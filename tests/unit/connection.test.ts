@@ -44,6 +44,7 @@ class DeferredStorage extends MemoryStorage {
     matches: (values: Record<string, unknown>) => boolean;
     gate: ReturnType<typeof deferred>;
     startedGate: ReturnType<typeof deferred>;
+    completedGate: ReturnType<typeof deferred>;
   }> = [];
 
   delayNextStatus(status: string) {
@@ -59,10 +60,12 @@ class DeferredStorage extends MemoryStorage {
   private delayNextWrite(matches: (values: Record<string, unknown>) => boolean) {
     const gate = deferred();
     const startedGate = deferred();
-    this.delays.push({ matches, gate, startedGate });
+    const completedGate = deferred();
+    this.delays.push({ matches, gate, startedGate, completedGate });
     return {
       started: startedGate.promise,
       release: gate.release,
+      completed: completedGate.promise,
     };
   }
 
@@ -72,6 +75,9 @@ class DeferredStorage extends MemoryStorage {
       const [delay] = this.delays.splice(delayIndex, 1);
       delay!.startedGate.release();
       await delay!.gate.promise;
+      await super.set(values);
+      delay!.completedGate.release();
+      return;
     }
     await super.set(values);
   }
@@ -628,6 +634,111 @@ describe('extension Bridge connection', () => {
       lastJobStatus: 'failed',
       lastJobError: '页面加载超时',
     });
+  });
+
+  it('restores saved state after an older outgoing organizing write finishes late', async () => {
+    const url = 'https://mp.weixin.qq.com/s/outgoing-organizing';
+    const storage = new DeferredStorage({ bridgeToken: 'x'.repeat(43) });
+    const socket = new MemorySocket();
+    const connection = new BridgeConnection(dependencies(storage, () => socket));
+    await connection.start();
+    socket.emit('open');
+    await vi.waitFor(() => expect(socket.sent).toHaveLength(1));
+    socket.emit(
+      'message',
+      JSON.stringify({
+        protocolVersion: 1,
+        type: 'job.collect',
+        requestId: 'job-outgoing',
+        timestamp: '2026-07-18T00:00:00.000Z',
+        payload: { url },
+      }),
+    );
+    await vi.waitFor(() => expect(storage.values.lastJobStatus).toBe('collecting'));
+
+    const organizingWrite = storage.delayNextJobWrite('job-outgoing', 'organizing');
+    connection.send('job.result', 'job-outgoing', { document: {} });
+    await organizingWrite.started;
+    socket.emit(
+      'message',
+      JSON.stringify({
+        protocolVersion: 1,
+        type: 'job.saved',
+        requestId: 'job-outgoing',
+        timestamp: '2026-07-18T00:00:01.000Z',
+        payload: { markdownPath: '/library/outgoing.md' },
+      }),
+    );
+    await vi.waitFor(() => expect(storage.values.lastJobStatus).toBe('saved'));
+
+    organizingWrite.release();
+    await organizingWrite.completed;
+    await flushPromises();
+    await flushPromises();
+
+    expect(storage.values).toMatchObject({
+      lastJobId: 'job-outgoing',
+      lastJobStatus: 'saved',
+      lastJobUrl: url,
+      lastOutputPath: '/library/outgoing.md',
+    });
+  });
+
+  it('restores collecting and saved state after an older queued write finishes late', async () => {
+    const url = 'https://mp.weixin.qq.com/s/outgoing-queued';
+    const storage = new DeferredStorage({ bridgeToken: 'x'.repeat(43) });
+    const socket = new MemorySocket();
+    const fetcher = vi.fn<typeof fetch>(async () => new Response(
+      JSON.stringify({ id: 'job-queued' }),
+      { status: 202, headers: { 'content-type': 'application/json' } },
+    ));
+    const connection = new BridgeConnection(dependencies(storage, () => socket, fetcher));
+    await connection.start();
+    socket.emit('open');
+    await vi.waitFor(() => expect(socket.sent).toHaveLength(1));
+
+    const queuedWrite = storage.delayNextJobWrite('job-queued', 'queued');
+    const created = connection.createJob(url);
+    await queuedWrite.started;
+    connection.send('job.progress', 'job-queued', { stage: 'collecting' });
+    await vi.waitFor(() => expect(storage.values.lastJobStatus).toBe('collecting'));
+    socket.emit(
+      'message',
+      JSON.stringify({
+        protocolVersion: 1,
+        type: 'job.saved',
+        requestId: 'job-queued',
+        timestamp: '2026-07-18T00:00:01.000Z',
+        payload: { markdownPath: '/library/queued.md' },
+      }),
+    );
+    await vi.waitFor(() => expect(storage.values.lastJobStatus).toBe('saved'));
+
+    queuedWrite.release();
+    await queuedWrite.completed;
+    await expect(created).resolves.toEqual({ id: 'job-queued' });
+    await flushPromises();
+    await flushPromises();
+
+    expect(storage.values).toMatchObject({
+      lastJobId: 'job-queued',
+      lastJobStatus: 'saved',
+      lastJobUrl: url,
+      lastOutputPath: '/library/queued.md',
+    });
+  });
+
+  it('does not persist job state when send fails before a connected socket accepts it', async () => {
+    const storage = new MemoryStorage({ bridgeToken: 'x'.repeat(43) });
+    const socket = new MemorySocket();
+    const connection = new BridgeConnection(dependencies(storage, () => socket));
+    await connection.start();
+
+    expect(() => connection.send('job.progress', 'not-sent', { stage: 'collecting' }))
+      .toThrow('Bridge WebSocket 未连接');
+    await flushPromises();
+
+    expect(storage.writes.some(write => write.lastJobId === 'not-sent')).toBe(false);
   });
 
   it('reports that automatic connection is in progress when protected actions lack a token', async () => {

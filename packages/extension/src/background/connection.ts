@@ -198,8 +198,9 @@ export class BridgeConnection {
   }
 
   send(type: string, requestId: string, payload: unknown): void {
-    if (this.socket?.readyState !== 1) throw new Error('Bridge WebSocket 未连接');
-    this.socket.send(
+    const socket = this.socket;
+    if (socket?.readyState !== 1) throw new Error('Bridge WebSocket 未连接');
+    socket.send(
       JSON.stringify({
         protocolVersion: 1,
         type,
@@ -217,11 +218,13 @@ export class BridgeConnection {
             ? ((payload as { needsAttention?: boolean }).needsAttention ? 'needs_attention' : 'failed')
             : undefined;
     if (localStatus) {
+      const generation = this.generation;
+      const isCurrent = () => this.isCurrent(generation) && this.socket === socket;
       const errorMessage =
         type === 'job.error' && typeof (payload as { message?: unknown }).message === 'string'
           ? (payload as { message: string }).message
           : '';
-      void this.dependencies.storage.set({
+      void this.transitionJob(generation, isCurrent, {
         lastJobId: requestId,
         lastJobStatus: localStatus,
         lastJobError: errorMessage,
@@ -235,6 +238,8 @@ export class BridgeConnection {
   ): Promise<{ id: string }> {
     const settings = await this.settings();
     if (!settings.token) throw new Error('浏览器扩展仍在自动连接 Bridge');
+    const generation = this.generation;
+    const isCurrent = () => this.isCurrent(generation);
     const fetcher = this.dependencies.fetch;
     const response = await fetcher(
       `http://127.0.0.1:${settings.port}/v1/jobs`,
@@ -250,7 +255,7 @@ export class BridgeConnection {
     if (!response.ok) throw new Error(`创建采集任务失败：HTTP ${response.status}`);
     const job = (await response.json()) as { id?: unknown };
     if (typeof job.id !== 'string') throw new Error('Bridge 返回了无效任务');
-    await this.dependencies.storage.set({
+    await this.transitionJob(generation, isCurrent, {
       lastJobId: job.id,
       lastJobStatus: 'queued',
       lastJobUrl: url,
