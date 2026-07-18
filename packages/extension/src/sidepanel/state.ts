@@ -1,6 +1,6 @@
-export type PopupState =
+export type SidePanelState =
   | { phase: 'loading' }
-  | { phase: 'unpaired'; message?: string }
+  | { phase: 'connecting' }
   | { phase: 'unsupported' }
   | {
       phase: 'ready';
@@ -13,10 +13,10 @@ export type PopupState =
   | { phase: 'saved'; path: string }
   | { phase: 'needs_attention'; message: string }
   | { phase: 'job_error'; message: string }
-  | { phase: 'error'; message: string };
+  | { phase: 'bridge_unavailable' }
+  | { phase: 'identity_error' };
 
-export interface PopupActions {
-  pair(code: string): Promise<void>;
+export interface SidePanelActions {
   capture(overrides: { userCategory?: string; userTags?: string[] }): Promise<void>;
   recapture(): Promise<void>;
   retry(): Promise<void>;
@@ -33,9 +33,11 @@ export interface BackgroundStatus {
   page: { supported: boolean; title: string; url: string };
 }
 
-export function popupStateFromStatus(status: BackgroundStatus): PopupState {
-  if (status.bridgeStatus === 'unpaired') return { phase: 'unpaired' };
-  if (status.bridgeStatus === 'connecting') return { phase: 'loading' };
+export function sidePanelStateFromStatus(status: BackgroundStatus): SidePanelState {
+  if (status.bridgeStatus === 'connecting') return { phase: 'connecting' };
+  if (status.bridgeStatus === 'identity_error') return { phase: 'identity_error' };
+  if (status.bridgeStatus !== 'connected') return { phase: 'bridge_unavailable' };
+
   const jobBelongsToPage = Boolean(
     status.lastJobUrl && status.lastJobUrl === status.page.url,
   );
@@ -65,9 +67,6 @@ export function popupStateFromStatus(status: BackgroundStatus): PopupState {
   if (jobBelongsToPage && status.lastJobStatus === 'failed') {
     return { phase: 'job_error', message: status.lastJobError || '采集失败，请重新保存。' };
   }
-  if (status.bridgeStatus !== 'connected') {
-    return { phase: 'error', message: '运行 Bridge 后点击“重新连接”。' };
-  }
   if (!status.page.supported) return { phase: 'unsupported' };
   return {
     phase: 'ready',
@@ -82,7 +81,7 @@ export function popupStateFromStatus(status: BackgroundStatus): PopupState {
 
 function required<T extends Element>(document: Document, selector: string): T {
   const element = document.querySelector<T>(selector);
-  if (!element) throw new Error(`弹窗缺少元素：${selector}`);
+  if (!element) throw new Error(`侧栏缺少元素：${selector}`);
   return element;
 }
 
@@ -96,17 +95,30 @@ function show(document: Document, selector: string): HTMLElement {
   return panel;
 }
 
-function setConnectionLabel(document: Document, state: PopupState): void {
+function setConnectionLabel(document: Document, state: SidePanelState): void {
   const label = required<HTMLElement>(document, '#connection-label');
-  const connected = !['loading', 'unpaired', 'error'].includes(state.phase);
-  label.textContent = state.phase === 'unpaired' ? '未配对' : connected ? '本机在线' : '检查连接';
+  const connected = [
+    'unsupported',
+    'ready',
+    'collecting',
+    'saved',
+    'needs_attention',
+    'job_error',
+  ].includes(state.phase);
+  const labels: Partial<Record<SidePanelState['phase'], string>> = {
+    loading: '读取状态',
+    connecting: '正在连接',
+    bridge_unavailable: '服务离线',
+    identity_error: '身份异常',
+  };
+  label.textContent = labels[state.phase] ?? '本机在线';
   label.dataset.connected = String(connected);
 }
 
-export function renderPopup(
+export function renderSidePanel(
   document: Document,
-  state: PopupState,
-  actions: PopupActions,
+  state: SidePanelState,
+  actions: SidePanelActions,
 ): void {
   hidePanels(document);
   setConnectionLabel(document, state);
@@ -115,17 +127,19 @@ export function renderPopup(
     show(document, '#loading-panel');
     return;
   }
-  if (state.phase === 'unpaired') {
-    show(document, '#unpaired-panel');
-    const pairError = required<HTMLElement>(document, '#pair-error');
-    pairError.hidden = !state.message;
-    pairError.textContent = state.message ?? '';
-    const form = required<HTMLFormElement>(document, '#pair-form');
-    form.onsubmit = event => {
-      event.preventDefault();
-      const code = required<HTMLInputElement>(document, '#pair-code').value.trim();
-      if (/^\d{6}$/.test(code)) void actions.pair(code);
+  if (state.phase === 'connecting') {
+    show(document, '#connecting-panel');
+    return;
+  }
+  if (state.phase === 'bridge_unavailable') {
+    show(document, '#bridge-unavailable-panel');
+    required<HTMLButtonElement>(document, '#retry-button').onclick = () => {
+      void actions.retry();
     };
+    return;
+  }
+  if (state.phase === 'identity_error') {
+    show(document, '#identity-error-panel');
     return;
   }
   if (state.phase === 'unsupported') {
@@ -185,15 +199,9 @@ export function renderPopup(
     };
     return;
   }
-  if (state.phase === 'job_error') {
-    show(document, '#job-error-panel');
-    required(document, '#job-error-message').textContent = state.message;
-    required<HTMLButtonElement>(document, '#job-recapture-button').onclick = () => {
-      void actions.recapture();
-    };
-    return;
-  }
-  show(document, '#error-panel');
-  required(document, '#error-message').textContent = state.message;
-  required<HTMLButtonElement>(document, '#retry-button').onclick = () => { void actions.retry(); };
+  show(document, '#job-error-panel');
+  required(document, '#job-error-message').textContent = state.message;
+  required<HTMLButtonElement>(document, '#job-recapture-button').onclick = () => {
+    void actions.recapture();
+  };
 }

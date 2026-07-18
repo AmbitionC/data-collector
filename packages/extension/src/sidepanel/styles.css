@@ -16,9 +16,9 @@
 html,
 body {
   margin: 0;
-  min-width: 320px;
-  width: 380px;
-  min-height: 420px;
+  min-width: 280px;
+  width: 100%;
+  min-height: 100vh;
   background: var(--paper);
   color: var(--body);
 }
@@ -40,37 +40,45 @@ input:focus-visible {
 
 .archive-slip {
   position: relative;
-  min-height: 416px;
-  padding: 20px 22px 17px 26px;
-  overflow: hidden;
+  display: flex;
+  width: 100%;
+  min-height: calc(100vh - 4px);
+  flex-direction: column;
+  padding: 0 clamp(16px, 5vw, 28px) clamp(16px, 4vw, 24px) clamp(22px, 6vw, 34px);
 }
 
 .archive-slip::before {
   position: absolute;
-  inset: 20px auto 48px 10px;
+  top: clamp(18px, 4vw, 26px);
+  bottom: clamp(48px, 10vw, 64px);
+  left: clamp(9px, 2.5vw, 14px);
   width: 2px;
   background: var(--line);
   content: "";
 }
 
 .masthead {
+  position: sticky;
+  top: 0;
+  z-index: 2;
   display: grid;
-  grid-template-columns: 42px 1fr auto;
-  gap: 10px;
+  grid-template-columns: 38px minmax(0, 1fr);
+  gap: 8px 10px;
   align-items: center;
-  padding-bottom: 17px;
+  padding: clamp(14px, 4vw, 22px) 0 clamp(12px, 3vw, 18px);
   border-bottom: 1px solid var(--line);
+  background: var(--paper);
 }
 
 .brand-mark {
   position: relative;
   display: grid;
-  width: 40px;
-  height: 40px;
+  width: 38px;
+  height: 38px;
   place-items: center;
   border: 1px solid var(--ink);
   color: var(--ink);
-  font: 700 13px/1 "SFMono-Regular", Consolas, monospace;
+  font: 700 12px/1 "SFMono-Regular", Consolas, monospace;
   letter-spacing: -0.06em;
 }
 
@@ -98,13 +106,14 @@ input:focus-visible {
   margin: 0;
   color: var(--ink);
   font-family: ui-rounded, "Avenir Next", "PingFang SC", sans-serif;
-  font-size: 17px;
+  font-size: clamp(15px, 4.5vw, 18px);
   font-weight: 750;
   letter-spacing: -0.02em;
 }
 
 .connection-label {
   display: inline-flex;
+  grid-column: 2;
   gap: 6px;
   align-items: center;
   color: var(--muted);
@@ -114,6 +123,7 @@ input:focus-visible {
 .connection-label::before {
   width: 7px;
   height: 7px;
+  flex: 0 0 auto;
   border-radius: 50%;
   background: var(--orange);
   content: "";
@@ -121,14 +131,16 @@ input:focus-visible {
 
 .connection-label[data-connected="true"]::before { background: var(--teal); }
 
-.state-panel { padding: 24px 0 20px; }
+.panel-content { flex: 1 0 auto; }
+
+.state-panel { padding: clamp(22px, 7vw, 38px) 0 clamp(20px, 6vw, 34px); }
 
 .state-panel h2,
 .lead {
   margin: 0 0 10px;
   color: var(--ink);
   font-family: ui-rounded, "Avenir Next", "PingFang SC", sans-serif;
-  font-size: 21px;
+  font-size: clamp(19px, 5.5vw, 24px);
   font-weight: 720;
   line-height: 1.3;
   letter-spacing: -0.025em;
@@ -143,13 +155,6 @@ input:focus-visible {
 
 .support.compact { margin-top: 18px; margin-bottom: 0; font-size: 12px; }
 
-.inline-error {
-  margin: -8px 0 12px;
-  color: #b45309;
-  font-size: 12px;
-  line-height: 1.5;
-}
-
 code,
 .saved-path {
   font-family: "SFMono-Regular", Consolas, monospace;
@@ -160,9 +165,9 @@ code {
   padding: 2px 4px;
   background: #eef1f6;
   color: var(--ink);
+  overflow-wrap: anywhere;
 }
 
-.pair-form,
 .organize-grid { display: grid; gap: 8px; }
 
 label {
@@ -183,16 +188,11 @@ input {
   color: var(--ink);
 }
 
-#pair-code {
-  height: 48px;
-  font: 700 22px/1 "SFMono-Regular", Consolas, monospace;
-  letter-spacing: 0.22em;
-  text-align: center;
-}
-
 .primary-button,
 .secondary-button {
+  width: 100%;
   min-height: 42px;
+  padding: 9px 12px;
   border-style: solid;
   border-radius: 6px;
   background-image: none;
@@ -204,7 +204,7 @@ input {
 
 .result-actions {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: 1fr;
   gap: 8px;
 }
 
@@ -247,11 +247,11 @@ input {
   margin-bottom: 18px !important;
   overflow: hidden;
   -webkit-box-orient: vertical;
-  -webkit-line-clamp: 2;
+  -webkit-line-clamp: 3;
 }
 
 .organize-grid { grid-template-columns: 1fr; }
-.capture-button { display: flex; justify-content: space-between; width: 100%; margin-top: 18px; padding: 0 14px; }
+.capture-button { display: flex; justify-content: space-between; margin-top: 18px; }
 
 .capture-track {
   position: relative;
@@ -276,7 +276,7 @@ input {
   position: relative;
   padding-top: 20px;
   color: var(--muted);
-  font: 600 10px/1.35 "SFMono-Regular", Consolas, monospace;
+  font: 600 9px/1.35 "SFMono-Regular", Consolas, monospace;
   text-align: center;
 }
 
@@ -322,7 +322,7 @@ input {
 }
 
 .saved-path {
-  max-height: 58px;
+  max-height: 84px;
   margin: 17px 0 14px;
   padding: 9px 10px;
   overflow: auto;
@@ -336,14 +336,12 @@ input {
 .warning { color: var(--orange); }
 
 .privacy-note {
-  position: absolute;
-  right: 22px;
-  bottom: 15px;
-  left: 26px;
   display: flex;
+  flex: 0 0 auto;
   gap: 7px;
   align-items: center;
-  padding-top: 11px;
+  margin-top: auto;
+  padding-top: 12px;
   border-top: 1px solid var(--line);
   color: var(--muted);
   font-size: 10px;
@@ -355,11 +353,14 @@ input {
   50% { box-shadow: 0 0 0 4px rgb(47 107 255 / 14%); }
 }
 
-@media (max-width: 350px) {
-  html,
-  body { width: 320px; }
-  .archive-slip { padding-right: 18px; padding-left: 23px; }
-  .connection-label { font-size: 9px; }
+@media (min-width: 340px) {
+  .masthead { grid-template-columns: 40px minmax(0, 1fr) auto; }
+  .connection-label { grid-column: auto; }
+  .track-step { font-size: 10px; }
+}
+
+@media (min-width: 420px) {
+  .result-actions { grid-template-columns: repeat(2, 1fr); }
 }
 
 @media (prefers-reduced-motion: reduce) {

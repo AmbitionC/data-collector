@@ -1,0 +1,113 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Data Collector</title>
+    <link rel="stylesheet" href="styles.css">
+  </head>
+  <body>
+    <main class="archive-slip" aria-labelledby="app-title">
+      <header class="masthead">
+        <div class="brand-mark" aria-hidden="true"><span>DC</span><i></i></div>
+        <div class="brand-copy">
+          <p class="eyebrow">Local archive</p>
+          <h1 id="app-title">Data Collector</h1>
+        </div>
+        <span id="connection-label" class="connection-label">读取状态</span>
+      </header>
+
+      <div class="panel-content">
+        <section id="loading-panel" class="state-panel" aria-live="polite">
+          <p class="lead">正在读取当前页面…</p>
+        </section>
+
+        <section id="connecting-panel" class="state-panel" aria-live="polite" hidden>
+          <p class="section-kicker">本机连接</p>
+          <h2>正在连接本机服务</h2>
+          <p class="support">请保持 Data Collector 服务运行，连接完成后会自动识别当前页面。</p>
+        </section>
+
+        <section id="bridge-unavailable-panel" class="state-panel" hidden>
+          <p class="section-kicker warning">服务离线</p>
+          <h2>本机服务没有响应</h2>
+          <p class="support">在终端运行 <code>npm run collector -- bridge start</code>，看到服务启动后再重试。</p>
+          <button id="retry-button" type="button" class="secondary-button">重新连接</button>
+        </section>
+
+        <section id="identity-error-panel" class="state-panel" hidden>
+          <p class="section-kicker warning">扩展身份异常</p>
+          <h2>当前安装无法连接本机服务</h2>
+          <p class="support">请在 Edge 扩展管理页移除 Data Collector，再从正式发布包重新安装。</p>
+        </section>
+
+        <section id="unsupported-panel" class="state-panel" hidden>
+          <p class="section-kicker">当前页面</p>
+          <h2>这里还不能采集</h2>
+          <p class="support">请打开一篇微信公众号文章，或知识星球中的单条文章、动态或问答。</p>
+        </section>
+
+        <section id="ready-panel" class="state-panel" hidden>
+          <div class="source-row">
+            <span id="source-label" class="source-label">已识别</span>
+            <span class="ready-copy">可以保存</span>
+          </div>
+          <h2 id="page-title" class="page-title"></h2>
+          <div class="organize-grid">
+            <label for="category">分类</label>
+            <input id="category" autocomplete="off" maxlength="100" placeholder="留空则自动分类">
+            <label for="tags">标签 <span>用逗号分隔</span></label>
+            <input id="tags" autocomplete="off" maxlength="300">
+          </div>
+          <button id="capture-button" type="button" class="primary-button capture-button">
+            <span>保存这一页</span><span aria-hidden="true">↘</span>
+          </button>
+        </section>
+
+        <section id="collecting-panel" class="state-panel" hidden>
+          <p class="section-kicker">采集轨迹</p>
+          <h2>内容正在归档</h2>
+          <p id="collecting-status" class="visually-live" role="status">正在识别页面</p>
+          <ol class="capture-track" aria-label="采集进度">
+            <li class="track-step" data-stage="0"><span>识别页面</span></li>
+            <li class="track-step" data-stage="1"><span>清理正文</span></li>
+            <li class="track-step" data-stage="2"><span>归纳内容</span></li>
+            <li class="track-step" data-stage="3"><span>写入本机</span></li>
+          </ol>
+          <p class="support compact">侧栏可以保持打开，归档会在后台继续。</p>
+        </section>
+
+        <section id="saved-panel" class="state-panel" hidden>
+          <div class="result-stamp" aria-hidden="true">✓</div>
+          <p class="section-kicker">已保存</p>
+          <h2>内容已进入本地知识库</h2>
+          <p id="saved-path" class="saved-path"></p>
+          <div class="result-actions">
+            <button id="copy-path-button" type="button" class="secondary-button">复制文件路径</button>
+            <button id="reveal-path-button" type="button" class="secondary-button">在文件夹中查看</button>
+          </div>
+        </section>
+
+        <section id="attention-panel" class="state-panel" hidden>
+          <p class="section-kicker warning">需要你处理</p>
+          <h2>浏览器已保留目标页面</h2>
+          <p id="attention-message" class="support"></p>
+          <button id="attention-recapture-button" type="button" class="primary-button">重新保存</button>
+        </section>
+
+        <section id="job-error-panel" class="state-panel" hidden>
+          <p class="section-kicker warning">采集失败</p>
+          <h2>这一页还没有保存</h2>
+          <p id="job-error-message" class="support"></p>
+          <button id="job-recapture-button" type="button" class="primary-button">重新保存</button>
+        </section>
+      </div>
+
+      <footer class="privacy-note">
+        <span class="local-dot" aria-hidden="true"></span>
+        <span>正文默认只保存在你的电脑</span>
+      </footer>
+    </main>
+    <script type="module" src="index.js"></script>
+  </body>
+</html>

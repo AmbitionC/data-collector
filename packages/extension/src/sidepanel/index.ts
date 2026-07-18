@@ -1,8 +1,9 @@
 import {
-  popupStateFromStatus,
-  renderPopup,
+  sidePanelStateFromStatus,
+  renderSidePanel,
   type BackgroundStatus,
-  type PopupActions,
+  type SidePanelActions,
+  type SidePanelState,
 } from './state.js';
 
 interface BackgroundResponse<T> {
@@ -10,6 +11,12 @@ interface BackgroundResponse<T> {
   value?: T;
   error?: string;
 }
+
+const POLL_INTERVALS = {
+  connecting: 250,
+  collecting: 700,
+  default: 1000,
+} as const;
 
 async function message<T>(payload: unknown): Promise<T> {
   const response = (await chrome.runtime.sendMessage(payload)) as BackgroundResponse<T>;
@@ -19,6 +26,19 @@ async function message<T>(payload: unknown): Promise<T> {
 
 let pollTimer: number | undefined;
 
+function scheduleRefresh(phase: SidePanelState['phase']): void {
+  if (pollTimer !== undefined) window.clearTimeout(pollTimer);
+  const interval = phase === 'connecting'
+    ? POLL_INTERVALS.connecting
+    : phase === 'collecting'
+      ? POLL_INTERVALS.collecting
+      : POLL_INTERVALS.default;
+  pollTimer = window.setTimeout(() => {
+    pollTimer = undefined;
+    void refresh();
+  }, interval);
+}
+
 function errorMessage(error: unknown, fallback: string): string {
   return error instanceof Error ? error.message : fallback;
 }
@@ -27,55 +47,33 @@ async function capturePage(
   overrides: { userCategory?: string; userTags?: string[] },
 ): Promise<void> {
   try {
-    renderPopup(document, { phase: 'collecting', activeStage: 0 }, actions);
+    renderSidePanel(document, { phase: 'collecting', activeStage: 0 }, actions);
+    scheduleRefresh('collecting');
     await message({ type: 'capture.current', overrides });
     await refresh();
   } catch (error) {
-    renderPopup(
+    renderSidePanel(
       document,
       { phase: 'job_error', message: errorMessage(error, '采集失败，请重新保存。') },
       actions,
     );
+    scheduleRefresh('job_error');
   }
 }
 
 async function refresh(): Promise<void> {
   try {
     const status = await message<BackgroundStatus>({ type: 'status.get' });
-    const state = popupStateFromStatus(status);
-    renderPopup(document, state, actions);
-    if (state.phase === 'collecting' || state.phase === 'loading') {
-      pollTimer = window.setTimeout(
-        () => { void refresh(); },
-        state.phase === 'loading' ? 250 : 700,
-      );
-    } else if (pollTimer !== undefined) {
-      clearTimeout(pollTimer);
-      pollTimer = undefined;
-    }
-  } catch (error) {
-    renderPopup(
-      document,
-      { phase: 'error', message: error instanceof Error ? error.message : '读取扩展状态失败' },
-      actions,
-    );
+    const state = sidePanelStateFromStatus(status);
+    renderSidePanel(document, state, actions);
+    scheduleRefresh(state.phase);
+  } catch {
+    renderSidePanel(document, { phase: 'bridge_unavailable' }, actions);
+    scheduleRefresh('bridge_unavailable');
   }
 }
 
-const actions: PopupActions = {
-  async pair(code) {
-    try {
-      renderPopup(document, { phase: 'loading' }, actions);
-      await message({ type: 'pair.submit', code });
-      await refresh();
-    } catch (error) {
-      renderPopup(
-        document,
-        { phase: 'unpaired', message: errorMessage(error, '配对失败，请检查配对码。') },
-        actions,
-      );
-    }
-  },
+const actions: SidePanelActions = {
   async capture(overrides) {
     await capturePage(overrides);
   },
@@ -84,14 +82,13 @@ const actions: PopupActions = {
   },
   async retry() {
     try {
+      renderSidePanel(document, { phase: 'connecting' }, actions);
+      scheduleRefresh('connecting');
       await message({ type: 'connection.retry' });
       await refresh();
-    } catch (error) {
-      renderPopup(
-        document,
-        { phase: 'error', message: errorMessage(error, 'Bridge 重新连接失败。') },
-        actions,
-      );
+    } catch {
+      renderSidePanel(document, { phase: 'bridge_unavailable' }, actions);
+      scheduleRefresh('bridge_unavailable');
     }
   },
   async copyPath(path) {
@@ -104,5 +101,5 @@ const actions: PopupActions = {
   },
 };
 
-renderPopup(document, { phase: 'loading' }, actions);
+renderSidePanel(document, { phase: 'loading' }, actions);
 void refresh();
