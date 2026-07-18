@@ -1,6 +1,6 @@
 import { readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import WebSocket from 'ws';
+import WebSocket, { type RawData } from 'ws';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   APP_VERSION,
@@ -80,6 +80,27 @@ async function nextMessage<T>(socket: WebSocket): Promise<WsEnvelope<string, T>>
       clearTimeout(timer);
       resolve(JSON.parse(data.toString()) as WsEnvelope<string, T>);
     });
+  });
+}
+
+async function expectNoMessage(socket: WebSocket, milliseconds = 150): Promise<void> {
+  await new Promise<void>((resolve, reject) => {
+    const onMessage = (data: RawData) => {
+      clearTimeout(timer);
+      reject(new Error(`Unexpected WebSocket message: ${data.toString()}`));
+    };
+    const timer = setTimeout(() => {
+      socket.off('message', onMessage);
+      resolve();
+    }, milliseconds);
+    socket.once('message', onMessage);
+  });
+}
+
+async function waitForExtensionReady(bridge: BridgeHandle): Promise<void> {
+  await vi.waitFor(async () => {
+    const health = await requestJson<{ extensionConnected: boolean }>(bridge.url, '/health');
+    expect(health.body.extensionConnected).toBe(true);
   });
 }
 
@@ -247,6 +268,72 @@ describe('local Bridge', () => {
     secondSocket.send(envelope('extension.hello', 'extension', { version: '0.1.0' }));
 
     expect(await redispatch).toMatchObject({ type: 'job.collect', requestId: job.body.id });
+  });
+
+  it('lets an extension-requested current-page job report progress and save without redispatch', async () => {
+    const root = await temporaryDirectory();
+    const bridge = await startBridge({ port: 0, libraryRoot: root, configDir: join(root, '.config') });
+    handles.push(bridge);
+    const { socket, token } = await authorize(bridge);
+    socket.send(envelope('extension.hello', 'extension', { version: APP_VERSION }));
+    await waitForExtensionReady(bridge);
+
+    const noDispatch = expectNoMessage(socket);
+    const created = await requestJson<{ id: string; status: string }>(bridge.url, '/v1/jobs', {
+      method: 'POST',
+      token,
+      body: { url: URL, requestedBy: 'extension' },
+    });
+    expect(created).toMatchObject({ status: 202, body: { status: 'queued' } });
+    await noDispatch;
+
+    const savedMessage = nextMessage<{ markdownPath: string }>(socket);
+    socket.send(envelope('job.progress', created.body.id, { stage: 'collecting' }));
+    socket.send(envelope('job.result', created.body.id, {
+      document: document({ userCategory: '当前页分类', userTags: ['当前页', '覆盖值'] }),
+    }));
+    const saved = await savedMessage;
+
+    expect(saved).toMatchObject({ type: 'job.saved', requestId: created.body.id });
+    const status = await requestJson<{ status: string; outputPath: string }>(
+      bridge.url,
+      `/v1/jobs/${created.body.id}`,
+      { token },
+    );
+    expect(status.body.status).toBe('saved');
+    const markdown = await readFile(status.body.outputPath, 'utf8');
+    expect(markdown).toContain('category: "当前页分类"');
+    expect(markdown).toContain('  - "当前页"');
+    expect(markdown).toContain('  - "覆盖值"');
+  });
+
+  it('dispatches an abandoned extension-requested queued job after extension reconnect', async () => {
+    const root = await temporaryDirectory();
+    const bridge = await startBridge({ port: 0, libraryRoot: root, configDir: join(root, '.config') });
+    handles.push(bridge);
+    const first = await authorize(bridge);
+    first.socket.send(envelope('extension.hello', 'extension', { version: APP_VERSION }));
+    await waitForExtensionReady(bridge);
+
+    const noInitialDispatch = expectNoMessage(first.socket);
+    const created = await requestJson<{ id: string }>(bridge.url, '/v1/jobs', {
+      method: 'POST',
+      token: first.token,
+      body: { url: URL, requestedBy: 'extension' },
+    });
+    await noInitialDispatch;
+    first.socket.close();
+    await new Promise<void>(resolve => first.socket.once('close', () => resolve()));
+
+    const second = await connect(bridge, first.token);
+    const redispatch = nextMessage<{ url: string }>(second);
+    second.send(envelope('extension.hello', 'extension', { version: APP_VERSION }));
+
+    await expect(redispatch).resolves.toMatchObject({
+      type: 'job.collect',
+      requestId: created.body.id,
+      payload: { url: URL },
+    });
   });
 
   it('closes a peer that returns content for a different URL', async () => {

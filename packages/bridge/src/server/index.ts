@@ -140,7 +140,12 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
     if (!job) throw new Error(`任务不存在：${parsedEnvelope.requestId}`);
     if (parsedEnvelope.type === 'job.progress') {
       progressSchema.parse(parsedEnvelope.payload);
-      if (job.status === 'dispatched') await jobs.transition(job.id, 'collecting');
+      if (
+        job.status === 'dispatched' ||
+        (job.status === 'queued' && job.requestedBy === 'extension')
+      ) {
+        await jobs.transition(job.id, 'collecting');
+      }
       return;
     }
     if (parsedEnvelope.type === 'job.result') {
@@ -196,7 +201,7 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
         ...(input.id ? { id: input.id } : {}),
       });
       sendJson(response, 202, job);
-      await dispatch(job);
+      if (job.requestedBy !== 'extension') await dispatch(job);
       return;
     }
     if (request.method === 'POST' && requestUrl.pathname === '/v1/reveal') {

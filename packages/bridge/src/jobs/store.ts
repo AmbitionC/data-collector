@@ -31,7 +31,7 @@ export interface JobTransitionPatch {
 }
 
 const ALLOWED_TRANSITIONS: Record<JobStatus, readonly JobStatus[]> = {
-  queued: ['dispatched', 'failed'],
+  queued: ['dispatched', 'collecting', 'failed'],
   dispatched: ['queued', 'collecting', 'needs_attention', 'failed'],
   collecting: ['queued', 'saved', 'needs_attention', 'failed'],
   saved: [],

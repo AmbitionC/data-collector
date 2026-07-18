@@ -1,7 +1,12 @@
 import { access, mkdir, readFile } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import puppeteer, { type Browser, type Page, type WebWorker } from 'puppeteer-core';
+import puppeteer, {
+  type Browser,
+  type Page,
+  type Target,
+  type WebWorker,
+} from 'puppeteer-core';
 import { afterEach, describe, expect, it } from 'vitest';
 import { startBridge, type BridgeHandle } from '../../packages/bridge/src/index.js';
 import { runCli } from '../../packages/bridge/src/cli.js';
@@ -82,16 +87,31 @@ async function elementText(page: Page, selector: string): Promise<string> {
   }
 }
 
-async function captureCurrentFromSidePanel(page: Page): Promise<unknown> {
+async function captureCurrentFromSidePanel(
+  page: Page,
+  overrides: { userCategory: string; userTags: string[] },
+): Promise<void> {
   const session = await page.createCDPSession();
   try {
     const { result, exceptionDetails } = await session.send('Runtime.evaluate', {
-      expression: 'chrome.runtime.sendMessage({type:"capture.current",overrides:{}})',
-      awaitPromise: true,
+      expression: `(() => {
+        const category = document.querySelector('#category');
+        const tags = document.querySelector('#tags');
+        const capture = document.querySelector('#capture-button');
+        if (!(category instanceof HTMLInputElement) ||
+            !(tags instanceof HTMLInputElement) ||
+            !(capture instanceof HTMLButtonElement)) {
+          throw new Error('Side Panel capture controls are missing');
+        }
+        category.value = ${JSON.stringify(overrides.userCategory)};
+        tags.value = ${JSON.stringify(overrides.userTags.join(', '))};
+        capture.click();
+        return true;
+      })()`,
       returnByValue: true,
     });
     if (exceptionDetails) throw new Error(exceptionDetails.text);
-    return result.value;
+    if (result.value !== true) throw new Error('Side Panel capture click failed');
   } finally {
     await session.detach();
   }
@@ -177,8 +197,18 @@ describe('built Chrome extension', () => {
     const screenshotDirectory = join(WORKSPACE, 'artifacts', 'screenshots');
     await mkdir(screenshotDirectory, { recursive: true });
     await sidePanel.screenshot({ path: join(screenshotDirectory, 'sidepanel-ready.png') });
-    const captureResponse = await captureCurrentFromSidePanel(sidePanel);
-    expect(captureResponse).toMatchObject({ ok: true });
+    const openedArticleTargets: string[] = [];
+    const recordArticleTarget = (target: Target) => {
+      if (target.type() === 'page' && target.url().startsWith(TARGET_URL)) {
+        openedArticleTargets.push(target.url());
+      }
+    };
+    browser.on('targetcreated', recordArticleTarget);
+    browser.on('targetchanged', recordArticleTarget);
+    await captureCurrentFromSidePanel(sidePanel, {
+      userCategory: 'E2E 指定分类',
+      userTags: ['E2E 标签', '当前页面'],
+    });
     await waitForVisiblePanel(sidePanel, '#collecting-panel', 10_000);
     await sidePanel.screenshot({ path: join(screenshotDirectory, 'sidepanel-collecting.png') });
     await waitForVisiblePanel(sidePanel, '#saved-panel', 15_000);
@@ -189,6 +219,14 @@ describe('built Chrome extension', () => {
     expect(markdown).toContain('一夜之间，通胀的玩笑这次开大了');
     expect(markdown).toContain('重远投资观');
     expect(markdown).toContain(TARGET_URL);
+    expect(markdown).toContain('category: "E2E 指定分类"');
+    expect(markdown).toContain('  - "E2E 标签"');
+    expect(markdown).toContain('  - "当前页面"');
+    expect(openedArticleTargets).toEqual([]);
+    expect((await browser.pages()).filter(page => page.url().startsWith(TARGET_URL)))
+      .toHaveLength(1);
+    browser.off('targetcreated', recordArticleTarget);
+    browser.off('targetchanged', recordArticleTarget);
 
     let cliOutput = '';
     let cliError = '';

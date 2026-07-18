@@ -50,6 +50,19 @@ describe('durable jobs', () => {
     });
   });
 
+  it('allows an extension current-page job to begin collecting without dispatch', async () => {
+    const root = await temporaryDirectory();
+    const jobs = await JobStore.open(join(root, '_catalog', 'jobs.json'), {
+      now: () => NOW,
+      id: () => 'current-page-job',
+    });
+    const job = await jobs.create({ url: WECHAT_URL, requestedBy: 'extension' });
+
+    await jobs.transition(job.id, 'collecting');
+
+    expect(jobs.get(job.id)?.status).toBe('collecting');
+  });
+
   it('recovers in-flight work and creates duplicate request IDs idempotently', async () => {
     const root = await temporaryDirectory();
     const path = join(root, '_catalog', 'jobs.json');
