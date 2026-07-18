@@ -21,6 +21,51 @@ export interface PopupActions {
   copyPath(path: string): Promise<void>;
 }
 
+export interface BackgroundStatus {
+  bridgeStatus: string;
+  lastJobStatus?: string;
+  lastOutputPath?: string;
+  page: { supported: boolean; title: string; url: string };
+}
+
+export function popupStateFromStatus(status: BackgroundStatus): PopupState {
+  if (status.bridgeStatus === 'unpaired') return { phase: 'unpaired' };
+  if (status.bridgeStatus === 'connecting') return { phase: 'loading' };
+  if (status.lastJobStatus === 'needs_attention') {
+    return {
+      phase: 'needs_attention',
+      message: '请在保留的页面中登录或打开单条详情，然后重新保存。',
+    };
+  }
+  if (['queued', 'dispatched', 'collecting', 'organizing'].includes(status.lastJobStatus ?? '')) {
+    return {
+      phase: 'collecting',
+      activeStage:
+        status.lastJobStatus === 'queued'
+          ? 0
+          : status.lastJobStatus === 'dispatched' || status.lastJobStatus === 'collecting'
+            ? 1
+            : 2,
+    };
+  }
+  if (status.lastJobStatus === 'saved' && status.lastOutputPath) {
+    return { phase: 'saved', path: status.lastOutputPath };
+  }
+  if (status.bridgeStatus !== 'connected') {
+    return { phase: 'error', message: '运行 Bridge 后点击“重新连接”。' };
+  }
+  if (!status.page.supported) return { phase: 'unsupported' };
+  return {
+    phase: 'ready',
+    sourceLabel: new URL(status.page.url).hostname === 'mp.weixin.qq.com'
+      ? '微信公众号'
+      : '知识星球',
+    title: status.page.title || '未命名内容',
+    category: '其他',
+    tags: [],
+  };
+}
+
 function required<T extends Element>(document: Document, selector: string): T {
   const element = document.querySelector<T>(selector);
   if (!element) throw new Error(`弹窗缺少元素：${selector}`);

@@ -1,16 +1,14 @@
-import { renderPopup, type PopupActions, type PopupState } from './state.js';
+import {
+  popupStateFromStatus,
+  renderPopup,
+  type BackgroundStatus,
+  type PopupActions,
+} from './state.js';
 
 interface BackgroundResponse<T> {
   ok: boolean;
   value?: T;
   error?: string;
-}
-
-interface BackgroundStatus {
-  bridgeStatus: string;
-  lastJobStatus?: string;
-  lastOutputPath?: string;
-  page: { supported: boolean; title: string; url: string };
 }
 
 async function message<T>(payload: unknown): Promise<T> {
@@ -19,46 +17,18 @@ async function message<T>(payload: unknown): Promise<T> {
   return response.value as T;
 }
 
-function sourceLabel(url: string): string {
-  return new URL(url).hostname === 'mp.weixin.qq.com' ? '微信公众号' : '知识星球';
-}
-
-function toState(status: BackgroundStatus): PopupState {
-  if (status.bridgeStatus === 'unpaired') return { phase: 'unpaired' };
-  if (status.lastJobStatus === 'needs_attention') {
-    return { phase: 'needs_attention', message: '请在保留的页面中登录或打开单条详情，然后重新保存。' };
-  }
-  if (['queued', 'dispatched', 'collecting'].includes(status.lastJobStatus ?? '')) {
-    return {
-      phase: 'collecting',
-      activeStage: status.lastJobStatus === 'queued' ? 0 : status.lastJobStatus === 'dispatched' ? 1 : 2,
-    };
-  }
-  if (status.lastJobStatus === 'saved' && status.lastOutputPath) {
-    return { phase: 'saved', path: status.lastOutputPath };
-  }
-  if (status.bridgeStatus !== 'connected') {
-    return { phase: 'error', message: '运行 Bridge 后点击“重新连接”。' };
-  }
-  if (!status.page.supported) return { phase: 'unsupported' };
-  return {
-    phase: 'ready',
-    sourceLabel: sourceLabel(status.page.url),
-    title: status.page.title || '未命名内容',
-    category: '其他',
-    tags: [],
-  };
-}
-
 let pollTimer: number | undefined;
 
 async function refresh(): Promise<void> {
   try {
     const status = await message<BackgroundStatus>({ type: 'status.get' });
-    const state = toState(status);
+    const state = popupStateFromStatus(status);
     renderPopup(document, state, actions);
-    if (state.phase === 'collecting') {
-      pollTimer = window.setTimeout(() => { void refresh(); }, 700);
+    if (state.phase === 'collecting' || state.phase === 'loading') {
+      pollTimer = window.setTimeout(
+        () => { void refresh(); },
+        state.phase === 'loading' ? 250 : 700,
+      );
     } else if (pollTimer !== undefined) {
       clearTimeout(pollTimer);
       pollTimer = undefined;

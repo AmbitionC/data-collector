@@ -2,7 +2,11 @@
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { renderPopup, type PopupActions } from '../../packages/extension/src/popup/state.js';
+import {
+  popupStateFromStatus,
+  renderPopup,
+  type PopupActions,
+} from '../../packages/extension/src/popup/state.js';
 
 const HTML_PATH = join(
   import.meta.dirname,
@@ -30,6 +34,25 @@ beforeEach(async () => {
 });
 
 describe('popup states', () => {
+  it('keeps polling while the paired WebSocket is still connecting', () => {
+    expect(
+      popupStateFromStatus({
+        bridgeStatus: 'connecting',
+        page: { supported: true, title: '文章', url: 'https://mp.weixin.qq.com/s/x' },
+      }),
+    ).toEqual({ phase: 'loading' });
+  });
+
+  it('maps Bridge organization to the third visible track stage', () => {
+    expect(
+      popupStateFromStatus({
+        bridgeStatus: 'connected',
+        lastJobStatus: 'organizing',
+        page: { supported: true, title: '文章', url: 'https://mp.weixin.qq.com/s/x' },
+      }),
+    ).toEqual({ phase: 'collecting', activeStage: 2 });
+  });
+
   it('shows the recognized page and submits editable organization fields', async () => {
     renderPopup(
       document,

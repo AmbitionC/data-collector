@@ -78,7 +78,8 @@ export class BridgeConnection {
 
   async pair(code: string): Promise<void> {
     const settings = await this.settings();
-    const response = await this.dependencies.fetch(
+    const fetcher = this.dependencies.fetch;
+    const response = await fetcher(
       `http://127.0.0.1:${settings.port}/v1/pair`,
       {
         method: 'POST',
@@ -111,6 +112,20 @@ export class BridgeConnection {
         payload,
       }),
     );
+    const localStatus =
+      type === 'job.progress'
+        ? 'collecting'
+        : type === 'job.result'
+          ? 'organizing'
+          : type === 'job.error'
+            ? ((payload as { needsAttention?: boolean }).needsAttention ? 'needs_attention' : 'failed')
+            : undefined;
+    if (localStatus) {
+      void this.dependencies.storage.set({
+        lastJobId: requestId,
+        lastJobStatus: localStatus,
+      });
+    }
   }
 
   async createJob(
@@ -119,7 +134,8 @@ export class BridgeConnection {
   ): Promise<{ id: string }> {
     const settings = await this.settings();
     if (!settings.token) throw new Error('浏览器扩展尚未与 Bridge 配对');
-    const response = await this.dependencies.fetch(
+    const fetcher = this.dependencies.fetch;
+    const response = await fetcher(
       `http://127.0.0.1:${settings.port}/v1/jobs`,
       {
         method: 'POST',

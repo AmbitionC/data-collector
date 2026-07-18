@@ -103,4 +103,50 @@ describe('extension Bridge connection', () => {
       expect.objectContaining({ method: 'POST' }),
     );
   });
+
+  it('invokes a native-style fetch function without rebinding this', async () => {
+    const storage = new MemoryStorage();
+    delete storage.values.bridgeToken;
+    const nativeStyleFetch = async function (this: unknown): Promise<Response> {
+      if (this !== undefined) throw new TypeError('Illegal invocation');
+      return new Response(JSON.stringify({ token: 'native-token'.padEnd(43, 'x') }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    };
+    const connection = new BridgeConnection({
+      storage,
+      socketFactory: () => new MemorySocket(),
+      fetch: nativeStyleFetch as typeof fetch,
+      setInterval: () => 1,
+      clearInterval: () => undefined,
+      setTimeout: () => 1,
+      clearTimeout: () => undefined,
+    });
+
+    await expect(connection.pair('123456')).resolves.toBeUndefined();
+  });
+
+  it('persists semantic progress when content enters the Bridge', async () => {
+    const storage = new MemoryStorage();
+    const socket = new MemorySocket();
+    const connection = new BridgeConnection({
+      storage,
+      socketFactory: () => socket,
+      fetch: vi.fn<typeof fetch>(),
+      setInterval: () => 1,
+      clearInterval: () => undefined,
+      setTimeout: () => 1,
+      clearTimeout: () => undefined,
+    });
+    await connection.start();
+    socket.emit('open');
+
+    connection.send('job.progress', 'job-1', { stage: 'collecting' });
+    await Promise.resolve();
+    expect(storage.values.lastJobStatus).toBe('collecting');
+    connection.send('job.result', 'job-1', { document: {} });
+    await Promise.resolve();
+    expect(storage.values.lastJobStatus).toBe('organizing');
+  });
 });

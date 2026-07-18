@@ -28,6 +28,8 @@ body { border-top: 4px solid var(--blue); }
 button,
 input { font: inherit; }
 
+button { appearance: none; }
+
 button:focus-visible,
 input:focus-visible {
   outline: 3px solid rgb(47 107 255 / 28%);
@@ -184,7 +186,10 @@ input {
 .primary-button,
 .secondary-button {
   min-height: 42px;
+  border-style: solid;
   border-radius: 6px;
+  background-image: none;
+  box-shadow: none;
   cursor: pointer;
   font-weight: 700;
   transition: transform 140ms ease, background-color 140ms ease;
