@@ -4,6 +4,7 @@ export type SidePanelState =
   | { phase: 'unsupported' }
   | {
       phase: 'ready';
+      url: string;
       sourceLabel: string;
       title: string;
       category: string;
@@ -70,6 +71,7 @@ export function sidePanelStateFromStatus(status: BackgroundStatus): SidePanelSta
   if (!status.page.supported) return { phase: 'unsupported' };
   return {
     phase: 'ready',
+    url: status.page.url,
     sourceLabel: new URL(status.page.url).hostname === 'mp.weixin.qq.com'
       ? '微信公众号'
       : '知识星球',
@@ -147,11 +149,14 @@ export function renderSidePanel(
     return;
   }
   if (state.phase === 'ready') {
-    show(document, '#ready-panel');
+    const panel = show(document, '#ready-panel');
     required(document, '#source-label').textContent = state.sourceLabel;
     required(document, '#page-title').textContent = state.title;
-    required<HTMLInputElement>(document, '#category').value = state.category;
-    required<HTMLInputElement>(document, '#tags').value = state.tags.join(', ');
+    if (panel.dataset.url !== state.url) {
+      panel.dataset.url = state.url;
+      required<HTMLInputElement>(document, '#category').value = state.category;
+      required<HTMLInputElement>(document, '#tags').value = state.tags.join(', ');
+    }
     required<HTMLButtonElement>(document, '#capture-button').onclick = () => {
       const category = required<HTMLInputElement>(document, '#category').value.trim();
       const tags = required<HTMLInputElement>(document, '#tags').value
@@ -181,10 +186,16 @@ export function renderSidePanel(
     return;
   }
   if (state.phase === 'saved') {
-    show(document, '#saved-panel');
+    const panel = show(document, '#saved-panel');
     required(document, '#saved-path').textContent = state.path;
-    required<HTMLButtonElement>(document, '#copy-path-button').onclick = () => {
-      void actions.copyPath(state.path);
+    const copyButton = required<HTMLButtonElement>(document, '#copy-path-button');
+    if (panel.dataset.path !== state.path) {
+      panel.dataset.path = state.path;
+      copyButton.textContent = '复制文件路径';
+    }
+    copyButton.onclick = async () => {
+      await actions.copyPath(state.path);
+      if (panel.dataset.path === state.path) copyButton.textContent = '路径已复制';
     };
     required<HTMLButtonElement>(document, '#reveal-path-button').onclick = () => {
       void actions.revealPath(state.path);

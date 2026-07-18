@@ -93,8 +93,6 @@ const actions: SidePanelActions = {
   },
   async copyPath(path) {
     await navigator.clipboard.writeText(path);
-    const button = document.querySelector<HTMLButtonElement>('#copy-path-button');
-    if (button) button.textContent = '路径已复制';
   },
   async revealPath(path) {
     await message({ type: 'library.reveal', path });

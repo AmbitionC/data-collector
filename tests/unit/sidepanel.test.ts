@@ -82,7 +82,7 @@ describe('side panel state mapping', () => {
   it('keeps ready, collecting, and matching saved behavior', () => {
     const page = { supported: true, title: '通胀与估值', url: 'https://mp.weixin.qq.com/s/x' };
     expect(sidePanelStateFromStatus({ bridgeStatus: 'connected', page }))
-      .toMatchObject({ phase: 'ready', title: '通胀与估值', category: '' });
+      .toMatchObject({ phase: 'ready', title: '通胀与估值', url: page.url, category: '' });
     expect(sidePanelStateFromStatus({
       bridgeStatus: 'connected',
       lastJobStatus: 'organizing',
@@ -103,6 +103,7 @@ describe('side panel DOM behavior', () => {
   it('shows the current page and submits editable organization fields', async () => {
     renderSidePanel(document, {
       phase: 'ready',
+      url: 'https://mp.weixin.qq.com/s/current',
       sourceLabel: '微信公众号',
       title: '一夜之间，通胀的玩笑这次开大了',
       category: '商业与投资',
@@ -122,6 +123,41 @@ describe('side panel DOM behavior', () => {
     });
   });
 
+  it('preserves dirty organization fields for the same URL and resets them for a new URL', () => {
+    renderSidePanel(document, {
+      phase: 'ready',
+      url: 'https://mp.weixin.qq.com/s/a',
+      sourceLabel: '微信公众号',
+      title: '文章 A',
+      category: '初始分类',
+      tags: ['初始标签'],
+    }, actions);
+    document.querySelector<HTMLInputElement>('#category')!.value = '用户编辑分类';
+    document.querySelector<HTMLInputElement>('#tags')!.value = '用户编辑标签';
+
+    renderSidePanel(document, {
+      phase: 'ready',
+      url: 'https://mp.weixin.qq.com/s/a',
+      sourceLabel: '微信公众号',
+      title: '文章 A（刷新）',
+      category: '',
+      tags: [],
+    }, actions);
+    expect(document.querySelector<HTMLInputElement>('#category')?.value).toBe('用户编辑分类');
+    expect(document.querySelector<HTMLInputElement>('#tags')?.value).toBe('用户编辑标签');
+
+    renderSidePanel(document, {
+      phase: 'ready',
+      url: 'https://mp.weixin.qq.com/s/b',
+      sourceLabel: '微信公众号',
+      title: '文章 B',
+      category: '新分类',
+      tags: ['新标签'],
+    }, actions);
+    expect(document.querySelector<HTMLInputElement>('#category')?.value).toBe('新分类');
+    expect(document.querySelector<HTMLInputElement>('#tags')?.value).toBe('新标签');
+  });
+
   it('shows a saved path and invokes both result actions with the exact path', async () => {
     const path = '/Users/chenhao/Documents/data-collector/微信公众号/商业与投资/index.md';
     renderSidePanel(document, { phase: 'saved', path }, actions);
@@ -132,6 +168,21 @@ describe('side panel DOM behavior', () => {
     expect(document.querySelector('#saved-path')?.textContent).toBe(path);
     expect(actions.copyPath).toHaveBeenCalledWith(path);
     expect(actions.revealPath).toHaveBeenCalledWith(path);
+  });
+
+  it('preserves copied text for the same saved path and resets it for a new path', async () => {
+    renderSidePanel(document, { phase: 'saved', path: '/library/a/index.md' }, actions);
+    const copyButton = document.querySelector<HTMLButtonElement>('#copy-path-button')!;
+    copyButton.click();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(copyButton.textContent).toBe('路径已复制');
+
+    renderSidePanel(document, { phase: 'saved', path: '/library/a/index.md' }, actions);
+    expect(copyButton.textContent).toBe('路径已复制');
+
+    renderSidePanel(document, { phase: 'saved', path: '/library/b/index.md' }, actions);
+    expect(copyButton.textContent).toBe('复制文件路径');
   });
 
   it('contains no manual connection form or legacy copy', async () => {

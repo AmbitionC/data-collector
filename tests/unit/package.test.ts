@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { MANIFEST_PUBLIC_KEY, TRUSTED_EXTENSION_ID } from '@data-collector/shared';
 import {
+  packageExtension,
   validateExtensionDirectory,
   writeExtensionArchive,
 } from '../../scripts/package-extension.mjs';
@@ -23,6 +24,10 @@ afterEach(() => temporaryDirectories.cleanup());
 
 async function fixture(): Promise<string> {
   const root = await temporaryDirectories.create('data-collector-package-');
+  return writeFixture(root);
+}
+
+async function writeFixture(root: string): Promise<string> {
   for (const file of REQUIRED_FILES) {
     const path = join(root, file);
     await mkdir(join(path, '..'), { recursive: true });
@@ -117,5 +122,14 @@ describe('extension package validation', () => {
     const digest = async (path: string) =>
       createHash('sha256').update(await readFile(path)).digest('hex');
     expect(await digest(first)).toBe(await digest(second));
+  });
+
+  it('keeps the pre-Task-6 archive filename', async () => {
+    const workspace = await temporaryDirectories.create('data-collector-workspace-');
+    await writeFixture(join(workspace, 'packages', 'extension', 'dist'));
+
+    expect(await packageExtension(workspace)).toBe(
+      join(workspace, 'artifacts', 'data-collector-extension-0.1.0.zip'),
+    );
   });
 });

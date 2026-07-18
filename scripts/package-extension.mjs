@@ -69,7 +69,7 @@ export async function writeExtensionArchive(extensionRoot, archive) {
 export async function packageExtension(workspaceRoot) {
   const extensionRoot = join(workspaceRoot, 'packages', 'extension', 'dist');
   const artifactDirectory = join(workspaceRoot, 'artifacts');
-  const archive = join(artifactDirectory, 'data-collector-extension-0.2.0.zip');
+  const archive = join(artifactDirectory, 'data-collector-extension-0.1.0.zip');
   await mkdir(artifactDirectory, { recursive: true });
   await rm(archive, { force: true });
   return writeExtensionArchive(extensionRoot, archive);
