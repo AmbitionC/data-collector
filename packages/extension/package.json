@@ -1,0 +1,9 @@
+{
+  "name": "@data-collector/extension",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "dependencies": {
+    "@data-collector/shared": "0.1.0"
+  }
+}
