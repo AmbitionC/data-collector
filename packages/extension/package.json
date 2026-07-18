@@ -3,6 +3,9 @@
   "private": true,
   "version": "0.1.0",
   "type": "module",
+  "scripts": {
+    "build": "node scripts/build.mjs"
+  },
   "dependencies": {
     "@data-collector/shared": "0.1.0"
   }
