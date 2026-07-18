@@ -1,16 +1,19 @@
-import { mkdtemp, readFile, stat } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { readFile, stat } from 'node:fs/promises';
 import { join } from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
 import { PairingManager } from '../../packages/bridge/src/auth.js';
 import { loadConfig } from '../../packages/bridge/src/config.js';
 import { JobStateError, JobStore } from '../../packages/bridge/src/jobs/store.js';
+import { createTemporaryDirectoryTracker } from '../helpers/temp.js';
 
 const WECHAT_URL = 'https://mp.weixin.qq.com/s/uW5gUigjslVY24YmCYhg0g';
 const NOW = '2026-07-18T00:00:00.000Z';
+const temporaryDirectories = createTemporaryDirectoryTracker();
+
+afterEach(() => temporaryDirectories.cleanup());
 
 async function temporaryDirectory(): Promise<string> {
-  return mkdtemp(join(tmpdir(), 'data-collector-jobs-'));
+  return temporaryDirectories.create('data-collector-jobs-');
 }
 
 describe('bridge configuration', () => {

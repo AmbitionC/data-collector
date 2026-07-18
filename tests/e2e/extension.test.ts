@@ -1,23 +1,25 @@
-import { access, mkdir, mkdtemp, readFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { access, mkdir, readFile } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import puppeteer, { type Browser, type Page } from 'puppeteer-core';
 import { afterEach, describe, expect, it } from 'vitest';
 import { startBridge, type BridgeHandle } from '../../packages/bridge/src/index.js';
 import { runCli } from '../../packages/bridge/src/cli.js';
+import { createTemporaryDirectoryTracker } from '../helpers/temp.js';
 
 const WORKSPACE = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const EXTENSION_PATH = join(WORKSPACE, 'packages', 'extension', 'dist');
 const TARGET_URL = 'https://mp.weixin.qq.com/s/uW5gUigjslVY24YmCYhg0g';
 let browser: Browser | undefined;
 let bridge: BridgeHandle | undefined;
+const temporaryDirectories = createTemporaryDirectoryTracker();
 
 afterEach(async () => {
   await browser?.close();
   await bridge?.close();
   browser = undefined;
   bridge = undefined;
+  await temporaryDirectories.cleanup();
 });
 
 async function popupFor(targetPage: Page): Promise<Page> {
@@ -60,7 +62,7 @@ async function preferredChrome(): Promise<string | undefined> {
 
 describe('built Chrome extension', () => {
   it('pairs, captures the current page, then updates it through the Codex CLI', async () => {
-    const libraryRoot = await mkdtemp(join(tmpdir(), 'data-collector-e2e-'));
+    const libraryRoot = await temporaryDirectories.create('data-collector-e2e-');
     bridge = await startBridge({
       port: 17321,
       libraryRoot,

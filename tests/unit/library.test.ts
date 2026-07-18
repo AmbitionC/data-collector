@@ -1,7 +1,6 @@
-import { mkdir, mkdtemp, readFile, readdir, symlink } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { mkdir, readFile, readdir, symlink } from 'node:fs/promises';
 import { isAbsolute, join, relative } from 'node:path';
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { CollectedDocument } from '@data-collector/shared';
 import { organize } from '../../packages/bridge/src/organize/index.js';
 import {
@@ -9,11 +8,15 @@ import {
   safeSlug,
 } from '../../packages/bridge/src/library/index.js';
 import { readResponseBytes } from '../../packages/bridge/src/library/assets.js';
+import { createTemporaryDirectoryTracker } from '../helpers/temp.js';
 
 const URL = 'https://mp.weixin.qq.com/s/library-test';
+const temporaryDirectories = createTemporaryDirectoryTracker();
+
+afterEach(() => temporaryDirectories.cleanup());
 
 async function temporaryDirectory(): Promise<string> {
-  return mkdtemp(join(tmpdir(), 'data-collector-library-'));
+  return temporaryDirectories.create('data-collector-library-');
 }
 
 function collected(overrides: Partial<CollectedDocument> = {}): CollectedDocument {

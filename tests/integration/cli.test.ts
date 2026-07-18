@@ -1,15 +1,15 @@
-import { mkdtemp } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import WebSocket from 'ws';
 import { afterEach, describe, expect, it } from 'vitest';
 import type { CollectedDocument } from '@data-collector/shared';
 import { runCli } from '../../packages/bridge/src/cli.js';
 import { startBridge, type BridgeHandle } from '../../packages/bridge/src/index.js';
+import { createTemporaryDirectoryTracker } from '../helpers/temp.js';
 
 const ARTICLE_URL = 'https://mp.weixin.qq.com/s/cli-test';
 const handles: BridgeHandle[] = [];
 const sockets: WebSocket[] = [];
+const temporaryDirectories = createTemporaryDirectoryTracker();
 
 function envelope(type: string, requestId: string, payload: unknown): string {
   return JSON.stringify({ protocolVersion: 1, type, requestId, timestamp: new Date().toISOString(), payload });
@@ -54,11 +54,12 @@ async function connect(bridge: BridgeHandle, token: string): Promise<WebSocket> 
 afterEach(async () => {
   for (const socket of sockets.splice(0)) socket.close();
   for (const handle of handles.splice(0)) await handle.close();
+  await temporaryDirectories.cleanup();
 });
 
 describe('Codex CLI', () => {
   it('submits a URL, waits for the extension, and prints only the saved path', async () => {
-    const root = await mkdtemp(join(tmpdir(), 'data-collector-cli-'));
+    const root = await temporaryDirectories.create('data-collector-cli-');
     const configDir = join(root, '.config');
     const bridge = await startBridge({ port: 0, libraryRoot: root, configDir });
     handles.push(bridge);

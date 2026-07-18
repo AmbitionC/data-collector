@@ -1,12 +1,12 @@
 import { createHash } from 'node:crypto';
-import { mkdir, mkdtemp, readFile, utimes, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { mkdir, readFile, utimes, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
 import {
   validateExtensionDirectory,
   writeExtensionArchive,
 } from '../../scripts/package-extension.mjs';
+import { createTemporaryDirectoryTracker } from '../helpers/temp.js';
 
 const REQUIRED_FILES = [
   'manifest.json',
@@ -16,9 +16,12 @@ const REQUIRED_FILES = [
   'popup/index.js',
   'popup/styles.css',
 ];
+const temporaryDirectories = createTemporaryDirectoryTracker();
+
+afterEach(() => temporaryDirectories.cleanup());
 
 async function fixture(): Promise<string> {
-  const root = await mkdtemp(join(tmpdir(), 'data-collector-package-'));
+  const root = await temporaryDirectories.create('data-collector-package-');
   for (const file of REQUIRED_FILES) {
     const path = join(root, file);
     await mkdir(join(path, '..'), { recursive: true });
@@ -57,7 +60,7 @@ describe('extension package validation', () => {
 
   it('creates byte-for-byte reproducible archives without a system zip command', async () => {
     const root = await fixture();
-    const output = await mkdtemp(join(tmpdir(), 'data-collector-archive-'));
+    const output = await temporaryDirectories.create('data-collector-archive-');
     const first = join(output, 'first.zip');
     const second = join(output, 'second.zip');
     await writeExtensionArchive(root, first);

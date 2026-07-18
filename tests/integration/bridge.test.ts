@@ -1,5 +1,4 @@
-import { mkdtemp, readFile, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import WebSocket from 'ws';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -8,14 +7,16 @@ import {
   startBridge,
   type BridgeHandle,
 } from '../../packages/bridge/src/index.js';
+import { createTemporaryDirectoryTracker } from '../helpers/temp.js';
 
 const URL = 'https://mp.weixin.qq.com/s/integration-test';
 const EXTENSION_ORIGIN = `chrome-extension://${'a'.repeat(32)}`;
 const handles: BridgeHandle[] = [];
 const sockets: WebSocket[] = [];
+const temporaryDirectories = createTemporaryDirectoryTracker();
 
 async function temporaryDirectory(): Promise<string> {
-  return mkdtemp(join(tmpdir(), 'data-collector-bridge-'));
+  return temporaryDirectories.create('data-collector-bridge-');
 }
 
 function document(overrides: Partial<CollectedDocument> = {}): CollectedDocument {
@@ -95,6 +96,7 @@ function envelope<T>(type: string, requestId: string, payload: T): string {
 afterEach(async () => {
   for (const socket of sockets.splice(0)) socket.close();
   for (const handle of handles.splice(0)) await handle.close();
+  await temporaryDirectories.cleanup();
 });
 
 describe('local Bridge', () => {
