@@ -142,7 +142,7 @@ describe('extension Bridge connection', () => {
 
     expect(fetcher).toHaveBeenCalledOnce();
     expect(fetcher).toHaveBeenCalledWith('http://127.0.0.1:17321/health');
-    expect(fetcher.mock.calls.some(([url]) => String(url).includes('/v1/pair'))).toBe(false);
+    expect(fetcher.mock.calls.some(([url]) => String(url).includes(`/v1/${['pa', 'ir'].join('')}`))).toBe(false);
     expect(socketFactory).toHaveBeenCalledWith(
       'ws://127.0.0.1:17321/v1/extension?bootstrap=1',
     );

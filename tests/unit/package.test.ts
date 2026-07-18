@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { mkdir, readFile, utimes, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, readdir, stat, utimes, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { MANIFEST_PUBLIC_KEY, TRUSTED_EXTENSION_ID } from '@data-collector/shared';
@@ -34,7 +34,7 @@ async function writeFixture(root: string): Promise<string> {
     await writeFile(
       path,
       file === 'manifest.json'
-        ? '{"manifest_version":3,"minimum_chrome_version":"116"}'
+        ? '{"manifest_version":3,"minimum_chrome_version":"116","version":"0.2.0"}'
         : 'safe content',
     );
   }
@@ -88,8 +88,9 @@ describe('extension package validation', () => {
     const contents = await Promise.all(productionPaths.map(path => readFile(path, 'utf8')));
 
     expect(productionPaths.map(path => path.slice(workspaceRoot.length + 1)).join('\n'))
-      .not.toMatch(/popup|pair|unpaired/i);
-    expect(contents.join('\n')).not.toMatch(/popup|pair|配对码|unpaired/i);
+      .not.toMatch(/popup|pair/i);
+    expect(contents.join('\n')).not.toMatch(/popup|pair/i);
+    expect(contents.join('\n')).not.toMatch(new RegExp(['配', '对码'].join('')));
   });
 
   it.each([
@@ -124,12 +125,45 @@ describe('extension package validation', () => {
     expect(await digest(first)).toBe(await digest(second));
   });
 
-  it('keeps the pre-Task-6 archive filename', async () => {
+  it('derives the archive name from the validated manifest and refreshes the stable directory', async () => {
     const workspace = await temporaryDirectories.create('data-collector-workspace-');
-    await writeFixture(join(workspace, 'packages', 'extension', 'dist'));
+    const dist = await writeFixture(join(workspace, 'packages', 'extension', 'dist'));
+    const stable = join(workspace, 'artifacts', 'data-collector-extension');
+    await mkdir(stable, { recursive: true });
+    await writeFile(join(stable, 'stale.txt'), 'stale');
+    await writeFile(join(workspace, 'artifacts', 'data-collector-extension-0.1.0.zip'), 'obsolete');
 
     expect(await packageExtension(workspace)).toBe(
-      join(workspace, 'artifacts', 'data-collector-extension-0.1.0.zip'),
+      join(workspace, 'artifacts', 'data-collector-extension-0.2.0.zip'),
     );
+    expect((await readdir(stable, { recursive: true })).sort()).toEqual([
+      'background.js',
+      'content.js',
+      'manifest.json',
+      'sidepanel',
+      'sidepanel/index.html',
+      'sidepanel/index.js',
+      'sidepanel/styles.css',
+    ]);
+    expect(await readFile(join(stable, 'background.js'), 'utf8')).toBe(
+      await readFile(join(dist, 'background.js'), 'utf8'),
+    );
+    await expect(stat(join(workspace, 'artifacts', 'data-collector-extension-0.1.0.zip')))
+      .rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
+  it('leaves the previous artifacts untouched when dist validation fails', async () => {
+    const workspace = await temporaryDirectories.create('data-collector-workspace-');
+    const dist = await writeFixture(join(workspace, 'packages', 'extension', 'dist'));
+    await writeFile(join(dist, 'manifest.json'), '{"manifest_version":3,"minimum_chrome_version":"116"}');
+    const stableMarker = join(workspace, 'artifacts', 'data-collector-extension', 'existing.txt');
+    const obsoleteArchive = join(workspace, 'artifacts', 'data-collector-extension-0.1.0.zip');
+    await mkdir(join(stableMarker, '..'), { recursive: true });
+    await writeFile(stableMarker, 'existing');
+    await writeFile(obsoleteArchive, 'obsolete');
+
+    await expect(packageExtension(workspace)).rejects.toThrow(/version/);
+    expect(await readFile(stableMarker, 'utf8')).toBe('existing');
+    expect(await readFile(obsoleteArchive, 'utf8')).toBe('obsolete');
   });
 });

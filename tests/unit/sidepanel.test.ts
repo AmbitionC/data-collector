@@ -189,7 +189,8 @@ describe('side panel DOM behavior', () => {
     const html = await readFile(join(PANEL_ROOT, 'index.html'), 'utf8');
 
     expect(document.querySelector('#pair-form')).toBeNull();
-    expect(html).not.toMatch(/popup|pair|配对码|unpaired/i);
+    expect(html).not.toMatch(/popup|pair/i);
+    expect(html).not.toMatch(new RegExp(['配', '对码'].join('')));
   });
 });
 

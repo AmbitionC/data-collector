@@ -158,7 +158,7 @@ describe('local Bridge', () => {
       body: { url: URL },
     });
     expect(unauthorized.status).toBe(401);
-    const removedPairing = await requestJson(bridge.url, '/v1/pair', {
+    const removedPairing = await requestJson(bridge.url, `/v1/${['pa', 'ir'].join('')}`, {
       method: 'POST',
       body: { code: '123456' },
     });

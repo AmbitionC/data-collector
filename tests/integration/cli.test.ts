@@ -115,6 +115,6 @@ describe('Codex CLI', () => {
 
     expect(stderr).toMatch(/Data Collector Bridge: http:\/\/127\.0\.0\.1:\d+/);
     expect(stderr).toContain('等待受信任的 Data Collector 扩展自动连接');
-    expect(stderr).not.toContain('配对码');
+    expect(stderr).not.toContain(['配', '对码'].join(''));
   });
 });

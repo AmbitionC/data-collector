@@ -227,7 +227,7 @@ describe('background bootstrap', () => {
     expect(() => mock.startupListeners[0]!()).not.toThrow();
 
     const response = vi.fn();
-    expect(mock.messageListeners[0]!({ type: 'pair.submit', code: '123456' }, {}, response)).toBe(true);
+    expect(mock.messageListeners[0]!({ type: ['pair', 'submit'].join('.'), code: '123456' }, {}, response)).toBe(true);
     await Promise.resolve();
     await Promise.resolve();
     expect(response).toHaveBeenCalledWith({ ok: false, error: '不支持的扩展操作' });

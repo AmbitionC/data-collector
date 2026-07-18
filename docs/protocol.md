@@ -1,30 +1,37 @@
 # 本机 Bridge 协议
 
-协议版本为 `1`。Bridge 只监听 `127.0.0.1`，默认端口 `17321`。
+协议版本为 `1`，应用版本为 `0.2.0`。Bridge 只监听 `127.0.0.1`，默认端口 `17321`。
 
-## 配对与认证
+## 固定身份自动授权
 
-Bridge 启动时生成一次性 6 位配对码，有效期 10 分钟。扩展调用：
+正式扩展的 manifest 公钥派生固定 ID。全新扩展没有 token 时按以下顺序连接：
 
-```http
-POST /v1/pair
-Content-Type: application/json
+1. 请求 `GET /health`，读取 Bridge 声明的 `trustedExtensionId`。
+2. 将该值与 `chrome.runtime.id` 严格比较；不一致时进入 `identity_error`，不会重试授权。
+3. 一致时连接 `ws://127.0.0.1:17321/v1/extension?bootstrap=1`。
+4. Bridge 校验请求 Origin 必须是固定扩展 Origin，随后通过 `bridge.authorized` 返回 bearer token。
+5. 扩展持久化 token，状态切换为 `connected`，并发送 `extension.hello`。
 
-{"code":"123456"}
+后续连接使用：
+
+```text
+ws://127.0.0.1:17321/v1/extension?token=<token>
 ```
 
-成功后返回随机 256 位 bearer token。令牌保存在扩展的 `chrome.storage.local` 和本机权限为 `0600` 的 `auth.json` 中。配对接口仅接受本机来源；其余任务接口必须发送：
+token 是至少 256 位的随机值，保存在扩展的 `chrome.storage.local` 和本机权限为 `0600` 的 `auth.json` 中。HTTP 保护接口发送：
 
 ```http
 Authorization: Bearer <token>
 ```
 
+WebSocket Origin 校验会阻止普通网页和其他扩展。Origin 与固定 ID 是浏览器内的调用边界，不是对同用户本机恶意进程的防护；能够控制本机用户账户的程序不在安全边界内。
+
 ## HTTP API
 
-- `GET /health`：进程、版本与扩展连接状态，不需要令牌。
+- `GET /health`：进程版本、受信任扩展 ID 与连接状态，不需要 token。
 - `POST /v1/jobs`：创建任务。正文 `{ "url": "...", "requestedBy": "codex|cli|extension" }`。
 - `GET /v1/jobs/:id`：查询任务状态和最终路径。
-- `POST /v1/reveal`：只允许打开知识库根目录内已存在的文件，供用户点击“在文件夹中查看”。
+- `POST /v1/reveal`：只允许打开知识库根目录内已存在的文件，供 Side Panel 点击“在文件夹中查看”。
 
 URL 只允许 HTTPS 的 `mp.weixin.qq.com`、`wx.zsxq.com` 与知识星球子域。请求体、字段长度、图片数量和 WebSocket 帧都有上限。
 
@@ -36,11 +43,9 @@ queued → dispatched → collecting → saved
                         └→ failed
 ```
 
-Bridge 重启会把未完成任务恢复到可重派发状态；扩展重连后继续派发。相同 URL 的任务可重复执行，但文件层通过稳定内容 ID 幂等更新。
+Bridge 重启会把未完成任务恢复到可重派发状态；扩展重连后继续派发。相同 URL 的任务可重复执行，文件层通过稳定内容 ID 幂等更新。
 
-## WebSocket
-
-地址：`ws://127.0.0.1:17321/v1/extension?token=<token>`。服务器同时校验 `chrome-extension://<id>` Origin。
+## WebSocket 消息
 
 统一信封：
 
@@ -57,10 +62,10 @@ Bridge 重启会把未完成任务恢复到可重派发状态；扩展重连后�
 主要消息：
 
 - 扩展 → Bridge：`extension.hello`、`bridge.ping`、`job.progress`、`job.result`、`job.error`
-- Bridge → 扩展：`bridge.pong`、`job.collect`、`job.saved`
+- Bridge → 扩展：`bridge.authorized`、`bridge.pong`、`job.collect`、`job.saved`
 
-扩展每 20 秒发送心跳，使 Chrome 116+ 的 Manifest V3 service worker 在活跃连接期间保持可用。所有消息都在共享 schema 边界校验，内容脚本返回的数据按不可信输入处理；回传 URL 必须与任务一致，违规消息会以 WebSocket `1008` 关闭。
+扩展每 20 秒发送心跳，使 Chrome 116+ 的 Manifest V3 service worker 在活跃连接期间保持可用。所有消息都在共享 schema 边界校验，内容脚本返回的数据按不可信输入处理；回传 URL 必须与任务一致，违规消息以 WebSocket `1008` 关闭。
 
 ## 扩展为其他客户端
 
-如果未来让另一个本机工具调用 Bridge，应复用配对、bearer token、URL allowlist 和 schema，而不是开放监听地址。云端 sink 应是 Bridge 写入后的独立模块，不能让扩展直接持有云端长期凭证。
+未来新增本机客户端时，应独立定义身份和授权方式，继续使用 token、URL allowlist 和 schema，不能仅因监听地址是回环就默认信任。云端 sink 应是 Bridge 写入后的独立模块，不能让扩展持有云端长期凭证。

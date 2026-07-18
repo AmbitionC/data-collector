@@ -1,4 +1,4 @@
-import { mkdir, readdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { cp, mkdir, mkdtemp, readdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { zipSync } from 'fflate';
@@ -48,6 +48,9 @@ export async function validateExtensionDirectory(root) {
   if (manifest.manifest_version !== 3 || manifest.minimum_chrome_version !== '116') {
     throw new Error('manifest 必须是 MV3 且最低 Chrome 版本为 116');
   }
+  if (typeof manifest.version !== 'string' || !/^\d+(?:\.\d+){2,3}$/.test(manifest.version)) {
+    throw new Error('manifest.version 必须是 Chrome 支持的数字版本');
+  }
   return files;
 }
 
@@ -69,10 +72,40 @@ export async function writeExtensionArchive(extensionRoot, archive) {
 export async function packageExtension(workspaceRoot) {
   const extensionRoot = join(workspaceRoot, 'packages', 'extension', 'dist');
   const artifactDirectory = join(workspaceRoot, 'artifacts');
-  const archive = join(artifactDirectory, 'data-collector-extension-0.1.0.zip');
   await mkdir(artifactDirectory, { recursive: true });
-  await rm(archive, { force: true });
-  return writeExtensionArchive(extensionRoot, archive);
+  await validateExtensionDirectory(extensionRoot);
+  const manifest = JSON.parse(await readFile(join(extensionRoot, 'manifest.json'), 'utf8'));
+  const archive = join(artifactDirectory, `data-collector-extension-${manifest.version}.zip`);
+  const stableDirectory = join(artifactDirectory, 'data-collector-extension');
+  const obsoleteArchive = join(artifactDirectory, 'data-collector-extension-0.1.0.zip');
+  const stagingRoot = await mkdtemp(join(artifactDirectory, '.data-collector-extension-'));
+  const stagedDirectory = join(stagingRoot, 'unpacked');
+  const stagedArchive = join(stagingRoot, 'extension.zip');
+  const previousDirectory = join(stagingRoot, 'previous');
+  let movedPrevious = false;
+  try {
+    await cp(extensionRoot, stagedDirectory, { recursive: true });
+    await validateExtensionDirectory(stagedDirectory);
+    await writeExtensionArchive(stagedDirectory, stagedArchive);
+    await rename(stagedArchive, archive);
+    try {
+      await rename(stableDirectory, previousDirectory);
+      movedPrevious = true;
+    } catch (error) {
+      if (!(error instanceof Error && 'code' in error && error.code === 'ENOENT')) throw error;
+    }
+    try {
+      await rename(stagedDirectory, stableDirectory);
+    } catch (error) {
+      if (movedPrevious) await rename(previousDirectory, stableDirectory);
+      throw error;
+    }
+    await validateExtensionDirectory(stableDirectory);
+    if (obsoleteArchive !== archive) await rm(obsoleteArchive, { force: true });
+    return archive;
+  } finally {
+    await rm(stagingRoot, { recursive: true, force: true });
+  }
 }
 
 const entry = process.argv[1] ? resolve(process.argv[1]) : '';

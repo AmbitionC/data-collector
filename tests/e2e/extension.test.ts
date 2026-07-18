@@ -1,10 +1,11 @@
 import { access, mkdir, readFile } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import puppeteer, { type Browser, type Page } from 'puppeteer-core';
+import puppeteer, { type Browser, type Page, type WebWorker } from 'puppeteer-core';
 import { afterEach, describe, expect, it } from 'vitest';
 import { startBridge, type BridgeHandle } from '../../packages/bridge/src/index.js';
 import { runCli } from '../../packages/bridge/src/cli.js';
+import { TRUSTED_EXTENSION_ID } from '../../packages/shared/src/index.js';
 import { createTemporaryDirectoryTracker } from '../helpers/temp.js';
 
 const WORKSPACE = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
@@ -22,22 +23,84 @@ afterEach(async () => {
   await temporaryDirectories.cleanup();
 });
 
-async function popupFor(targetPage: Page): Promise<Page> {
+async function sidePanelFor(targetPage: Page): Promise<{ page: Page; worker: WebWorker }> {
   const workerTarget = await browser!.waitForTarget(
     target => target.type() === 'service_worker' && target.url().endsWith('background.js'),
     { timeout: 20_000 },
   );
   const worker = await workerTarget.worker();
   if (!worker) throw new Error('扩展 Service Worker 未启动');
+  const extensionId = new URL(workerTarget.url()).host;
+  expect(extensionId).toBe(TRUSTED_EXTENSION_ID);
+  const sidePanel = await browser!.newPage();
+  await sidePanel.goto(`chrome-extension://${extensionId}/sidepanel/index.html`, {
+    waitUntil: 'domcontentloaded',
+  });
   await targetPage.bringToFront();
-  await worker.evaluate(() => (globalThis as { chrome: { action: { openPopup(): Promise<void> } } }).chrome.action.openPopup());
-  const popupTarget = await browser!.waitForTarget(
-    target => target.type() === 'page' && target.url().endsWith('popup/index.html'),
-    { timeout: 10_000 },
-  );
-  const page = popupTarget.asPage();
-  if (!page) throw new Error('扩展弹窗没有可交互页面');
-  return page;
+  return { page: sidePanel, worker };
+}
+
+async function waitForVisiblePanel(page: Page, selector: string, timeout: number): Promise<void> {
+  const session = await page.createCDPSession();
+  const deadline = Date.now() + timeout;
+  try {
+    while (Date.now() < deadline) {
+      const { root } = await session.send('DOM.getDocument');
+      const { nodeId } = await session.send('DOM.querySelector', { nodeId: root.nodeId, selector });
+      const { attributes } = await session.send('DOM.getAttributes', { nodeId });
+      if (!attributes.includes('hidden')) return;
+      await new Promise(resolveDelay => setTimeout(resolveDelay, 100));
+    }
+  } finally {
+    await session.detach();
+  }
+  throw new Error(`等待侧栏状态超时：${selector}`);
+}
+
+async function elementText(page: Page, selector: string): Promise<string> {
+  const session = await page.createCDPSession();
+  try {
+    const { root } = await session.send('DOM.getDocument');
+    const { nodeId } = await session.send('DOM.querySelector', { nodeId: root.nodeId, selector });
+    const { outerHTML } = await session.send('DOM.getOuterHTML', { nodeId });
+    return outerHTML
+      .replace(/^<[^>]+>|<\/[^>]+>$/g, '')
+      .replaceAll('&amp;', '&')
+      .replaceAll('&lt;', '<')
+      .replaceAll('&gt;', '>')
+      .trim();
+  } finally {
+    await session.detach();
+  }
+}
+
+async function captureCurrentFromSidePanel(page: Page): Promise<unknown> {
+  const session = await page.createCDPSession();
+  try {
+    const { result, exceptionDetails } = await session.send('Runtime.evaluate', {
+      expression: 'chrome.runtime.sendMessage({type:"capture.current",overrides:{}})',
+      awaitPromise: true,
+      returnByValue: true,
+    });
+    if (exceptionDetails) throw new Error(exceptionDetails.text);
+    return result.value;
+  } finally {
+    await session.detach();
+  }
+}
+
+async function waitForExtensionReady(worker: WebWorker, url: string, timeout: number): Promise<void> {
+  const deadline = Date.now() + timeout;
+  while (Date.now() < deadline) {
+    const ready = await worker.evaluate(async expectedUrl => {
+      const values = await chrome.storage.local.get(['bridgeStatus']);
+      const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+      return values.bridgeStatus === 'connected' && tab?.url === expectedUrl;
+    }, url);
+    if (ready) return;
+    await new Promise(resolveDelay => setTimeout(resolveDelay, 100));
+  }
+  throw new Error(`扩展没有在目标文章上完成自动授权：${url}`);
 }
 
 async function preferredChrome(): Promise<string | undefined> {
@@ -61,7 +124,7 @@ async function preferredChrome(): Promise<string | undefined> {
 }
 
 describe('built Chrome extension', () => {
-  it('pairs, captures the current page, then updates it through the Codex CLI', async () => {
+  it('automatically authorizes the side panel, captures the current page, then updates it through the Codex CLI', async () => {
     const libraryRoot = await temporaryDirectories.create('data-collector-e2e-');
     bridge = await startBridge({
       port: 17321,
@@ -98,22 +161,21 @@ describe('built Chrome extension', () => {
     });
     await articlePage.goto(TARGET_URL, { waitUntil: 'domcontentloaded' });
 
-    const popup = await popupFor(articlePage);
-    await popup.waitForSelector('#unpaired-panel:not([hidden])', { timeout: 10_000 });
-    await popup.type('#pair-code', bridge.pairingCode);
-    await popup.click('#pair-form button[type="submit"]');
-    await popup.waitForSelector('#ready-panel:not([hidden])', { timeout: 10_000 });
-    expect(await popup.$eval('#page-title', element => element.textContent)).toContain('一夜之间');
+    const { page: sidePanel, worker } = await sidePanelFor(articlePage);
+    await waitForExtensionReady(worker, TARGET_URL, 10_000);
+    await waitForVisiblePanel(sidePanel, '#ready-panel', 10_000);
+    expect(await elementText(sidePanel, '#page-title')).toContain('一夜之间');
 
     const screenshotDirectory = join(WORKSPACE, 'artifacts', 'screenshots');
     await mkdir(screenshotDirectory, { recursive: true });
-    await popup.screenshot({ path: join(screenshotDirectory, 'popup-ready.png') });
-    await popup.click('#capture-button');
-    await popup.waitForSelector('#collecting-panel:not([hidden])', { timeout: 10_000 });
-    await popup.screenshot({ path: join(screenshotDirectory, 'popup-collecting.png') });
-    await popup.waitForSelector('#saved-panel:not([hidden])', { timeout: 15_000 });
+    await sidePanel.screenshot({ path: join(screenshotDirectory, 'sidepanel-ready.png') });
+    const captureResponse = await captureCurrentFromSidePanel(sidePanel);
+    expect(captureResponse).toMatchObject({ ok: true });
+    await waitForVisiblePanel(sidePanel, '#collecting-panel', 10_000);
+    await sidePanel.screenshot({ path: join(screenshotDirectory, 'sidepanel-collecting.png') });
+    await waitForVisiblePanel(sidePanel, '#saved-panel', 15_000);
 
-    const outputPath = (await popup.$eval('#saved-path', element => element.textContent ?? '')).trim();
+    const outputPath = await elementText(sidePanel, '#saved-path');
     expect(outputPath).toMatch(/index\.md$/);
     const markdown = await readFile(outputPath, 'utf8');
     expect(markdown).toContain('一夜之间，通胀的玩笑这次开大了');
