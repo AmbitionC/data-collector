@@ -1,6 +1,6 @@
 import { readFile, stat } from 'node:fs/promises';
 import { join } from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { AccessTokenManager } from '../../packages/bridge/src/auth.js';
 import { createTemporaryDirectoryTracker } from '../helpers/temp.js';
 
@@ -30,6 +30,41 @@ describe('access token storage', () => {
     const manager = await AccessTokenManager.open(join(root, 'auth.json'), { token: () => 'short-token' });
 
     await expect(manager.ensureToken()).rejects.toThrow('访问令牌长度不足');
+  });
+
+  it('shares one in-flight token creation across concurrent callers', async () => {
+    const root = await temporaryDirectories.create('data-collector-bridge-auth-');
+    const firstToken = 'a'.repeat(43);
+    const token = vi.fn()
+      .mockReturnValueOnce(firstToken)
+      .mockReturnValueOnce('b'.repeat(43))
+      .mockReturnValueOnce('c'.repeat(43));
+    const manager = await AccessTokenManager.open(join(root, 'auth.json'), { token });
+
+    const tokens = await Promise.all([
+      manager.ensureToken(),
+      manager.ensureToken(),
+      manager.ensureToken(),
+    ]);
+
+    expect(token).toHaveBeenCalledOnce();
+    expect(tokens).toEqual([firstToken, firstToken, firstToken]);
+    expect(manager.verify(firstToken)).toBe(true);
+  });
+
+  it('clears a failed in-flight creation so a later call can retry', async () => {
+    const root = await temporaryDirectories.create('data-collector-bridge-auth-');
+    const validToken = 'z'.repeat(43);
+    const token = vi.fn()
+      .mockReturnValueOnce('short-token')
+      .mockReturnValueOnce(validToken);
+    const manager = await AccessTokenManager.open(join(root, 'auth.json'), { token });
+
+    await expect(manager.ensureToken()).rejects.toThrow('访问令牌长度不足');
+    await expect(manager.ensureToken()).resolves.toBe(validToken);
+
+    expect(token).toHaveBeenCalledTimes(2);
+    expect(manager.verify(validToken)).toBe(true);
   });
 
   it('does not expose pairing-code APIs', async () => {

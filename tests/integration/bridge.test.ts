@@ -94,8 +94,12 @@ async function authorize(
   return { socket, token: message.payload.token };
 }
 
-async function expectBootstrapRejected(bridge: BridgeHandle, origin: string): Promise<void> {
-  const socket = new WebSocket(`${bridge.wsUrl}?bootstrap=1`, { origin });
+async function expectWebSocketRejected(
+  bridge: BridgeHandle,
+  query: string,
+  origin: string,
+): Promise<void> {
+  const socket = new WebSocket(`${bridge.wsUrl}${query}`, { origin });
   const status = await new Promise<number | undefined>((resolve, reject) => {
     socket.once('unexpected-response', (_request, response) => {
       response.resume();
@@ -315,9 +319,21 @@ describe('local Bridge', () => {
     const bridge = await startBridge({ port: 0, libraryRoot: root, configDir });
     handles.push(bridge);
 
-    await expectBootstrapRejected(bridge, `chrome-extension://${'a'.repeat(32)}`);
-    await expectBootstrapRejected(bridge, 'https://example.com');
+    await expectWebSocketRejected(bridge, '?bootstrap=1', `chrome-extension://${'a'.repeat(32)}`);
+    await expectWebSocketRejected(bridge, '?bootstrap=1', 'https://example.com');
 
     await expect(readFile(join(configDir, 'auth.json'), 'utf8')).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
+  it('requires bootstrap or a valid token from a trusted Origin', async () => {
+    const root = await temporaryDirectory();
+    const bridge = await startBridge({ port: 0, libraryRoot: root, configDir: join(root, '.config') });
+    handles.push(bridge);
+
+    await expectWebSocketRejected(bridge, '', EXTENSION_ORIGIN);
+    await expectWebSocketRejected(bridge, '?token=invalid', EXTENSION_ORIGIN);
+
+    const authorized = await authorize(bridge, `extension://${TRUSTED_EXTENSION_ID}`);
+    expect(authorized.token.length).toBeGreaterThanOrEqual(32);
   });
 });

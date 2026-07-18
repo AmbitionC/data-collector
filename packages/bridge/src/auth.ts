@@ -28,6 +28,8 @@ function digest(value: string): Buffer {
 }
 
 export class AccessTokenManager {
+  private ensuringToken: Promise<string> | undefined;
+
   private constructor(
     private readonly authFile: string,
     private readonly dependencies: AccessTokenDependencies,
@@ -50,6 +52,15 @@ export class AccessTokenManager {
 
   async ensureToken(): Promise<string> {
     if (this.currentToken) return this.currentToken;
+    const pending = this.ensuringToken ?? (this.ensuringToken = this.createToken());
+    try {
+      return await pending;
+    } finally {
+      if (this.ensuringToken === pending) this.ensuringToken = undefined;
+    }
+  }
+
+  private async createToken(): Promise<string> {
     const token = this.dependencies.token();
     if (token.length < 32) throw new Error('访问令牌长度不足');
     await writeProtectedJson(this.authFile, { version: 1, token });
