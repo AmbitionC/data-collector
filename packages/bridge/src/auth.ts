@@ -2,20 +2,11 @@ import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { mkdir, open, readFile, rename } from 'node:fs/promises';
 import { dirname } from 'node:path';
 
-interface PairingDependencies {
-  now: () => number;
-  code: () => string;
+interface AccessTokenDependencies {
   token: () => string;
 }
 
-interface PairingCode {
-  code: string;
-  expiresAt: number;
-}
-
-const DEFAULT_DEPENDENCIES: PairingDependencies = {
-  now: () => Date.now(),
-  code: () => String(Number.parseInt(randomBytes(4).toString('hex'), 16) % 1_000_000).padStart(6, '0'),
+const DEFAULT_DEPENDENCIES: AccessTokenDependencies = {
   token: () => randomBytes(32).toString('base64url'),
 };
 
@@ -36,19 +27,17 @@ function digest(value: string): Buffer {
   return createHash('sha256').update(value).digest();
 }
 
-export class PairingManager {
-  private pending: PairingCode | undefined;
-
+export class AccessTokenManager {
   private constructor(
     private readonly authFile: string,
-    private readonly dependencies: PairingDependencies,
+    private readonly dependencies: AccessTokenDependencies,
     private currentToken?: string,
   ) {}
 
   static async open(
     authFile: string,
-    overrides: Partial<PairingDependencies> = {},
-  ): Promise<PairingManager> {
+    overrides: Partial<AccessTokenDependencies> = {},
+  ): Promise<AccessTokenManager> {
     let token: string | undefined;
     try {
       const stored = JSON.parse(await readFile(authFile, 'utf8')) as { token?: unknown };
@@ -56,23 +45,11 @@ export class PairingManager {
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
     }
-    return new PairingManager(authFile, { ...DEFAULT_DEPENDENCIES, ...overrides }, token);
+    return new AccessTokenManager(authFile, { ...DEFAULT_DEPENDENCIES, ...overrides }, token);
   }
 
-  createPairingCode(): { code: string; expiresAt: string } {
-    const code = this.dependencies.code();
-    if (!/^\d{6}$/.test(code)) throw new Error('配对码生成器必须返回 6 位数字');
-    const expiresAt = this.dependencies.now() + 10 * 60 * 1000;
-    this.pending = { code, expiresAt };
-    return { code, expiresAt: new Date(expiresAt).toISOString() };
-  }
-
-  async exchange(code: string): Promise<string> {
-    const pending = this.pending;
-    this.pending = undefined;
-    if (!pending || pending.code !== code || this.dependencies.now() > pending.expiresAt) {
-      throw new Error('配对码无效或已过期');
-    }
+  async ensureToken(): Promise<string> {
+    if (this.currentToken) return this.currentToken;
     const token = this.dependencies.token();
     if (token.length < 32) throw new Error('访问令牌长度不足');
     await writeProtectedJson(this.authFile, { version: 1, token });

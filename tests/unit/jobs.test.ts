@@ -1,7 +1,6 @@
-import { readFile, stat } from 'node:fs/promises';
+import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { PairingManager } from '../../packages/bridge/src/auth.js';
 import { loadConfig } from '../../packages/bridge/src/config.js';
 import { JobStateError, JobStore } from '../../packages/bridge/src/jobs/store.js';
 import { createTemporaryDirectoryTracker } from '../helpers/temp.js';
@@ -26,44 +25,6 @@ describe('bridge configuration', () => {
     expect(() => loadConfig({ libraryRoot: root, host: '0.0.0.0' })).toThrow(
       /只允许监听 127\.0\.0\.1/,
     );
-  });
-});
-
-describe('pairing', () => {
-  it('exchanges a one-time code, persists a protected token, and rejects reuse', async () => {
-    const root = await temporaryDirectory();
-    const authFile = join(root, 'auth.json');
-    const pairing = await PairingManager.open(authFile, {
-      now: () => Date.parse(NOW),
-      code: () => '123456',
-      token: () => 'test-token-with-at-least-32-characters',
-    });
-
-    expect(pairing.createPairingCode()).toMatchObject({ code: '123456' });
-    const token = await pairing.exchange('123456');
-    expect(token).toBe('test-token-with-at-least-32-characters');
-    expect(pairing.verify(token)).toBe(true);
-    expect(pairing.verify('wrong-token-with-at-least-32-chars')).toBe(false);
-    await expect(pairing.exchange('123456')).rejects.toThrow(/配对码无效或已过期/);
-    expect((await stat(authFile)).mode & 0o777).toBe(0o600);
-    expect(await readFile(authFile, 'utf8')).not.toContain('123456');
-
-    const reopened = await PairingManager.open(authFile);
-    expect(reopened.verify(token)).toBe(true);
-  });
-
-  it('expires a code after ten minutes', async () => {
-    const root = await temporaryDirectory();
-    let now = Date.parse(NOW);
-    const pairing = await PairingManager.open(join(root, 'auth.json'), {
-      now: () => now,
-      code: () => '654321',
-      token: () => 'another-test-token-with-32-characters',
-    });
-    pairing.createPairingCode();
-    now += 10 * 60 * 1000 + 1;
-
-    await expect(pairing.exchange('654321')).rejects.toThrow(/配对码无效或已过期/);
   });
 });
 
