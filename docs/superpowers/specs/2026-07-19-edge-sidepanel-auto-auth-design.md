@@ -107,7 +107,8 @@ Bridge 保存精确允许列表，只接受以下固定来源且 ID 必须完全
 5. Bridge 测试验证 extension 当前页任务创建时不回派 `job.collect`，本地 progress/result 可保存；CLI/Codex 仍立即派发，未开始的 extension queued job 在重连时恢复派发。
 6. UI 测试先移除配对表单断言，覆盖 connecting、Bridge 未启动、身份错误、被其他实例接管和自适应侧栏 DOM。
 7. E2E 打开 Side Panel document，实际填写分类/标签并点击保存，断言不创建额外采集标签页、覆盖值写入 Markdown，并继续覆盖 CLI URL 采集和 catalog 去重。
-8. 全量执行类型检查、构建、67 项以上回归、覆盖率、可复现 ZIP 和真实微信文章 smoke。
+8. 合并自动门槛执行类型检查、构建、67 项以上回归、覆盖率、离线 fixture E2E 和可复现 ZIP；其中离线 fixture E2E 不依赖站点网络状态。
+9. 真实在线微信文章 smoke 只在网络可用时作为补充验收，不是合并硬门槛。
 
 Edge Beta 手工验收：重新加载固定扩展目录，点击工具栏图标后右侧栏打开；左侧文章自适应；无需配对码；Bridge 在线后可保存指定微信文章并显示最终路径。
 

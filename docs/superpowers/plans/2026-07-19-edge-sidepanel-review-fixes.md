@@ -177,7 +177,7 @@ Persist `replaced` without `markDisconnected()`, cancel timers, suppress automat
 
 Run focused tests and commit the protocol, Bridge, extension, and UI changes.
 
-### Task 5: Documentation, release artifacts, and complete verification
+### Task 5: Documentation, local release artifacts, and complete verification
 
 **Files:**
 - Modify: `docs/superpowers/specs/2026-07-19-edge-sidepanel-auto-auth-design.md`
@@ -187,6 +187,8 @@ Run focused tests and commit the protocol, Bridge, extension, and UI changes.
 - Modify: `README.md`
 - Create: `.superpowers/sdd/final-fixes-report.md`
 
+**Ignore policy:** `artifacts/` and `.superpowers/sdd/*` are ignored local verification records. Generate and inspect them, but do not stage or commit them. Git commits contain only tracked code, tests, and documentation.
+
 - [ ] **Step 1: Document the revised state machines**
 
 Describe stale-token delayed bootstrap, current-page `queued -> collecting`, reconnect dispatch of abandoned extension jobs, close `4009/replaced`, standby behavior, and explicit retry.
@@ -195,6 +197,6 @@ Describe stale-token delayed bootstrap, current-page `queued -> collecting`, rec
 
 Run the task-required command sequence, `git diff --check`, temp-directory before/after scans, live pairing scan, stable/ZIP six-file inspection, fixed-ID derivation, auth mode verification, and two-run ZIP SHA-256 comparison.
 
-- [ ] **Step 3: Write the report and final commit**
+- [ ] **Step 3: Write the local report and commit tracked documentation**
 
-Record root cause, exact RED/GREEN evidence, commits, verification output, artifact hash/contents/ID, and remaining concerns in `.superpowers/sdd/final-fixes-report.md`, then commit all documentation and generated release artifacts intentionally.
+Record root cause, exact RED/GREEN evidence, commits, verification output, artifact hash/contents/ID, and remaining concerns in the ignored local `.superpowers/sdd/final-fixes-report.md`. Commit only tracked documentation changes; do not `git add` the report or generated `artifacts/` contents.

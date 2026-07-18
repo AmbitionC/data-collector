@@ -21,6 +21,8 @@ npm run package
 - 端到端：用系统 Chrome 加载构建后的固定 ID 扩展，打开公众号 fixture，验证 Side Panel document 无需输入即可进入 ready；实际填写分类/标签并点击保存，断言无额外文章 tab、覆盖值进入 Markdown，再覆盖 catalog 去重和 CLI URL collection。
 - 真实冒烟：请求指定在线公众号文章，复用生产提取器和知识库写入器，验证标题、作者、正文、最终路径和重复采集幂等性。
 
+合并自动门槛使用离线 fixture E2E，并包含在上述自动化命令中。真实在线冒烟依赖外部站点与网络状态，只在网络可用时作为补充验收，不因其未执行或外部网络失败阻塞合并。
+
 E2E 会依次查找 `CHROME_PATH`、`PUPPETEER_EXECUTABLE_PATH`、macOS Chrome、Linux Chrome/Chromium 和 Windows Chrome。需要指定浏览器时：
 
 ```bash
@@ -59,14 +61,14 @@ shasum -a 256 artifacts/data-collector-extension-0.2.0.zip
 
 两次 SHA-256 必须完全一致。发布前还应执行任务简报指定的当前源码扫描，并排除历史 `docs/superpowers`；预期没有遗留人工授权或旧入口文本。
 
-## 真实微信公众号冒烟
+## 可选：真实微信公众号在线冒烟
 
 ```bash
 npm run build
 node scripts/smoke-wechat.mjs 'https://mp.weixin.qq.com/s/uW5gUigjslVY24YmCYhg0g'
 ```
 
-脚本使用隔离知识库 `artifacts/smoke-library`，连续写入两次同一 URL；两次必须保存到同一路径且 catalog 只有一个条目。结果摘要写入 `artifacts/smoke-wechat.json`。
+网络可用时可运行此补充验收；它不是合并硬门槛。脚本使用隔离知识库 `artifacts/smoke-library`，连续写入两次同一 URL；两次必须保存到同一路径且 catalog 只有一个条目。结果摘要写入 `artifacts/smoke-wechat.json`。
 
 ## 页面结构回归
 
