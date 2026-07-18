@@ -31,6 +31,11 @@ type CollectHandler = (requestId: string, url: string) => void | Promise<void>;
 
 const DEFAULT_PORT = 17321;
 
+interface ConnectionTransition {
+  generation: number;
+  values: Record<string, unknown>;
+}
+
 export class BridgeConnection {
   private socket: SocketLike | undefined;
   private pingTimer: unknown;
@@ -39,6 +44,8 @@ export class BridgeConnection {
   private collectHandler: CollectHandler | undefined;
   private stopped = false;
   private startPromise: Promise<void> | undefined;
+  private generation = 0;
+  private latestTransition: ConnectionTransition | undefined;
 
   constructor(private readonly dependencies: ConnectionDependencies) {}
 
@@ -61,8 +68,10 @@ export class BridgeConnection {
   private async startOnce(): Promise<void> {
     const settings = await this.settings();
     if (this.socket?.readyState === 0 || this.socket?.readyState === 1) return;
+    const generation = ++this.generation;
     const bootstrap = !settings.token;
     if (bootstrap) {
+      let trustedExtensionId: string;
       try {
         const fetcher = this.dependencies.fetch;
         const response = await fetcher(
@@ -73,19 +82,20 @@ export class BridgeConnection {
         if (typeof health.trustedExtensionId !== 'string') {
           throw new Error('Bridge health response is missing trustedExtensionId');
         }
-        if (health.trustedExtensionId !== this.dependencies.extensionId) {
-          this.cancelReconnect();
-          await this.dependencies.storage.set({ bridgeStatus: 'identity_error' });
-          return;
-        }
+        trustedExtensionId = health.trustedExtensionId;
       } catch {
-        await this.markDisconnected();
+        await this.markDisconnected(generation);
+        return;
+      }
+      if (trustedExtensionId !== this.dependencies.extensionId) {
+        this.cancelReconnect();
+        await this.transition(generation, { bridgeStatus: 'identity_error' });
         return;
       }
     }
-    if (this.stopped) return;
+    if (!this.isCurrent(generation)) return;
 
-    await this.dependencies.storage.set({ bridgeStatus: 'connecting' });
+    if (!(await this.transition(generation, { bridgeStatus: 'connecting' }))) return;
     let socket: SocketLike;
     try {
       socket = this.dependencies.socketFactory(
@@ -94,31 +104,35 @@ export class BridgeConnection {
           : `ws://127.0.0.1:${settings.port}/v1/extension?token=${encodeURIComponent(settings.token!)}`,
       );
     } catch {
-      await this.markDisconnected();
+      await this.markDisconnected(generation);
+      return;
+    }
+    if (!this.isCurrent(generation)) {
+      socket.close();
       return;
     }
     this.socket = socket;
     let disconnected = false;
     let announced = false;
-    let authorization: Promise<void> | undefined;
+    let connectionReady: Promise<boolean> | undefined;
+    const isCurrent = () =>
+      this.isCurrent(generation) && !disconnected && this.socket === socket;
 
     const announce = async (token?: string): Promise<void> => {
-      if (announced || disconnected || this.socket !== socket) return;
-      if (token && !authorization) {
-        authorization = this.dependencies.storage.set({
+      if (announced || !isCurrent()) return;
+      if (token && !connectionReady) {
+        connectionReady = this.transition(generation, {
           bridgeToken: token,
           bridgeStatus: 'connected',
         });
       }
-      if (bootstrap && !authorization) return;
-      if (authorization) await authorization;
-      if (announced || disconnected || this.socket !== socket || socket.readyState !== 1) return;
+      if (bootstrap && !connectionReady) return;
+      connectionReady ??= this.transition(generation, { bridgeStatus: 'connected' });
+      if (!(await connectionReady)) return;
+      if (announced || !isCurrent() || socket.readyState !== 1) return;
       announced = true;
       this.reconnectAttempt = 0;
       this.cancelReconnect();
-      if (!authorization) {
-        void this.dependencies.storage.set({ bridgeStatus: 'connected' });
-      }
       this.send('extension.hello', 'extension', { version: APP_VERSION });
       this.startKeepalive();
     };
@@ -127,8 +141,13 @@ export class BridgeConnection {
       void announce();
     });
     socket.addEventListener('message', event => {
-      if (typeof event.data !== 'string') return;
-      void this.handleMessage(event.data, token => announce(token));
+      if (typeof event.data !== 'string' || !isCurrent()) return;
+      void this.handleMessage(
+        event.data,
+        generation,
+        isCurrent,
+        token => announce(token),
+      );
     });
     const disconnect = () => {
       if (disconnected || this.socket !== socket) return;
@@ -139,7 +158,17 @@ export class BridgeConnection {
         this.dependencies.clearInterval(this.pingTimer);
         this.pingTimer = undefined;
       }
-      void this.markDisconnected();
+      const ready = connectionReady;
+      void (async () => {
+        if (ready) {
+          try {
+            await ready;
+          } catch {
+            // The disconnected transition below remains authoritative.
+          }
+        }
+        await this.markDisconnected(generation);
+      })();
     };
     socket.addEventListener('close', disconnect);
     socket.addEventListener('error', disconnect);
@@ -148,6 +177,7 @@ export class BridgeConnection {
 
   stop(): void {
     this.stopped = true;
+    this.generation += 1;
     if (this.pingTimer !== undefined) {
       this.dependencies.clearInterval(this.pingTimer);
       this.pingTimer = undefined;
@@ -248,36 +278,44 @@ export class BridgeConnection {
 
   private async handleMessage(
     raw: string,
+    generation: number,
+    isCurrent: () => boolean,
     authorize: (token: string) => Promise<void>,
   ): Promise<void> {
     try {
       const message = wsEnvelopeSchema.parse(JSON.parse(raw));
+      if (!isCurrent()) return;
       if (message.type === 'bridge.authorized') {
         const payload = bridgeAuthorizedPayloadSchema.parse(message.payload);
         await authorize(payload.token);
       } else if (message.type === 'job.collect') {
         const payload = message.payload as { url?: unknown };
-        if (typeof payload.url === 'string') {
-          void this.dependencies.storage.set({
+        if (typeof payload.url === 'string' && isCurrent()) {
+          await this.dependencies.storage.set({
             lastJobId: message.requestId,
             lastJobStatus: 'collecting',
             lastJobUrl: payload.url,
             lastJobError: '',
           });
-          void this.collectHandler?.(message.requestId, payload.url);
+          if (isCurrent()) {
+            await this.collectHandler?.(message.requestId, payload.url);
+          }
         }
-      } else if (message.type === 'job.saved') {
+      } else if (message.type === 'job.saved' && isCurrent()) {
         const payload = message.payload as { markdownPath?: unknown };
-        void this.dependencies.storage.set({
+        await this.dependencies.storage.set({
           lastJobId: message.requestId,
           lastJobStatus: 'saved',
           ...(typeof payload.markdownPath === 'string'
             ? { lastOutputPath: payload.markdownPath }
             : {}),
         });
+        if (!isCurrent()) return;
       }
     } catch {
-      void this.dependencies.storage.set({ bridgeStatus: 'protocol_error' });
+      if (isCurrent()) {
+        await this.transition(generation, { bridgeStatus: 'protocol_error' });
+      }
     }
   }
 
@@ -290,15 +328,39 @@ export class BridgeConnection {
     }, 20_000);
   }
 
-  private async markDisconnected(): Promise<void> {
-    await this.dependencies.storage.set({ bridgeStatus: 'disconnected' });
-    if (this.stopped || this.reconnectTimer !== undefined) return;
+  private async markDisconnected(generation: number): Promise<void> {
+    if (!(await this.transition(generation, { bridgeStatus: 'disconnected' }))) return;
+    if (!this.isCurrent(generation) || this.reconnectTimer !== undefined) return;
     const delay = Math.min(30_000, 1_000 * 2 ** this.reconnectAttempt);
     this.reconnectAttempt += 1;
     this.reconnectTimer = this.dependencies.setTimeout(() => {
       this.reconnectTimer = undefined;
       void this.start();
     }, delay);
+  }
+
+  private isCurrent(generation: number): boolean {
+    return !this.stopped && generation === this.generation;
+  }
+
+  private async transition(
+    generation: number,
+    values: Record<string, unknown>,
+  ): Promise<boolean> {
+    if (!this.isCurrent(generation)) return false;
+    const transition = { generation, values };
+    this.latestTransition = transition;
+    await this.dependencies.storage.set(values);
+    if (this.latestTransition !== transition) {
+      let latest = this.latestTransition;
+      while (latest) {
+        await this.dependencies.storage.set(latest.values);
+        if (this.latestTransition === latest) break;
+        latest = this.latestTransition;
+      }
+      return false;
+    }
+    return this.isCurrent(generation);
   }
 
   private cancelReconnect(): void {

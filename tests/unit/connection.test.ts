@@ -27,6 +27,40 @@ class MemoryStorage implements ExtensionStorage {
   }
 }
 
+function deferred() {
+  let release!: () => void;
+  const promise = new Promise<void>(resolve => { release = resolve; });
+  return { promise, release };
+}
+
+class DeferredStorage extends MemoryStorage {
+  private delayedStatus: string | undefined;
+  private gate: ReturnType<typeof deferred> | undefined;
+  private startedGate: ReturnType<typeof deferred> | undefined;
+
+  delayNextStatus(status: string) {
+    this.delayedStatus = status;
+    this.gate = deferred();
+    this.startedGate = deferred();
+    return {
+      started: this.startedGate.promise,
+      release: this.gate.release,
+    };
+  }
+
+  override async set(values: Record<string, unknown>): Promise<void> {
+    if (values.bridgeStatus === this.delayedStatus && this.gate && this.startedGate) {
+      const gate = this.gate;
+      this.delayedStatus = undefined;
+      this.gate = undefined;
+      this.startedGate.release();
+      this.startedGate = undefined;
+      await gate.promise;
+    }
+    await super.set(values);
+  }
+}
+
 class MemorySocket implements SocketLike {
   readonly sent: string[] = [];
   readyState: number;
@@ -182,6 +216,7 @@ describe('extension Bridge connection', () => {
 
     await connection.start();
     socket.emit('open');
+    await vi.waitFor(() => expect(socket.sent).toHaveLength(1));
 
     expect(fetcher).not.toHaveBeenCalled();
     expect(socketFactory).toHaveBeenCalledWith(
@@ -243,10 +278,105 @@ describe('extension Bridge connection', () => {
 
     socket.emit('error');
     socket.emit('close');
+    await vi.waitFor(() => expect(deps.setTimeout).toHaveBeenCalledOnce());
+
+    expect(storage.writes.filter(write => write.bridgeStatus === 'disconnected')).toHaveLength(1);
+  });
+
+  it('keeps a newer identity error after an older disconnect write resumes', async () => {
+    const storage = new DeferredStorage({ bridgeToken: 'x'.repeat(43) });
+    const socket = new MemorySocket();
+    const fetcher = vi.fn<typeof fetch>(async () => healthResponse('different-extension-id'));
+    const deps = dependencies(storage, () => socket, fetcher);
+    const connection = new BridgeConnection(deps);
+    await connection.start();
+    socket.emit('open');
+
+    delete storage.values.bridgeToken;
+    const disconnectWrite = storage.delayNextStatus('disconnected');
+    socket.emit('close');
+    await disconnectWrite.started;
+
+    await connection.start();
+    expect(storage.values.bridgeStatus).toBe('identity_error');
+    disconnectWrite.release();
+    await flushPromises();
     await flushPromises();
 
-    expect(deps.setTimeout).toHaveBeenCalledOnce();
-    expect(storage.writes.filter(write => write.bridgeStatus === 'disconnected')).toHaveLength(1);
+    expect(storage.values.bridgeStatus).toBe('identity_error');
+    expect(deps.setTimeout).not.toHaveBeenCalled();
+  });
+
+  it('lets disconnect win when authorization persistence finishes late', async () => {
+    const storage = new DeferredStorage();
+    const socket = new MemorySocket();
+    const deps = dependencies(
+      storage,
+      () => socket,
+      vi.fn<typeof fetch>(async () => healthResponse()),
+    );
+    const connection = new BridgeConnection(deps);
+    await connection.start();
+    socket.emit('open');
+
+    const authorizationWrite = storage.delayNextStatus('connected');
+    socket.emit(
+      'message',
+      JSON.stringify({
+        protocolVersion: 1,
+        type: 'bridge.authorized',
+        requestId: 'authorization',
+        timestamp: '2026-07-18T00:00:00.000Z',
+        payload: { token: 'late-token'.padEnd(43, 'x') },
+      }),
+    );
+    await authorizationWrite.started;
+    socket.emit('close');
+    await flushPromises();
+
+    authorizationWrite.release();
+    await vi.waitFor(() => expect(deps.setTimeout).toHaveBeenCalledOnce());
+
+    expect(storage.values).toMatchObject({
+      bridgeToken: 'late-token'.padEnd(43, 'x'),
+      bridgeStatus: 'disconnected',
+    });
+    expect(socket.sent).toEqual([]);
+  });
+
+  it('ignores collection and invalid messages from a disconnected old socket', async () => {
+    const storage = new MemoryStorage({ bridgeToken: 'x'.repeat(43) });
+    const oldSocket = new MemorySocket();
+    const currentSocket = new MemorySocket();
+    const socketFactory = vi.fn()
+      .mockReturnValueOnce(oldSocket)
+      .mockReturnValueOnce(currentSocket);
+    const collect = vi.fn();
+    const connection = new BridgeConnection(dependencies(storage, socketFactory));
+    connection.onCollect(collect);
+    await connection.start();
+    oldSocket.emit('open');
+    oldSocket.emit('close');
+    await flushPromises();
+    await connection.start();
+    currentSocket.emit('open');
+
+    oldSocket.emit(
+      'message',
+      JSON.stringify({
+        protocolVersion: 1,
+        type: 'job.collect',
+        requestId: 'stale-job',
+        timestamp: '2026-07-18T00:00:00.000Z',
+        payload: { url: 'https://mp.weixin.qq.com/s/stale' },
+      }),
+    );
+    oldSocket.emit('message', '{invalid json');
+    await flushPromises();
+
+    expect(collect).not.toHaveBeenCalled();
+    expect(storage.values.lastJobId).toBeUndefined();
+    expect(storage.values.bridgeStatus).toBe('connected');
   });
 
   it('serializes concurrent start attempts into a single socket', async () => {
@@ -281,8 +411,8 @@ describe('extension Bridge connection', () => {
       }),
     );
 
-    expect(collect).toHaveBeenCalledWith('job-1', 'https://mp.weixin.qq.com/s/x');
     await flushPromises();
+    expect(collect).toHaveBeenCalledWith('job-1', 'https://mp.weixin.qq.com/s/x');
     expect(storage.values.lastJobUrl).toBe('https://mp.weixin.qq.com/s/x');
 
     connection.send('job.progress', 'job-1', { stage: 'collecting' });

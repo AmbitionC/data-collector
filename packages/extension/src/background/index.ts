@@ -110,7 +110,7 @@ async function status() {
 }
 
 chrome.runtime.onMessage.addListener((message: unknown, _sender, sendResponse) => {
-  const request = message as { type?: string; code?: string; overrides?: unknown };
+  const request = message as { type?: string; overrides?: unknown };
   const action = async () => {
     if (request.type === 'status.get') return status();
     if (request.type === 'capture.current') {
