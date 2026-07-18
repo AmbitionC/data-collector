@@ -83,6 +83,22 @@ class DeferredStorage extends MemoryStorage {
   }
 }
 
+class DeferredReadStorage extends MemoryStorage {
+  private readonly readGate = deferred();
+  private readonly startedGate = deferred();
+  readonly readStarted = this.startedGate.promise;
+
+  releaseRead(): void {
+    this.readGate.release();
+  }
+
+  override async get(): Promise<Record<string, unknown>> {
+    this.startedGate.release();
+    await this.readGate.promise;
+    return super.get();
+  }
+}
+
 class MemorySocket implements SocketLike {
   readonly sent: string[] = [];
   readyState: number;
@@ -453,6 +469,23 @@ describe('extension Bridge connection', () => {
     expect(socketFactory).not.toHaveBeenCalled();
 
     await (connection as BridgeConnection & { retry(): Promise<void> }).retry();
+    expect(socketFactory).toHaveBeenCalledOnce();
+  });
+
+  it('honors manual retry while automatic startup is still reading persisted standby', async () => {
+    const storage = new DeferredReadStorage({
+      bridgeToken: 'x'.repeat(43),
+      bridgeStatus: 'replaced',
+    });
+    const socketFactory = vi.fn(() => new MemorySocket());
+    const connection = new BridgeConnection(dependencies(storage, socketFactory));
+
+    const automatic = connection.start();
+    await storage.readStarted;
+    const manual = connection.retry();
+    storage.releaseRead();
+    await Promise.all([automatic, manual]);
+
     expect(socketFactory).toHaveBeenCalledOnce();
   });
 

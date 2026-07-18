@@ -69,7 +69,14 @@ export class BridgeConnection {
     if (force) this.reconnectSuppressed = false;
     if (this.reconnectSuppressed) return;
     this.stopped = false;
-    if (this.startPromise) return this.startPromise;
+    if (this.startPromise) {
+      await this.startPromise;
+      if (force && this.reconnectSuppressed) {
+        this.reconnectSuppressed = false;
+        await this.start({ force: true });
+      }
+      return;
+    }
     const startPromise = this.startOnce(force);
     this.startPromise = startPromise;
     try {
