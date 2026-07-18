@@ -42,7 +42,9 @@ export function loadConfig(overrides: ConfigOverrides = {}): BridgeConfig {
   const libraryRoot = expandPath(
     overrides.libraryRoot ?? process.env.DATA_COLLECTOR_LIBRARY ?? '~/Documents/data-collector',
   );
-  const configDir = expandPath(overrides.configDir ?? '~/.data-collector');
+  const configDir = expandPath(
+    overrides.configDir ?? process.env.DATA_COLLECTOR_CONFIG ?? '~/.data-collector',
+  );
   return {
     host,
     port,
