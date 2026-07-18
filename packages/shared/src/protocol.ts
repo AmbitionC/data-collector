@@ -69,6 +69,10 @@ export const wsEnvelopeSchema = z.object({
   payload: z.unknown(),
 });
 
+export const bridgeAuthorizedPayloadSchema = z.object({
+  token: z.string().min(32).max(512),
+});
+
 export const collectJobPayloadSchema = z.object({
   url: z.string().url().max(4096),
   userCategory: z.string().trim().max(100).optional(),
@@ -80,3 +84,4 @@ export const jobResultPayloadSchema = z.object({
 });
 
 export type CollectedDocumentInput = z.infer<typeof collectedDocumentSchema>;
+export type BridgeAuthorizedPayload = z.infer<typeof bridgeAuthorizedPayloadSchema>;
