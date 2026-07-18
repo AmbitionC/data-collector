@@ -7,6 +7,7 @@ import {
 export interface ExtensionStorage {
   get(keys?: string | string[] | Record<string, unknown>): Promise<Record<string, unknown>>;
   set(values: Record<string, unknown>): Promise<void>;
+  remove(keys: string | string[]): Promise<void>;
 }
 
 export interface SocketLike {
@@ -47,6 +48,8 @@ export class BridgeConnection {
   private generation = 0;
   private latestTransition: ConnectionTransition | undefined;
   private latestJobTransition: ConnectionTransition | undefined;
+  private tokenInvalidation: Promise<void> | undefined;
+  private ignoreStoredToken = false;
 
   constructor(private readonly dependencies: ConnectionDependencies) {}
 
@@ -67,6 +70,7 @@ export class BridgeConnection {
   }
 
   private async startOnce(): Promise<void> {
+    await this.tokenInvalidation;
     const settings = await this.settings();
     if (this.socket?.readyState === 0 || this.socket?.readyState === 1) return;
     const generation = ++this.generation;
@@ -129,7 +133,9 @@ export class BridgeConnection {
       }
       if (bootstrap && !connectionReady) return;
       connectionReady ??= this.transition(generation, { bridgeStatus: 'connected' });
-      if (!(await connectionReady)) return;
+      const readyCommitted = await connectionReady;
+      if (token && readyCommitted) this.ignoreStoredToken = false;
+      if (!readyCommitted) return;
       if (announced || !isCurrent() || socket.readyState !== 1) return;
       announced = true;
       this.reconnectAttempt = 0;
@@ -160,6 +166,7 @@ export class BridgeConnection {
         this.pingTimer = undefined;
       }
       const ready = connectionReady;
+      const invalidateStoredToken = !bootstrap && !announced;
       void (async () => {
         if (ready) {
           try {
@@ -168,6 +175,7 @@ export class BridgeConnection {
             // The disconnected transition below remains authoritative.
           }
         }
+        if (invalidateStoredToken) await this.invalidateStoredToken();
         await this.markDisconnected(generation);
       })();
     };
@@ -272,9 +280,23 @@ export class BridgeConnection {
   private async settings(): Promise<{ token?: string; port: number }> {
     const values = await this.dependencies.storage.get(['bridgeToken', 'bridgePort']);
     return {
-      ...(typeof values.bridgeToken === 'string' ? { token: values.bridgeToken } : {}),
+      ...(!this.ignoreStoredToken && typeof values.bridgeToken === 'string'
+        ? { token: values.bridgeToken }
+        : {}),
       port: typeof values.bridgePort === 'number' ? values.bridgePort : DEFAULT_PORT,
     };
+  }
+
+  private async invalidateStoredToken(): Promise<void> {
+    if (this.tokenInvalidation) return this.tokenInvalidation;
+    this.ignoreStoredToken = true;
+    const invalidation = this.dependencies.storage.remove('bridgeToken').catch(() => undefined);
+    this.tokenInvalidation = invalidation;
+    try {
+      await invalidation;
+    } finally {
+      if (this.tokenInvalidation === invalidation) this.tokenInvalidation = undefined;
+    }
   }
 
   private async handleMessage(

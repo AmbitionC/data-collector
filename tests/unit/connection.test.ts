@@ -11,6 +11,7 @@ import {
 
 class MemoryStorage implements ExtensionStorage {
   readonly writes: Array<Record<string, unknown>> = [];
+  readonly removals: Array<string | string[]> = [];
   values: Record<string, unknown>;
 
   constructor(values: Record<string, unknown> = {}) {
@@ -24,6 +25,11 @@ class MemoryStorage implements ExtensionStorage {
   async set(values: Record<string, unknown>): Promise<void> {
     this.writes.push(values);
     Object.assign(this.values, values);
+  }
+
+  async remove(keys: string | string[]): Promise<void> {
+    this.removals.push(keys);
+    for (const key of typeof keys === 'string' ? [keys] : keys) delete this.values[key];
   }
 }
 
@@ -239,6 +245,104 @@ describe('extension Bridge connection', () => {
     expect(storage.values.bridgeStatus).toBe('connected');
   });
 
+  it('removes a stale stored token and reauthorizes through health on the scheduled retry', async () => {
+    const staleToken = 'stale-token'.padEnd(43, 'x');
+    const freshToken = 'fresh-token'.padEnd(43, 'x');
+    const storage = new MemoryStorage({ bridgeToken: staleToken });
+    const rejectedSocket = new MemorySocket();
+    const bootstrapSocket = new MemorySocket();
+    const socketFactory = vi.fn()
+      .mockReturnValueOnce(rejectedSocket)
+      .mockReturnValueOnce(bootstrapSocket);
+    const fetcher = vi.fn<typeof fetch>(async () => healthResponse());
+    const deps = dependencies(storage, socketFactory, fetcher);
+    const connection = new BridgeConnection(deps);
+
+    await connection.start();
+    expect(socketFactory).toHaveBeenCalledWith(
+      `ws://127.0.0.1:17321/v1/extension?token=${staleToken}`,
+    );
+
+    rejectedSocket.emit('close');
+    await vi.waitFor(() => expect(deps.setTimeout).toHaveBeenCalledOnce());
+
+    expect(storage.removals).toEqual(['bridgeToken']);
+    expect(storage.values.bridgeToken).toBeUndefined();
+    expect(storage.values.bridgeStatus).toBe('disconnected');
+    expect(fetcher).not.toHaveBeenCalled();
+
+    deps.setTimeout.mock.calls[0]![0]();
+    await vi.waitFor(() => expect(socketFactory).toHaveBeenCalledTimes(2));
+    expect(fetcher).toHaveBeenCalledWith('http://127.0.0.1:17321/health');
+    expect(socketFactory).toHaveBeenLastCalledWith(
+      'ws://127.0.0.1:17321/v1/extension?bootstrap=1',
+    );
+
+    bootstrapSocket.emit('open');
+    bootstrapSocket.emit(
+      'message',
+      JSON.stringify({
+        protocolVersion: 1,
+        type: 'bridge.authorized',
+        requestId: 'authorization',
+        timestamp: '2026-07-18T00:00:00.000Z',
+        payload: { token: freshToken },
+      }),
+    );
+    await vi.waitFor(() => expect(bootstrapSocket.sent).toHaveLength(1));
+
+    expect(storage.values.bridgeToken).toBe(freshToken);
+    expect(bootstrapSocket.sent.map(raw => JSON.parse(raw).type)).toEqual(['extension.hello']);
+  });
+
+  it('stops after a stale token retry discovers a different fixed extension identity', async () => {
+    const storage = new MemoryStorage({ bridgeToken: 'stale-token'.padEnd(43, 'x') });
+    const rejectedSocket = new MemorySocket();
+    const socketFactory = vi.fn(() => rejectedSocket);
+    const fetcher = vi.fn<typeof fetch>(async () => healthResponse('different-extension-id'));
+    const deps = dependencies(storage, socketFactory, fetcher);
+    const connection = new BridgeConnection(deps);
+
+    await connection.start();
+    rejectedSocket.emit('close');
+    await vi.waitFor(() => expect(deps.setTimeout).toHaveBeenCalledOnce());
+    deps.setTimeout.mock.calls[0]![0]();
+    await vi.waitFor(() => expect(storage.values.bridgeStatus).toBe('identity_error'));
+
+    expect(storage.values.bridgeToken).toBeUndefined();
+    expect(fetcher).toHaveBeenCalledOnce();
+    expect(socketFactory).toHaveBeenCalledOnce();
+    expect(deps.setTimeout).toHaveBeenCalledOnce();
+  });
+
+  it('retries a failed bootstrap socket only through backoff without token invalidation', async () => {
+    const storage = new MemoryStorage();
+    const firstSocket = new MemorySocket();
+    const secondSocket = new MemorySocket();
+    const socketFactory = vi.fn()
+      .mockReturnValueOnce(firstSocket)
+      .mockReturnValueOnce(secondSocket);
+    const fetcher = vi.fn<typeof fetch>(async () => healthResponse());
+    const deps = dependencies(storage, socketFactory, fetcher);
+    const connection = new BridgeConnection(deps);
+
+    await connection.start();
+    firstSocket.emit('close');
+    await vi.waitFor(() => expect(deps.setTimeout).toHaveBeenCalledOnce());
+
+    expect(storage.removals).toEqual([]);
+    expect(socketFactory).toHaveBeenCalledOnce();
+
+    deps.setTimeout.mock.calls[0]![0]();
+    await vi.waitFor(() => expect(socketFactory).toHaveBeenCalledTimes(2));
+    expect(fetcher).toHaveBeenCalledTimes(2);
+
+    secondSocket.emit('close');
+    await vi.waitFor(() => expect(deps.setTimeout).toHaveBeenCalledTimes(2));
+    expect(storage.removals).toEqual([]);
+    expect(socketFactory).toHaveBeenCalledTimes(2);
+  });
+
   it('announces once when the socket is already open before listeners are attached', async () => {
     const storage = new MemoryStorage({ bridgeToken: 'x'.repeat(43) });
     const socket = new MemorySocket(1);
@@ -366,6 +470,7 @@ describe('extension Bridge connection', () => {
     connection.onCollect(collect);
     await connection.start();
     oldSocket.emit('open');
+    await vi.waitFor(() => expect(oldSocket.sent).toHaveLength(1));
     oldSocket.emit('close');
     await flushPromises();
     await connection.start();

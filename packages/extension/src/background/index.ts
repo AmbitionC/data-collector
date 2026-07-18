@@ -14,6 +14,7 @@ import {
 const storage: ExtensionStorage = {
   get: keys => chrome.storage.local.get(keys),
   set: values => chrome.storage.local.set(values),
+  remove: keys => chrome.storage.local.remove(keys),
 };
 
 const tabs: TabsApi = {
