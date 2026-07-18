@@ -13,6 +13,7 @@ await build({
   entryPoints: {
     background: join(packageRoot, 'src', 'background', 'index.ts'),
     content: join(packageRoot, 'src', 'content.ts'),
+    'popup/index': join(packageRoot, 'src', 'popup', 'index.ts'),
   },
   outdir: outputDirectory,
   bundle: true,
@@ -26,3 +27,5 @@ await build({
   },
 });
 await cp(join(packageRoot, 'manifest.json'), join(outputDirectory, 'manifest.json'));
+await cp(join(packageRoot, 'src', 'popup', 'index.html'), join(outputDirectory, 'popup', 'index.html'));
+await cp(join(packageRoot, 'src', 'popup', 'styles.css'), join(outputDirectory, 'popup', 'styles.css'));

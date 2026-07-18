@@ -27,6 +27,7 @@
     }
   ],
   "action": {
+    "default_popup": "popup/index.html",
     "default_title": "保存到 Data Collector"
   },
   "content_security_policy": {
