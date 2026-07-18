@@ -13,11 +13,12 @@
     "build": "npm run build -ws --if-present",
     "test": "vitest run",
     "test:coverage": "vitest run --coverage",
-    "typecheck": "tsc -b packages/shared --pretty false && tsc -p packages/extension/tsconfig.json --pretty false",
+    "typecheck": "tsc -b packages/shared packages/bridge --pretty false && tsc -p packages/extension/tsconfig.json --pretty false",
     "collector": "node packages/bridge/dist/cli.js"
   },
   "devDependencies": {
     "@types/chrome": "0.2.2",
+    "@types/node": "26.1.1",
     "@vitest/coverage-v8": "4.1.10",
     "jsdom": "29.1.1",
     "typescript": "7.0.2",
