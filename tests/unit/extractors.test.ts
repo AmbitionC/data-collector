@@ -48,6 +48,23 @@ describe('WeChat extraction', () => {
     expect(result.html).toContain('src="https://mmbiz.qpic.cn/');
     expect(result.html).not.toContain('qrcode');
   });
+
+  it('uses inert WeChat page variables when rendered metadata nodes are empty', () => {
+    const url = 'https://mp.weixin.qq.com/s/variable-fallback';
+    const doc = new JSDOM(`
+      <script>
+        var msg_title = "变量标题";
+        var nickname = "变量公众号";
+        var ct = "1784280000";
+      </script>
+      <div id="js_content"><p>${'这是一段足够长的公众号正文内容。'.repeat(5)}</p></div>
+    `, { url }).window.document;
+
+    const result = extractDocument(doc, url, NOW);
+
+    expect(result).toMatchObject({ title: '变量标题', author: '变量公众号' });
+    expect(result.publishedAt).toBe(new Date(1_784_280_000_000).toISOString());
+  });
 });
 
 describe('ZSXQ extraction', () => {
@@ -88,5 +105,34 @@ describe('ZSXQ extraction', () => {
 
     expect(() => extractDocument(doc, 'https://wx.zsxq.com/dweb2/index/group/1', NOW))
       .toThrowError(expect.objectContaining<Partial<ExtractionError>>({ code: 'UNSUPPORTED_LAYOUT' }));
+  });
+
+  it('selects a unique visible detail by density and navigation noise', () => {
+    const doc = new JSDOM(`
+      <style>.hidden-copy { display: none }</style>
+      <main>
+        <nav><a>首页导航很长</a><a>星球列表很长</a><a>用户中心很长</a><a>消息通知很长</a></nav>
+        <div class="hidden-copy"><h1>隐藏副本</h1><p>${'隐藏噪声'.repeat(100)}</p></div>
+        <section>
+          <h1>一篇没有固定选择器的星球动态</h1>
+          <p>这是用户打开的单条详情正文，包含足够明确的段落结构和实际信息。</p>
+          <p>正文说明本地采集、分类归纳以及后续写入知识库的具体工作方式。</p>
+          <p>最后一个段落用于拉开与导航、侧栏和隐藏副本之间的正文密度差异。</p>
+        </section>
+        <aside><a>推荐一</a><a>推荐二</a><a>推荐三</a></aside>
+      </main>
+    `).window.document;
+
+    const result = extractDocument(
+      doc,
+      'https://wx.zsxq.com/dweb2/index/topic_detail/fallback',
+      NOW,
+    );
+
+    expect(result.kind).toBe('post');
+    expect(result.title).toBe('一篇没有固定选择器的星球动态');
+    expect(result.text).toContain('单条详情正文');
+    expect(result.text).not.toContain('首页导航');
+    expect(result.text).not.toContain('隐藏噪声');
   });
 });

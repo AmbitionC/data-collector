@@ -73,6 +73,8 @@ async function status() {
     'bridgeStatus',
     'lastJobId',
     'lastJobStatus',
+    'lastJobUrl',
+    'lastJobError',
     'lastOutputPath',
   ]);
   const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
@@ -89,6 +91,8 @@ async function status() {
     bridgeStatus: values.bridgeStatus ?? 'disconnected',
     lastJobId: values.lastJobId,
     lastJobStatus: values.lastJobStatus,
+    lastJobUrl: values.lastJobUrl,
+    lastJobError: values.lastJobError,
     lastOutputPath: values.lastOutputPath,
     page: { supported, title: tab?.title ?? '', url: tab?.url ?? '' },
   };
@@ -111,6 +115,10 @@ chrome.runtime.onMessage.addListener((message: unknown, _sender, sendResponse) =
     if (request.type === 'connection.retry') {
       await connection.start();
       return status();
+    }
+    if (request.type === 'library.reveal' && typeof (request as { path?: unknown }).path === 'string') {
+      await connection.reveal((request as { path: string }).path);
+      return { revealed: true };
     }
     throw new Error('不支持的扩展操作');
   };

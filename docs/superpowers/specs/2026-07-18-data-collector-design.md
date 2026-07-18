@@ -228,24 +228,24 @@ data-collector collect 'https://mp.weixin.qq.com/s/…' --wait
 
 ### 10.3 浏览器端到端测试
 
-构建扩展并由 Puppeteer 加载 unpacked 产物；测试弹窗配对、当前页采集、Codex URL 任务、Service Worker 重启后的恢复以及错误界面。浏览器测试只断言用户可见行为和生成文件，不依赖扩展内部实现。
+构建扩展并由 Puppeteer 加载 unpacked 产物；测试弹窗配对、当前页采集、Codex URL 任务和最终 Markdown 落盘。Service Worker 重连、失败恢复与错误界面由独立的后台和弹窗测试覆盖。浏览器测试只断言用户可见行为和生成文件，不依赖扩展内部实现。
 
 ### 10.4 真实冒烟
 
 使用 `https://mp.weixin.qq.com/s/uW5gUigjslVY24YmCYhg0g`：
 
-1. Bridge 指向临时知识库目录并启动。
-2. CLI 提交 URL，扩展自动打开文章并采集。
-3. 验证标题为“一夜之间，通胀的玩笑这次开大了”，公众号为“重远投资观”，正文非空且本地 Markdown 包含原链接。
-4. 验证至少一张正文图片被保存或以远端 URL 明确回退。
-5. 再次采集，验证路径和稳定 ID 不变，索引只保留一个条目。
+1. 在线 smoke 请求真实文章 HTML，并复用扩展生产提取器、组织器与知识库写入器。
+2. 验证标题为“一夜之间，通胀的玩笑这次开大了”，公众号为“重远投资观”，正文非空且本地 Markdown 包含原链接。
+3. 验证至少一张正文图片被保存或以远端 URL 明确回退。
+4. 再次写入，验证路径和稳定 ID 不变，索引只保留一个条目。
+5. unpacked 扩展、弹窗、Bridge、WebSocket 与 CLI URL 任务由独立 E2E 覆盖，避免把站点网络波动和浏览器启动问题混在同一测试中。
 
 知识星球没有提供可公开复现链接，自动化采用 fixture；真实登录态验收通过扩展弹窗的诊断页和人工打开单条内容完成，不在测试中保存或自动化用户凭证。
 
 ## 11. 技术约束与依据
 
 - Chrome Manifest V3，最低 Chrome 116。Chrome 官方说明 116 起 WebSocket 活动会刷新 Service Worker 的 30 秒空闲计时，20 秒心跳可维持连接：<https://developer.chrome.com/docs/extensions/how-to/web-platform/websockets>。
-- 仅声明目标站点 host permissions、`activeTab`、`storage`、`alarms`、`scripting`；Chrome 官方建议尽量缩小权限并在适用时使用可选权限：<https://developer.chrome.com/docs/extensions/develop/concepts/declare-permissions>。
+- 仅声明目标站点 host permissions、`activeTab`、`storage`、`alarms`；Chrome 官方建议尽量缩小权限并在适用时使用可选权限：<https://developer.chrome.com/docs/extensions/develop/concepts/declare-permissions>。
 - 内容脚本视为不可信输入，所有消息执行运行时校验和清洗；依据 Chrome 扩展消息安全建议：<https://developer.chrome.com/docs/extensions/develop/concepts/messaging>。
 - 端到端测试加载最终构建产物并断言外部行为，遵循 Chrome 官方扩展 E2E 建议：<https://developer.chrome.com/docs/extensions/how-to/test/end-to-end-testing>。
 

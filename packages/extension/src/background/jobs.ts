@@ -40,9 +40,17 @@ export interface CaptureOverrides {
 const NEEDS_ATTENTION = new Set(['AUTH_REQUIRED', 'UNSUPPORTED_LAYOUT']);
 
 export class JobRunner {
+  private remoteQueue: Promise<void> = Promise.resolve();
+
   constructor(private readonly options: JobRunnerOptions) {}
 
   async runRemoteJob(requestId: string, rawUrl: string): Promise<void> {
+    const result = this.remoteQueue.then(() => this.runRemoteJobNow(requestId, rawUrl));
+    this.remoteQueue = result.catch(() => undefined);
+    return result;
+  }
+
+  private async runRemoteJobNow(requestId: string, rawUrl: string): Promise<void> {
     let tabId: number | undefined;
     let keepTab = false;
     try {

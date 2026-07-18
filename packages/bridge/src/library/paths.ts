@@ -1,4 +1,5 @@
-import { sep, resolve } from 'node:path';
+import { lstat } from 'node:fs/promises';
+import { join, relative, sep, resolve } from 'node:path';
 
 const WINDOWS_RESERVED = /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])$/i;
 
@@ -26,6 +27,26 @@ export function assertInsideRoot(root: string, candidate: string): string {
     !absoluteCandidate.startsWith(`${absoluteRoot}${sep}`)
   ) {
     throw new Error('拒绝写入知识库目录之外的路径');
+  }
+  return absoluteCandidate;
+}
+
+export async function assertSafeWritePath(root: string, candidate: string): Promise<string> {
+  const absoluteRoot = resolve(root);
+  const absoluteCandidate = assertInsideRoot(root, candidate);
+  const parts = relative(absoluteRoot, absoluteCandidate).split(sep).filter(Boolean);
+  let current = absoluteRoot;
+  for (const part of ['', ...parts]) {
+    if (part) current = join(current, part);
+    try {
+      const metadata = await lstat(current);
+      if (metadata.isSymbolicLink()) {
+        throw new Error(`拒绝通过符号链接写出知识库：${current}`);
+      }
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return absoluteCandidate;
+      throw error;
+    }
   }
   return absoluteCandidate;
 }

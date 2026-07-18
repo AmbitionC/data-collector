@@ -121,9 +121,14 @@ export class BridgeConnection {
             ? ((payload as { needsAttention?: boolean }).needsAttention ? 'needs_attention' : 'failed')
             : undefined;
     if (localStatus) {
+      const errorMessage =
+        type === 'job.error' && typeof (payload as { message?: unknown }).message === 'string'
+          ? (payload as { message: string }).message
+          : '';
       void this.dependencies.storage.set({
         lastJobId: requestId,
         lastJobStatus: localStatus,
+        lastJobError: errorMessage,
       });
     }
   }
@@ -149,8 +154,31 @@ export class BridgeConnection {
     if (!response.ok) throw new Error(`创建采集任务失败：HTTP ${response.status}`);
     const job = (await response.json()) as { id?: unknown };
     if (typeof job.id !== 'string') throw new Error('Bridge 返回了无效任务');
-    await this.dependencies.storage.set({ lastJobId: job.id, lastJobStatus: 'queued' });
+    await this.dependencies.storage.set({
+      lastJobId: job.id,
+      lastJobStatus: 'queued',
+      lastJobUrl: url,
+      lastJobError: '',
+    });
     return { id: job.id };
+  }
+
+  async reveal(path: string): Promise<void> {
+    const settings = await this.settings();
+    if (!settings.token) throw new Error('浏览器扩展尚未与 Bridge 配对');
+    const fetcher = this.dependencies.fetch;
+    const response = await fetcher(
+      `http://127.0.0.1:${settings.port}/v1/reveal`,
+      {
+        method: 'POST',
+        headers: {
+          authorization: `Bearer ${settings.token}`,
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({ path }),
+      },
+    );
+    if (!response.ok) throw new Error(`打开知识库文件失败：HTTP ${response.status}`);
   }
 
   private async settings(): Promise<{ token?: string; port: number }> {
@@ -170,6 +198,8 @@ export class BridgeConnection {
           void this.dependencies.storage.set({
             lastJobId: message.requestId,
             lastJobStatus: 'collecting',
+            lastJobUrl: payload.url,
+            lastJobError: '',
           });
           void this.collectHandler?.(message.requestId, payload.url);
         }

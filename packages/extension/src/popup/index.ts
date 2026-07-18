@@ -19,6 +19,26 @@ async function message<T>(payload: unknown): Promise<T> {
 
 let pollTimer: number | undefined;
 
+function errorMessage(error: unknown, fallback: string): string {
+  return error instanceof Error ? error.message : fallback;
+}
+
+async function capturePage(
+  overrides: { userCategory?: string; userTags?: string[] },
+): Promise<void> {
+  try {
+    renderPopup(document, { phase: 'collecting', activeStage: 0 }, actions);
+    await message({ type: 'capture.current', overrides });
+    await refresh();
+  } catch (error) {
+    renderPopup(
+      document,
+      { phase: 'job_error', message: errorMessage(error, '采集失败，请重新保存。') },
+      actions,
+    );
+  }
+}
+
 async function refresh(): Promise<void> {
   try {
     const status = await message<BackgroundStatus>({ type: 'status.get' });
@@ -44,23 +64,43 @@ async function refresh(): Promise<void> {
 
 const actions: PopupActions = {
   async pair(code) {
-    renderPopup(document, { phase: 'loading' }, actions);
-    await message({ type: 'pair.submit', code });
-    await refresh();
+    try {
+      renderPopup(document, { phase: 'loading' }, actions);
+      await message({ type: 'pair.submit', code });
+      await refresh();
+    } catch (error) {
+      renderPopup(
+        document,
+        { phase: 'unpaired', message: errorMessage(error, '配对失败，请检查配对码。') },
+        actions,
+      );
+    }
   },
   async capture(overrides) {
-    renderPopup(document, { phase: 'collecting', activeStage: 0 }, actions);
-    await message({ type: 'capture.current', overrides });
-    await refresh();
+    await capturePage(overrides);
+  },
+  async recapture() {
+    await capturePage({});
   },
   async retry() {
-    await message({ type: 'connection.retry' });
-    await refresh();
+    try {
+      await message({ type: 'connection.retry' });
+      await refresh();
+    } catch (error) {
+      renderPopup(
+        document,
+        { phase: 'error', message: errorMessage(error, 'Bridge 重新连接失败。') },
+        actions,
+      );
+    }
   },
   async copyPath(path) {
     await navigator.clipboard.writeText(path);
     const button = document.querySelector<HTMLButtonElement>('#copy-path-button');
     if (button) button.textContent = '路径已复制';
+  },
+  async revealPath(path) {
+    await message({ type: 'library.reveal', path });
   },
 };
 

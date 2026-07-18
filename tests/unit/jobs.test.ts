@@ -124,4 +124,26 @@ describe('durable jobs', () => {
       }),
     ).rejects.toThrow(/任务 ID 已用于其他地址/);
   });
+
+  it('serializes concurrent creates and transitions without losing durable jobs', async () => {
+    const root = await temporaryDirectory();
+    const path = join(root, 'jobs.json');
+    const jobs = await JobStore.open(path, { now: () => NOW });
+    const ids = Array.from({ length: 40 }, (_, index) => `parallel-${index}`);
+
+    await Promise.all(
+      ids.map((id, index) =>
+        jobs.create({
+          id,
+          url: `https://mp.weixin.qq.com/s/parallel-${index}`,
+          requestedBy: 'codex',
+        }),
+      ),
+    );
+    await Promise.all(ids.map(id => jobs.transition(id, 'dispatched')));
+
+    const reopened = await JobStore.open(path);
+    expect(reopened.list()).toHaveLength(ids.length);
+    expect(reopened.list().every(job => job.status === 'dispatched')).toBe(true);
+  });
 });

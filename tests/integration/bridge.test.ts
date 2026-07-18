@@ -1,8 +1,8 @@
-import { mkdtemp, readFile } from 'node:fs/promises';
+import { mkdtemp, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import WebSocket from 'ws';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { CollectedDocument, WsEnvelope } from '@data-collector/shared';
 import {
   startBridge,
@@ -18,7 +18,7 @@ async function temporaryDirectory(): Promise<string> {
   return mkdtemp(join(tmpdir(), 'data-collector-bridge-'));
 }
 
-function document(): CollectedDocument {
+function document(overrides: Partial<CollectedDocument> = {}): CollectedDocument {
   return {
     schemaVersion: 1,
     source: 'wechat',
@@ -31,6 +31,7 @@ function document(): CollectedDocument {
     html: '<p>Bridge 收到浏览器回传后，会清洗、归纳并写入本地 Markdown 知识库。</p>',
     text: 'Bridge 收到浏览器回传后，会清洗、归纳并写入本地 Markdown 知识库。',
     images: [],
+    ...overrides,
   };
 }
 
@@ -195,5 +196,70 @@ describe('local Bridge', () => {
     secondSocket.send(envelope('extension.hello', 'extension', { version: '0.1.0' }));
 
     expect(await redispatch).toMatchObject({ type: 'job.collect', requestId: job.body.id });
+  });
+
+  it('closes a peer that returns content for a different URL', async () => {
+    const root = await temporaryDirectory();
+    const bridge = await startBridge({ port: 0, libraryRoot: root, configDir: join(root, '.config') });
+    handles.push(bridge);
+    const token = await pair(bridge);
+    const socket = await connect(bridge, token);
+    socket.send(envelope('extension.hello', 'extension', { version: '0.1.0' }));
+    const dispatchedPromise = nextMessage<{ url: string }>(socket);
+    const job = await requestJson<{ id: string }>(bridge.url, '/v1/jobs', {
+      method: 'POST',
+      token,
+      body: { url: URL, requestedBy: 'codex' },
+    });
+    await dispatchedPromise;
+    const closed = new Promise<number>(resolve => {
+      socket.once('close', code => resolve(code));
+    });
+
+    socket.send(
+      envelope('job.result', job.body.id, {
+        document: document({
+          url: 'https://mp.weixin.qq.com/s/other',
+          canonicalUrl: 'https://mp.weixin.qq.com/s/other',
+        }),
+      }),
+    );
+
+    await expect(closed).resolves.toBe(1008);
+    const status = await requestJson<{ status: string }>(bridge.url, `/v1/jobs/${job.body.id}`, {
+      token,
+    });
+    expect(status.body.status).not.toBe('saved');
+  });
+
+  it('reveals only an existing path inside the configured library', async () => {
+    const root = await temporaryDirectory();
+    const target = join(root, 'saved.md');
+    await writeFile(target, 'saved');
+    const reveal = vi.fn(async () => undefined);
+    const bridge = await startBridge({
+      port: 0,
+      libraryRoot: root,
+      configDir: join(root, '.config'),
+      reveal,
+    });
+    handles.push(bridge);
+    const token = await pair(bridge);
+
+    const accepted = await requestJson(bridge.url, '/v1/reveal', {
+      method: 'POST',
+      token,
+      body: { path: target },
+    });
+    const rejected = await requestJson(bridge.url, '/v1/reveal', {
+      method: 'POST',
+      token,
+      body: { path: join(root, '..', 'outside.md') },
+    });
+
+    expect(accepted.status).toBe(200);
+    expect(rejected.status).toBe(400);
+    expect(reveal).toHaveBeenCalledOnce();
+    expect(reveal).toHaveBeenCalledWith(target);
   });
 });

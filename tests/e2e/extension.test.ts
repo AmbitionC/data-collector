@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url';
 import puppeteer, { type Browser, type Page } from 'puppeteer-core';
 import { afterEach, describe, expect, it } from 'vitest';
 import { startBridge, type BridgeHandle } from '../../packages/bridge/src/index.js';
+import { runCli } from '../../packages/bridge/src/cli.js';
 
 const WORKSPACE = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const EXTENSION_PATH = join(WORKSPACE, 'packages', 'extension', 'dist');
@@ -39,6 +40,7 @@ async function popupFor(targetPage: Page): Promise<Page> {
 
 async function preferredChrome(): Promise<string | undefined> {
   const candidates = [
+    process.env.CHROME_PATH,
     process.env.PUPPETEER_EXECUTABLE_PATH,
     '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
     '/usr/bin/google-chrome',
@@ -57,7 +59,7 @@ async function preferredChrome(): Promise<string | undefined> {
 }
 
 describe('built Chrome extension', () => {
-  it('pairs, captures a WeChat page, and writes visible output', async () => {
+  it('pairs, captures the current page, then updates it through the Codex CLI', async () => {
     const libraryRoot = await mkdtemp(join(tmpdir(), 'data-collector-e2e-'));
     bridge = await startBridge({
       port: 17321,
@@ -77,6 +79,9 @@ describe('built Chrome extension', () => {
       headless: true,
       enableExtensions: [EXTENSION_PATH],
       executablePath,
+      timeout: 20_000,
+      protocolTimeout: 20_000,
+      signal: AbortSignal.timeout(25_000),
     });
 
     const fixture = await readFile(join(WORKSPACE, 'tests', 'fixtures', 'wechat-article.html'), 'utf8');
@@ -112,5 +117,33 @@ describe('built Chrome extension', () => {
     expect(markdown).toContain('一夜之间，通胀的玩笑这次开大了');
     expect(markdown).toContain('重远投资观');
     expect(markdown).toContain(TARGET_URL);
+
+    let cliOutput = '';
+    let cliError = '';
+    const cliCode = await runCli(
+      [
+        'collect',
+        TARGET_URL,
+        '--wait',
+        '30000',
+        '--port',
+        new URL(bridge.url).port,
+        '--library',
+        libraryRoot,
+        '--config',
+        join(libraryRoot, '.config'),
+      ],
+      {
+        stdout: value => { cliOutput += value; },
+        stderr: value => { cliError += value; },
+      },
+    );
+    expect(cliCode).toBe(0);
+    expect(cliError).toBe('');
+    expect(cliOutput.trim()).toBe(outputPath);
+    const catalog = JSON.parse(
+      await readFile(join(libraryRoot, '_catalog', 'index.json'), 'utf8'),
+    ) as unknown[];
+    expect(catalog).toHaveLength(1);
   });
 });

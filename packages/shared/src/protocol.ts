@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { canonicalizeUrl, parseSupportedUrl } from './url.js';
 
 export const collectedImageSchema = z.object({
   url: z.string().url().max(4096),
@@ -25,6 +26,39 @@ export const collectedDocumentSchema = z.object({
   sourceMetadata: z
     .record(z.string(), z.union([z.string(), z.number(), z.boolean(), z.null()]))
     .optional(),
+}).superRefine((document, context) => {
+  try {
+    const rawUrl = parseSupportedUrl(document.url);
+    const canonicalUrl = canonicalizeUrl(rawUrl).href;
+    if (document.canonicalUrl !== canonicalUrl) {
+      context.addIssue({
+        code: 'custom',
+        path: ['canonicalUrl'],
+        message: 'canonicalUrl 与原始 URL 不一致',
+      });
+    }
+    const expectedSource = rawUrl.hostname === 'mp.weixin.qq.com' ? 'wechat' : 'zsxq';
+    if (document.source !== expectedSource) {
+      context.addIssue({
+        code: 'custom',
+        path: ['source'],
+        message: '内容来源与 URL 域名不一致',
+      });
+    }
+    if (document.source === 'wechat' && document.kind !== 'article') {
+      context.addIssue({
+        code: 'custom',
+        path: ['kind'],
+        message: '微信公众号内容类型必须是 article',
+      });
+    }
+  } catch {
+    context.addIssue({
+      code: 'custom',
+      path: ['url'],
+      message: '内容 URL 不在支持列表中',
+    });
+  }
 });
 
 export const wsEnvelopeSchema = z.object({

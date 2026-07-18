@@ -61,6 +61,7 @@ async function atomicWrite(path: string, value: StoredJobs): Promise<void> {
 
 export class JobStore {
   private readonly jobs = new Map<string, JobRecord>();
+  private mutationQueue: Promise<void> = Promise.resolve();
 
   private constructor(
     public readonly path: string,
@@ -101,25 +102,27 @@ export class JobStore {
   }
 
   async create(input: CreateJobInput): Promise<JobRecord> {
-    const id = input.id ?? this.dependencies.id();
-    const url = canonicalizeUrl(parseSupportedUrl(input.url)).href;
-    const existing = this.jobs.get(id);
-    if (existing) {
-      if (existing.url !== url) throw new Error('任务 ID 已用于其他地址');
-      return structuredClone(existing);
-    }
-    const timestamp = this.dependencies.now();
-    const job: JobRecord = {
-      id,
-      url,
-      requestedBy: input.requestedBy,
-      status: 'queued',
-      createdAt: timestamp,
-      updatedAt: timestamp,
-    };
-    this.jobs.set(id, job);
-    await this.persist();
-    return structuredClone(job);
+    return this.serializeMutation(async () => {
+      const id = input.id ?? this.dependencies.id();
+      const url = canonicalizeUrl(parseSupportedUrl(input.url)).href;
+      const existing = this.jobs.get(id);
+      if (existing) {
+        if (existing.url !== url) throw new Error('任务 ID 已用于其他地址');
+        return structuredClone(existing);
+      }
+      const timestamp = this.dependencies.now();
+      const job: JobRecord = {
+        id,
+        url,
+        requestedBy: input.requestedBy,
+        status: 'queued',
+        createdAt: timestamp,
+        updatedAt: timestamp,
+      };
+      this.jobs.set(id, job);
+      await this.persist();
+      return structuredClone(job);
+    });
   }
 
   async transition(
@@ -127,36 +130,49 @@ export class JobStore {
     status: JobStatus,
     patch: JobTransitionPatch = {},
   ): Promise<JobRecord> {
-    const current = this.jobs.get(id);
-    if (!current) throw new JobStateError(`任务不存在：${id}`);
-    if (!ALLOWED_TRANSITIONS[current.status].includes(status)) {
-      throw new JobStateError(`非法任务状态：${current.status} → ${status}`);
-    }
-    const next: JobRecord = {
-      ...current,
-      status,
-      updatedAt: this.dependencies.now(),
-      ...(patch.outputPath ? { outputPath: patch.outputPath } : {}),
-      ...(patch.errorCode ? { errorCode: patch.errorCode } : {}),
-      ...(patch.errorMessage ? { errorMessage: patch.errorMessage } : {}),
-    };
-    this.jobs.set(id, next);
-    await this.persist();
-    return structuredClone(next);
+    return this.serializeMutation(async () => {
+      const current = this.jobs.get(id);
+      if (!current) throw new JobStateError(`任务不存在：${id}`);
+      if (!ALLOWED_TRANSITIONS[current.status].includes(status)) {
+        throw new JobStateError(`非法任务状态：${current.status} → ${status}`);
+      }
+      const next: JobRecord = {
+        ...current,
+        status,
+        updatedAt: this.dependencies.now(),
+        ...(patch.outputPath ? { outputPath: patch.outputPath } : {}),
+        ...(patch.errorCode ? { errorCode: patch.errorCode } : {}),
+        ...(patch.errorMessage ? { errorMessage: patch.errorMessage } : {}),
+      };
+      this.jobs.set(id, next);
+      await this.persist();
+      return structuredClone(next);
+    });
   }
 
   async recover(): Promise<void> {
-    let changed = false;
-    for (const [id, job] of this.jobs) {
-      if (job.status !== 'dispatched' && job.status !== 'collecting') continue;
-      this.jobs.set(id, {
-        ...job,
-        status: 'queued',
-        updatedAt: this.dependencies.now(),
-      });
-      changed = true;
-    }
-    if (changed) await this.persist();
+    await this.serializeMutation(async () => {
+      let changed = false;
+      for (const [id, job] of this.jobs) {
+        if (job.status !== 'dispatched' && job.status !== 'collecting') continue;
+        this.jobs.set(id, {
+          ...job,
+          status: 'queued',
+          updatedAt: this.dependencies.now(),
+        });
+        changed = true;
+      }
+      if (changed) await this.persist();
+    });
+  }
+
+  private serializeMutation<T>(operation: () => Promise<T>): Promise<T> {
+    const result = this.mutationQueue.then(operation, operation);
+    this.mutationQueue = result.then(
+      () => undefined,
+      () => undefined,
+    );
+    return result;
   }
 
   private async persist(): Promise<void> {

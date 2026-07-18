@@ -143,6 +143,13 @@ input:focus-visible {
 
 .support.compact { margin-top: 18px; margin-bottom: 0; font-size: 12px; }
 
+.inline-error {
+  margin: -8px 0 12px;
+  color: #b45309;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
 code,
 .saved-path {
   font-family: "SFMono-Regular", Consolas, monospace;
@@ -193,6 +200,12 @@ input {
   cursor: pointer;
   font-weight: 700;
   transition: transform 140ms ease, background-color 140ms ease;
+}
+
+.result-actions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
 }
 
 .primary-button {

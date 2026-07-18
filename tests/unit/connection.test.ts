@@ -74,6 +74,8 @@ describe('extension Bridge connection', () => {
     expect(JSON.parse(socket.sent[0]!)).toMatchObject({ type: 'extension.hello' });
     expect(collect).toHaveBeenCalledWith('job-1', 'https://mp.weixin.qq.com/s/x');
     expect(storage.values.bridgeStatus).toBe('connected');
+    await Promise.resolve();
+    expect(storage.values.lastJobUrl).toBe('https://mp.weixin.qq.com/s/x');
   });
 
   it('pairs over HTTP and stores the returned token', async () => {
@@ -148,5 +150,11 @@ describe('extension Bridge connection', () => {
     connection.send('job.result', 'job-1', { document: {} });
     await Promise.resolve();
     expect(storage.values.lastJobStatus).toBe('organizing');
+    connection.send('job.error', 'job-1', { message: '页面加载超时', needsAttention: false });
+    await Promise.resolve();
+    expect(storage.values).toMatchObject({
+      lastJobStatus: 'failed',
+      lastJobError: '页面加载超时',
+    });
   });
 });

@@ -25,15 +25,60 @@ beforeEach(async () => {
   document.open();
   document.write(await readFile(HTML_PATH, 'utf8'));
   document.close();
-  actions = {
-    pair: vi.fn(async () => undefined),
-    capture: vi.fn(async () => undefined),
-    retry: vi.fn(async () => undefined),
-    copyPath: vi.fn(async () => undefined),
+    actions = {
+      pair: vi.fn(async () => undefined),
+      capture: vi.fn(async () => undefined),
+      recapture: vi.fn(async () => undefined),
+      retry: vi.fn(async () => undefined),
+      copyPath: vi.fn(async () => undefined),
+      revealPath: vi.fn(async () => undefined),
   };
 });
 
 describe('popup states', () => {
+  it('leaves category empty so the offline organizer can classify automatically', () => {
+    expect(
+      popupStateFromStatus({
+        bridgeStatus: 'connected',
+        page: { supported: true, title: '通胀与估值', url: 'https://mp.weixin.qq.com/s/new' },
+      }),
+    ).toMatchObject({ phase: 'ready', category: '' });
+  });
+
+  it('does not let a saved result from another URL cover the current page', () => {
+    expect(
+      popupStateFromStatus({
+        bridgeStatus: 'connected',
+        lastJobStatus: 'saved',
+        lastJobUrl: 'https://mp.weixin.qq.com/s/old',
+        lastOutputPath: '/tmp/old/index.md',
+        page: { supported: true, title: '新文章', url: 'https://mp.weixin.qq.com/s/new' },
+      }),
+    ).toMatchObject({ phase: 'ready', title: '新文章' });
+  });
+
+  it('shows the saved result and collection failure only for the matching page', () => {
+    const page = { supported: true, title: '文章', url: 'https://mp.weixin.qq.com/s/same' };
+    expect(
+      popupStateFromStatus({
+        bridgeStatus: 'connected',
+        lastJobStatus: 'saved',
+        lastJobUrl: page.url,
+        lastOutputPath: '/tmp/same/index.md',
+        page,
+      }),
+    ).toEqual({ phase: 'saved', path: '/tmp/same/index.md' });
+    expect(
+      popupStateFromStatus({
+        bridgeStatus: 'connected',
+        lastJobStatus: 'failed',
+        lastJobUrl: page.url,
+        lastJobError: '页面加载超时',
+        page,
+      }),
+    ).toEqual({ phase: 'job_error', message: '页面加载超时' });
+  });
+
   it('keeps polling while the paired WebSocket is still connecting', () => {
     expect(
       popupStateFromStatus({
@@ -48,6 +93,7 @@ describe('popup states', () => {
       popupStateFromStatus({
         bridgeStatus: 'connected',
         lastJobStatus: 'organizing',
+        lastJobUrl: 'https://mp.weixin.qq.com/s/x',
         page: { supported: true, title: '文章', url: 'https://mp.weixin.qq.com/s/x' },
       }),
     ).toEqual({ phase: 'collecting', activeStage: 2 });
@@ -113,10 +159,12 @@ describe('popup states', () => {
     const path = '/Users/chenhao/Documents/data-collector/微信公众号/商业与投资/index.md';
     renderPopup(document, { phase: 'saved', path }, actions);
     document.querySelector<HTMLButtonElement>('#copy-path-button')!.click();
+    document.querySelector<HTMLButtonElement>('#reveal-path-button')!.click();
     await Promise.resolve();
 
     expect(document.querySelector('#saved-path')?.textContent).toBe(path);
     expect(actions.copyPath).toHaveBeenCalledWith(path);
+    expect(actions.revealPath).toHaveBeenCalledWith(path);
   });
 
   it('gives one concrete next step for attention states', () => {
@@ -128,5 +176,16 @@ describe('popup states', () => {
 
     expect(document.querySelector<HTMLElement>('#attention-panel')?.hidden).toBe(false);
     expect(document.querySelector('#attention-message')?.textContent).toContain('请先登录知识星球');
+    document.querySelector<HTMLButtonElement>('#attention-recapture-button')!.click();
+    expect(actions.recapture).toHaveBeenCalledOnce();
+  });
+
+  it('lets the user retry a collection failure without reconnecting the Bridge', () => {
+    renderPopup(document, { phase: 'job_error', message: '页面加载超时' }, actions);
+
+    expect(document.querySelector<HTMLElement>('#job-error-panel')?.hidden).toBe(false);
+    expect(document.querySelector('#job-error-message')?.textContent).toContain('页面加载超时');
+    document.querySelector<HTMLButtonElement>('#job-recapture-button')!.click();
+    expect(actions.recapture).toHaveBeenCalledOnce();
   });
 });

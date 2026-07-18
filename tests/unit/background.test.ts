@@ -67,6 +67,29 @@ class InMemoryBridge implements BridgeClient {
 }
 
 describe('extension job runner', () => {
+  it('queues remote jobs so reconnect bursts do not open unlimited tabs', async () => {
+    const tabs = new InMemoryTabs();
+    const bridge = new InMemoryBridge();
+    let releaseFirst: (() => void) | undefined;
+    let waits = 0;
+    const runner = new JobRunner({
+      tabs,
+      bridge,
+      waitForTabComplete: async () => {
+        waits += 1;
+        if (waits === 1) await new Promise<void>(resolve => { releaseFirst = resolve; });
+      },
+    });
+
+    const first = runner.runRemoteJob('job-1', URL);
+    const second = runner.runRemoteJob('job-2', URL);
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect(tabs.created).toHaveLength(1);
+    releaseFirst?.();
+    await Promise.all([first, second]);
+    expect(tabs.created).toHaveLength(2);
+  });
+
   it('opens a background tab, returns content, and closes the created tab', async () => {
     const tabs = new InMemoryTabs();
     const bridge = new InMemoryBridge();

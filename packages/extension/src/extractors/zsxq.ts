@@ -40,21 +40,54 @@ function findTitle(root: ParentNode, document: Document): string {
 }
 
 function isHidden(element: Element): boolean {
-  return (
-    element.hasAttribute('hidden') ||
-    element.getAttribute('aria-hidden') === 'true' ||
-    /display\s*:\s*none|visibility\s*:\s*hidden/i.test(element.getAttribute('style') ?? '')
-  );
+  let current: Element | null = element;
+  while (current) {
+    if (
+      current.hasAttribute('hidden') ||
+      current.getAttribute('aria-hidden') === 'true' ||
+      /display\s*:\s*none|visibility\s*:\s*hidden/i.test(current.getAttribute('style') ?? '')
+    ) return true;
+    const style = current.ownerDocument.defaultView?.getComputedStyle(current);
+    if (style?.display === 'none' || style?.visibility === 'hidden') return true;
+    current = current.parentElement;
+  }
+  return false;
+}
+
+function visibleText(element: Element): string {
+  const walker = element.ownerDocument.createTreeWalker(element, 4);
+  const parts: string[] = [];
+  let node = walker.nextNode();
+  while (node) {
+    const parent = node.parentElement;
+    if (parent && !isHidden(parent)) parts.push(node.textContent ?? '');
+    node = walker.nextNode();
+  }
+  return parts.join(' ').replace(/[\s\u00a0]+/g, ' ').trim();
 }
 
 function scoredFallback(document: Document): Element | null {
   const candidates = [...document.querySelectorAll('main, article, section, div')]
     .filter(element => !isHidden(element))
     .map(element => {
-      const text = elementText(element);
+      const text = visibleText(element);
       const paragraphs = element.querySelectorAll('p').length;
-      const links = element.querySelectorAll('a').length;
-      const score = text.length + paragraphs * 80 - links * 20;
+      const linkElements = [...element.querySelectorAll('a')].filter(link => !isHidden(link));
+      const linkTextLength = linkElements.reduce((total, link) => total + visibleText(link).length, 0);
+      const navigationRatio = linkTextLength / Math.max(1, text.length);
+      const heading = element.querySelector('h1, h2, [role="heading"]');
+      const directHeading = heading?.parentElement === element;
+      const controls = element.querySelectorAll('button, input, textarea, select').length;
+      const paragraphDensity = text.length / Math.max(1, paragraphs);
+      const score =
+        Math.min(text.length, 5_000) +
+        paragraphs * 120 +
+        Math.min(paragraphDensity, 160) +
+        (directHeading ? 260 : heading ? 60 : 0) -
+        linkTextLength * 2 -
+        linkElements.length * 30 -
+        navigationRatio * 400 -
+        controls * 50;
       return { element, text, score };
     })
     .filter(candidate => candidate.text.length >= 80)

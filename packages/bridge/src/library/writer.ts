@@ -5,7 +5,8 @@ import TurndownService from 'turndown';
 import { stableContentId } from '@data-collector/shared';
 import type { OrganizedDocument } from '../organize/index.js';
 import { downloadAssets } from './assets.js';
-import { assertInsideRoot, safeSlug } from './paths.js';
+import type { ResolveAddresses } from './assets.js';
+import { assertInsideRoot, assertSafeWritePath, safeSlug } from './paths.js';
 
 interface CatalogEntry {
   id: string;
@@ -27,6 +28,7 @@ export interface SavedContent {
 export interface MarkdownLibraryOptions {
   root: string;
   fetch?: typeof fetch;
+  resolveAddresses?: ResolveAddresses;
 }
 
 const SOURCE_DIRECTORIES = {
@@ -34,8 +36,10 @@ const SOURCE_DIRECTORIES = {
   zsxq: '知识星球',
 } as const;
 
-async function atomicWriteText(path: string, contents: string): Promise<void> {
+async function atomicWriteText(root: string, path: string, contents: string): Promise<void> {
+  await assertSafeWritePath(root, dirname(path));
   await mkdir(dirname(path), { recursive: true });
+  await assertSafeWritePath(root, path);
   const temporary = `${path}.${process.pid}.${randomBytes(6).toString('hex')}.tmp`;
   const handle = await open(temporary, 'w', 0o600);
   try {
@@ -89,15 +93,29 @@ function toMarkdown(html: string): string {
 export class MarkdownLibrary {
   private readonly root: string;
   private readonly fetcher: typeof fetch;
+  private readonly resolveAddresses: ResolveAddresses | undefined;
+  private saveQueue: Promise<void> = Promise.resolve();
 
   constructor(options: MarkdownLibraryOptions) {
     this.root = options.root;
     this.fetcher = options.fetch ?? fetch;
+    this.resolveAddresses = options.resolveAddresses;
   }
 
   async save(input: OrganizedDocument): Promise<SavedContent> {
+    const result = this.saveQueue.then(() => this.saveNow(input));
+    this.saveQueue = result.then(
+      () => undefined,
+      () => undefined,
+    );
+    return result;
+  }
+
+  private async saveNow(input: OrganizedDocument): Promise<SavedContent> {
     await mkdir(this.root, { recursive: true });
+    await assertSafeWritePath(this.root, this.root);
     const catalogPath = assertInsideRoot(this.root, join(this.root, '_catalog', 'index.json'));
+    await assertSafeWritePath(this.root, catalogPath);
     const catalog = await this.readCatalog(catalogPath);
     const id = stableContentId(input.document.canonicalUrl);
     const existing = catalog.find(entry => entry.id === id);
@@ -113,7 +131,9 @@ export class MarkdownLibrary {
       );
     const markdownPath = assertInsideRoot(this.root, join(this.root, relativePath));
     const entryDirectory = dirname(markdownPath);
+    await assertSafeWritePath(this.root, entryDirectory);
     await mkdir(entryDirectory, { recursive: true });
+    await assertSafeWritePath(this.root, markdownPath);
 
     const assets = await downloadAssets({
       html: input.sanitizedHtml,
@@ -121,9 +141,10 @@ export class MarkdownLibrary {
       entryDirectory,
       libraryRoot: this.root,
       fetch: this.fetcher,
+      ...(this.resolveAddresses ? { resolveAddresses: this.resolveAddresses } : {}),
     });
     const markdown = `${frontMatter(input, id, assets.failed)}# ${input.document.title}\n\n${toMarkdown(assets.html)}\n`;
-    await atomicWriteText(markdownPath, markdown);
+    await atomicWriteText(this.root, markdownPath, markdown);
 
     const nextEntry: CatalogEntry = {
       id,
@@ -138,7 +159,7 @@ export class MarkdownLibrary {
       .filter(entry => entry.id !== id)
       .concat(nextEntry)
       .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt) || a.id.localeCompare(b.id));
-    await atomicWriteText(catalogPath, `${JSON.stringify(nextCatalog, null, 2)}\n`);
+    await atomicWriteText(this.root, catalogPath, `${JSON.stringify(nextCatalog, null, 2)}\n`);
 
     return {
       id,

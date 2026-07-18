@@ -380,7 +380,7 @@ expect(chrome.tabs.remove).toHaveBeenCalledWith(42);
   "name": "Data Collector",
   "version": "0.1.0",
   "minimum_chrome_version": "116",
-  "permissions": ["activeTab", "alarms", "scripting", "storage"],
+  "permissions": ["activeTab", "alarms", "storage"],
   "host_permissions": [
     "https://mp.weixin.qq.com/*",
     "https://wx.zsxq.com/*",

@@ -1,6 +1,6 @@
 export type PopupState =
   | { phase: 'loading' }
-  | { phase: 'unpaired' }
+  | { phase: 'unpaired'; message?: string }
   | { phase: 'unsupported' }
   | {
       phase: 'ready';
@@ -12,18 +12,23 @@ export type PopupState =
   | { phase: 'collecting'; activeStage: number }
   | { phase: 'saved'; path: string }
   | { phase: 'needs_attention'; message: string }
+  | { phase: 'job_error'; message: string }
   | { phase: 'error'; message: string };
 
 export interface PopupActions {
   pair(code: string): Promise<void>;
   capture(overrides: { userCategory?: string; userTags?: string[] }): Promise<void>;
+  recapture(): Promise<void>;
   retry(): Promise<void>;
   copyPath(path: string): Promise<void>;
+  revealPath(path: string): Promise<void>;
 }
 
 export interface BackgroundStatus {
   bridgeStatus: string;
   lastJobStatus?: string;
+  lastJobUrl?: string;
+  lastJobError?: string;
   lastOutputPath?: string;
   page: { supported: boolean; title: string; url: string };
 }
@@ -31,13 +36,19 @@ export interface BackgroundStatus {
 export function popupStateFromStatus(status: BackgroundStatus): PopupState {
   if (status.bridgeStatus === 'unpaired') return { phase: 'unpaired' };
   if (status.bridgeStatus === 'connecting') return { phase: 'loading' };
-  if (status.lastJobStatus === 'needs_attention') {
+  const jobBelongsToPage = Boolean(
+    status.lastJobUrl && status.lastJobUrl === status.page.url,
+  );
+  if (jobBelongsToPage && status.lastJobStatus === 'needs_attention') {
     return {
       phase: 'needs_attention',
       message: '请在保留的页面中登录或打开单条详情，然后重新保存。',
     };
   }
-  if (['queued', 'dispatched', 'collecting', 'organizing'].includes(status.lastJobStatus ?? '')) {
+  if (
+    jobBelongsToPage &&
+    ['queued', 'dispatched', 'collecting', 'organizing'].includes(status.lastJobStatus ?? '')
+  ) {
     return {
       phase: 'collecting',
       activeStage:
@@ -48,8 +59,11 @@ export function popupStateFromStatus(status: BackgroundStatus): PopupState {
             : 2,
     };
   }
-  if (status.lastJobStatus === 'saved' && status.lastOutputPath) {
+  if (jobBelongsToPage && status.lastJobStatus === 'saved' && status.lastOutputPath) {
     return { phase: 'saved', path: status.lastOutputPath };
+  }
+  if (jobBelongsToPage && status.lastJobStatus === 'failed') {
+    return { phase: 'job_error', message: status.lastJobError || '采集失败，请重新保存。' };
   }
   if (status.bridgeStatus !== 'connected') {
     return { phase: 'error', message: '运行 Bridge 后点击“重新连接”。' };
@@ -61,7 +75,7 @@ export function popupStateFromStatus(status: BackgroundStatus): PopupState {
       ? '微信公众号'
       : '知识星球',
     title: status.page.title || '未命名内容',
-    category: '其他',
+    category: '',
     tags: [],
   };
 }
@@ -103,6 +117,9 @@ export function renderPopup(
   }
   if (state.phase === 'unpaired') {
     show(document, '#unpaired-panel');
+    const pairError = required<HTMLElement>(document, '#pair-error');
+    pairError.hidden = !state.message;
+    pairError.textContent = state.message ?? '';
     const form = required<HTMLFormElement>(document, '#pair-form');
     form.onsubmit = event => {
       event.preventDefault();
@@ -155,11 +172,25 @@ export function renderPopup(
     required<HTMLButtonElement>(document, '#copy-path-button').onclick = () => {
       void actions.copyPath(state.path);
     };
+    required<HTMLButtonElement>(document, '#reveal-path-button').onclick = () => {
+      void actions.revealPath(state.path);
+    };
     return;
   }
   if (state.phase === 'needs_attention') {
     show(document, '#attention-panel');
     required(document, '#attention-message').textContent = state.message;
+    required<HTMLButtonElement>(document, '#attention-recapture-button').onclick = () => {
+      void actions.recapture();
+    };
+    return;
+  }
+  if (state.phase === 'job_error') {
+    show(document, '#job-error-panel');
+    required(document, '#job-error-message').textContent = state.message;
+    required<HTMLButtonElement>(document, '#job-recapture-button').onclick = () => {
+      void actions.recapture();
+    };
     return;
   }
   show(document, '#error-panel');
