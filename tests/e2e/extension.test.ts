@@ -151,6 +151,17 @@ async function preferredChrome(): Promise<string | undefined> {
   return undefined;
 }
 
+async function serveArticleFixture(page: Page, fixture: string): Promise<void> {
+  await page.setRequestInterception(true);
+  page.on('request', request => {
+    if (request.isNavigationRequest() && request.url().startsWith(TARGET_URL)) {
+      void request.respond({ status: 200, contentType: 'text/html; charset=utf-8', body: fixture });
+    } else {
+      void request.continue();
+    }
+  });
+}
+
 describe('built Chrome extension', () => {
   it('automatically authorizes the side panel, captures the current page, then updates it through the Codex CLI', async () => {
     const libraryRoot = await temporaryDirectories.create('data-collector-e2e-');
@@ -179,14 +190,7 @@ describe('built Chrome extension', () => {
 
     const fixture = await readFile(join(WORKSPACE, 'tests', 'fixtures', 'wechat-article.html'), 'utf8');
     const articlePage = await browser.newPage();
-    await articlePage.setRequestInterception(true);
-    articlePage.on('request', request => {
-      if (request.isNavigationRequest() && request.url().startsWith(TARGET_URL)) {
-        void request.respond({ status: 200, contentType: 'text/html; charset=utf-8', body: fixture });
-      } else {
-        void request.continue();
-      }
-    });
+    await serveArticleFixture(articlePage, fixture);
     await articlePage.goto(TARGET_URL, { waitUntil: 'domcontentloaded' });
 
     const { page: sidePanel, worker } = await sidePanelFor(articlePage);
@@ -230,6 +234,16 @@ describe('built Chrome extension', () => {
 
     let cliOutput = '';
     let cliError = '';
+    const remoteFixtureSetups: Promise<void>[] = [];
+    const interceptRemotePage = (target: Target) => {
+      if (target.type() !== 'page') return;
+      remoteFixtureSetups.push(
+        target.page().then(async page => {
+          if (page) await serveArticleFixture(page, fixture);
+        }),
+      );
+    };
+    browser.on('targetcreated', interceptRemotePage);
     const cliCode = await runCli(
       [
         'collect',
@@ -248,8 +262,9 @@ describe('built Chrome extension', () => {
         stderr: value => { cliError += value; },
       },
     );
-    expect(cliCode).toBe(0);
-    expect(cliError).toBe('');
+    browser.off('targetcreated', interceptRemotePage);
+    await Promise.all(remoteFixtureSetups);
+    expect({ code: cliCode, error: cliError }).toEqual({ code: 0, error: '' });
     expect(cliOutput.trim()).toBe(outputPath);
     const catalog = JSON.parse(
       await readFile(join(libraryRoot, '_catalog', 'index.json'), 'utf8'),
