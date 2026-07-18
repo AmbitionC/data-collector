@@ -10,7 +10,7 @@
     "node": ">=22.12"
   },
   "scripts": {
-    "build": "npm run build -ws --if-present",
+    "build": "npm run build -w @data-collector/shared && npm run build -w @data-collector/bridge && npm run build -w @data-collector/extension",
     "package": "npm run build && node scripts/package-extension.mjs",
     "test": "vitest run",
     "test:e2e": "npm run build && vitest run --config vitest.e2e.config.ts",
