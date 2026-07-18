@@ -15,6 +15,7 @@ export type SidePanelState =
   | { phase: 'needs_attention'; message: string }
   | { phase: 'job_error'; message: string }
   | { phase: 'bridge_unavailable' }
+  | { phase: 'replaced' }
   | { phase: 'identity_error' };
 
 export interface SidePanelActions {
@@ -36,6 +37,7 @@ export interface BackgroundStatus {
 
 export function sidePanelStateFromStatus(status: BackgroundStatus): SidePanelState {
   if (status.bridgeStatus === 'connecting') return { phase: 'connecting' };
+  if (status.bridgeStatus === 'replaced') return { phase: 'replaced' };
   if (status.bridgeStatus === 'identity_error') return { phase: 'identity_error' };
   if (status.bridgeStatus !== 'connected') return { phase: 'bridge_unavailable' };
 
@@ -111,6 +113,7 @@ function setConnectionLabel(document: Document, state: SidePanelState): void {
     loading: '读取状态',
     connecting: '正在连接',
     bridge_unavailable: '服务离线',
+    replaced: '已被接管',
     identity_error: '身份异常',
   };
   label.textContent = labels[state.phase] ?? '本机在线';
@@ -136,6 +139,13 @@ export function renderSidePanel(
   if (state.phase === 'bridge_unavailable') {
     show(document, '#bridge-unavailable-panel');
     required<HTMLButtonElement>(document, '#retry-button').onclick = () => {
+      void actions.retry();
+    };
+    return;
+  }
+  if (state.phase === 'replaced') {
+    show(document, '#replaced-panel');
+    required<HTMLButtonElement>(document, '#replaced-retry-button').onclick = () => {
       void actions.retry();
     };
     return;

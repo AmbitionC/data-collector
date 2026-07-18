@@ -1,6 +1,9 @@
 import { z } from 'zod';
 import { canonicalizeUrl, parseSupportedUrl } from './url.js';
 
+export const EXTENSION_REPLACED_CLOSE_CODE = 4009;
+export const EXTENSION_REPLACED_CLOSE_REASON = 'replaced';
+
 export const collectedImageSchema = z.object({
   url: z.string().url().max(4096),
   alt: z.string().trim().max(500).optional(),

@@ -4,6 +4,8 @@ import WebSocket, { type RawData } from 'ws';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   APP_VERSION,
+  EXTENSION_REPLACED_CLOSE_CODE,
+  EXTENSION_REPLACED_CLOSE_REASON,
   TRUSTED_EXTENSION_ID,
   type CollectedDocument,
   type WsEnvelope,
@@ -422,5 +424,33 @@ describe('local Bridge', () => {
 
     const authorized = await authorize(bridge, `extension://${TRUSTED_EXTENSION_ID}`);
     expect(authorized.token.length).toBeGreaterThanOrEqual(32);
+  });
+
+  it('replaces an older extension peer with an application close while keeping the new peer usable', async () => {
+    const root = await temporaryDirectory();
+    const bridge = await startBridge({ port: 0, libraryRoot: root, configDir: join(root, '.config') });
+    handles.push(bridge);
+    const first = await authorize(bridge);
+    first.socket.send(envelope('extension.hello', 'extension-a', { version: APP_VERSION }));
+    await waitForExtensionReady(bridge);
+    const firstClosed = new Promise<{ code: number; reason: string }>(resolve => {
+      first.socket.once('close', (code, reason) => resolve({ code, reason: reason.toString() }));
+    });
+
+    const second = await connect(bridge, first.token);
+    await expect(firstClosed).resolves.toEqual({
+      code: EXTENSION_REPLACED_CLOSE_CODE,
+      reason: EXTENSION_REPLACED_CLOSE_REASON,
+    });
+    second.send(envelope('extension.hello', 'extension-b', { version: APP_VERSION }));
+    await waitForExtensionReady(bridge);
+    const pong = nextMessage(second);
+    second.send(envelope('bridge.ping', 'replacement-check', {}));
+
+    await expect(pong).resolves.toMatchObject({
+      type: 'bridge.pong',
+      requestId: 'replacement-check',
+    });
+    expect(second.readyState).toBe(WebSocket.OPEN);
   });
 });

@@ -79,6 +79,21 @@ describe('side panel state mapping', () => {
       .toMatch(/Edge.*扩展管理.*移除.*重新安装/);
   });
 
+  it('explains replacement standby separately and allows an explicit retry', () => {
+    const state = sidePanelStateFromStatus({
+      bridgeStatus: 'replaced',
+      page: { supported: true, title: '文章', url: 'https://mp.weixin.qq.com/s/x' },
+    });
+
+    expect(state).toEqual({ phase: 'replaced' });
+    renderSidePanel(document, state, actions);
+    expect(document.querySelector<HTMLElement>('#replaced-panel')?.hidden).toBe(false);
+    expect(document.querySelector('#replaced-panel')?.textContent)
+      .toContain('另一个浏览器实例已接管');
+    document.querySelector<HTMLButtonElement>('#replaced-retry-button')!.click();
+    expect(actions.retry).toHaveBeenCalledOnce();
+  });
+
   it('keeps ready, collecting, and matching saved behavior', () => {
     const page = { supported: true, title: '通胀与估值', url: 'https://mp.weixin.qq.com/s/x' };
     expect(sidePanelStateFromStatus({ bridgeStatus: 'connected', page }))

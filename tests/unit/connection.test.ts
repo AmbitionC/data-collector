@@ -86,13 +86,21 @@ class DeferredStorage extends MemoryStorage {
 class MemorySocket implements SocketLike {
   readonly sent: string[] = [];
   readyState: number;
-  private readonly listeners = new Map<string, Array<(event: { data?: string }) => void>>();
+  private readonly listeners = new Map<string, Array<(event: {
+    data?: string;
+    code?: number;
+    reason?: string;
+  }) => void>>();
 
   constructor(readyState = 0) {
     this.readyState = readyState;
   }
 
-  addEventListener(type: string, listener: (event: { data?: string }) => void): void {
+  addEventListener(type: string, listener: (event: {
+    data?: string;
+    code?: number;
+    reason?: string;
+  }) => void): void {
     const listeners = this.listeners.get(type) ?? [];
     listeners.push(listener);
     this.listeners.set(type, listeners);
@@ -106,10 +114,12 @@ class MemorySocket implements SocketLike {
     this.readyState = 3;
   }
 
-  emit(type: string, data?: string): void {
+  emit(type: string, data?: string, close?: { code: number; reason: string }): void {
     if (type === 'open') this.readyState = 1;
     if (type === 'close') this.readyState = 3;
-    for (const listener of this.listeners.get(type) ?? []) listener({ ...(data ? { data } : {}) });
+    for (const listener of this.listeners.get(type) ?? []) {
+      listener({ ...(data ? { data } : {}), ...close });
+    }
   }
 }
 
@@ -401,6 +411,49 @@ describe('extension Bridge connection', () => {
     await vi.waitFor(() => expect(deps.setTimeout).toHaveBeenCalledOnce());
 
     expect(storage.writes.filter(write => write.bridgeStatus === 'disconnected')).toHaveLength(1);
+  });
+
+  it('enters standby on an explicit replacement close until the user retries', async () => {
+    const storage = new MemoryStorage({ bridgeToken: 'x'.repeat(43) });
+    const replacedSocket = new MemorySocket();
+    const retrySocket = new MemorySocket();
+    const socketFactory = vi.fn()
+      .mockReturnValueOnce(replacedSocket)
+      .mockReturnValueOnce(retrySocket);
+    const deps = dependencies(storage, socketFactory);
+    const connection = new BridgeConnection(deps);
+    await connection.start();
+    replacedSocket.emit('open');
+    await vi.waitFor(() => expect(replacedSocket.sent).toHaveLength(1));
+
+    replacedSocket.emit('close', undefined, { code: 4009, reason: 'replaced' });
+    await vi.waitFor(() => expect(storage.values.bridgeStatus).toBe('replaced'));
+
+    expect(deps.setTimeout).not.toHaveBeenCalled();
+    await connection.start();
+    expect(socketFactory).toHaveBeenCalledOnce();
+
+    await (connection as BridgeConnection & { retry(): Promise<void> }).retry();
+    expect(socketFactory).toHaveBeenCalledTimes(2);
+    retrySocket.emit('open');
+    await vi.waitFor(() => expect(retrySocket.sent).toHaveLength(1));
+    expect(storage.values.bridgeStatus).toBe('connected');
+  });
+
+  it('suppresses automatic startup from a persisted replaced status but allows manual retry', async () => {
+    const storage = new MemoryStorage({
+      bridgeToken: 'x'.repeat(43),
+      bridgeStatus: 'replaced',
+    });
+    const socket = new MemorySocket();
+    const socketFactory = vi.fn(() => socket);
+    const connection = new BridgeConnection(dependencies(storage, socketFactory));
+
+    await connection.start();
+    expect(socketFactory).not.toHaveBeenCalled();
+
+    await (connection as BridgeConnection & { retry(): Promise<void> }).retry();
+    expect(socketFactory).toHaveBeenCalledOnce();
   });
 
   it('keeps a newer identity error after an older disconnect write resumes', async () => {

@@ -8,6 +8,8 @@ import { z } from 'zod';
 import { WebSocket, type RawData } from 'ws';
 import {
   APP_VERSION,
+  EXTENSION_REPLACED_CLOSE_CODE,
+  EXTENSION_REPLACED_CLOSE_REASON,
   TRUSTED_EXTENSION_ID,
   bridgeAuthorizedPayloadSchema,
   jobResultPayloadSchema,
@@ -243,7 +245,10 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
         );
       }
       if (extensionSocket && extensionSocket.readyState === WebSocket.OPEN) {
-        extensionSocket.close(1012, 'replaced');
+        extensionSocket.close(
+          EXTENSION_REPLACED_CLOSE_CODE,
+          EXTENSION_REPLACED_CLOSE_REASON,
+        );
       }
       extensionSocket = socket;
       extensionReady = false;

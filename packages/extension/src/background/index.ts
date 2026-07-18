@@ -121,7 +121,7 @@ chrome.runtime.onMessage.addListener((message: unknown, _sender, sendResponse) =
       return { jobId };
     }
     if (request.type === 'connection.retry') {
-      await connection.start();
+      await connection.retry();
       return status();
     }
     if (request.type === 'library.reveal' && typeof (request as { path?: unknown }).path === 'string') {

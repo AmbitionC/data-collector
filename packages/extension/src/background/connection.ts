@@ -1,5 +1,7 @@
 import {
   APP_VERSION,
+  EXTENSION_REPLACED_CLOSE_CODE,
+  EXTENSION_REPLACED_CLOSE_REASON,
   bridgeAuthorizedPayloadSchema,
   wsEnvelopeSchema,
 } from '@data-collector/shared';
@@ -12,7 +14,11 @@ export interface ExtensionStorage {
 
 export interface SocketLike {
   readyState: number;
-  addEventListener(type: string, listener: (event: { data?: string }) => void): void;
+  addEventListener(type: string, listener: (event: {
+    data?: string;
+    code?: number;
+    reason?: string;
+  }) => void): void;
   send(value: string): void;
   close(): void;
 }
@@ -50,6 +56,7 @@ export class BridgeConnection {
   private latestJobTransition: ConnectionTransition | undefined;
   private tokenInvalidation: Promise<void> | undefined;
   private ignoreStoredToken = false;
+  private reconnectSuppressed = false;
 
   constructor(private readonly dependencies: ConnectionDependencies) {}
 
@@ -57,10 +64,13 @@ export class BridgeConnection {
     this.collectHandler = handler;
   }
 
-  async start(): Promise<void> {
+  async start(options: { force?: boolean } = {}): Promise<void> {
+    const force = options.force === true;
+    if (force) this.reconnectSuppressed = false;
+    if (this.reconnectSuppressed) return;
     this.stopped = false;
     if (this.startPromise) return this.startPromise;
-    const startPromise = this.startOnce();
+    const startPromise = this.startOnce(force);
     this.startPromise = startPromise;
     try {
       await startPromise;
@@ -69,9 +79,17 @@ export class BridgeConnection {
     }
   }
 
-  private async startOnce(): Promise<void> {
+  async retry(): Promise<void> {
+    await this.start({ force: true });
+  }
+
+  private async startOnce(force: boolean): Promise<void> {
     await this.tokenInvalidation;
     const settings = await this.settings();
+    if (!force && settings.status === 'replaced') {
+      this.reconnectSuppressed = true;
+      return;
+    }
     if (this.socket?.readyState === 0 || this.socket?.readyState === 1) return;
     const generation = ++this.generation;
     const bootstrap = !settings.token;
@@ -138,6 +156,7 @@ export class BridgeConnection {
       if (!readyCommitted) return;
       if (announced || !isCurrent() || socket.readyState !== 1) return;
       announced = true;
+      this.reconnectSuppressed = false;
       this.reconnectAttempt = 0;
       this.cancelReconnect();
       this.send('extension.hello', 'extension', { version: APP_VERSION });
@@ -156,9 +175,16 @@ export class BridgeConnection {
         token => announce(token),
       );
     });
-    const disconnect = () => {
+    const disconnect = (event: { code?: number; reason?: string } = {}) => {
       if (disconnected || this.socket !== socket) return;
+      const replaced =
+        event.code === EXTENSION_REPLACED_CLOSE_CODE &&
+        event.reason === EXTENSION_REPLACED_CLOSE_REASON;
       disconnected = true;
+      if (replaced) {
+        this.reconnectSuppressed = true;
+        this.cancelReconnect();
+      }
       if (socket.readyState !== 3) socket.close();
       if (this.socket === socket) this.socket = undefined;
       if (this.pingTimer !== undefined) {
@@ -166,7 +192,7 @@ export class BridgeConnection {
         this.pingTimer = undefined;
       }
       const ready = connectionReady;
-      const invalidateStoredToken = !bootstrap && !announced;
+      const invalidateStoredToken = !replaced && !bootstrap && !announced;
       void (async () => {
         if (ready) {
           try {
@@ -175,12 +201,16 @@ export class BridgeConnection {
             // The disconnected transition below remains authoritative.
           }
         }
+        if (replaced) {
+          await this.transition(generation, { bridgeStatus: 'replaced' });
+          return;
+        }
         if (invalidateStoredToken) await this.invalidateStoredToken();
         await this.markDisconnected(generation);
       })();
     };
     socket.addEventListener('close', disconnect);
-    socket.addEventListener('error', disconnect);
+    socket.addEventListener('error', () => disconnect());
     if (socket.readyState === 1 && !bootstrap) void announce();
   }
 
@@ -282,13 +312,18 @@ export class BridgeConnection {
     if (!response.ok) throw new Error(`打开知识库文件失败：HTTP ${response.status}`);
   }
 
-  private async settings(): Promise<{ token?: string; port: number }> {
-    const values = await this.dependencies.storage.get(['bridgeToken', 'bridgePort']);
+  private async settings(): Promise<{ token?: string; port: number; status?: string }> {
+    const values = await this.dependencies.storage.get([
+      'bridgeToken',
+      'bridgePort',
+      'bridgeStatus',
+    ]);
     return {
       ...(!this.ignoreStoredToken && typeof values.bridgeToken === 'string'
         ? { token: values.bridgeToken }
         : {}),
       port: typeof values.bridgePort === 'number' ? values.bridgePort : DEFAULT_PORT,
+      ...(typeof values.bridgeStatus === 'string' ? { status: values.bridgeStatus } : {}),
     };
   }
 

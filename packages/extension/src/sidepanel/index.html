@@ -35,6 +35,13 @@
           <button id="retry-button" type="button" class="secondary-button">重新连接</button>
         </section>
 
+        <section id="replaced-panel" class="state-panel" hidden>
+          <p class="section-kicker warning">连接已转移</p>
+          <h2>另一个浏览器实例已接管</h2>
+          <p class="support">当前实例已停止自动重连，避免两个浏览器反复争用本机服务。</p>
+          <button id="replaced-retry-button" type="button" class="secondary-button">在此实例重新连接</button>
+        </section>
+
         <section id="identity-error-panel" class="state-panel" hidden>
           <p class="section-kicker warning">扩展身份异常</p>
           <h2>当前安装无法连接本机服务</h2>
