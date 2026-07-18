@@ -34,28 +34,38 @@ function deferred() {
 }
 
 class DeferredStorage extends MemoryStorage {
-  private delayedStatus: string | undefined;
-  private gate: ReturnType<typeof deferred> | undefined;
-  private startedGate: ReturnType<typeof deferred> | undefined;
+  private readonly delays: Array<{
+    matches: (values: Record<string, unknown>) => boolean;
+    gate: ReturnType<typeof deferred>;
+    startedGate: ReturnType<typeof deferred>;
+  }> = [];
 
   delayNextStatus(status: string) {
-    this.delayedStatus = status;
-    this.gate = deferred();
-    this.startedGate = deferred();
+    return this.delayNextWrite(values => values.bridgeStatus === status);
+  }
+
+  delayNextJobWrite(jobId: string, status: string) {
+    return this.delayNextWrite(
+      values => values.lastJobId === jobId && values.lastJobStatus === status,
+    );
+  }
+
+  private delayNextWrite(matches: (values: Record<string, unknown>) => boolean) {
+    const gate = deferred();
+    const startedGate = deferred();
+    this.delays.push({ matches, gate, startedGate });
     return {
-      started: this.startedGate.promise,
-      release: this.gate.release,
+      started: startedGate.promise,
+      release: gate.release,
     };
   }
 
   override async set(values: Record<string, unknown>): Promise<void> {
-    if (values.bridgeStatus === this.delayedStatus && this.gate && this.startedGate) {
-      const gate = this.gate;
-      this.delayedStatus = undefined;
-      this.gate = undefined;
-      this.startedGate.release();
-      this.startedGate = undefined;
-      await gate.promise;
+    const delayIndex = this.delays.findIndex(delay => delay.matches(values));
+    if (delayIndex >= 0) {
+      const [delay] = this.delays.splice(delayIndex, 1);
+      delay!.startedGate.release();
+      await delay!.gate.promise;
     }
     await super.set(values);
   }
@@ -377,6 +387,92 @@ describe('extension Bridge connection', () => {
     expect(collect).not.toHaveBeenCalled();
     expect(storage.values.lastJobId).toBeUndefined();
     expect(storage.values.bridgeStatus).toBe('connected');
+  });
+
+  it('restores the latest job after old collect and saved writes finish late', async () => {
+    const storage = new DeferredStorage({ bridgeToken: 'x'.repeat(43) });
+    const oldSocket = new MemorySocket();
+    const currentSocket = new MemorySocket();
+    const socketFactory = vi.fn()
+      .mockReturnValueOnce(oldSocket)
+      .mockReturnValueOnce(currentSocket);
+    const collect = vi.fn();
+    const connection = new BridgeConnection(dependencies(storage, socketFactory));
+    connection.onCollect(collect);
+    await connection.start();
+    oldSocket.emit('open');
+    await vi.waitFor(() => expect(oldSocket.sent).toHaveLength(1));
+
+    const oldCollectWrite = storage.delayNextJobWrite('job-A', 'collecting');
+    const oldSavedWrite = storage.delayNextJobWrite('job-A', 'saved');
+    oldSocket.emit(
+      'message',
+      JSON.stringify({
+        protocolVersion: 1,
+        type: 'job.collect',
+        requestId: 'job-A',
+        timestamp: '2026-07-18T00:00:00.000Z',
+        payload: { url: 'https://mp.weixin.qq.com/s/A' },
+      }),
+    );
+    oldSocket.emit(
+      'message',
+      JSON.stringify({
+        protocolVersion: 1,
+        type: 'job.saved',
+        requestId: 'job-A',
+        timestamp: '2026-07-18T00:00:00.000Z',
+        payload: { markdownPath: '/library/A.md' },
+      }),
+    );
+    await Promise.all([oldCollectWrite.started, oldSavedWrite.started]);
+
+    oldSocket.emit('close');
+    await vi.waitFor(() => expect(storage.values.bridgeStatus).toBe('disconnected'));
+    await connection.start();
+    currentSocket.emit('open');
+    await vi.waitFor(() => expect(currentSocket.sent).toHaveLength(1));
+    currentSocket.emit(
+      'message',
+      JSON.stringify({
+        protocolVersion: 1,
+        type: 'job.collect',
+        requestId: 'job-B',
+        timestamp: '2026-07-18T00:00:01.000Z',
+        payload: { url: 'https://mp.weixin.qq.com/s/B' },
+      }),
+    );
+    await vi.waitFor(() => expect(collect).toHaveBeenCalledWith('job-B', 'https://mp.weixin.qq.com/s/B'));
+    currentSocket.emit(
+      'message',
+      JSON.stringify({
+        protocolVersion: 1,
+        type: 'job.saved',
+        requestId: 'job-B',
+        timestamp: '2026-07-18T00:00:02.000Z',
+        payload: { markdownPath: '/library/B.md' },
+      }),
+    );
+    await vi.waitFor(() => expect(storage.values).toMatchObject({
+      lastJobId: 'job-B',
+      lastJobStatus: 'saved',
+      lastOutputPath: '/library/B.md',
+    }));
+
+    const currentJobWrites = storage.writes.filter(write => write.lastJobId === 'job-B').length;
+    oldCollectWrite.release();
+    oldSavedWrite.release();
+    await vi.waitFor(() => expect(
+      storage.writes.filter(write => write.lastJobId === 'job-B').length,
+    ).toBeGreaterThan(currentJobWrites));
+
+    expect(storage.values).toMatchObject({
+      lastJobId: 'job-B',
+      lastJobStatus: 'saved',
+      lastJobUrl: 'https://mp.weixin.qq.com/s/B',
+      lastOutputPath: '/library/B.md',
+    });
+    expect(collect).toHaveBeenCalledTimes(1);
   });
 
   it('serializes concurrent start attempts into a single socket', async () => {

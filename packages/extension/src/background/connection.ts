@@ -46,6 +46,7 @@ export class BridgeConnection {
   private startPromise: Promise<void> | undefined;
   private generation = 0;
   private latestTransition: ConnectionTransition | undefined;
+  private latestJobTransition: ConnectionTransition | undefined;
 
   constructor(private readonly dependencies: ConnectionDependencies) {}
 
@@ -291,26 +292,26 @@ export class BridgeConnection {
       } else if (message.type === 'job.collect') {
         const payload = message.payload as { url?: unknown };
         if (typeof payload.url === 'string' && isCurrent()) {
-          await this.dependencies.storage.set({
+          const committed = await this.transitionJob(generation, isCurrent, {
             lastJobId: message.requestId,
             lastJobStatus: 'collecting',
             lastJobUrl: payload.url,
             lastJobError: '',
+            lastOutputPath: '',
           });
-          if (isCurrent()) {
+          if (committed && isCurrent()) {
             await this.collectHandler?.(message.requestId, payload.url);
           }
         }
       } else if (message.type === 'job.saved' && isCurrent()) {
         const payload = message.payload as { markdownPath?: unknown };
-        await this.dependencies.storage.set({
+        await this.transitionJob(generation, isCurrent, {
           lastJobId: message.requestId,
           lastJobStatus: 'saved',
           ...(typeof payload.markdownPath === 'string'
             ? { lastOutputPath: payload.markdownPath }
             : {}),
         });
-        if (!isCurrent()) return;
       }
     } catch {
       if (isCurrent()) {
@@ -361,6 +362,32 @@ export class BridgeConnection {
       return false;
     }
     return this.isCurrent(generation);
+  }
+
+  private async transitionJob(
+    generation: number,
+    isCurrent: () => boolean,
+    values: Record<string, unknown>,
+  ): Promise<boolean> {
+    if (!isCurrent()) return false;
+    const previous = this.latestJobTransition?.values;
+    const transitionValues =
+      previous?.lastJobId === values.lastJobId
+        ? { ...previous, ...values }
+        : values;
+    const transition = { generation, values: transitionValues };
+    this.latestJobTransition = transition;
+    await this.dependencies.storage.set(values);
+    if (this.latestJobTransition !== transition) {
+      let latest = this.latestJobTransition;
+      while (latest) {
+        await this.dependencies.storage.set(latest.values);
+        if (this.latestJobTransition === latest) break;
+        latest = this.latestJobTransition;
+      }
+      return false;
+    }
+    return isCurrent();
   }
 
   private cancelReconnect(): void {
