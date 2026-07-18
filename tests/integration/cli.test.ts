@@ -1,7 +1,7 @@
 import { join } from 'node:path';
 import WebSocket from 'ws';
-import { afterEach, describe, expect, it } from 'vitest';
-import type { CollectedDocument } from '@data-collector/shared';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { TRUSTED_EXTENSION_ID, type CollectedDocument } from '@data-collector/shared';
 import { runCli } from '../../packages/bridge/src/cli.js';
 import { startBridge, type BridgeHandle } from '../../packages/bridge/src/index.js';
 import { createTemporaryDirectoryTracker } from '../helpers/temp.js';
@@ -30,25 +30,17 @@ function document(): CollectedDocument {
   };
 }
 
-async function pair(bridge: BridgeHandle): Promise<void> {
-  const response = await fetch(`${bridge.url}/v1/pair`, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ code: bridge.pairingCode }),
-  });
-  expect(response.status).toBe(200);
-}
-
-async function connect(bridge: BridgeHandle, token: string): Promise<WebSocket> {
-  const socket = new WebSocket(`${bridge.wsUrl}?token=${encodeURIComponent(token)}`, {
-    origin: `chrome-extension://${'b'.repeat(32)}`,
+async function authorize(bridge: BridgeHandle): Promise<{ socket: WebSocket; token: string }> {
+  const socket = new WebSocket(`${bridge.wsUrl}?bootstrap=1`, {
+    origin: `chrome-extension://${TRUSTED_EXTENSION_ID}`,
   });
   sockets.push(socket);
-  await new Promise<void>((resolve, reject) => {
-    socket.once('open', resolve);
+  const message = await new Promise<{ type: string; payload: { token: string } }>((resolve, reject) => {
+    socket.once('message', data => resolve(JSON.parse(data.toString()) as { type: string; payload: { token: string } }));
     socket.once('error', reject);
   });
-  return socket;
+  expect(message.type).toBe('bridge.authorized');
+  return { socket, token: message.payload.token };
 }
 
 afterEach(async () => {
@@ -63,9 +55,8 @@ describe('Codex CLI', () => {
     const configDir = join(root, '.config');
     const bridge = await startBridge({ port: 0, libraryRoot: root, configDir });
     handles.push(bridge);
-    await pair(bridge);
-    const auth = JSON.parse(await (await import('node:fs/promises')).readFile(join(configDir, 'auth.json'), 'utf8')) as { token: string };
-    const socket = await connect(bridge, auth.token);
+    const authorized = await authorize(bridge);
+    const socket = authorized.socket;
     socket.send(envelope('extension.hello', 'extension', { version: '0.1.0' }));
 
     const received = new Promise<{ requestId: string }>((resolve, reject) => {
@@ -89,5 +80,41 @@ describe('Codex CLI', () => {
     expect(await running).toBe(0);
     expect(stderr).toBe('');
     expect(stdout.trim()).toMatch(/^\/.+index\.md$/);
+  });
+
+  it('explains how to auto-authorize collect when no token exists', async () => {
+    const root = await temporaryDirectories.create('data-collector-cli-no-token-');
+    let stderr = '';
+
+    const result = await runCli(
+      ['collect', ARTICLE_URL, '--config', join(root, '.config')],
+      { stdout: () => undefined, stderr: value => { stderr += value; } },
+    );
+
+    expect(result).toBe(1);
+    expect(stderr.trim()).toBe('扩展尚未自动连接，请先启动 Bridge 并在 Edge 中打开 Data Collector 侧边栏');
+  });
+
+  it('prints the Bridge URL and waits for the trusted extension on start', async () => {
+    const root = await temporaryDirectories.create('data-collector-cli-start-');
+    const processOnce = vi.spyOn(process, 'once').mockImplementation(((event: string, listener: (...args: never[]) => void) => {
+      if (event === 'SIGINT') queueMicrotask(listener);
+      return process;
+    }) as typeof process.once);
+    let stderr = '';
+
+    try {
+      const result = await runCli(
+        ['bridge', 'start', '--port', '0', '--library', root, '--config', join(root, '.config')],
+        { stdout: () => undefined, stderr: value => { stderr += value; } },
+      );
+      expect(result).toBe(0);
+    } finally {
+      processOnce.mockRestore();
+    }
+
+    expect(stderr).toMatch(/Data Collector Bridge: http:\/\/127\.0\.0\.1:\d+/);
+    expect(stderr).toContain('等待受信任的 Data Collector 扩展自动连接');
+    expect(stderr).not.toContain('配对码');
   });
 });

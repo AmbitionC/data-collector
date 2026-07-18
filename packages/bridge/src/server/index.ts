@@ -7,13 +7,16 @@ import { dirname, isAbsolute, relative, resolve } from 'node:path';
 import { z } from 'zod';
 import { WebSocket, type RawData } from 'ws';
 import {
+  APP_VERSION,
+  TRUSTED_EXTENSION_ID,
+  bridgeAuthorizedPayloadSchema,
   jobResultPayloadSchema,
   wsEnvelopeSchema,
   type CollectedDocument,
   type JobRecord,
   type WsEnvelope,
 } from '@data-collector/shared';
-import { PairingManager } from '../auth.js';
+import { AccessTokenManager } from '../auth.js';
 import { loadConfig, type ConfigOverrides } from '../config.js';
 import { JobStore } from '../jobs/store.js';
 import { MarkdownLibrary } from '../library/index.js';
@@ -21,7 +24,6 @@ import { organize } from '../organize/index.js';
 import { attachExtensionWebSocket } from './websocket.js';
 import { bearerToken, HttpError, isLoopback, readJson, sendJson } from './http.js';
 
-const pairSchema = z.object({ code: z.string().regex(/^\d{6}$/) });
 const createJobSchema = z.object({
   id: z.string().min(1).max(100).optional(),
   url: z.string().url().max(4096),
@@ -43,7 +45,6 @@ export interface StartBridgeOptions extends ConfigOverrides {
 export interface BridgeHandle {
   url: string;
   wsUrl: string;
-  pairingCode: string;
   close(): Promise<void>;
 }
 
@@ -102,8 +103,7 @@ async function verifiedLibraryPath(root: string, requestedPath: string): Promise
 
 export async function startBridge(options: StartBridgeOptions = {}): Promise<BridgeHandle> {
   const config = loadConfig(options);
-  const pairing = await PairingManager.open(config.authFile);
-  const pairingCode = pairing.createPairingCode().code;
+  const access = await AccessTokenManager.open(config.authFile);
   const jobs = await JobStore.open(config.jobsFile);
   await jobs.recover();
   const library = new MarkdownLibrary({
@@ -173,16 +173,20 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
     if (request.method === 'GET' && requestUrl.pathname === '/health') {
       return sendJson(response, 200, {
         ok: true,
-        version: '0.1.0',
+        version: APP_VERSION,
+        trustedExtensionId: TRUSTED_EXTENSION_ID,
         extensionConnected: extensionReady && extensionSocket?.readyState === WebSocket.OPEN,
       });
     }
-    if (request.method === 'POST' && requestUrl.pathname === '/v1/pair') {
-      const input = pairSchema.parse(await readJson(request));
-      return sendJson(response, 200, { token: await pairing.exchange(input.code) });
-    }
+    const jobMatch = requestUrl.pathname.match(/^\/v1\/jobs\/([^/]+)$/);
+    const isProtectedRoute =
+      (request.method === 'POST' && requestUrl.pathname === '/v1/jobs') ||
+      (request.method === 'POST' && requestUrl.pathname === '/v1/reveal') ||
+      (request.method === 'GET' && Boolean(jobMatch?.[1]));
+    if (!isProtectedRoute) throw new HttpError(404, 'NOT_FOUND', '接口不存在');
+
     const token = bearerToken(request) ?? '';
-    if (!pairing.verify(token)) throw new HttpError(401, 'UNAUTHORIZED', '访问令牌无效');
+    if (!access.verify(token)) throw new HttpError(401, 'UNAUTHORIZED', '访问令牌无效');
 
     if (request.method === 'POST' && requestUrl.pathname === '/v1/jobs') {
       const input = createJobSchema.parse(await readJson(request));
@@ -201,7 +205,6 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
       await reveal(path);
       return sendJson(response, 200, { ok: true });
     }
-    const jobMatch = requestUrl.pathname.match(/^\/v1\/jobs\/([^/]+)$/);
     if (request.method === 'GET' && jobMatch?.[1]) {
       const job = jobs.get(decodeURIComponent(jobMatch[1]));
       if (!job) throw new HttpError(404, 'JOB_NOT_FOUND', '任务不存在');
@@ -221,8 +224,19 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
 
   const websocketServer = attachExtensionWebSocket({
     server,
-    pairing,
-    onConnection: socket => {
+    access,
+    onConnection: (socket, authorization) => {
+      if (authorization.bootstrapToken) {
+        socket.send(
+          JSON.stringify(
+            envelope(
+              'bridge.authorized',
+              'authorization',
+              bridgeAuthorizedPayloadSchema.parse({ token: authorization.bootstrapToken }),
+            ),
+          ),
+        );
+      }
       if (extensionSocket && extensionSocket.readyState === WebSocket.OPEN) {
         extensionSocket.close(1012, 'replaced');
       }
@@ -265,7 +279,6 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
   return {
     url,
     wsUrl: `ws://${config.host}:${address.port}/v1/extension`,
-    pairingCode,
     async close() {
       extensionSocket?.close(1001, 'server shutdown');
       websocketServer.close();

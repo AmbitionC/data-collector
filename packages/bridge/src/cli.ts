@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { fileURLToPath } from 'node:url';
 import { resolve } from 'node:path';
-import { PairingManager } from './auth.js';
+import { AccessTokenManager } from './auth.js';
 import { loadConfig, type ConfigOverrides } from './config.js';
 import { startBridge } from './server/index.js';
 
@@ -33,9 +33,9 @@ function configOverrides(args: string[]): ConfigOverrides {
 
 async function authenticatedToken(args: string[]): Promise<{ baseUrl: string; token: string }> {
   const config = loadConfig(configOverrides(args));
-  const pairing = await PairingManager.open(config.authFile);
-  const token = pairing.token();
-  if (!token) throw new Error('尚未配对浏览器扩展，请先启动 Bridge 并在扩展中输入配对码');
+  const access = await AccessTokenManager.open(config.authFile);
+  const token = access.token();
+  if (!token) throw new Error('扩展尚未自动连接，请先启动 Bridge 并在 Edge 中打开 Data Collector 侧边栏');
   return { baseUrl: `http://${config.host}:${config.port}`, token };
 }
 
@@ -90,7 +90,7 @@ async function bridge(args: string[], io: CliIo): Promise<number> {
   if (args[1] !== 'start') throw new Error('用法：data-collector bridge start [--port 17321]');
   const handle = await startBridge(configOverrides(args));
   io.stderr(`Data Collector Bridge: ${handle.url}\n`);
-  io.stderr(`扩展配对码: ${handle.pairingCode}（10 分钟内有效）\n`);
+  io.stderr('等待受信任的 Data Collector 扩展自动连接\n');
   await new Promise<void>(resolveSignal => {
     const stop = () => resolveSignal();
     process.once('SIGINT', stop);

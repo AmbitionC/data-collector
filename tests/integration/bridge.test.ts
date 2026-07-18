@@ -2,7 +2,12 @@ import { readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import WebSocket from 'ws';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import type { CollectedDocument, WsEnvelope } from '@data-collector/shared';
+import {
+  APP_VERSION,
+  TRUSTED_EXTENSION_ID,
+  type CollectedDocument,
+  type WsEnvelope,
+} from '@data-collector/shared';
 import {
   startBridge,
   type BridgeHandle,
@@ -10,7 +15,7 @@ import {
 import { createTemporaryDirectoryTracker } from '../helpers/temp.js';
 
 const URL = 'https://mp.weixin.qq.com/s/integration-test';
-const EXTENSION_ORIGIN = `chrome-extension://${'a'.repeat(32)}`;
+const EXTENSION_ORIGIN = `chrome-extension://${TRUSTED_EXTENSION_ID}`;
 const handles: BridgeHandle[] = [];
 const sockets: WebSocket[] = [];
 const temporaryDirectories = createTemporaryDirectoryTracker();
@@ -52,15 +57,6 @@ async function requestJson<T>(
   return { status: response.status, body: (await response.json()) as T };
 }
 
-async function pair(bridge: BridgeHandle): Promise<string> {
-  const response = await requestJson<{ token: string }>(bridge.url, '/v1/pair', {
-    method: 'POST',
-    body: { code: bridge.pairingCode },
-  });
-  expect(response.status).toBe(200);
-  return response.body.token;
-}
-
 async function connect(bridge: BridgeHandle, token: string): Promise<WebSocket> {
   const socket = new WebSocket(`${bridge.wsUrl}?token=${encodeURIComponent(token)}`, {
     origin: EXTENSION_ORIGIN,
@@ -76,11 +72,39 @@ async function connect(bridge: BridgeHandle, token: string): Promise<WebSocket> 
 async function nextMessage<T>(socket: WebSocket): Promise<WsEnvelope<string, T>> {
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => reject(new Error('WebSocket message timeout')), 5_000);
+    socket.once('error', error => {
+      clearTimeout(timer);
+      reject(error);
+    });
     socket.once('message', data => {
       clearTimeout(timer);
       resolve(JSON.parse(data.toString()) as WsEnvelope<string, T>);
     });
   });
+}
+
+async function authorize(
+  bridge: BridgeHandle,
+  origin = `chrome-extension://${TRUSTED_EXTENSION_ID}`,
+): Promise<{ socket: WebSocket; token: string }> {
+  const socket = new WebSocket(`${bridge.wsUrl}?bootstrap=1`, { origin });
+  sockets.push(socket);
+  const message = await nextMessage<{ token: string }>(socket);
+  expect(message.type).toBe('bridge.authorized');
+  return { socket, token: message.payload.token };
+}
+
+async function expectBootstrapRejected(bridge: BridgeHandle, origin: string): Promise<void> {
+  const socket = new WebSocket(`${bridge.wsUrl}?bootstrap=1`, { origin });
+  const status = await new Promise<number | undefined>((resolve, reject) => {
+    socket.once('unexpected-response', (_request, response) => {
+      response.resume();
+      resolve(response.statusCode);
+    });
+    socket.once('open', () => reject(new Error(`Unexpected WebSocket connection for ${origin}`)));
+    socket.once('error', reject);
+  });
+  expect(status).toBe(401);
 }
 
 function envelope<T>(type: string, requestId: string, payload: T): string {
@@ -110,16 +134,34 @@ describe('local Bridge', () => {
     });
     handles.push(bridge);
 
-    const health = await requestJson<{ extensionConnected: boolean }>(bridge.url, '/health');
-    expect(health).toMatchObject({ status: 200, body: { extensionConnected: false } });
+    const health = await requestJson<{
+      ok: boolean;
+      version: string;
+      trustedExtensionId: string;
+      extensionConnected: boolean;
+    }>(bridge.url, '/health');
+    expect(health).toEqual({
+      status: 200,
+      body: {
+        ok: true,
+        version: APP_VERSION,
+        trustedExtensionId: TRUSTED_EXTENSION_ID,
+        extensionConnected: false,
+      },
+    });
     const unauthorized = await requestJson(bridge.url, '/v1/jobs', {
       method: 'POST',
       body: { url: URL },
     });
     expect(unauthorized.status).toBe(401);
+    const removedPairing = await requestJson(bridge.url, '/v1/pair', {
+      method: 'POST',
+      body: { code: '123456' },
+    });
+    expect(removedPairing.status).toBe(404);
 
-    const token = await pair(bridge);
-    const socket = await connect(bridge, token);
+    const { socket, token } = await authorize(bridge);
+    expect(token.length).toBeGreaterThanOrEqual(32);
     socket.send(envelope('extension.hello', 'extension', { version: '0.1.0' }));
     const dispatchedPromise = nextMessage<{ url: string }>(socket);
     const jobResponse = await requestJson<{ id: string; status: string }>(bridge.url, '/v1/jobs', {
@@ -157,7 +199,7 @@ describe('local Bridge', () => {
     const options = { port: 0, libraryRoot: root, configDir: join(root, '.config') };
     const first = await startBridge(options);
     handles.push(first);
-    const token = await pair(first);
+    const { token } = await authorize(first);
     const job = await requestJson<{ id: string }>(first.url, '/v1/jobs', {
       method: 'POST',
       token,
@@ -168,7 +210,9 @@ describe('local Bridge', () => {
 
     const restarted = await startBridge(options);
     handles.push(restarted);
-    const socket = await connect(restarted, token);
+    const authorized = await authorize(restarted);
+    expect(authorized.token).toBe(token);
+    const socket = authorized.socket;
     const dispatchedPromise = nextMessage<{ url: string }>(socket);
     socket.send(envelope('extension.hello', 'extension', { version: '0.1.0' }));
     const dispatched = await dispatchedPromise;
@@ -180,8 +224,9 @@ describe('local Bridge', () => {
     const root = await temporaryDirectory();
     const bridge = await startBridge({ port: 0, libraryRoot: root, configDir: join(root, '.config') });
     handles.push(bridge);
-    const token = await pair(bridge);
-    const firstSocket = await connect(bridge, token);
+    const authorized = await authorize(bridge);
+    const token = authorized.token;
+    const firstSocket = authorized.socket;
     firstSocket.send(envelope('extension.hello', 'extension', { version: '0.1.0' }));
     const firstDispatch = nextMessage<{ url: string }>(firstSocket);
     const job = await requestJson<{ id: string }>(bridge.url, '/v1/jobs', {
@@ -204,8 +249,7 @@ describe('local Bridge', () => {
     const root = await temporaryDirectory();
     const bridge = await startBridge({ port: 0, libraryRoot: root, configDir: join(root, '.config') });
     handles.push(bridge);
-    const token = await pair(bridge);
-    const socket = await connect(bridge, token);
+    const { socket, token } = await authorize(bridge);
     socket.send(envelope('extension.hello', 'extension', { version: '0.1.0' }));
     const dispatchedPromise = nextMessage<{ url: string }>(socket);
     const job = await requestJson<{ id: string }>(bridge.url, '/v1/jobs', {
@@ -246,7 +290,7 @@ describe('local Bridge', () => {
       reveal,
     });
     handles.push(bridge);
-    const token = await pair(bridge);
+    const { token } = await authorize(bridge);
 
     const accepted = await requestJson(bridge.url, '/v1/reveal', {
       method: 'POST',
@@ -263,5 +307,17 @@ describe('local Bridge', () => {
     expect(rejected.status).toBe(400);
     expect(reveal).toHaveBeenCalledOnce();
     expect(reveal).toHaveBeenCalledWith(target);
+  });
+
+  it('rejects untrusted bootstrap Origins without creating an access token', async () => {
+    const root = await temporaryDirectory();
+    const configDir = join(root, '.config');
+    const bridge = await startBridge({ port: 0, libraryRoot: root, configDir });
+    handles.push(bridge);
+
+    await expectBootstrapRejected(bridge, `chrome-extension://${'a'.repeat(32)}`);
+    await expectBootstrapRejected(bridge, 'https://example.com');
+
+    await expect(readFile(join(configDir, 'auth.json'), 'utf8')).rejects.toMatchObject({ code: 'ENOENT' });
   });
 });
