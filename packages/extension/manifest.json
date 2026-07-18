@@ -1,0 +1,36 @@
+{
+  "manifest_version": 3,
+  "name": "Data Collector",
+  "description": "把微信公众号与知识星球内容整理到本地 Markdown 知识库。",
+  "version": "0.1.0",
+  "minimum_chrome_version": "116",
+  "permissions": ["activeTab", "alarms", "storage"],
+  "host_permissions": [
+    "https://mp.weixin.qq.com/*",
+    "https://wx.zsxq.com/*",
+    "https://*.zsxq.com/*",
+    "http://127.0.0.1/*"
+  ],
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://mp.weixin.qq.com/*",
+        "https://wx.zsxq.com/*",
+        "https://*.zsxq.com/*"
+      ],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "action": {
+    "default_popup": "popup/index.html",
+    "default_title": "保存到 Data Collector"
+  },
+  "content_security_policy": {
+    "extension_pages": "script-src 'self'; object-src 'self'; connect-src 'self' http://127.0.0.1:* ws://127.0.0.1:*"
+  }
+}

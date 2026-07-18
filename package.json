@@ -1,0 +1,36 @@
+{
+  "name": "data-collector",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "workspaces": [
+    "packages/*"
+  ],
+  "engines": {
+    "node": ">=22.12"
+  },
+  "scripts": {
+    "build": "npm run build -ws --if-present",
+    "package": "npm run build && node scripts/package-extension.mjs",
+    "test": "vitest run",
+    "test:e2e": "npm run build && vitest run --config vitest.e2e.config.ts",
+    "test:coverage": "vitest run --coverage",
+    "typecheck": "tsc -b packages/shared packages/bridge --pretty false && tsc -p packages/extension/tsconfig.json --pretty false",
+    "collector": "node packages/bridge/dist/cli.js",
+    "smoke:wechat": "npm run build && node scripts/smoke-wechat.mjs"
+  },
+  "devDependencies": {
+    "@types/chrome": "0.2.2",
+    "@types/node": "26.1.1",
+    "@types/sanitize-html": "2.16.1",
+    "@types/turndown": "5.0.6",
+    "@types/ws": "8.18.1",
+    "@vitest/coverage-v8": "4.1.10",
+    "esbuild": "0.28.1",
+    "fflate": "0.8.3",
+    "jsdom": "29.1.1",
+    "puppeteer-core": "25.3.0",
+    "typescript": "7.0.2",
+    "vitest": "4.1.10"
+  }
+}
