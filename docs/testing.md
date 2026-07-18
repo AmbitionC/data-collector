@@ -17,8 +17,8 @@ npm run package
 测试层次：
 
 - 单元：URL 规范化、DOM 提取、固定身份、自动授权、任务状态机、清洗、文件写入、Side Panel 状态、后台 `setPanelBehavior` 与打包白名单。
-- 集成：真实 HTTP/WebSocket Bridge、Origin/token 认证、重连恢复、CLI 采集和错误退出。
-- 端到端：用系统 Chrome 加载构建后的固定 ID 扩展，打开公众号 fixture，验证 Side Panel document 无需输入即可进入 ready，再覆盖当前页采集、Markdown、catalog 去重和 CLI URL collection。
+- 集成：真实 HTTP/WebSocket Bridge、Origin/token 认证、current-page 不重复派发、queued 重连恢复、`4009/replaced` 单连接接管、CLI 采集和错误退出。
+- 端到端：用系统 Chrome 加载构建后的固定 ID 扩展，打开公众号 fixture，验证 Side Panel document 无需输入即可进入 ready；实际填写分类/标签并点击保存，断言无额外文章 tab、覆盖值进入 Markdown，再覆盖 catalog 去重和 CLI URL collection。
 - 真实冒烟：请求指定在线公众号文章，复用生产提取器和知识库写入器，验证标题、作者、正文、最终路径和重复采集幂等性。
 
 E2E 会依次查找 `CHROME_PATH`、`PUPPETEER_EXECUTABLE_PATH`、macOS Chrome、Linux Chrome/Chromium 和 Windows Chrome。需要指定浏览器时：
@@ -31,7 +31,7 @@ CHROME_PATH='/path/to/chrome' npm run test:e2e
 
 headless Chrome 不能通过用户手势可靠打开 Edge 原生 Side Panel surface，因此自动化按既定边界直接访问 `chrome-extension://<fixed-id>/sidepanel/index.html`。测试从构建后 service worker URL 解析 ID 并与受信任 ID 比较，截图写入 `artifacts/screenshots/sidepanel-ready.png` 和 `sidepanel-collecting.png`。
 
-为了让被采集文章保持 active tab，测试通过 CDP DOM 域观察后台 Side Panel document，并从该扩展 document 发送真实 `capture.current` 消息。它验证页面、状态机、自动授权和采集链路，但不声称验证 Edge 原生侧栏容器。工具栏点击配置由 background 单元测试对 `sidePanel.setPanelBehavior({ openPanelOnActionClick: true })` 独立约束。
+为了让被采集文章保持 active tab，测试通过 CDP DOM 域观察后台 Side Panel document，并对真实分类/标签输入框赋值、点击“保存这一页”。测试监听 Chrome page target，确保当前页任务不会再创建同 URL 后台采集 tab。它验证页面、状态机、自动授权和采集链路，但不声称验证 Edge 原生侧栏容器。工具栏点击配置由 background 单元测试对 `sidePanel.setPanelBehavior({ openPanelOnActionClick: true })` 独立约束。
 
 ## 手工验收清单
 
@@ -43,7 +43,8 @@ headless Chrome 不能通过用户手势可靠打开 Edge 原生 Side Panel surf
 6. 登录知识星球后验证文章、动态、问答详情；退出后应显示需要登录，不保存登录页。
 7. 停止 Bridge 后 Side Panel 显示服务离线；重启并点击“重新连接”后恢复。
 8. 安装非正式 ID 时显示身份异常，并提示删除后从正式发布包重新安装。
-9. `unzip -l artifacts/data-collector-extension-0.2.0.zip` 只显示六个允许文件。
+9. 同时启动第二个已安装实例时，旧 Side Panel 显示“另一个浏览器实例已接管”且不反复重连；点击“在此实例重新连接”后可主动接管。
+10. `unzip -l artifacts/data-collector-extension-0.2.0.zip` 只显示六个允许文件。
 
 ## 可复现打包
 

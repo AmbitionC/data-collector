@@ -12,6 +12,8 @@
 4. Bridge 校验请求 Origin 必须是固定扩展 Origin，随后通过 `bridge.authorized` 返回 bearer token。
 5. 扩展持久化 token，状态切换为 `connected`，并发送 `extension.hello`。
 
+存储 token 的认证 socket 若在完成 `open`/`extension.hello` 前失败，扩展删除 `chrome.storage.local.bridgeToken`，仅通过指数退避 timer 再试。下一次从 `/health` 固定 ID 检查重新开始，再建立一次 bootstrap socket；不会在 close/error 回调中同步递归。health 不可达继续退避，ID 不匹配进入 `identity_error` 且不再定时重连。
+
 后续连接使用：
 
 ```text
@@ -29,7 +31,7 @@ WebSocket Origin 校验会阻止普通网页和其他扩展。Origin 与固定 I
 ## HTTP API
 
 - `GET /health`：进程版本、受信任扩展 ID 与连接状态，不需要 token。
-- `POST /v1/jobs`：创建任务。正文 `{ "url": "...", "requestedBy": "codex|cli|extension" }`。
+- `POST /v1/jobs`：创建任务。正文 `{ "url": "...", "requestedBy": "codex|cli|extension" }`。Codex/CLI 任务在扩展在线时立即派发；`extension` 表示 Side Panel 当前页采集，由当前 tab runner 直接回传，不立即回派。
 - `GET /v1/jobs/:id`：查询任务状态和最终路径。
 - `POST /v1/reveal`：只允许打开知识库根目录内已存在的文件，供 Side Panel 点击“在文件夹中查看”。
 
@@ -38,12 +40,16 @@ URL 只允许 HTTPS 的 `mp.weixin.qq.com`、`wx.zsxq.com` 与知识星球子域
 任务状态：
 
 ```text
-queued → dispatched → collecting → saved
-                        ├→ needs_attention
-                        └→ failed
+Codex/CLI: queued → dispatched → collecting → saved
+                                  ├→ needs_attention
+                                  └→ failed
+
+当前页:    queued ───────────────→ collecting → saved
+                                  ├→ needs_attention
+                                  └→ failed
 ```
 
-Bridge 重启会把未完成任务恢复到可重派发状态；扩展重连后继续派发。相同 URL 的任务可重复执行，文件层通过稳定内容 ID 幂等更新。
+当前页任务若在发送 progress 前断线会保持 `queued`；扩展重连后，通用 `dispatchQueued` 会把它作为恢复任务派发，避免永久丢失。Bridge 重启也会把其他未完成任务恢复到可重派发状态。相同 URL 的任务可重复执行，文件层通过稳定内容 ID 幂等更新。
 
 ## WebSocket 消息
 
@@ -65,6 +71,8 @@ Bridge 重启会把未完成任务恢复到可重派发状态；扩展重连后�
 - Bridge → 扩展：`bridge.authorized`、`bridge.pong`、`job.collect`、`job.saved`
 
 扩展每 20 秒发送心跳，使 Chrome 116+ 的 Manifest V3 service worker 在活跃连接期间保持可用。所有消息都在共享 schema 边界校验，内容脚本返回的数据按不可信输入处理；回传 URL 必须与任务一致，违规消息以 WebSocket `1008` 关闭。
+
+同一 Bridge 只保留最新扩展连接。新连接替换旧连接时，Bridge 使用共享应用关闭码 `4009` 和原因 `replaced`。旧扩展进入持久 standby，不把替换误报为服务不可达，也不由 alarm/startup 自动重连；Side Panel 显示“另一个浏览器实例已接管”，用户可显式点击重试重新连接。
 
 ## 扩展为其他客户端
 

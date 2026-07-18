@@ -51,6 +51,7 @@ Manifest 移除 `action.default_popup`，保留工具栏 action 标题。Service
 - `ready`：可保存，并允许覆盖分类和标签。
 - `collecting`、`saved`、`needs_attention`、`job_error`：沿用现有采集反馈。
 - `bridge_unavailable`：本机 Bridge 未启动，展示启动命令和重试按钮。
+- `replaced`：另一个浏览器实例已接管，停止自动重连并允许用户显式重新连接。
 - `identity_error`：安装包身份与 Bridge 内置 ID 不一致，提示重新加载官方构建目录。
 
 不再存在 `unpaired` 状态、配对输入框或 `pair.submit` 消息。
@@ -66,12 +67,14 @@ Bridge 保存精确允许列表，只接受以下固定来源且 ID 必须完全
 
 自动授权使用 WebSocket 握手而不是普通 HTTP `Origin`。浏览器 WebSocket 的 Origin 由浏览器生成，普通网页不能把自己声明成指定扩展。流程如下：
 
-1. 扩展没有令牌，或现有令牌收到 `401` 时，连接 `/v1/extension?bootstrap=1`。
-2. Bridge 先校验连接来自 loopback，再精确校验 Origin。
+1. 扩展有令牌时直接建立认证 socket；没有令牌时先请求 `/health` 并严格比较 Bridge 固定 ID 与 `chrome.runtime.id`。
+2. ID 匹配后连接 `/v1/extension?bootstrap=1`；Bridge 先校验连接来自 loopback，再精确校验 Origin。
 3. 身份通过后，Bridge 创建或读取 256 位随机令牌并发送 `bridge.authorized`。
 4. 扩展保存令牌并在同一连接发送 `extension.hello`。
 5. 后续 WebSocket 握手继续同时校验固定 Origin 与令牌；HTTP jobs/reveal 继续要求 Bearer token。
 6. 扩展存储被清空时可再次 bootstrap，Bridge 返回当前令牌，无需人工操作。
+
+若存储中的令牌已失效，带令牌的 WebSocket 在成功 `open`/发送 `extension.hello` 前会失败。扩展先从 `chrome.storage.local` 删除该令牌，再按既有指数退避安排下一次尝试；下一次必须重新读取 `/health`、核对固定 ID，并只做一次 bootstrap。Bridge 不可达时继续退避，身份不匹配时停止重试。bootstrap socket 自身失败不会清理令牌或同步递归。
 
 删除 `POST /v1/pair`、六位码生成/过期逻辑和 CLI 配对提示。Bridge 启动输出改为本机地址、知识库目录与“等待受信任扩展自动连接”。CLI 仍从权限为 `0600` 的认证文件读取令牌。
 
@@ -88,9 +91,9 @@ Bridge 保存精确允许列表，只接受以下固定来源且 ID 必须完全
 ## 6. 错误处理
 
 - Bridge 未启动或端口不可达：指数退避重连，侧栏展示启动命令与立即重试。
-- 旧令牌失效：一次自动 bootstrap；身份失败则停止循环并展示 `identity_error`。
+- 旧令牌失效：清除扩展存储令牌，定时重试时重新核对 health 并做一次自动 bootstrap；身份失败则停止循环并展示 `identity_error`。
 - 非固定 Origin：WebSocket 升级返回 `401`，不生成或泄露令牌。
-- 多个 Data Collector 连接：保留最新连接，旧连接以 `1012` 关闭。
+- 多个 Data Collector 连接：保留最新连接，旧连接以应用关闭码 `4009`、原因 `replaced` 关闭。旧实例持久化 `replaced` 并停止 alarm/startup 自动重连；只有用户点击重试才重新竞争连接。
 - 页面不支持、需要登录或 DOM 变化：使用现有可恢复状态，不关闭侧栏。
 
 ## 7. 测试与验收
@@ -100,9 +103,11 @@ Bridge 保存精确允许列表，只接受以下固定来源且 ID 必须完全
 1. Manifest/打包测试先要求 `sidePanel`、固定 key、`side_panel`，并禁止 `default_popup` 与旧 `popup/` 文件。
 2. Bridge 单元/集成测试先验证固定 Origin 自动授权、随机 Origin 拒绝、令牌持久化、旧令牌复用和 HTTP 未授权拒绝。
 3. 连接测试先验证无令牌 bootstrap、收到授权消息后存储令牌、旧令牌 `401` 后自动回退，以及身份错误不无限重试。
-4. UI 测试先移除配对表单断言，覆盖 connecting、Bridge 未启动、身份错误和自适应侧栏 DOM。
-5. E2E 改为打开真实 Side Panel，而不是调用 popup；继续覆盖当前页采集与 CLI URL 采集。
-6. 全量执行类型检查、构建、67 项以上回归、覆盖率、可复现 ZIP 和真实微信文章 smoke。
+4. 连接测试用延迟 storage 写验证 queued/collecting/organizing/saved 的 latest snapshot 不会被旧异步写回退，并验证 `4009/replaced` 不设重连 timer、自动启动受抑制、手动重试可恢复。
+5. Bridge 测试验证 extension 当前页任务创建时不回派 `job.collect`，本地 progress/result 可保存；CLI/Codex 仍立即派发，未开始的 extension queued job 在重连时恢复派发。
+6. UI 测试先移除配对表单断言，覆盖 connecting、Bridge 未启动、身份错误、被其他实例接管和自适应侧栏 DOM。
+7. E2E 打开 Side Panel document，实际填写分类/标签并点击保存，断言不创建额外采集标签页、覆盖值写入 Markdown，并继续覆盖 CLI URL 采集和 catalog 去重。
+8. 全量执行类型检查、构建、67 项以上回归、覆盖率、可复现 ZIP 和真实微信文章 smoke。
 
 Edge Beta 手工验收：重新加载固定扩展目录，点击工具栏图标后右侧栏打开；左侧文章自适应；无需配对码；Bridge 在线后可保存指定微信文章并显示最终路径。
 
