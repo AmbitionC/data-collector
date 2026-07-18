@@ -58,6 +58,7 @@ function waitForTabComplete(tabId: number, timeoutMs = 30_000): Promise<void> {
 
 const connection = new BridgeConnection({
   storage,
+  extensionId: chrome.runtime.id,
   socketFactory: url => new WebSocket(url) as unknown as SocketLike,
   fetch,
   setInterval: (callback, milliseconds) => setInterval(callback, milliseconds),
@@ -67,6 +68,16 @@ const connection = new BridgeConnection({
 });
 const runner = new JobRunner({ tabs, bridge: connection, waitForTabComplete });
 connection.onCollect((requestId, url) => runner.runRemoteJob(requestId, url));
+
+async function configureSidePanel(): Promise<void> {
+  const sidePanel = (chrome as typeof chrome & {
+    sidePanel?: {
+      setPanelBehavior(options: { openPanelOnActionClick: boolean }): Promise<void>;
+    };
+  }).sidePanel;
+  if (!sidePanel?.setPanelBehavior) return;
+  await sidePanel.setPanelBehavior({ openPanelOnActionClick: true });
+}
 
 async function status() {
   const values = await chrome.storage.local.get([
@@ -102,10 +113,6 @@ chrome.runtime.onMessage.addListener((message: unknown, _sender, sendResponse) =
   const request = message as { type?: string; code?: string; overrides?: unknown };
   const action = async () => {
     if (request.type === 'status.get') return status();
-    if (request.type === 'pair.submit' && request.code) {
-      await connection.pair(request.code);
-      return status();
-    }
     if (request.type === 'capture.current') {
       const jobId = await runner.captureCurrent(
         (request.overrides ?? {}) as { userCategory?: string; userTags?: string[] },
@@ -135,10 +142,15 @@ chrome.runtime.onMessage.addListener((message: unknown, _sender, sendResponse) =
 
 chrome.runtime.onInstalled.addListener(() => {
   void chrome.alarms.create('bridge-reconnect', { periodInMinutes: 1 });
+  void configureSidePanel();
   void connection.start();
 });
-chrome.runtime.onStartup.addListener(() => { void connection.start(); });
+chrome.runtime.onStartup.addListener(() => {
+  void configureSidePanel();
+  void connection.start();
+});
 chrome.alarms.onAlarm.addListener(alarm => {
   if (alarm.name === 'bridge-reconnect') void connection.start();
 });
+void configureSidePanel();
 void connection.start();

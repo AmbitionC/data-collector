@@ -1,4 +1,8 @@
-import { wsEnvelopeSchema } from '@data-collector/shared';
+import {
+  APP_VERSION,
+  bridgeAuthorizedPayloadSchema,
+  wsEnvelopeSchema,
+} from '@data-collector/shared';
 
 export interface ExtensionStorage {
   get(keys?: string | string[] | Record<string, unknown>): Promise<Record<string, unknown>>;
@@ -14,6 +18,7 @@ export interface SocketLike {
 
 interface ConnectionDependencies {
   storage: ExtensionStorage;
+  extensionId: string;
   socketFactory: (url: string) => SocketLike;
   fetch: typeof fetch;
   setInterval: (callback: () => void, milliseconds: number) => unknown;
@@ -33,6 +38,7 @@ export class BridgeConnection {
   private reconnectAttempt = 0;
   private collectHandler: CollectHandler | undefined;
   private stopped = false;
+  private startPromise: Promise<void> | undefined;
 
   constructor(private readonly dependencies: ConnectionDependencies) {}
 
@@ -42,63 +48,114 @@ export class BridgeConnection {
 
   async start(): Promise<void> {
     this.stopped = false;
+    if (this.startPromise) return this.startPromise;
+    const startPromise = this.startOnce();
+    this.startPromise = startPromise;
+    try {
+      await startPromise;
+    } finally {
+      if (this.startPromise === startPromise) this.startPromise = undefined;
+    }
+  }
+
+  private async startOnce(): Promise<void> {
     const settings = await this.settings();
-    if (!settings.token) {
-      await this.dependencies.storage.set({ bridgeStatus: 'unpaired' });
+    if (this.socket?.readyState === 0 || this.socket?.readyState === 1) return;
+    const bootstrap = !settings.token;
+    if (bootstrap) {
+      try {
+        const fetcher = this.dependencies.fetch;
+        const response = await fetcher(
+          `http://127.0.0.1:${settings.port}/health`,
+        );
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        const health = (await response.json()) as { trustedExtensionId?: unknown };
+        if (typeof health.trustedExtensionId !== 'string') {
+          throw new Error('Bridge health response is missing trustedExtensionId');
+        }
+        if (health.trustedExtensionId !== this.dependencies.extensionId) {
+          this.cancelReconnect();
+          await this.dependencies.storage.set({ bridgeStatus: 'identity_error' });
+          return;
+        }
+      } catch {
+        await this.markDisconnected();
+        return;
+      }
+    }
+    if (this.stopped) return;
+
+    await this.dependencies.storage.set({ bridgeStatus: 'connecting' });
+    let socket: SocketLike;
+    try {
+      socket = this.dependencies.socketFactory(
+        bootstrap
+          ? `ws://127.0.0.1:${settings.port}/v1/extension?bootstrap=1`
+          : `ws://127.0.0.1:${settings.port}/v1/extension?token=${encodeURIComponent(settings.token!)}`,
+      );
+    } catch {
+      await this.markDisconnected();
       return;
     }
-    if (this.socket?.readyState === 0 || this.socket?.readyState === 1) return;
-    const socket = this.dependencies.socketFactory(
-      `ws://127.0.0.1:${settings.port}/v1/extension?token=${encodeURIComponent(settings.token)}`,
-    );
     this.socket = socket;
-    await this.dependencies.storage.set({ bridgeStatus: 'connecting' });
+    let disconnected = false;
+    let announced = false;
+    let authorization: Promise<void> | undefined;
+
+    const announce = async (token?: string): Promise<void> => {
+      if (announced || disconnected || this.socket !== socket) return;
+      if (token && !authorization) {
+        authorization = this.dependencies.storage.set({
+          bridgeToken: token,
+          bridgeStatus: 'connected',
+        });
+      }
+      if (bootstrap && !authorization) return;
+      if (authorization) await authorization;
+      if (announced || disconnected || this.socket !== socket || socket.readyState !== 1) return;
+      announced = true;
+      this.reconnectAttempt = 0;
+      this.cancelReconnect();
+      if (!authorization) {
+        void this.dependencies.storage.set({ bridgeStatus: 'connected' });
+      }
+      this.send('extension.hello', 'extension', { version: APP_VERSION });
+      this.startKeepalive();
+    };
 
     socket.addEventListener('open', () => {
-      this.reconnectAttempt = 0;
-      void this.dependencies.storage.set({ bridgeStatus: 'connected' });
-      this.send('extension.hello', 'extension', { version: '0.1.0' });
-      this.startKeepalive();
+      void announce();
     });
     socket.addEventListener('message', event => {
       if (typeof event.data !== 'string') return;
-      this.handleMessage(event.data);
+      void this.handleMessage(event.data, token => announce(token));
     });
-    socket.addEventListener('close', () => this.handleDisconnect());
-    socket.addEventListener('error', () => this.handleDisconnect());
+    const disconnect = () => {
+      if (disconnected || this.socket !== socket) return;
+      disconnected = true;
+      if (socket.readyState !== 3) socket.close();
+      if (this.socket === socket) this.socket = undefined;
+      if (this.pingTimer !== undefined) {
+        this.dependencies.clearInterval(this.pingTimer);
+        this.pingTimer = undefined;
+      }
+      void this.markDisconnected();
+    };
+    socket.addEventListener('close', disconnect);
+    socket.addEventListener('error', disconnect);
+    if (socket.readyState === 1 && !bootstrap) void announce();
   }
 
   stop(): void {
     this.stopped = true;
-    if (this.pingTimer !== undefined) this.dependencies.clearInterval(this.pingTimer);
-    if (this.reconnectTimer !== undefined) this.dependencies.clearTimeout(this.reconnectTimer);
-    this.socket?.close();
-    this.socket = undefined;
-  }
-
-  async pair(code: string): Promise<void> {
-    const settings = await this.settings();
-    const fetcher = this.dependencies.fetch;
-    const response = await fetcher(
-      `http://127.0.0.1:${settings.port}/v1/pair`,
-      {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ code }),
-      },
-    );
-    if (!response.ok) throw new Error('配对失败，请确认配对码与 Bridge 状态');
-    const body = (await response.json()) as { token?: unknown };
-    if (typeof body.token !== 'string' || body.token.length < 32) {
-      throw new Error('Bridge 返回了无效令牌');
+    if (this.pingTimer !== undefined) {
+      this.dependencies.clearInterval(this.pingTimer);
+      this.pingTimer = undefined;
     }
-    await this.dependencies.storage.set({
-      bridgeToken: body.token,
-      bridgeStatus: 'connecting',
-    });
-    this.socket?.close();
+    this.cancelReconnect();
+    const socket = this.socket;
     this.socket = undefined;
-    await this.start();
+    socket?.close();
   }
 
   send(type: string, requestId: string, payload: unknown): void {
@@ -138,7 +195,7 @@ export class BridgeConnection {
     _overrides?: { userCategory?: string; userTags?: string[] },
   ): Promise<{ id: string }> {
     const settings = await this.settings();
-    if (!settings.token) throw new Error('浏览器扩展尚未与 Bridge 配对');
+    if (!settings.token) throw new Error('浏览器扩展仍在自动连接 Bridge');
     const fetcher = this.dependencies.fetch;
     const response = await fetcher(
       `http://127.0.0.1:${settings.port}/v1/jobs`,
@@ -165,7 +222,7 @@ export class BridgeConnection {
 
   async reveal(path: string): Promise<void> {
     const settings = await this.settings();
-    if (!settings.token) throw new Error('浏览器扩展尚未与 Bridge 配对');
+    if (!settings.token) throw new Error('浏览器扩展仍在自动连接 Bridge');
     const fetcher = this.dependencies.fetch;
     const response = await fetcher(
       `http://127.0.0.1:${settings.port}/v1/reveal`,
@@ -189,10 +246,16 @@ export class BridgeConnection {
     };
   }
 
-  private handleMessage(raw: string): void {
+  private async handleMessage(
+    raw: string,
+    authorize: (token: string) => Promise<void>,
+  ): Promise<void> {
     try {
       const message = wsEnvelopeSchema.parse(JSON.parse(raw));
-      if (message.type === 'job.collect') {
+      if (message.type === 'bridge.authorized') {
+        const payload = bridgeAuthorizedPayloadSchema.parse(message.payload);
+        await authorize(payload.token);
+      } else if (message.type === 'job.collect') {
         const payload = message.payload as { url?: unknown };
         if (typeof payload.url === 'string') {
           void this.dependencies.storage.set({
@@ -227,11 +290,8 @@ export class BridgeConnection {
     }, 20_000);
   }
 
-  private handleDisconnect(): void {
-    if (this.socket?.readyState !== 3) this.socket?.close();
-    this.socket = undefined;
-    if (this.pingTimer !== undefined) this.dependencies.clearInterval(this.pingTimer);
-    void this.dependencies.storage.set({ bridgeStatus: 'disconnected' });
+  private async markDisconnected(): Promise<void> {
+    await this.dependencies.storage.set({ bridgeStatus: 'disconnected' });
     if (this.stopped || this.reconnectTimer !== undefined) return;
     const delay = Math.min(30_000, 1_000 * 2 ** this.reconnectAttempt);
     this.reconnectAttempt += 1;
@@ -239,5 +299,11 @@ export class BridgeConnection {
       this.reconnectTimer = undefined;
       void this.start();
     }, delay);
+  }
+
+  private cancelReconnect(): void {
+    if (this.reconnectTimer === undefined) return;
+    this.dependencies.clearTimeout(this.reconnectTimer);
+    this.reconnectTimer = undefined;
   }
 }

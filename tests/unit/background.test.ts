@@ -1,5 +1,5 @@
-import { describe, expect, it } from 'vitest';
-import type { CollectedDocument } from '@data-collector/shared';
+import { describe, expect, it, vi } from 'vitest';
+import { TRUSTED_EXTENSION_ID, type CollectedDocument } from '@data-collector/shared';
 import {
   JobRunner,
   type BridgeClient,
@@ -137,5 +137,99 @@ describe('extension job runner', () => {
       requestId: 'current-job',
       payload: { document: { userCategory: '稍后阅读', userTags: ['重点'] } },
     });
+  });
+});
+
+function backgroundChromeMock(withSidePanel: boolean) {
+  const installedListeners: Array<() => void> = [];
+  const startupListeners: Array<() => void> = [];
+  const messageListeners: Array<(
+    message: unknown,
+    sender: unknown,
+    sendResponse: (response: unknown) => void,
+  ) => boolean> = [];
+  const alarmListeners: Array<(alarm: { name: string }) => void> = [];
+  const setPanelBehavior = vi.fn(async () => undefined);
+  const chromeMock = {
+    runtime: {
+      id: TRUSTED_EXTENSION_ID,
+      onInstalled: { addListener: vi.fn((listener: () => void) => installedListeners.push(listener)) },
+      onStartup: { addListener: vi.fn((listener: () => void) => startupListeners.push(listener)) },
+      onMessage: {
+        addListener: vi.fn((listener: typeof messageListeners[number]) => messageListeners.push(listener)),
+      },
+    },
+    storage: {
+      local: {
+        get: vi.fn(async () => ({ bridgeToken: 'x'.repeat(43), bridgePort: 17321 })),
+        set: vi.fn(async () => undefined),
+      },
+    },
+    tabs: {
+      create: vi.fn(),
+      remove: vi.fn(),
+      update: vi.fn(),
+      query: vi.fn(async () => []),
+      sendMessage: vi.fn(),
+      get: vi.fn(),
+      onUpdated: { addListener: vi.fn(), removeListener: vi.fn() },
+      onRemoved: { addListener: vi.fn(), removeListener: vi.fn() },
+    },
+    alarms: {
+      create: vi.fn(async () => undefined),
+      onAlarm: { addListener: vi.fn((listener: typeof alarmListeners[number]) => alarmListeners.push(listener)) },
+    },
+    ...(withSidePanel ? { sidePanel: { setPanelBehavior } } : {}),
+  };
+  return {
+    chromeMock,
+    installedListeners,
+    startupListeners,
+    messageListeners,
+    setPanelBehavior,
+  };
+}
+
+class BackgroundSocket {
+  readyState = 0;
+
+  addEventListener(): void {}
+  send(): void {}
+  close(): void { this.readyState = 3; }
+}
+
+describe('background bootstrap', () => {
+  it('configures toolbar action opening at initialization, install, and startup', async () => {
+    vi.resetModules();
+    const mock = backgroundChromeMock(true);
+    vi.stubGlobal('chrome', mock.chromeMock);
+    vi.stubGlobal('WebSocket', BackgroundSocket);
+    vi.stubGlobal('fetch', vi.fn<typeof fetch>());
+
+    await import('../../packages/extension/src/background/index.js');
+    expect(mock.setPanelBehavior).toHaveBeenCalledTimes(1);
+    expect(mock.setPanelBehavior).toHaveBeenLastCalledWith({ openPanelOnActionClick: true });
+
+    mock.installedListeners[0]!();
+    mock.startupListeners[0]!();
+    expect(mock.setPanelBehavior).toHaveBeenCalledTimes(3);
+  });
+
+  it('guards missing Side Panel API and no longer accepts manual pairing messages', async () => {
+    vi.resetModules();
+    const mock = backgroundChromeMock(false);
+    vi.stubGlobal('chrome', mock.chromeMock);
+    vi.stubGlobal('WebSocket', BackgroundSocket);
+    vi.stubGlobal('fetch', vi.fn<typeof fetch>());
+
+    await expect(import('../../packages/extension/src/background/index.js')).resolves.toBeDefined();
+    expect(() => mock.installedListeners[0]!()).not.toThrow();
+    expect(() => mock.startupListeners[0]!()).not.toThrow();
+
+    const response = vi.fn();
+    expect(mock.messageListeners[0]!({ type: 'pair.submit', code: '123456' }, {}, response)).toBe(true);
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(response).toHaveBeenCalledWith({ ok: false, error: '不支持的扩展操作' });
   });
 });
