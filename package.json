@@ -19,6 +19,8 @@
   "devDependencies": {
     "@types/chrome": "0.2.2",
     "@types/node": "26.1.1",
+    "@types/sanitize-html": "2.16.1",
+    "@types/turndown": "5.0.6",
     "@vitest/coverage-v8": "4.1.10",
     "jsdom": "29.1.1",
     "typescript": "7.0.2",
