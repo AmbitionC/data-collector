@@ -1,7 +1,7 @@
-import { cp, mkdir, mkdtemp, readdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
+import { cp, lstat, mkdir, mkdtemp, readdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { zipSync } from 'fflate';
+import { unzipSync, zipSync } from 'fflate';
 
 const ALLOWED_FILES = [
   'background.js',
@@ -11,6 +11,7 @@ const ALLOWED_FILES = [
   'sidepanel/index.js',
   'sidepanel/styles.css',
 ].sort();
+const ALLOWED_DIRECTORIES = ['sidepanel'];
 
 const SECRET_PATTERNS = [
   /\bsk-[A-Za-z0-9_-]{16,}\b/,
@@ -19,18 +20,40 @@ const SECRET_PATTERNS = [
   /\bAKIA[0-9A-Z]{16}\b/,
 ];
 
-async function filesBelow(root, directory = root) {
+async function entriesBelow(root, directory = root) {
   const files = [];
+  const directories = [];
   for (const entry of await readdir(directory, { withFileTypes: true })) {
     const absolute = join(directory, entry.name);
-    if (entry.isDirectory()) files.push(...(await filesBelow(root, absolute)));
-    else if (entry.isFile()) files.push(relative(root, absolute).split('\\').join('/'));
+    const path = relative(root, absolute).split('\\').join('/');
+    if (entry.isSymbolicLink()) throw new Error(`打包目录不允许符号链接：${path}`);
+    if (entry.isDirectory()) {
+      directories.push(path);
+      const nested = await entriesBelow(root, absolute);
+      files.push(...nested.files);
+      directories.push(...nested.directories);
+    } else if (entry.isFile()) {
+      files.push(path);
+    } else {
+      throw new Error(`打包目录包含不允许的目录项：${path}`);
+    }
   }
-  return files.sort();
+  return { files: files.sort(), directories: directories.sort() };
 }
 
 export async function validateExtensionDirectory(root) {
-  const files = await filesBelow(root);
+  const rootStats = await lstat(root);
+  if (!rootStats.isDirectory() || rootStats.isSymbolicLink()) {
+    throw new Error('打包根路径必须是普通目录');
+  }
+  const { files, directories } = await entriesBelow(root);
+  const unexpectedDirectories = directories.filter(directory => !ALLOWED_DIRECTORIES.includes(directory));
+  const missingDirectories = ALLOWED_DIRECTORIES.filter(directory => !directories.includes(directory));
+  if (unexpectedDirectories.length || missingDirectories.length) {
+    throw new Error(
+      `打包包含不允许的目录：unexpected=${unexpectedDirectories.join(',') || '-'} missing=${missingDirectories.join(',') || '-'}`,
+    );
+  }
   const unexpected = files.filter(file => !ALLOWED_FILES.includes(file));
   const missing = ALLOWED_FILES.filter(file => !files.includes(file));
   if (unexpected.length || missing.length) {
@@ -69,7 +92,103 @@ export async function writeExtensionArchive(extensionRoot, archive) {
   return archive;
 }
 
-export async function packageExtension(workspaceRoot) {
+export async function validateExtensionArchive(archive, extensionRoot) {
+  let entries;
+  try {
+    entries = unzipSync(new Uint8Array(await readFile(archive)));
+  } catch (error) {
+    throw new Error('扩展 ZIP 无法读取', { cause: error });
+  }
+  const files = Object.keys(entries).sort();
+  const unexpected = files.filter(file => !ALLOWED_FILES.includes(file));
+  const missing = ALLOWED_FILES.filter(file => !files.includes(file));
+  if (unexpected.length || missing.length) {
+    throw new Error(
+      `扩展 ZIP 文件不在允许清单：unexpected=${unexpected.join(',') || '-'} missing=${missing.join(',') || '-'}`,
+    );
+  }
+  for (const file of files) {
+    const expected = await readFile(join(extensionRoot, file));
+    if (!Buffer.from(entries[file]).equals(expected)) {
+      throw new Error(`扩展 ZIP 内容与 staged directory 不一致：${file}`);
+    }
+  }
+  return files;
+}
+
+async function pathExists(path) {
+  try {
+    await lstat(path);
+    return true;
+  } catch (error) {
+    if (error instanceof Error && 'code' in error && error.code === 'ENOENT') return false;
+    throw error;
+  }
+}
+
+export async function commitExtensionArtifacts(options, dependencies = {}) {
+  const move = dependencies.rename ?? rename;
+  const validateCommittedDirectory =
+    dependencies.validateCommittedDirectory ?? validateExtensionDirectory;
+  const previousDirectory = join(options.transactionRoot, 'previous-directory');
+  const previousArchive = join(options.transactionRoot, 'previous-archive.zip');
+  let backedUpDirectory = false;
+  let backedUpArchive = false;
+  let committedDirectory = false;
+  let committedArchive = false;
+
+  try {
+    if (await pathExists(options.stableDirectory)) {
+      await move(options.stableDirectory, previousDirectory);
+      backedUpDirectory = true;
+    }
+    if (await pathExists(options.archive)) {
+      await move(options.archive, previousArchive);
+      backedUpArchive = true;
+    }
+    await move(options.stagedArchive, options.archive);
+    committedArchive = true;
+    await move(options.stagedDirectory, options.stableDirectory);
+    committedDirectory = true;
+    await validateCommittedDirectory(options.stableDirectory);
+  } catch (error) {
+    const rollbackErrors = [];
+    if (committedDirectory) {
+      try {
+        await rm(options.stableDirectory, { recursive: true, force: true });
+      } catch (rollbackError) {
+        rollbackErrors.push(rollbackError);
+      }
+    }
+    if (committedArchive) {
+      try {
+        await rm(options.archive, { force: true });
+      } catch (rollbackError) {
+        rollbackErrors.push(rollbackError);
+      }
+    }
+    if (backedUpDirectory) {
+      try {
+        await move(previousDirectory, options.stableDirectory);
+      } catch (rollbackError) {
+        rollbackErrors.push(rollbackError);
+      }
+    }
+    if (backedUpArchive) {
+      try {
+        await move(previousArchive, options.archive);
+      } catch (rollbackError) {
+        rollbackErrors.push(rollbackError);
+      }
+    }
+    if (rollbackErrors.length) {
+      throw new AggregateError([error, ...rollbackErrors], '扩展 artifacts 提交失败且回滚不完整');
+    }
+    throw error;
+  }
+}
+
+export async function packageExtension(workspaceRoot, dependencies = {}) {
   const extensionRoot = join(workspaceRoot, 'packages', 'extension', 'dist');
   const artifactDirectory = join(workspaceRoot, 'artifacts');
   await mkdir(artifactDirectory, { recursive: true });
@@ -81,26 +200,19 @@ export async function packageExtension(workspaceRoot) {
   const stagingRoot = await mkdtemp(join(artifactDirectory, '.data-collector-extension-'));
   const stagedDirectory = join(stagingRoot, 'unpacked');
   const stagedArchive = join(stagingRoot, 'extension.zip');
-  const previousDirectory = join(stagingRoot, 'previous');
-  let movedPrevious = false;
   try {
     await cp(extensionRoot, stagedDirectory, { recursive: true });
     await validateExtensionDirectory(stagedDirectory);
-    await writeExtensionArchive(stagedDirectory, stagedArchive);
-    await rename(stagedArchive, archive);
-    try {
-      await rename(stableDirectory, previousDirectory);
-      movedPrevious = true;
-    } catch (error) {
-      if (!(error instanceof Error && 'code' in error && error.code === 'ENOENT')) throw error;
-    }
-    try {
-      await rename(stagedDirectory, stableDirectory);
-    } catch (error) {
-      if (movedPrevious) await rename(previousDirectory, stableDirectory);
-      throw error;
-    }
-    await validateExtensionDirectory(stableDirectory);
+    const writeArchive = dependencies.writeArchive ?? writeExtensionArchive;
+    await writeArchive(stagedDirectory, stagedArchive);
+    await validateExtensionArchive(stagedArchive, stagedDirectory);
+    await commitExtensionArtifacts({
+      transactionRoot: stagingRoot,
+      stagedDirectory,
+      stagedArchive,
+      stableDirectory,
+      archive,
+    }, dependencies);
     if (obsoleteArchive !== archive) await rm(obsoleteArchive, { force: true });
     return archive;
   } finally {

@@ -1,5 +1,14 @@
 import { createHash } from 'node:crypto';
-import { mkdir, readFile, readdir, stat, utimes, writeFile } from 'node:fs/promises';
+import {
+  mkdir,
+  readFile,
+  readdir,
+  rename as fsRename,
+  stat,
+  symlink,
+  utimes,
+  writeFile,
+} from 'node:fs/promises';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { MANIFEST_PUBLIC_KEY, TRUSTED_EXTENSION_ID } from '@data-collector/shared';
@@ -104,6 +113,25 @@ describe('extension package validation', () => {
     await expect(validateExtensionDirectory(root)).rejects.toThrow(/打包文件不在允许清单/);
   });
 
+  it.each(['popup', 'sidepanel/extra'])('rejects unexpected directory %s even when empty', async directory => {
+    const root = await fixture();
+    await mkdir(join(root, directory), { recursive: true });
+
+    await expect(validateExtensionDirectory(root)).rejects.toThrow(/不允许的目录/);
+  });
+
+  it('rejects a symlink before reading or copying its external target', async () => {
+    const workspace = await temporaryDirectories.create('data-collector-workspace-');
+    const dist = await writeFixture(join(workspace, 'packages', 'extension', 'dist'));
+    const external = join(await temporaryDirectories.create('data-collector-external-'), 'secret.txt');
+    await writeFile(external, 'sk-example-secret-value');
+    await symlink(external, join(dist, 'linked-secret.txt'));
+
+    await expect(packageExtension(workspace)).rejects.toThrow(/符号链接.*linked-secret\.txt/);
+    expect(await readFile(external, 'utf8')).toBe('sk-example-secret-value');
+    expect(await readdir(join(workspace, 'artifacts'))).toEqual([]);
+  });
+
   it('rejects credential-like content', async () => {
     const root = await fixture();
     await writeFile(join(root, 'background.js'), 'const key = "sk-example-secret-value";');
@@ -165,5 +193,78 @@ describe('extension package validation', () => {
     await expect(packageExtension(workspace)).rejects.toThrow(/version/);
     expect(await readFile(stableMarker, 'utf8')).toBe('existing');
     expect(await readFile(obsoleteArchive, 'utf8')).toBe('obsolete');
+  });
+
+  it('validates the staged archive before touching existing artifacts', async () => {
+    const workspace = await temporaryDirectories.create('data-collector-workspace-');
+    await writeFixture(join(workspace, 'packages', 'extension', 'dist'));
+    const artifacts = join(workspace, 'artifacts');
+    const stable = join(artifacts, 'data-collector-extension');
+    const archive = join(artifacts, 'data-collector-extension-0.2.0.zip');
+    await mkdir(stable, { recursive: true });
+    await writeFile(join(stable, 'existing.txt'), 'existing stable');
+    await writeFile(archive, 'existing archive');
+
+    await expect(packageExtension(workspace, {
+      writeArchive: async (_root, destination) => { await writeFile(destination, 'not a zip'); },
+    })).rejects.toThrow(/ZIP/);
+
+    expect(await readFile(join(stable, 'existing.txt'), 'utf8')).toBe('existing stable');
+    expect(await readFile(archive, 'utf8')).toBe('existing archive');
+    expect((await readdir(artifacts)).sort()).toEqual([
+      'data-collector-extension',
+      'data-collector-extension-0.2.0.zip',
+    ]);
+  });
+
+  it('rolls back the stable directory and archive when post-rename validation fails', async () => {
+    const workspace = await temporaryDirectories.create('data-collector-workspace-');
+    await writeFixture(join(workspace, 'packages', 'extension', 'dist'));
+    const artifacts = join(workspace, 'artifacts');
+    const stable = join(artifacts, 'data-collector-extension');
+    const archive = join(artifacts, 'data-collector-extension-0.2.0.zip');
+    await mkdir(stable, { recursive: true });
+    await writeFile(join(stable, 'existing.txt'), 'existing stable');
+    await writeFile(archive, 'existing archive');
+
+    await expect(packageExtension(workspace, {
+      validateCommittedDirectory: async () => { throw new Error('injected post-rename validation failure'); },
+    })).rejects.toThrow(/injected post-rename validation failure/);
+
+    expect(await readFile(join(stable, 'existing.txt'), 'utf8')).toBe('existing stable');
+    expect(await readdir(stable)).toEqual(['existing.txt']);
+    expect(await readFile(archive, 'utf8')).toBe('existing archive');
+    expect((await readdir(artifacts)).sort()).toEqual([
+      'data-collector-extension',
+      'data-collector-extension-0.2.0.zip',
+    ]);
+  });
+
+  it('rolls back both artifacts and removes transaction files when archive commit rename fails', async () => {
+    const workspace = await temporaryDirectories.create('data-collector-workspace-');
+    await writeFixture(join(workspace, 'packages', 'extension', 'dist'));
+    const artifacts = join(workspace, 'artifacts');
+    const stable = join(artifacts, 'data-collector-extension');
+    const archive = join(artifacts, 'data-collector-extension-0.2.0.zip');
+    await mkdir(stable, { recursive: true });
+    await writeFile(join(stable, 'existing.txt'), 'existing stable');
+    await writeFile(archive, 'existing archive');
+
+    await expect(packageExtension(workspace, {
+      rename: async (source, destination) => {
+        if (source.endsWith('extension.zip') && destination === archive) {
+          throw Object.assign(new Error('injected archive rename failure'), { code: 'EIO' });
+        }
+        await fsRename(source, destination);
+      },
+    })).rejects.toThrow(/injected archive rename failure/);
+
+    expect(await readFile(join(stable, 'existing.txt'), 'utf8')).toBe('existing stable');
+    expect(await readdir(stable)).toEqual(['existing.txt']);
+    expect(await readFile(archive, 'utf8')).toBe('existing archive');
+    expect((await readdir(artifacts)).sort()).toEqual([
+      'data-collector-extension',
+      'data-collector-extension-0.2.0.zip',
+    ]);
   });
 });

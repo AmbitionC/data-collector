@@ -16,11 +16,19 @@ let bridge: BridgeHandle | undefined;
 const temporaryDirectories = createTemporaryDirectoryTracker();
 
 afterEach(async () => {
-  await browser?.close();
-  await bridge?.close();
+  const activeBrowser = browser;
+  const activeBridge = bridge;
   browser = undefined;
   bridge = undefined;
-  await temporaryDirectories.cleanup();
+  const closeResults = await Promise.allSettled([
+    Promise.resolve().then(() => activeBrowser?.close()),
+    Promise.resolve().then(() => activeBridge?.close()),
+  ]);
+  const cleanupResults = await Promise.allSettled([temporaryDirectories.cleanup()]);
+  const failures = [...closeResults, ...cleanupResults]
+    .filter((result): result is PromiseRejectedResult => result.status === 'rejected')
+    .map(result => result.reason);
+  if (failures.length) throw new AggregateError(failures, 'E2E 资源清理失败');
 });
 
 async function sidePanelFor(targetPage: Page): Promise<{ page: Page; worker: WebWorker }> {
