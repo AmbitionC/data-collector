@@ -166,6 +166,7 @@ describe('local Bridge', () => {
       version: string;
       trustedExtensionId: string;
       extensionConnected: boolean;
+      routes: Record<string, string[]>;
     }>(bridge.url, '/health');
     expect(health).toEqual({
       status: 200,
@@ -174,6 +175,8 @@ describe('local Bridge', () => {
         version: APP_VERSION,
         trustedExtensionId: TRUSTED_EXTENSION_ID,
         extensionConnected: false,
+        // 默认无 sinks.json：所有来源回退到本机库。
+        routes: { wechat: ['本机库'], zsxq: ['本机库'], nowcoder: ['本机库'] },
       },
     });
     const unauthorized = await requestJson(bridge.url, '/v1/jobs', {

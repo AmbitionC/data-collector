@@ -31,11 +31,14 @@
 
 - `sinks`：`{ <id>: 定义 }`。
   - `{ "type": "markdown" }`
-  - `{ "type": "repo-inbox", "repoPath": "…", "inboxDir": "_inbox", "commit": true, "push": false }`
+  - `{ "type": "repo-inbox", "repoPath": "…", "inboxDir": "_inbox", "label": "…", "commit": true, "push": false }`
     - `repoPath` 支持 `~` 展开；`inboxDir` 默认 `_inbox`。
+    - `label`（可选）：侧边栏「保存去向」展示的名称；缺省由仓库目录名派生（如「life-teachers 收件箱」）。
     - `commit`（默认 `true`）：写入后 `git add/commit` 到当前分支（不切分支）。
     - `push`（默认 `false`）：提交后 `git push`。**本机 Agent 无需 push；若由云端定时 Routine（每次全新克隆）消费收件箱，则需 `push: true`。**
 - `routes`：`{ <source>: [sinkId, …] }`。未列出的来源回退到 `markdown`。
+
+**落地去向展示**：Bridge 的 `/health` 会返回「来源→去向名称」映射（只含 sink 的 `label`，**不含本机路径/凭证**）。扩展缓存后，侧边栏在识别到当前页面来源时显示「保存去向：本机库 · fe-journey 收件箱」，让保存前就能看清这一页会进哪些库。
 
 示例见 [`examples/sinks.example.json`](examples/sinks.example.json)。
 

@@ -1,4 +1,4 @@
-import type { Source } from '@data-collector/shared';
+import { SOURCES, type Source } from '@data-collector/shared';
 import type { OrganizedDocument } from '../organize/index.js';
 import type { ResolveAddresses } from '../library/assets.js';
 import { MarkdownLibrarySink } from './markdownLibrarySink.js';
@@ -51,6 +51,7 @@ export class SinkRouter {
           new RepoInboxSink({
             id,
             repoPath: definition.repoPath,
+            ...(definition.label ? { label: definition.label } : {}),
             ...(definition.inboxDir ? { inboxDir: definition.inboxDir } : {}),
             ...(definition.commit !== undefined ? { commit: definition.commit } : {}),
             ...(definition.push !== undefined ? { push: definition.push } : {}),
@@ -68,6 +69,18 @@ export class SinkRouter {
       }));
     }
     return new SinkRouter(sinks, config.routes, warn);
+  }
+
+  /**
+   * 每个来源的「去向」标签列表（供侧边栏展示）。只暴露面向用户的 sink 名称，
+   * 不含本机路径、凭证等敏感信息。
+   */
+  describeRoutes(): Record<Source, string[]> {
+    const out = {} as Record<Source, string[]>;
+    for (const source of SOURCES) {
+      out[source] = this.resolveSinkIds(source).map(id => this.sinks.get(id)?.label ?? id);
+    }
+    return out;
   }
 
   /** 解析某来源要用的 sink id 列表（去重、剔除未定义项，空则回退 markdown）。 */

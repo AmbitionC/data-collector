@@ -11,6 +11,7 @@ export type SidePanelState =
       title: string;
       category: string;
       tags: string[];
+      routeTargets?: string[];
     }
   | { phase: 'collecting'; activeStage: number }
   | { phase: 'saved'; path: string }
@@ -34,7 +35,7 @@ export interface BackgroundStatus {
   lastJobUrl?: string;
   lastJobError?: string;
   lastOutputPath?: string;
-  page: { supported: boolean; title: string; url: string };
+  page: { supported: boolean; title: string; url: string; routeTargets?: string[] };
 }
 
 export function sidePanelStateFromStatus(status: BackgroundStatus): SidePanelState {
@@ -80,6 +81,7 @@ export function sidePanelStateFromStatus(status: BackgroundStatus): SidePanelSta
     title: status.page.title || '未命名内容',
     category: '',
     tags: [],
+    ...(status.page.routeTargets?.length ? { routeTargets: status.page.routeTargets } : {}),
   };
 }
 
@@ -162,6 +164,15 @@ export function renderSidePanel(
     const panel = show(document, '#ready-panel');
     required(document, '#source-label').textContent = state.sourceLabel;
     required(document, '#page-title').textContent = state.title;
+    const routeHint = required<HTMLElement>(document, '#route-hint');
+    const targets = state.routeTargets ?? [];
+    if (targets.length > 0) {
+      routeHint.hidden = false;
+      routeHint.textContent = `保存去向：${targets.join(' · ')}`;
+    } else {
+      routeHint.hidden = true;
+      routeHint.textContent = '';
+    }
     if (panel.dataset.url !== state.url) {
       panel.dataset.url = state.url;
       required<HTMLInputElement>(document, '#category').value = state.category;

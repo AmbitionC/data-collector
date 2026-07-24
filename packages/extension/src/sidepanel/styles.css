@@ -334,6 +334,23 @@ input:focus {
 .capture-button { margin-top: 18px; }
 .capture-button span[aria-hidden] { font-size: 15px; opacity: 0.9; }
 
+/* 落地去向提示（数据来自 bridge 路由，仅展示 sink 名称，不含本机路径）。 */
+.route-hint {
+  display: flex;
+  gap: 6px;
+  align-items: baseline;
+  margin: 12px 2px 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.route-hint::before {
+  content: "↳";
+  color: var(--muted-soft);
+  font-size: 12px;
+}
+
 .result-actions {
   display: grid;
   grid-template-columns: 1fr;

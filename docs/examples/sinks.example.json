@@ -5,6 +5,7 @@
       "type": "repo-inbox",
       "repoPath": "~/Code/life-teachers",
       "inboxDir": "_inbox",
+      "label": "life-teachers 收件箱",
       "commit": true,
       "push": false
     },
@@ -12,6 +13,7 @@
       "type": "repo-inbox",
       "repoPath": "~/Code/front-end-journey-resource",
       "inboxDir": "_inbox",
+      "label": "fe-journey 收件箱",
       "commit": true,
       "push": false
     }

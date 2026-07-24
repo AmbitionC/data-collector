@@ -12,6 +12,7 @@ const repoInboxSinkSchema = z.object({
   type: z.literal('repo-inbox'),
   repoPath: z.string().trim().min(1).max(4096),
   inboxDir: z.string().trim().min(1).max(200).optional(),
+  label: z.string().trim().min(1).max(60).optional(),
   commit: z.boolean().optional(),
   push: z.boolean().optional(),
 });

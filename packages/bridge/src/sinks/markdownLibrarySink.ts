@@ -8,6 +8,7 @@ import type { ContentSink, SinkResult } from './types.js';
  */
 export class MarkdownLibrarySink implements ContentSink {
   readonly id = 'markdown';
+  readonly label = '本机库';
   private readonly library: MarkdownLibrary;
 
   constructor(options: MarkdownLibraryOptions) {

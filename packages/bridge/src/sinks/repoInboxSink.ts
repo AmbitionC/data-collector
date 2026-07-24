@@ -13,6 +13,8 @@ import type { ContentSink, SinkResult } from './types.js';
 export interface RepoInboxSinkOptions {
   /** sink 标识（路由用）。 */
   id: string;
+  /** 面向用户的去向名称；缺省由仓库目录名派生（如「life-teachers 收件箱」）。 */
+  label?: string;
   /** 目标仓库根目录（支持 ~ 展开）。 */
   repoPath: string;
   /** 收件箱子目录（相对仓库根），默认 `_inbox`。 */
@@ -92,6 +94,7 @@ function defaultRunGit(
  */
 export class RepoInboxSink implements ContentSink {
   readonly id: string;
+  readonly label: string;
   private readonly repoRoot: string;
   private readonly inboxDir: string;
   private readonly commit: boolean;
@@ -105,6 +108,7 @@ export class RepoInboxSink implements ContentSink {
     this.id = options.id;
     this.repoRoot = expandPath(options.repoPath);
     this.inboxDir = options.inboxDir ?? '_inbox';
+    this.label = options.label ?? `${this.repoRoot.split(/[\\/]/).filter(Boolean).pop() ?? '仓库'} 收件箱`;
     this.commit = options.commit ?? true;
     this.push = options.push ?? false;
     this.fetcher = options.fetch ?? fetch;

@@ -108,11 +108,18 @@ export class BridgeConnection {
           `http://127.0.0.1:${settings.port}/health`,
         );
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
-        const health = (await response.json()) as { trustedExtensionId?: unknown };
+        const health = (await response.json()) as {
+          trustedExtensionId?: unknown;
+          routes?: unknown;
+        };
         if (typeof health.trustedExtensionId !== 'string') {
           throw new Error('Bridge health response is missing trustedExtensionId');
         }
         trustedExtensionId = health.trustedExtensionId;
+        // 缓存来源→去向映射（仅面向用户的 sink 名称），供侧边栏展示落地去向。
+        if (health.routes && typeof health.routes === 'object') {
+          await this.dependencies.storage.set({ routes: health.routes });
+        }
       } catch {
         await this.markDisconnected(generation);
         return;

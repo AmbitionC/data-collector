@@ -198,6 +198,27 @@ describe('SinkRouter', () => {
     expect(warn).toHaveBeenCalledWith(expect.stringContaining('ghost'));
   });
 
+  it('describes per-source routing targets by user-facing label (no paths leaked)', () => {
+    const router = SinkRouter.build(
+      {
+        sinks: {
+          markdown: { type: 'markdown' },
+          'fe-inbox': { type: 'repo-inbox', repoPath: '~/Code/front-end-journey-resource' },
+          lt: { type: 'repo-inbox', repoPath: '/x/life-teachers', label: 'life-teachers 收件箱' },
+        },
+        routes: { nowcoder: ['fe-inbox'], wechat: ['markdown', 'lt'] },
+      },
+      { libraryRoot: '/tmp/lib' },
+    );
+    const routes = router.describeRoutes();
+    expect(routes.nowcoder).toEqual(['front-end-journey-resource 收件箱']);
+    expect(routes.wechat).toEqual(['本机库', 'life-teachers 收件箱']);
+    expect(routes.zsxq).toEqual(['本机库']); // 未配置来源回退本机库
+    // 不泄露本机路径
+    expect(JSON.stringify(routes)).not.toContain('/x/');
+    expect(JSON.stringify(routes)).not.toContain('Code');
+  });
+
   it('honours an explicit per-job override', () => {
     const router = SinkRouter.build(
       {

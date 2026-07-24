@@ -203,6 +203,7 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
         version: APP_VERSION,
         trustedExtensionId: TRUSTED_EXTENSION_ID,
         extensionConnected: extensionReady && extensionSocket?.readyState === WebSocket.OPEN,
+        routes: router.describeRoutes(),
       });
     }
     const jobMatch = requestUrl.pathname.match(/^\/v1\/jobs\/([^/]+)$/);

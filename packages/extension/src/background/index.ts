@@ -1,4 +1,4 @@
-import { parseSupportedUrl } from '@data-collector/shared';
+import { descriptorForHost, parseSupportedUrl } from '@data-collector/shared';
 import {
   BridgeConnection,
   type ExtensionStorage,
@@ -88,13 +88,18 @@ async function status() {
     'lastJobUrl',
     'lastJobError',
     'lastOutputPath',
+    'routes',
   ]);
   const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
   let supported = false;
+  let routeTargets: string[] = [];
   if (tab?.url) {
     try {
       parseSupportedUrl(tab.url);
       supported = true;
+      const source = descriptorForHost(new URL(tab.url).hostname)?.id;
+      const routes = values.routes as Record<string, string[]> | undefined;
+      if (source && Array.isArray(routes?.[source])) routeTargets = routes[source];
     } catch {
       supported = false;
     }
@@ -106,7 +111,7 @@ async function status() {
     lastJobUrl: values.lastJobUrl,
     lastJobError: values.lastJobError,
     lastOutputPath: values.lastOutputPath,
-    page: { supported, title: tab?.title ?? '', url: tab?.url ?? '' },
+    page: { supported, title: tab?.title ?? '', url: tab?.url ?? '', routeTargets },
   };
 }
 
