@@ -182,9 +182,10 @@ export function renderSidePanel(
     return;
   }
   if (state.phase === 'collecting') {
-    show(document, '#collecting-panel');
+    const panel = show(document, '#collecting-panel');
     const stages = ['识别页面', '清理正文', '归纳内容', '写入本机'];
     const activeStage = Math.max(0, Math.min(3, state.activeStage));
+    panel.dataset.stage = String(activeStage);
     required(document, '#collecting-status').textContent = `正在${stages[activeStage]}`;
     for (const step of document.querySelectorAll<HTMLElement>('.track-step')) {
       const stage = Number(step.dataset.stage);
