@@ -183,6 +183,8 @@ describe('built Chrome extension', () => {
       headless: true,
       enableExtensions: [EXTENSION_PATH],
       executablePath,
+      // 容器/CI 环境（无用户命名空间沙箱）需要显式关闭沙箱，本地测试仅加载受信任 fixture。
+      args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'],
       timeout: 20_000,
       protocolTimeout: 20_000,
       signal: AbortSignal.timeout(25_000),
