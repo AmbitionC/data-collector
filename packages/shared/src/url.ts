@@ -1,38 +1,26 @@
 import { sha256 } from '@noble/hashes/sha2.js';
 import { bytesToHex } from '@noble/hashes/utils.js';
-
-const WECHAT_HOST = 'mp.weixin.qq.com';
-const ZSXQ_HOST = 'wx.zsxq.com';
-const WECHAT_IDENTITY_PARAMS = new Set(['__biz', 'mid', 'idx', 'sn', 'chksm']);
-const ZSXQ_IDENTITY_PARAMS = new Set([
-  'topic_id',
-  'group_id',
-  'article_id',
-  'question_id',
-  'answer_id',
-]);
+import { descriptorForHost } from './sources.js';
 
 export function parseSupportedUrl(raw: string): URL {
   try {
     const url = new URL(raw);
     const host = url.hostname.toLowerCase();
-    const supportedHost =
-      host === WECHAT_HOST || host === ZSXQ_HOST || host.endsWith('.zsxq.com');
-    if (url.protocol !== 'https:' || !supportedHost) {
+    if (url.protocol !== 'https:' || !descriptorForHost(host)) {
       throw new Error('unsupported');
     }
     url.hostname = host;
     return url;
   } catch {
-    throw new Error('不支持的采集地址：仅支持微信公众号和知识星球 HTTPS 页面');
+    throw new Error('不支持的采集地址：仅支持微信公众号、知识星球和牛客网 HTTPS 页面');
   }
 }
 
 export function canonicalizeUrl(input: URL): URL {
   const url = parseSupportedUrl(input.href);
   url.hash = '';
-  const allowlist =
-    url.hostname === WECHAT_HOST ? WECHAT_IDENTITY_PARAMS : ZSXQ_IDENTITY_PARAMS;
+  const descriptor = descriptorForHost(url.hostname);
+  const allowlist = new Set(descriptor?.identityParams ?? []);
   const kept = [...url.searchParams.entries()]
     .filter(([key]) => allowlist.has(key))
     .sort(([a, av], [b, bv]) => a.localeCompare(b) || av.localeCompare(bv));

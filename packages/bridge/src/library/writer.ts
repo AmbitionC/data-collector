@@ -1,8 +1,8 @@
 import { randomBytes } from 'node:crypto';
 import { mkdir, open, readFile, rename } from 'node:fs/promises';
 import { dirname, join, relative } from 'node:path';
-import TurndownService from 'turndown';
-import { stableContentId } from '@data-collector/shared';
+import { descriptorFor, stableContentId, type Source } from '@data-collector/shared';
+import { renderMarkdown } from './markdown.js';
 import type { OrganizedDocument } from '../organize/index.js';
 import { downloadAssets } from './assets.js';
 import type { ResolveAddresses } from './assets.js';
@@ -10,7 +10,7 @@ import { assertInsideRoot, assertSafeWritePath, safeSlug } from './paths.js';
 
 interface CatalogEntry {
   id: string;
-  source: 'wechat' | 'zsxq';
+  source: Source;
   title: string;
   url: string;
   category: string;
@@ -30,11 +30,6 @@ export interface MarkdownLibraryOptions {
   fetch?: typeof fetch;
   resolveAddresses?: ResolveAddresses;
 }
-
-const SOURCE_DIRECTORIES = {
-  wechat: '微信公众号',
-  zsxq: '知识星球',
-} as const;
 
 async function atomicWriteText(root: string, path: string, contents: string): Promise<void> {
   await assertSafeWritePath(root, dirname(path));
@@ -80,16 +75,6 @@ function frontMatter(input: OrganizedDocument, id: string, failedImages: number)
   return lines.join('\n');
 }
 
-function toMarkdown(html: string): string {
-  const service = new TurndownService({
-    headingStyle: 'atx',
-    codeBlockStyle: 'fenced',
-    bulletListMarker: '-',
-    emDelimiter: '_',
-  });
-  return service.turndown(html).trim();
-}
-
 export class MarkdownLibrary {
   private readonly root: string;
   private readonly fetcher: typeof fetch;
@@ -123,7 +108,7 @@ export class MarkdownLibrary {
     const relativePath =
       existing?.relativePath ??
       join(
-        SOURCE_DIRECTORIES[input.document.source],
+        descriptorFor(input.document.source).label,
         safeSlug(input.category),
         year,
         `${id}-${safeSlug(input.document.title)}`,
@@ -143,7 +128,7 @@ export class MarkdownLibrary {
       fetch: this.fetcher,
       ...(this.resolveAddresses ? { resolveAddresses: this.resolveAddresses } : {}),
     });
-    const markdown = `${frontMatter(input, id, assets.failed)}# ${input.document.title}\n\n${toMarkdown(assets.html)}\n`;
+    const markdown = `${frontMatter(input, id, assets.failed)}# ${input.document.title}\n\n${renderMarkdown(assets.html)}\n`;
     await atomicWriteText(this.root, markdownPath, markdown);
 
     const nextEntry: CatalogEntry = {

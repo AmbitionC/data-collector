@@ -1,4 +1,4 @@
-export const SOURCES = ['wechat', 'zsxq'] as const;
+export const SOURCES = ['wechat', 'zsxq', 'nowcoder'] as const;
 export type Source = (typeof SOURCES)[number];
 
 export const CONTENT_KINDS = ['article', 'post', 'question', 'answer'] as const;

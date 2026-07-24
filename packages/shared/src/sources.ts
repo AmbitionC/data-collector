@@ -1,0 +1,76 @@
+import type { ContentKind, Source } from './model.js';
+
+/**
+ * 来源描述符：一个来源的声明式定义，作为 URL 校验、规范化、协议校验、
+ * 本机库目录与收件箱目录命名、以及提取器分派的单一真相源。
+ *
+ * 新增一个来源 = 在 SOURCE_REGISTRY 里加一条描述符 + 在扩展侧写一个提取器，
+ * 不再需要在 model / url / protocol / extractors 四处分别改硬编码。
+ */
+export interface SourceDescriptor {
+  /** 来源标识，与 SOURCES 一致。 */
+  readonly id: Source;
+  /** 展示名，同时用作本机库与收件箱的目录名（如“微信公众号”）。 */
+  readonly label: string;
+  /** 判断某主机名（已小写）是否属于该来源。 */
+  matchHost(host: string): boolean;
+  /**
+   * 规范化 URL 时保留的查询参数（其余全部丢弃）。
+   * 空数组表示该来源的身份在 path 段中（如牛客的帖子 id），只保留路径。
+   */
+  readonly identityParams: readonly string[];
+  /** 该来源允许的内容类型。 */
+  readonly kinds: readonly ContentKind[];
+  /** 缺省内容类型。 */
+  readonly defaultKind: ContentKind;
+}
+
+const WECHAT_HOST = 'mp.weixin.qq.com';
+const ZSXQ_HOST = 'wx.zsxq.com';
+const NOWCODER_HOST = 'www.nowcoder.com';
+
+/**
+ * 来源注册表。键必须覆盖 SOURCES 的每一项（编译期强制）。
+ */
+export const SOURCE_REGISTRY: Record<Source, SourceDescriptor> = {
+  wechat: {
+    id: 'wechat',
+    label: '微信公众号',
+    matchHost: host => host === WECHAT_HOST,
+    identityParams: ['__biz', 'mid', 'idx', 'sn', 'chksm'],
+    kinds: ['article'],
+    defaultKind: 'article',
+  },
+  zsxq: {
+    id: 'zsxq',
+    label: '知识星球',
+    matchHost: host => host === ZSXQ_HOST || host.endsWith('.zsxq.com'),
+    identityParams: ['topic_id', 'group_id', 'article_id', 'question_id', 'answer_id'],
+    kinds: ['article', 'post', 'question', 'answer'],
+    defaultKind: 'post',
+  },
+  nowcoder: {
+    id: 'nowcoder',
+    label: '牛客网',
+    matchHost: host =>
+      host === NOWCODER_HOST || host === 'nowcoder.com' || host.endsWith('.nowcoder.com'),
+    // 牛客面经身份在 path（/discuss/<id>、/feed/main/detail/<id>），查询参数全为跟踪参数。
+    identityParams: [],
+    kinds: ['post'],
+    defaultKind: 'post',
+  },
+};
+
+/** 按主机名查找来源描述符；找不到返回 undefined。 */
+export function descriptorForHost(host: string): SourceDescriptor | undefined {
+  const lower = host.toLowerCase();
+  for (const descriptor of Object.values(SOURCE_REGISTRY)) {
+    if (descriptor.matchHost(lower)) return descriptor;
+  }
+  return undefined;
+}
+
+/** 按来源标识取描述符。 */
+export function descriptorFor(source: Source): SourceDescriptor {
+  return SOURCE_REGISTRY[source];
+}

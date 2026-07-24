@@ -21,8 +21,9 @@ import {
 import { AccessTokenManager } from '../auth.js';
 import { loadConfig, type ConfigOverrides } from '../config.js';
 import { JobStore } from '../jobs/store.js';
-import { MarkdownLibrary } from '../library/index.js';
+import type { ResolveAddresses } from '../library/assets.js';
 import { organize } from '../organize/index.js';
+import { loadSinksConfig, SinkRouter } from '../sinks/index.js';
 import { attachExtensionWebSocket } from './websocket.js';
 import { bearerToken, HttpError, isLoopback, readJson, sendJson } from './http.js';
 
@@ -41,6 +42,7 @@ const revealSchema = z.object({ path: z.string().trim().min(1).max(4096) });
 
 export interface StartBridgeOptions extends ConfigOverrides {
   fetch?: typeof fetch;
+  resolveAddresses?: ResolveAddresses;
   reveal?: (path: string) => Promise<void>;
 }
 
@@ -108,10 +110,16 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
   const access = await AccessTokenManager.open(config.authFile);
   const jobs = await JobStore.open(config.jobsFile);
   await jobs.recover();
-  const library = new MarkdownLibrary({
-    root: config.libraryRoot,
-    ...(options.fetch ? { fetch: options.fetch } : {}),
-  });
+  const sinksConfig = await loadSinksConfig(config.sinksFile);
+  const router = SinkRouter.build(
+    sinksConfig,
+    {
+      libraryRoot: config.libraryRoot,
+      ...(options.fetch ? { fetch: options.fetch } : {}),
+      ...(options.resolveAddresses ? { resolveAddresses: options.resolveAddresses } : {}),
+    },
+    message => console.warn(`[sinks] ${message}`),
+  );
   const reveal = options.reveal ?? defaultReveal;
   let extensionSocket: WebSocket | undefined;
   let extensionReady = false;
@@ -157,9 +165,21 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
         throw new Error('回传内容 URL 与采集任务不一致');
       }
       if (job.status === 'dispatched') await jobs.transition(job.id, 'collecting');
-      const saved = await library.save(organize(result.document as CollectedDocument));
-      await jobs.transition(job.id, 'saved', { outputPath: saved.markdownPath });
-      socket.send(JSON.stringify(envelope('job.saved', job.id, saved)));
+      const sinkResults = await router.save(organize(result.document as CollectedDocument));
+      const succeeded = sinkResults.filter(sinkResult => sinkResult.ok);
+      if (succeeded.length === 0) {
+        const detail = sinkResults
+          .map(sinkResult => `${sinkResult.sinkId}: ${sinkResult.detail?.error ?? '失败'}`)
+          .join('；');
+        throw new Error(`所有落地目标均失败：${detail || '无可用目标'}`);
+      }
+      const primary = succeeded[0]!;
+      await jobs.transition(job.id, 'saved', { outputPath: primary.outputRef });
+      socket.send(
+        JSON.stringify(
+          envelope('job.saved', job.id, { outputPath: primary.outputRef, results: sinkResults }),
+        ),
+      );
       return;
     }
     if (parsedEnvelope.type === 'job.error') {

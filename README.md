@@ -1,6 +1,6 @@
 # Data Collector
 
-Data Collector 0.2.0 是一个本机优先的 Microsoft Edge 扩展。它常驻 Side Panel，把微信公众号文章以及知识星球的文章、动态、问题和回答整理为本机 Markdown 知识库。正文和账号凭证默认不会上传云端。
+Data Collector 是一个本机优先的 Microsoft Edge 扩展。它常驻 Side Panel，把微信公众号文章、知识星球的文章/动态/问答，以及牛客网的面经/讨论整理为结构化内容；默认写入本机 Markdown 知识库，也可按来源路由投递到目标仓库的收件箱，供 Claude Code / Codex 等 Agent 后续归档。正文和账号凭证默认不会上传云端。
 
 ## 能做什么
 
@@ -10,6 +10,7 @@ Data Collector 0.2.0 是一个本机优先的 Microsoft Edge 扩展。它常驻 
 - 提取标题、作者、发布时间、正文与最多 30 张图片。
 - 离线生成摘要、分类和标签；用户指定的分类、标签优先。
 - 原子写入 Markdown；重复采集同一规范 URL 时更新原条目，不制造副本。
+- 可选按来源路由到目标仓库收件箱（`repo-inbox` sink），供 Agent 后续归档；配置见 [落地目标与来源路由](docs/sinks.md)。
 - 遇到知识星球未登录、页面结构不支持等情况时明确要求人工处理。
 
 ## 架构与信任边界

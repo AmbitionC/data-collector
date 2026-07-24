@@ -1,0 +1,24 @@
+{
+  "sinks": {
+    "markdown": { "type": "markdown" },
+    "life-teachers": {
+      "type": "repo-inbox",
+      "repoPath": "~/Code/life-teachers",
+      "inboxDir": "_inbox",
+      "commit": true,
+      "push": false
+    },
+    "fe-journey": {
+      "type": "repo-inbox",
+      "repoPath": "~/Code/front-end-journey-resource",
+      "inboxDir": "_inbox",
+      "commit": true,
+      "push": false
+    }
+  },
+  "routes": {
+    "wechat": ["markdown", "life-teachers"],
+    "zsxq": ["markdown", "life-teachers"],
+    "nowcoder": ["fe-journey"]
+  }
+}

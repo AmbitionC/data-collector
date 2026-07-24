@@ -1,14 +1,22 @@
-import { parseSupportedUrl, type CollectedDocument, type Source } from '@data-collector/shared';
+import {
+  descriptorForHost,
+  parseSupportedUrl,
+  type CollectedDocument,
+  type Source,
+} from '@data-collector/shared';
 import { ExtractionError, type Clock } from './types.js';
+import { extractNowcoder } from './nowcoder.js';
 import { extractWechat } from './wechat.js';
 import { extractZsxq } from './zsxq.js';
 
 export { ExtractionError } from './types.js';
 
+const UNSUPPORTED_MESSAGE = '当前页面不是微信公众号、知识星球或牛客网内容';
+
 export function detectSource(url: URL): Source {
-  if (url.hostname === 'mp.weixin.qq.com') return 'wechat';
-  if (url.hostname === 'wx.zsxq.com' || url.hostname.endsWith('.zsxq.com')) return 'zsxq';
-  throw new ExtractionError('UNSUPPORTED_URL', '当前页面不是微信公众号或知识星球内容');
+  const descriptor = descriptorForHost(url.hostname);
+  if (!descriptor) throw new ExtractionError('UNSUPPORTED_URL', UNSUPPORTED_MESSAGE);
+  return descriptor.id;
 }
 
 export function extractDocument(
@@ -20,9 +28,14 @@ export function extractDocument(
   try {
     url = parseSupportedUrl(rawUrl);
   } catch {
-    throw new ExtractionError('UNSUPPORTED_URL', '当前页面不是微信公众号或知识星球内容');
+    throw new ExtractionError('UNSUPPORTED_URL', UNSUPPORTED_MESSAGE);
   }
-  return detectSource(url) === 'wechat'
-    ? extractWechat(document, url, now)
-    : extractZsxq(document, url, now);
+  switch (detectSource(url)) {
+    case 'wechat':
+      return extractWechat(document, url, now);
+    case 'zsxq':
+      return extractZsxq(document, url, now);
+    case 'nowcoder':
+      return extractNowcoder(document, url, now);
+  }
 }

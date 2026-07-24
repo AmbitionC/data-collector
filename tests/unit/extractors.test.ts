@@ -17,9 +17,10 @@ async function fixture(name: string, url: string): Promise<Document> {
 }
 
 describe('source detection', () => {
-  it('detects the two supported sources', () => {
+  it('detects the supported sources', () => {
     expect(detectSource(new URL('https://mp.weixin.qq.com/s/x'))).toBe('wechat');
     expect(detectSource(new URL('https://wx.zsxq.com/dweb2/index/topic_detail/x'))).toBe('zsxq');
+    expect(detectSource(new URL('https://www.nowcoder.com/discuss/123'))).toBe('nowcoder');
   });
 });
 
@@ -134,5 +135,63 @@ describe('ZSXQ extraction', () => {
     expect(result.text).toContain('单条详情正文');
     expect(result.text).not.toContain('首页导航');
     expect(result.text).not.toContain('隐藏噪声');
+  });
+});
+
+describe('Nowcoder extraction', () => {
+  it('extracts an interview post and drops query-only tracking from the identity', async () => {
+    const url = 'https://www.nowcoder.com/discuss/123456?channel=feed&from=push';
+    const result = extractDocument(await fixture('nowcoder-post.html', url), url, NOW);
+
+    expect(result).toMatchObject({
+      source: 'nowcoder',
+      kind: 'post',
+      title: '字节跳动前端一面面经（已过）',
+      author: '前端の张三',
+      canonicalUrl: 'https://www.nowcoder.com/discuss/123456',
+      collectedAt: NOW(),
+    });
+    expect(result.publishedAt).toBe('2026-07-10T01:30:00.000Z');
+    expect(result.text).toContain('事件循环');
+    expect(result.text).not.toContain('感谢分享');
+    expect(result.text).not.toContain('首页');
+    expect(result.images).toEqual([
+      {
+        url: 'https://static.nowcoder.com/images/interview-eventloop.png',
+        alt: '事件循环示意图',
+      },
+    ]);
+  });
+
+  it('reports authentication instead of scraping a login wall', () => {
+    const doc = new JSDOM(
+      '<div class="nc-login-modal">登录后查看完整面经</div><main><article class="post-detail"><h1 class="post-title">被挡住的面经</h1></article></main>',
+    ).window.document;
+
+    expect(() => extractDocument(doc, 'https://www.nowcoder.com/discuss/999', NOW)).toThrowError(
+      expect.objectContaining<Partial<ExtractionError>>({ code: 'AUTH_REQUIRED' }),
+    );
+  });
+
+  it('falls back to a unique dense block when semantic selectors are absent', () => {
+    const doc = new JSDOM(`
+      <main>
+        <nav><a>首页导航很长</a><a>讨论区很长</a><a>找工作很长</a><a>消息很长</a></nav>
+        <div class="feed-item">
+          <h1>美团前端二面面经分享</h1>
+          <p>这是完整的二面记录，涵盖了浏览器渲染、性能优化和一道中等难度算法题。</p>
+          <p>面试官先让做自我介绍，然后围绕项目深挖了状态管理与打包体积优化。</p>
+          <p>最后一道算法是最长递增子序列，要求给出动态规划思路并分析复杂度。</p>
+        </div>
+        <aside><a>相关推荐一</a><a>相关推荐二</a><a>相关推荐三</a></aside>
+      </main>
+    `).window.document;
+
+    const result = extractDocument(doc, 'https://www.nowcoder.com/feed/main/detail/abc', NOW);
+
+    expect(result.source).toBe('nowcoder');
+    expect(result.title).toBe('美团前端二面面经分享');
+    expect(result.text).toContain('最长递增子序列');
+    expect(result.text).not.toContain('首页导航');
   });
 });

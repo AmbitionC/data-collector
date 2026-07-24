@@ -1,3 +1,5 @@
+import { descriptorForHost } from '@data-collector/shared';
+
 export type SidePanelState =
   | { phase: 'loading' }
   | { phase: 'connecting' }
@@ -74,9 +76,7 @@ export function sidePanelStateFromStatus(status: BackgroundStatus): SidePanelSta
   return {
     phase: 'ready',
     url: status.page.url,
-    sourceLabel: new URL(status.page.url).hostname === 'mp.weixin.qq.com'
-      ? '微信公众号'
-      : '知识星球',
+    sourceLabel: descriptorForHost(new URL(status.page.url).hostname)?.label ?? '内容',
     title: status.page.title || '未命名内容',
     category: '',
     tags: [],

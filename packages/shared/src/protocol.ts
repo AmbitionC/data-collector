@@ -1,4 +1,6 @@
 import { z } from 'zod';
+import { CONTENT_KINDS, SOURCES } from './model.js';
+import { descriptorForHost } from './sources.js';
 import { canonicalizeUrl, parseSupportedUrl } from './url.js';
 
 export const EXTENSION_REPLACED_CLOSE_CODE = 4009;
@@ -11,8 +13,8 @@ export const collectedImageSchema = z.object({
 
 export const collectedDocumentSchema = z.object({
   schemaVersion: z.literal(1),
-  source: z.enum(['wechat', 'zsxq']),
-  kind: z.enum(['article', 'post', 'question', 'answer']),
+  source: z.enum(SOURCES),
+  kind: z.enum(CONTENT_KINDS),
   url: z.string().url().max(4096),
   canonicalUrl: z.string().url().max(4096),
   title: z.string().trim().min(1).max(500),
@@ -40,19 +42,23 @@ export const collectedDocumentSchema = z.object({
         message: 'canonicalUrl 与原始 URL 不一致',
       });
     }
-    const expectedSource = rawUrl.hostname === 'mp.weixin.qq.com' ? 'wechat' : 'zsxq';
-    if (document.source !== expectedSource) {
+    const descriptor = descriptorForHost(rawUrl.hostname);
+    if (!descriptor) {
+      context.addIssue({ code: 'custom', path: ['url'], message: '内容 URL 不在支持列表中' });
+      return;
+    }
+    if (document.source !== descriptor.id) {
       context.addIssue({
         code: 'custom',
         path: ['source'],
         message: '内容来源与 URL 域名不一致',
       });
     }
-    if (document.source === 'wechat' && document.kind !== 'article') {
+    if (!descriptor.kinds.includes(document.kind)) {
       context.addIssue({
         code: 'custom',
         path: ['kind'],
-        message: '微信公众号内容类型必须是 article',
+        message: `${descriptor.label}不支持该内容类型`,
       });
     }
   } catch {
