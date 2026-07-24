@@ -166,7 +166,17 @@ export interface ContentSink { readonly id: string; save(doc: OrganizedDocument)
   4. 删除对应 raw 条目；走 branch→PR→merge master。
 - 合并 master 后，`sync.yml` → faas 自动同步到 OSS/DB/网站/检索。**发布只改 resource 仓库**（沿用既有 skill 铁律，不碰 faas/manager）。
 
-### 4.3 Agent 触发方式
+### 4.3 去重与热度加权（知识点 + 原文）
+
+保证「同一考点只有一条知识点、越高频出现越靠前」，让目录树从热点→冷门。落在加工层，**复用网站既有热度基建、零前后端改动**：
+
+- **网站既有基建**：叶子 `currRank`（0~5 火苗 `HeatBadge`）即热度；索引页默认按热度排序（`sortIndex` 的「热度」是默认 `SortKey`），目录树 `TreeNav` 按 `_tree.json` 数组序渲染。因此只要加工时维护好 `heat`/`currRank` 并把兄弟叶子按热度排序，热点→冷门即自动成立。
+- **原文去重**：同 URL 由采集器稳定内容 ID 幂等覆盖；跨 URL 转载由采集器写入 `meta.json.contentHash`（正文归一化指纹）识别；近似改写由 Agent 判断。
+- **知识点语义去重 + 加权**：新面经的每个知识点候选，先检索既有（词法/embedding + 读 `_tree.json`）；**命中语义近似（表述不同内容相近）则绝不新建**——把该面经登记进既有知识点的「## 出现于」来源、按去重来源数累加 `heat`、据分档表重算 `currRank`、有新角度则补进正文（内容加权而非丢弃）；全新才建（`heat:1`）。改动后把受影响父节点下兄弟叶子按 `heat` 降序稳定重排。
+- **数据流**：`heat`/`currRank` 是加工阶段维护的叶子额外字段，faas 内容同步（`upsertLeaf` 的 `{...node,...leaf}`）原样透传到 DB/nav，网站火苗与热度排序直接消费。
+- 规则细节见 `front-end-journey-resource/.codex/skills/curate-interview-posts/references/dedup-and-heat.md`。
+
+### 4.4 Agent 触发方式
 
 - **手动**：对目标仓库会话说「处理收件箱」。
 - **定时**：Claude Code on the web 的 Routine / 定时会话（本环境可配置），周期性 drain 收件箱后自动加工提交；或 Codex 定时任务。
