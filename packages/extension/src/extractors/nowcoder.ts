@@ -16,18 +16,25 @@ const TITLE_SELECTORS = [
   'h1',
 ];
 
+// 顺序：feed/main/detail 的真实正文容器优先，其后是讨论区/其它页型与通用兜底。
 const CONTENT_SELECTORS = [
+  '.feed-content-text',
   '.post-topic-des',
   '.nc-post-content',
   '.js-post-content',
   '.feed-content-detail',
-  '.feed-content',
   '.discuss-main',
+  '[class*="feed-content"]',
   '[class*="post-content"]',
   'article',
 ];
 
+// feed/main/detail 的图片画廊与正文是兄弟节点，采集时并入正文一起提取。
+const GALLERY_SELECTORS = ['.feed-img', '[class*="feed-img"]', '.feed-content-imgs'];
+
 const AUTHOR_SELECTORS = [
+  '.user-nickname .name-text',
+  '.name-text',
   '.js-nc-wrap-link .name',
   '.feed-nickname',
   '.author-name',
@@ -36,7 +43,13 @@ const AUTHOR_SELECTORS = [
   '[class*="author-name"]',
 ];
 
-const TIME_SELECTORS = ['time', '.post-time', '.feed-time', '[class*="post-time"]'];
+const TIME_SELECTORS = [
+  '.time-text',
+  'time',
+  '.post-time',
+  '.feed-time',
+  '[class*="post-time"]',
+];
 
 function firstWithin(root: ParentNode, selectors: string[]): Element | null {
   for (const selector of selectors) {
@@ -109,12 +122,53 @@ function scoredFallback(document: Document): Element | null {
   return candidates[0].element;
 }
 
+/**
+ * 牛客时间戳常见三种：ISO / `YYYY-MM-DD HH:MM` / 当年帖子的 `MM-DD HH:MM`（无年份）。
+ * 前两种交给通用解析；最后一种按采集年份补齐，若补出的时间明显晚于当下则回退到上一年
+ *（跨年边界，例如 12 月的帖子在次年 1 月采集）。
+ */
+function nowcoderPublishedAt(raw: string, datetime: string | null, nowIso: string): string | undefined {
+  // 有 ISO datetime 属性时优先用它。
+  if (datetime && datetime.includes('T')) {
+    const exact = parsePublishedAt(raw, datetime);
+    if (exact) return exact;
+  }
+  // 当年 `MM-DD HH:MM`（无年份）先于通用解析处理——通用解析会把它误判成含糊日期。
+  const match = raw.match(/^(\d{1,2})-(\d{1,2})\s+(\d{1,2}):(\d{2})/);
+  if (match) {
+    const [, month, day, hour, minute] = match;
+    const now = new Date(nowIso);
+    const build = (year: number): Date =>
+      new Date(
+        `${year}-${month!.padStart(2, '0')}-${day!.padStart(2, '0')}T${hour!.padStart(2, '0')}:${minute}:00+08:00`,
+      );
+    let date = build(now.getUTCFullYear());
+    if (Number.isNaN(date.getTime())) return undefined;
+    if (date.getTime() > now.getTime() + 2 * 86_400_000) date = build(now.getUTCFullYear() - 1);
+    return Number.isNaN(date.getTime()) ? undefined : date.toISOString();
+  }
+  // 其它格式（ISO / `YYYY-MM-DD HH:MM` / 中文日期）交给通用解析。
+  return parsePublishedAt(raw, datetime);
+}
+
+/** 若正文命中语义容器，且同一区块存在图片画廊（feed/main/detail 中与正文并列），并入一起提取。 */
+function withGallery(document: Document, content: Element): Element {
+  const region = content.closest('section, article') ?? content.parentElement;
+  const gallery = region ? firstWithin(region, GALLERY_SELECTORS) : null;
+  if (!gallery || gallery === content || content.contains(gallery)) return content;
+  const combined = document.createElement('div');
+  combined.append(content.cloneNode(true));
+  combined.append(gallery.cloneNode(true));
+  return combined;
+}
+
 export function extractNowcoder(document: Document, url: URL, now: Clock) {
   if (LOGIN_SELECTORS.some(selector => document.querySelector(selector))) {
     throw new ExtractionError('AUTH_REQUIRED', '请先登录牛客网，再打开需要保存的面经详情页');
   }
 
-  const content = firstWithin(document, CONTENT_SELECTORS) ?? scoredFallback(document);
+  const primary = firstWithin(document, CONTENT_SELECTORS);
+  const content = primary ? withGallery(document, primary) : scoredFallback(document);
   const title =
     elementText(firstWithin(document, TITLE_SELECTORS)) ||
     elementText(document.querySelector('title'));
@@ -128,7 +182,11 @@ export function extractNowcoder(document: Document, url: URL, now: Clock) {
 
   const time = firstWithin(document, TIME_SELECTORS);
   const author = elementText(firstWithin(document, AUTHOR_SELECTORS));
-  const publishedAt = parsePublishedAt(elementText(time), time?.getAttribute('datetime'));
+  const publishedAt = nowcoderPublishedAt(
+    elementText(time),
+    time?.getAttribute('datetime') ?? null,
+    now(),
+  );
   return buildDocument({
     source: 'nowcoder',
     kind: 'post',
