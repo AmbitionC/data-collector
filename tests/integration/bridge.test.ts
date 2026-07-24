@@ -292,14 +292,21 @@ describe('local Bridge', () => {
     expect(created).toMatchObject({ status: 202, body: { status: 'queued' } });
     await noDispatch;
 
-    const savedMessage = nextMessage<{ markdownPath: string }>(socket);
+    const savedMessage = nextMessage<{
+      type: string;
+      requestId: string;
+      payload: { outputPath: string; results: { sinkId: string; ok: boolean }[] };
+    }>(socket);
     socket.send(envelope('job.progress', created.body.id, { stage: 'collecting' }));
     socket.send(envelope('job.result', created.body.id, {
       document: document({ userCategory: '当前页分类', userTags: ['当前页', '覆盖值'] }),
     }));
     const saved = await savedMessage;
 
+    // 侧边栏「已保存」屏依赖 job.saved 载荷里的 outputPath（多 sink 后的首要产出）。
     expect(saved).toMatchObject({ type: 'job.saved', requestId: created.body.id });
+    expect(saved.payload.outputPath).toMatch(/index\.md$/);
+    expect(saved.payload.results.some(result => result.sinkId === 'markdown' && result.ok)).toBe(true);
     const status = await requestJson<{ status: string; outputPath: string }>(
       bridge.url,
       `/v1/jobs/${created.body.id}`,

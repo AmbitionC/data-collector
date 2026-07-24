@@ -619,7 +619,7 @@ describe('extension Bridge connection', () => {
         type: 'job.saved',
         requestId: 'job-A',
         timestamp: '2026-07-18T00:00:00.000Z',
-        payload: { markdownPath: '/library/A.md' },
+        payload: { outputPath: '/library/A.md' },
       }),
     );
     await Promise.all([oldCollectWrite.started, oldSavedWrite.started]);
@@ -647,7 +647,7 @@ describe('extension Bridge connection', () => {
         type: 'job.saved',
         requestId: 'job-B',
         timestamp: '2026-07-18T00:00:02.000Z',
-        payload: { markdownPath: '/library/B.md' },
+        payload: { outputPath: '/library/B.md' },
       }),
     );
     await vi.waitFor(() => expect(storage.values).toMatchObject({
@@ -752,7 +752,7 @@ describe('extension Bridge connection', () => {
         type: 'job.saved',
         requestId: 'job-outgoing',
         timestamp: '2026-07-18T00:00:01.000Z',
-        payload: { markdownPath: '/library/outgoing.md' },
+        payload: { outputPath: '/library/outgoing.md' },
       }),
     );
     await vi.waitFor(() => expect(storage.values.lastJobStatus).toBe('saved'));
@@ -795,7 +795,7 @@ describe('extension Bridge connection', () => {
         type: 'job.saved',
         requestId: 'job-queued',
         timestamp: '2026-07-18T00:00:01.000Z',
-        payload: { markdownPath: '/library/queued.md' },
+        payload: { outputPath: '/library/queued.md' },
       }),
     );
     await vi.waitFor(() => expect(storage.values.lastJobStatus).toBe('saved'));

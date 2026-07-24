@@ -380,12 +380,13 @@ export class BridgeConnection {
           }
         }
       } else if (message.type === 'job.saved' && isCurrent()) {
-        const payload = message.payload as { markdownPath?: unknown };
+        // Bridge 的 job.saved 载荷为 { outputPath, results }（多 sink 后的首要产出路径）。
+        const payload = message.payload as { outputPath?: unknown };
         await this.transitionJob(generation, isCurrent, {
           lastJobId: message.requestId,
           lastJobStatus: 'saved',
-          ...(typeof payload.markdownPath === 'string'
-            ? { lastOutputPath: payload.markdownPath }
+          ...(typeof payload.outputPath === 'string'
+            ? { lastOutputPath: payload.outputPath }
             : {}),
         });
       }
