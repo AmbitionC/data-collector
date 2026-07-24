@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process';
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { mkdir, open, rename } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
@@ -35,6 +35,20 @@ function expandPath(value: string): string {
 
 function yamlString(value: string): string {
   return JSON.stringify(value);
+}
+
+/**
+ * 正文内容指纹：对纯文本做归一化（去空白、标点、大小写）后取 SHA-256。
+ * 同一篇文章在不同 URL 被再次发布（转载/搬运）时指纹一致，便于加工阶段做原文去重
+ *（同 URL 由稳定内容 ID 幂等覆盖，跨 URL 的重复由本指纹识别）。
+ */
+function contentFingerprint(text: string): string {
+  const normalized = text
+    .normalize('NFKC')
+    .toLowerCase()
+    .replace(/[\s　]+/g, '')
+    .replace(/[，。！？、；：""''（）()[\]{}<>·—…,.!?;:'"]/g, '');
+  return createHash('sha256').update(normalized).digest('hex').slice(0, 16);
 }
 
 async function atomicWriteText(root: string, path: string, contents: string): Promise<void> {
@@ -145,6 +159,7 @@ export class RepoInboxSink implements ContentSink {
 
     const meta = {
       id,
+      contentHash: contentFingerprint(document.text),
       source: document.source,
       kind: document.kind,
       title: document.title,

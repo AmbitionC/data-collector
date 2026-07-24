@@ -100,6 +100,8 @@ describe('RepoInboxSink', () => {
       url: 'https://www.nowcoder.com/discuss/123456',
       downloadedImages: 1,
     });
+    // 内容指纹用于加工阶段的原文去重（同文不同 URL 的转载指纹一致）。
+    expect(meta.contentHash).toMatch(/^[a-f0-9]{16}$/);
 
     expect(runGit).toHaveBeenCalledWith(repo, expect.arrayContaining(['add']));
     expect(runGit).toHaveBeenCalledWith(repo, expect.arrayContaining(['commit', '-m']));
