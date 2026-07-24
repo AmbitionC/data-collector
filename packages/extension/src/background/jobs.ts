@@ -30,6 +30,14 @@ export interface JobRunnerOptions {
   tabs: TabsApi;
   bridge: BridgeClient;
   waitForTabComplete: (tabId: number, timeoutMs?: number) => Promise<void>;
+  /** 可注入的延时（测试用）；缺省用 setTimeout。 */
+  delay?: (ms: number) => Promise<void>;
+}
+
+/** 内容脚本在标签页 complete 后可能仍未注册消息监听，这类错误可短暂重试。 */
+function isContentScriptNotReady(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /Receiving end does not exist|Could not establish connection/i.test(message);
 }
 
 export interface CaptureOverrides {
@@ -43,6 +51,25 @@ export class JobRunner {
   private remoteQueue: Promise<void> = Promise.resolve();
 
   constructor(private readonly options: JobRunnerOptions) {}
+
+  private wait(ms: number): Promise<void> {
+    return this.options.delay ? this.options.delay(ms) : new Promise(resolve => setTimeout(resolve, ms));
+  }
+
+  /** 向内容脚本请求提取；内容脚本尚未就绪时短暂重试（最多 4 次）。 */
+  private async extractWithRetry(tabId: number): Promise<ExtractionResponse> {
+    let lastError: unknown;
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+      try {
+        return await this.options.tabs.sendMessage(tabId, { type: 'extract.document' });
+      } catch (error) {
+        if (!isContentScriptNotReady(error) || attempt === 3) throw error;
+        lastError = error;
+        await this.wait(150);
+      }
+    }
+    throw lastError;
+  }
 
   async runRemoteJob(requestId: string, rawUrl: string): Promise<void> {
     const result = this.remoteQueue.then(() => this.runRemoteJobNow(requestId, rawUrl));
@@ -60,7 +87,7 @@ export class JobRunner {
       tabId = tab.id;
       await this.options.waitForTabComplete(tabId, 30_000);
       this.options.bridge.send('job.progress', requestId, { stage: 'collecting' });
-      const response = await this.options.tabs.sendMessage(tabId, { type: 'extract.document' });
+      const response = await this.extractWithRetry(tabId);
       if (!response.ok) {
         keepTab = NEEDS_ATTENTION.has(response.error.code);
         if (keepTab) await this.options.tabs.update(tabId, { active: true });

@@ -90,6 +90,47 @@ describe('extension job runner', () => {
     expect(tabs.created).toHaveLength(2);
   });
 
+  it('retries the content-script message while it is not ready, then succeeds', async () => {
+    const tabs = new InMemoryTabs();
+    const bridge = new InMemoryBridge();
+    let calls = 0;
+    tabs.sendMessage = async () => {
+      calls += 1;
+      if (calls < 3) throw new Error('Could not establish connection. Receiving end does not exist.');
+      return { ok: true, document: document() };
+    };
+    const runner = new JobRunner({
+      tabs,
+      bridge,
+      waitForTabComplete: async () => undefined,
+      delay: async () => undefined,
+    });
+
+    await runner.runRemoteJob('job-retry', URL);
+    expect(calls).toBe(3);
+    expect(bridge.sent.some(message => message.type === 'job.result')).toBe(true);
+    expect(bridge.sent.some(message => message.type === 'job.error')).toBe(false);
+  });
+
+  it('reports COLLECTION_FAILED when the content script never becomes ready', async () => {
+    const tabs = new InMemoryTabs();
+    const bridge = new InMemoryBridge();
+    tabs.sendMessage = async () => {
+      throw new Error('Receiving end does not exist.');
+    };
+    const runner = new JobRunner({
+      tabs,
+      bridge,
+      waitForTabComplete: async () => undefined,
+      delay: async () => undefined,
+    });
+
+    await runner.runRemoteJob('job-fail', URL);
+    const error = bridge.sent.find(message => message.type === 'job.error');
+    expect((error?.payload as { code: string }).code).toBe('COLLECTION_FAILED');
+    expect(tabs.removed).toContain(42);
+  });
+
   it('opens a background tab, returns content, and closes the created tab', async () => {
     const tabs = new InMemoryTabs();
     const bridge = new InMemoryBridge();
