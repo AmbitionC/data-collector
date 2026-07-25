@@ -44,6 +44,7 @@ class InMemoryTabs implements TabsApi {
   readonly updated: Array<{ id: number; active: boolean }> = [];
   /** 内容脚本收到的消息类型顺序（批量采集靠它验证「提取一轮 → 翻一页」的节奏）。 */
   readonly asked: string[] = [];
+  readonly reloaded: number[] = [];
   listRounds: Array<{ documents: CollectedDocument[]; skipped: number; total: number }> = [];
   advances: Array<{ collapsed: number; loaded: number }> = [];
   response: Awaited<ReturnType<TabsApi['sendMessage']>> = { ok: true, document: document() };
@@ -64,6 +65,10 @@ class InMemoryTabs implements TabsApi {
 
   async query(): Promise<BrowserTab[]> {
     return [this.activeTab];
+  }
+
+  async reload(id: number): Promise<void> {
+    this.reloaded.push(id);
   }
 
   async sendMessage(
@@ -285,7 +290,7 @@ describe('list page batch capture', () => {
       skipped: 1,
       failed: 0,
       rounds: 1,
-      running: false,
+      phase: 'done',
     });
   });
 
@@ -305,7 +310,7 @@ describe('list page batch capture', () => {
       'extract.list',
       'list.advance',
     ]);
-    expect(summary).toMatchObject({ collected: 3, rounds: 2, running: false });
+    expect(summary).toMatchObject({ collected: 3, rounds: 2, phase: 'done' });
   });
 
   it('does not re-archive a post that shows up again in a later round', async () => {
@@ -320,10 +325,10 @@ describe('list page batch capture', () => {
     const summary = await runner.captureList();
 
     expect(bridge.createdFor).toEqual([`${LIST_URL}/topic/111`, `${LIST_URL}/topic/222`]);
-    expect(summary).toMatchObject({ collected: 2, failed: 0 });
+    expect(summary).toMatchObject({ collected: 2, failed: 0, phase: 'done' });
   });
 
-  it('counts a failed post and carries on with the rest of the batch', async () => {
+  it('counts a failed post and carries on with the rest of the batch (E6)', async () => {
     const { tabs, bridge, runner } = listRunner();
     bridge.failCreateFor = `${LIST_URL}/topic/222`;
     tabs.listRounds = [{ documents: [topic('111'), topic('222'), topic('333')], skipped: 0, total: 3 }];
@@ -331,19 +336,8 @@ describe('list page batch capture', () => {
 
     const summary = await runner.captureList();
 
-    expect(summary).toMatchObject({ collected: 2, failed: 1 });
+    expect(summary).toMatchObject({ collected: 2, failed: 1, phase: 'done' });
     expect(bridge.sent.filter(item => item.type === 'job.result')).toHaveLength(2);
-  });
-
-  it('stops at the item cap instead of running away on an endless feed', async () => {
-    const { tabs, runner } = listRunner();
-    tabs.listRounds = [{ documents: [topic('111'), topic('222'), topic('333')], skipped: 0, total: 3 }];
-
-    const summary = await runner.captureList({}, { maxItems: 2 });
-
-    expect(summary.collected).toBe(2);
-    // 到顶就收工，不再翻页。
-    expect(tabs.asked).toEqual(['extract.list']);
   });
 
   it('reports live progress so the side panel can count up during a long batch', async () => {
@@ -353,27 +347,133 @@ describe('list page batch capture', () => {
 
     await runner.captureList();
 
-    expect(progress[0]).toMatchObject({ collected: 0, running: true, url: LIST_URL });
+    expect(progress[0]).toMatchObject({ collected: 0, phase: 'running', url: LIST_URL });
     expect(progress.map(item => item.collected)).toEqual([0, 1, 2, 2]);
-    expect(progress.at(-1)).toMatchObject({ collected: 2, running: false });
+    expect(progress.at(-1)).toMatchObject({ collected: 2, phase: 'done' });
   });
 
-  it('surfaces an extraction failure instead of reporting an empty batch as success', async () => {
-    const { tabs, runner } = listRunner();
-    tabs.listRounds = [];
+  // ── 错误场景矩阵（docs/sidepanel-states.md 第四节）────────────────────
 
-    await expect(runner.captureList()).rejects.toThrow('没有更多轮次');
-  });
-
-  it('tells the user to refresh when the page has no content script yet', async () => {
+  it('E1: reports CONTENT_SCRIPT_MISSING as a failed batch, never as a finished one', async () => {
     const { tabs, runner, progress } = listRunner();
     tabs.sendMessage = async () => {
       throw new Error('Could not establish connection. Receiving end does not exist.');
     };
 
-    await expect(runner.captureList()).rejects.toThrow('刷新');
-    // 失败也要收尾，否则侧栏会一直显示「正在批量归档」。
-    expect(progress.at(-1)).toMatchObject({ running: false, collected: 0 });
+    const summary = await runner.captureList();
+
+    // 这正是「错误一闪而过就跳到『本轮批量归档完成』」的根因：终态必须是 failed。
+    expect(summary.phase).toBe('failed');
+    expect(summary.code).toBe('CONTENT_SCRIPT_MISSING');
+    expect(summary.error).toContain('重新加载');
+    expect(progress.at(-1)).toMatchObject({ phase: 'failed', code: 'CONTENT_SCRIPT_MISSING' });
+    // 中途不得出现任何被当成成功的终态。
+    expect(progress.some(item => ['done', 'capped', 'stopped'].includes(item.phase))).toBe(false);
+  });
+
+  it('E1 自愈: reloads the tab first, then collects', async () => {
+    const { tabs, runner } = listRunner();
+    tabs.listRounds = [{ documents: [topic('111')], skipped: 0, total: 1 }];
+    tabs.advances = [{ collapsed: 1, loaded: 0 }];
+
+    const summary = await runner.captureList({}, { reloadFirst: true });
+
+    // 用户不该被要求「自己按 F5」——插件自己重载页面再跑。
+    expect(tabs.reloaded).toEqual([7]);
+    expect(summary).toMatchObject({ collected: 1, phase: 'done' });
+  });
+
+  it('E2: passes an extractor error (login wall) straight through', async () => {
+    const { tabs, runner } = listRunner();
+    tabs.sendMessage = async () => ({
+      ok: false as const,
+      error: { code: 'AUTH_REQUIRED', message: '请先登录知识星球' },
+    });
+
+    const summary = await runner.captureList();
+
+    expect(summary).toMatchObject({ phase: 'failed', code: 'AUTH_REQUIRED' });
+    expect(summary.error).toContain('登录');
+  });
+
+  it('E3: an empty feed is reported as empty, not as done', async () => {
+    const { tabs, runner } = listRunner();
+    tabs.listRounds = [{ documents: [], skipped: 0, total: 0 }];
+
+    const summary = await runner.captureList();
+
+    expect(summary).toMatchObject({ phase: 'empty', collected: 0 });
+  });
+
+  it('E4: posts found but none addressable is reported as skipped_all', async () => {
+    const { tabs, runner } = listRunner();
+    tabs.listRounds = [{ documents: [], skipped: 21, total: 21 }];
+
+    const summary = await runner.captureList();
+
+    // 21 条全跳过不是「完成」，是需要修 DOM 适配。
+    expect(summary).toMatchObject({ phase: 'skipped_all', collected: 0, skipped: 21 });
+  });
+
+  it('E5: a dead Bridge ends the batch instead of failing every remaining post', async () => {
+    const { tabs, bridge, runner } = listRunner();
+    tabs.listRounds = [{
+      documents: [topic('111'), topic('222'), topic('333')],
+      skipped: 0,
+      total: 3,
+    }];
+    bridge.createJob = async (url: string) => {
+      bridge.createdFor.push(url);
+      if (bridge.createdFor.length > 1) throw new Error('Failed to fetch');
+      return { id: 'job-1' };
+    };
+
+    const summary = await runner.captureList();
+
+    expect(summary).toMatchObject({ phase: 'failed', code: 'BRIDGE_UNAVAILABLE', collected: 1 });
+    // 不再对剩下的每一条重试，避免刷一屏失败。
+    expect(bridge.createdFor).toHaveLength(2);
+  });
+
+  it('E7: stopping mid-batch keeps what was collected and says so', async () => {
+    const { tabs, bridge, runner } = listRunner();
+    tabs.listRounds = [{ documents: [topic('111'), topic('222')], skipped: 0, total: 2 }];
+    const original = bridge.createJob.bind(bridge);
+    bridge.createJob = async (url: string) => {
+      const job = await original(url);
+      runner.stopBatch();
+      return job;
+    };
+
+    const summary = await runner.captureList();
+
+    expect(summary).toMatchObject({ phase: 'stopped', collected: 1 });
+    expect(tabs.asked).toEqual(['extract.list']);
+  });
+
+  it('E9: hitting the item cap is disclosed, not silently truncated', async () => {
+    const { tabs, runner } = listRunner();
+    tabs.listRounds = [{ documents: [topic('111'), topic('222'), topic('333')], skipped: 0, total: 3 }];
+
+    const summary = await runner.captureList({}, { maxItems: 2 });
+
+    expect(summary).toMatchObject({ collected: 2, phase: 'capped' });
+    // 到顶就收工，不再翻页。
+    expect(tabs.asked).toEqual(['extract.list']);
+  });
+
+  it('E10: no collectable tab throws so the panel shows a sticky local error', async () => {
+    const { tabs, runner } = listRunner();
+    tabs.activeTab = { id: undefined, url: undefined };
+
+    await expect(runner.captureList()).rejects.toThrow('没有可采集的浏览器页面');
+  });
+
+  it('exports a DOM sample for adaptation instead of asking the user to run console scripts', async () => {
+    const { tabs, runner } = listRunner();
+    tabs.sendMessage = async () => ({ ok: true as const, diagnostics: '{"topicCount":21}' });
+
+    expect(await runner.diagnoseList()).toBe('{"topicCount":21}');
   });
 });
 

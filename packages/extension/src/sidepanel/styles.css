@@ -543,7 +543,12 @@ select:focus {
 /* 已入库是这块面板的主指标，用主色点出来。 */
 .batch-tally > div:first-child dd { color: var(--primary); }
 
+/* 需要处理的终态（中断 / 无产出）不用成功语气：主指标退回墨色，失败列点红。 */
+#batch-panel[data-tone="warn"] .batch-tally > div:first-child dd { color: var(--ink); }
+#batch-panel[data-tone="warn"] .batch-tally > div:last-child dd { color: var(--error); }
+
 #batch-actions { margin-top: 20px; }
+#batch-actions:not(:has(button:not([hidden]))) { display: none; }
 
 /* ── saved 面板 ─────────────────────────────────────── */
 .result-stamp {

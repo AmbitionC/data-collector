@@ -428,4 +428,50 @@ describe('built Chrome extension', () => {
     expect((await browser!.pages()).filter(page => page.url().startsWith(LIST_URL)))
       .toHaveLength(1);
   });
+
+  it('reports an unproductive batch as needing attention, and the screen stays put', async () => {
+    await startStack();
+
+    // 一条帖子都没有的列表页：批量必然零产出。这类「结束但没成果」的批次
+    // 曾经被显示成「本轮批量归档完成」，而且错误屏会被下一次轮询覆盖掉。
+    const listPage = await browser!.newPage();
+    await serveArticleFixture(
+      listPage,
+      '<!doctype html><html><head><title>重远投资观-知识星球</title></head>'
+        + '<body><app-root><div class="main-content-container"></div></app-root></body></html>',
+      LIST_URL,
+    );
+    await listPage.goto(LIST_URL, { waitUntil: 'domcontentloaded' });
+
+    const { page: sidePanel } = await sidePanelFor(listPage);
+    await waitForVisiblePanel(sidePanel, '#ready-panel', 15_000);
+    await clickSidePanel(sidePanel, '#capture-button');
+
+    await waitForValue(
+      sidePanel,
+      `document.querySelector('#batch-heading').textContent`,
+      value => value !== '正在批量归档' && value !== '',
+      20_000,
+      '批量进入终态',
+    );
+
+    const heading = await elementText(sidePanel, '#batch-heading');
+    // 零产出绝不能用成功语气。
+    expect(heading).not.toContain('完成');
+    expect(heading).toContain('没有找到');
+    expect(await elementText(sidePanel, '#batch-collected')).toBe('0');
+    const panelTone = await sidePanel.evaluate(
+      () => document.querySelector<HTMLElement>('#batch-panel')?.dataset.tone,
+    );
+    expect(panelTone).toBe('warn');
+
+    await sidePanel.screenshot({
+      path: join(WORKSPACE, 'artifacts', 'screenshots', 'sidepanel-batch-empty.png'),
+    });
+
+    // 轮询跑好几轮（默认 700ms 一次），终态不得被悄悄换掉。
+    await new Promise(resolveDelay => setTimeout(resolveDelay, 3_500));
+    expect(await elementText(sidePanel, '#batch-heading')).toBe(heading);
+    expect(await elementText(sidePanel, '#batch-collected')).toBe('0');
+  });
 });

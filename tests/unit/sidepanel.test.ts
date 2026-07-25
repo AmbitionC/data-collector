@@ -27,6 +27,8 @@ beforeEach(async () => {
   actions = {
     capture: vi.fn(async () => undefined),
     captureList: vi.fn(async () => undefined),
+    stopBatch: vi.fn(async () => undefined),
+    diagnoseBatch: vi.fn(async () => undefined),
     dismissBatch: vi.fn(async () => undefined),
     recapture: vi.fn(async () => undefined),
     retry: vi.fn(async () => undefined),
@@ -116,14 +118,21 @@ describe('side panel state mapping', () => {
       skipped: 2,
       failed: 0,
       rounds: 2,
-      running: true,
+      phase: 'running' as const,
       updatedAt: 1_000,
     };
 
     expect(sidePanelStateFromStatus(
       { bridgeStatus: 'connected', batch, page: { supported: true, list: true, title: '', url } },
       () => 2_000,
-    )).toEqual({ phase: 'batch', collected: 7, skipped: 2, failed: 0, running: true });
+    )).toEqual({
+      phase: 'batch',
+      batchPhase: 'running',
+      collected: 7,
+      skipped: 2,
+      failed: 0,
+      message: '',
+    });
 
     // 换到别的页面就不再打扰（与单页任务同一套归属判断）。
     expect(sidePanelStateFromStatus(
@@ -136,17 +145,57 @@ describe('side panel state mapping', () => {
     )).toMatchObject({ phase: 'ready' });
   });
 
-  it('treats a batch whose progress went stale as finished, not forever running', () => {
+  it('E8: a batch whose progress went stale is reported as interrupted, not as finished', () => {
     const url = 'https://wx.zsxq.com/group/48844584441158';
-    // Service Worker 被回收时进度会停更；不能让侧栏永远转圈。
-    expect(sidePanelStateFromStatus(
+    // Service Worker 被回收时进度会停更；既不能永远转圈，也不能谎报「完成」。
+    const state = sidePanelStateFromStatus(
       {
         bridgeStatus: 'connected',
-        batch: { url, collected: 3, skipped: 0, failed: 0, rounds: 1, running: true, updatedAt: 0 },
+        batch: {
+          url,
+          collected: 3,
+          skipped: 0,
+          failed: 0,
+          rounds: 1,
+          phase: 'running',
+          updatedAt: 0,
+        },
         page: { supported: true, list: true, title: '', url },
       },
       () => 120_000,
-    )).toMatchObject({ phase: 'batch', collected: 3, running: false });
+    );
+
+    expect(state).toMatchObject({ phase: 'batch', batchPhase: 'failed', collected: 3 });
+    expect((state as { message: string }).message).toContain('中断');
+  });
+
+  it('carries the batch failure reason through instead of dropping it', () => {
+    const url = 'https://wx.zsxq.com/group/48844584441158';
+    const state = sidePanelStateFromStatus(
+      {
+        bridgeStatus: 'connected',
+        batch: {
+          url,
+          collected: 0,
+          skipped: 0,
+          failed: 0,
+          rounds: 0,
+          phase: 'failed',
+          code: 'CONTENT_SCRIPT_MISSING',
+          error: '页面脚本未就绪：插件安装或更新后，之前打开的标签页需要重新加载一次。',
+          updatedAt: 1_000,
+        },
+        page: { supported: true, list: true, title: '', url },
+      },
+      () => 2_000,
+    );
+
+    expect(state).toMatchObject({
+      phase: 'batch',
+      batchPhase: 'failed',
+      code: 'CONTENT_SCRIPT_MISSING',
+    });
+    expect((state as { message: string }).message).toContain('重新加载');
   });
 
   it('keeps ready, collecting, and matching saved behavior', () => {
@@ -281,32 +330,113 @@ describe('side panel DOM behavior', () => {
     expect(actions.captureList).toHaveBeenCalledWith({ userCategory: '投资' });
   });
 
-  it('counts a running batch and offers continue / done once it settles', async () => {
-    renderSidePanel(
-      document,
-      { phase: 'batch', collected: 4, skipped: 2, failed: 1, running: true },
-      actions,
-    );
-    expect(document.querySelector<HTMLElement>('#batch-panel')?.hidden).toBe(false);
+  const batchState = (
+    batchPhase: 'running' | 'done' | 'capped' | 'stopped' | 'empty' | 'skipped_all' | 'failed',
+    extra: Partial<{ collected: number; skipped: number; failed: number; message: string; code: string }> = {},
+  ) => ({
+    phase: 'batch' as const,
+    batchPhase,
+    collected: 0,
+    skipped: 0,
+    failed: 0,
+    message: '',
+    ...extra,
+  });
+
+  const visible = (selector: string) =>
+    document.querySelector<HTMLElement>(selector)?.hidden === false;
+
+  it('counts a running batch and only offers stop while it runs', async () => {
+    renderSidePanel(document, batchState('running', { collected: 4, skipped: 2, failed: 1 }), actions);
+
+    expect(visible('#batch-panel')).toBe(true);
     expect(document.querySelector('#batch-heading')?.textContent).toBe('正在批量归档');
     expect(document.querySelector('#batch-collected')?.textContent).toBe('4');
     expect(document.querySelector('#batch-skipped')?.textContent).toBe('2');
     expect(document.querySelector('#batch-failed')?.textContent).toBe('1');
-    // 跑着的时候不给按钮，避免同一页并发两批。
-    expect(document.querySelector<HTMLElement>('#batch-actions')?.hidden).toBe(true);
+    // 长任务必须能中止；跑着的时候不给「继续/完成」，避免同一页并发两批。
+    expect(visible('#batch-stop-button')).toBe(true);
+    expect(visible('#batch-continue-button')).toBe(false);
+    expect(visible('#batch-done-button')).toBe(false);
 
-    renderSidePanel(
-      document,
-      { phase: 'batch', collected: 6, skipped: 2, failed: 1, running: false },
-      actions,
-    );
-    expect(document.querySelector('#batch-heading')?.textContent).toBe('本轮批量归档完成');
-    expect(document.querySelector<HTMLElement>('#batch-actions')?.hidden).toBe(false);
+    document.querySelector<HTMLButtonElement>('#batch-stop-button')!.click();
+    await Promise.resolve();
+    expect(actions.stopBatch).toHaveBeenCalledOnce();
+  });
+
+  it('offers continue / done only for the terminal states that actually succeeded', async () => {
+    for (const phase of ['done', 'capped', 'stopped'] as const) {
+      renderSidePanel(document, batchState(phase, { collected: 6 }), actions);
+      expect(visible('#batch-continue-button')).toBe(true);
+      expect(visible('#batch-done-button')).toBe(true);
+      expect(visible('#batch-retry-button')).toBe(false);
+      expect(document.querySelector<HTMLElement>('#batch-panel')?.dataset.tone).toBe('ok');
+    }
+
     document.querySelector<HTMLButtonElement>('#batch-continue-button')!.click();
     document.querySelector<HTMLButtonElement>('#batch-done-button')!.click();
     await Promise.resolve();
     expect(actions.captureList).toHaveBeenCalledOnce();
     expect(actions.dismissBatch).toHaveBeenCalledOnce();
+  });
+
+  it('never renders a failed or empty batch with success wording', () => {
+    // 这正是本次事故：0 条入库、异常中止，却显示「本轮批量归档完成」。
+    for (const phase of ['failed', 'empty', 'skipped_all'] as const) {
+      renderSidePanel(document, batchState(phase, { skipped: 21 }), actions);
+      const heading = document.querySelector('#batch-heading')?.textContent ?? '';
+      expect(heading).not.toContain('完成');
+      expect(document.querySelector<HTMLElement>('#batch-panel')?.dataset.tone).toBe('warn');
+      expect(document.querySelector('#batch-kicker')?.textContent).toBe('需要你处理');
+      // 需要处理的终态给「重试」，不给「继续采下一批」。
+      expect(visible('#batch-retry-button')).toBe(true);
+      expect(visible('#batch-continue-button')).toBe(false);
+    }
+  });
+
+  it('E1: turns the refresh instruction into a button that does the refresh', async () => {
+    renderSidePanel(
+      document,
+      batchState('failed', {
+        code: 'CONTENT_SCRIPT_MISSING',
+        message: '页面脚本未就绪：插件安装或更新后，之前打开的标签页需要重新加载一次。',
+      }),
+      actions,
+    );
+
+    const retry = document.querySelector<HTMLButtonElement>('#batch-retry-button')!;
+    expect(retry.textContent).toBe('刷新页面并重试');
+    expect(document.querySelector('#batch-note')?.textContent).toContain('重新加载');
+
+    retry.click();
+    await Promise.resolve();
+    // 不让用户自己去按 F5：插件重载页面后自己再跑一遍。
+    expect(actions.captureList).toHaveBeenCalledWith(expect.anything(), { reloadFirst: true });
+  });
+
+  it('E4: offers one-click diagnostics when nothing was addressable', async () => {
+    renderSidePanel(document, batchState('skipped_all', { skipped: 21 }), actions);
+
+    expect(visible('#batch-diagnose-button')).toBe(true);
+    document.querySelector<HTMLButtonElement>('#batch-diagnose-button')!.click();
+    await Promise.resolve();
+    expect(actions.diagnoseBatch).toHaveBeenCalledOnce();
+
+    // 其它终态不该出现诊断按钮。
+    renderSidePanel(document, batchState('done', { collected: 3 }), actions);
+    expect(visible('#batch-diagnose-button')).toBe(false);
+  });
+
+  it('shows the concrete failure reason rather than a generic one', () => {
+    renderSidePanel(
+      document,
+      batchState('failed', { collected: 5, code: 'BRIDGE_UNAVAILABLE', message: '本机服务无响应，本批已中断。' }),
+      actions,
+    );
+
+    expect(document.querySelector('#batch-note')?.textContent).toBe('本机服务无响应，本批已中断。');
+    // 中断前采到的要如实认账。
+    expect(document.querySelector('#batch-collected')?.textContent).toBe('5');
   });
 
   it('shows a saved path and invokes both result actions with the exact path', async () => {

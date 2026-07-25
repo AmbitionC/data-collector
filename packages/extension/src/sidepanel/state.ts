@@ -1,4 +1,7 @@
 import { descriptorForHost } from '@data-collector/shared';
+import type { BatchPhase } from '../background/jobs.js';
+
+export type { BatchPhase };
 
 export type SidePanelState =
   | { phase: 'loading' }
@@ -20,10 +23,13 @@ export type SidePanelState =
   | { phase: 'collecting'; activeStage: number }
   | {
       phase: 'batch';
+      /** 见 docs/sidepanel-states.md：结束 ≠ 完成，每个终态有各自的文案与出路。 */
+      batchPhase: BatchPhase;
       collected: number;
       skipped: number;
       failed: number;
-      running: boolean;
+      message: string;
+      code?: string;
     }
   | { phase: 'saved'; path: string }
   | { phase: 'needs_attention'; message: string }
@@ -40,8 +46,12 @@ export interface CaptureOverrides {
 
 export interface SidePanelActions {
   capture(overrides: CaptureOverrides): Promise<void>;
-  /** 批量保存当前列表页上的帖子。 */
-  captureList(overrides: CaptureOverrides): Promise<void>;
+  /** 批量保存当前列表页上的帖子；reloadFirst 用于「刷新页面并重试」自愈。 */
+  captureList(overrides: CaptureOverrides, options?: { reloadFirst?: boolean }): Promise<void>;
+  /** 中止正在跑的批量。 */
+  stopBatch(): Promise<void>;
+  /** 导出页面结构样本（帖子拿不到各自链接时用于排查适配）。 */
+  diagnoseBatch(): Promise<void>;
   /** 收起批量结果，回到可再次采集的状态。 */
   dismissBatch(): Promise<void>;
   recapture(): Promise<void>;
@@ -56,7 +66,9 @@ export interface BatchStatus {
   skipped: number;
   failed: number;
   rounds: number;
-  running: boolean;
+  phase: BatchPhase;
+  error?: string;
+  code?: string;
   updatedAt: number;
 }
 
@@ -93,12 +105,19 @@ export function sidePanelStateFromStatus(
   // 批量结果属于发起它的那一页；换页面就不再打扰（与单页任务同一套归属判断）。
   const batch = status.batch;
   if (batch && batch.url === status.page.url) {
+    // E8：Service Worker 被回收时进度停更，不能让侧栏永远转圈——按「已中断」处理。
+    const stalled = batch.phase === 'running' && now() - batch.updatedAt >= BATCH_STALE_MS;
+    const batchPhase: BatchPhase = stalled ? 'failed' : batch.phase;
     return {
       phase: 'batch',
+      batchPhase,
       collected: batch.collected,
       skipped: batch.skipped,
       failed: batch.failed,
-      running: batch.running && now() - batch.updatedAt < BATCH_STALE_MS,
+      message: stalled
+        ? '浏览器回收了插件的后台进程，本批已中断。已入库的不会重复，可以直接续采。'
+        : batch.error ?? '',
+      ...(stalled ? { code: 'WORKER_EVICTED' } : batch.code ? { code: batch.code } : {}),
     };
   }
 
@@ -204,6 +223,89 @@ function setConnectionLabel(document: Document, state: SidePanelState): void {
   };
   label.textContent = labels[state.phase] ?? '本机在线';
   label.dataset.connected = String(connected);
+}
+
+/** 每个批量终态的标题、说明与出路按钮；「结束」不等于「完成」。 */
+const BATCH_COPY: Record<BatchPhase, { heading: string; note: string; tone: 'ok' | 'warn' }> = {
+  running: {
+    heading: '正在批量归档',
+    note: '采完一屏会自动收起已处理的帖子并向下加载，侧栏可以保持打开。',
+    tone: 'ok',
+  },
+  done: {
+    heading: '本轮批量归档完成',
+    note: '本页已经没有新的帖子了。',
+    tone: 'ok',
+  },
+  capped: {
+    heading: '已达单次上限',
+    note: '本页可能还有更多帖子。点「继续采下一批」接着采，已入库的不会重复。',
+    tone: 'ok',
+  },
+  stopped: {
+    heading: '已停止',
+    note: '已入库的内容都保留了。点「继续采下一批」可以接着采。',
+    tone: 'ok',
+  },
+  empty: {
+    heading: '本页没有找到可采集的帖子',
+    note: '可能页面还没加载完，或当前不是帖子列表。等内容出现后再重试。',
+    tone: 'warn',
+  },
+  skipped_all: {
+    heading: '这些帖子无法分别入库',
+    note: '每条必须带自己的帖子地址才能各自成篇，否则会算出同一个 ID 相互覆盖。这是页面结构适配问题——点下面的按钮复制诊断信息，发给我就能修。',
+    tone: 'warn',
+  },
+  failed: {
+    heading: '批量归档中断',
+    note: '',
+    tone: 'warn',
+  },
+};
+
+function renderBatch(
+  document: Document,
+  state: Extract<SidePanelState, { phase: 'batch' }>,
+  actions: SidePanelActions,
+): void {
+  const panel = show(document, '#batch-panel');
+  const copy = BATCH_COPY[state.batchPhase];
+  const running = state.batchPhase === 'running';
+  panel.dataset.tone = copy.tone;
+
+  required(document, '#batch-kicker').textContent = copy.tone === 'warn' ? '需要你处理' : '批量归档';
+  required<HTMLElement>(document, '#batch-kicker').classList.toggle('warning', copy.tone === 'warn');
+  required(document, '#batch-heading').textContent = copy.heading;
+  required(document, '#batch-collected').textContent = String(state.collected);
+  required(document, '#batch-skipped').textContent = String(state.skipped);
+  required(document, '#batch-failed').textContent = String(state.failed);
+  // 失败时优先展示具体原因；其余状态展示该状态的固定说明。
+  required(document, '#batch-note').textContent = state.message || copy.note;
+
+  const stopButton = required<HTMLButtonElement>(document, '#batch-stop-button');
+  const continueButton = required<HTMLButtonElement>(document, '#batch-continue-button');
+  const retryButton = required<HTMLButtonElement>(document, '#batch-retry-button');
+  const diagnoseButton = required<HTMLButtonElement>(document, '#batch-diagnose-button');
+  const doneButton = required<HTMLButtonElement>(document, '#batch-done-button');
+
+  // E1 的自愈：不让用户去看懂提示再自己按 F5，插件自己重载页面再跑一遍。
+  const needsReload = state.code === 'CONTENT_SCRIPT_MISSING';
+  const recoverable = ['empty', 'skipped_all', 'failed'].includes(state.batchPhase);
+  stopButton.hidden = !running;
+  continueButton.hidden = running || recoverable;
+  retryButton.hidden = running || !recoverable;
+  retryButton.textContent = needsReload ? '刷新页面并重试' : '重试';
+  diagnoseButton.hidden = state.batchPhase !== 'skipped_all';
+  doneButton.hidden = running;
+
+  stopButton.onclick = () => { void actions.stopBatch(); };
+  continueButton.onclick = () => { void actions.captureList(collectOverrides(document)); };
+  retryButton.onclick = () => {
+    void actions.captureList(collectOverrides(document), needsReload ? { reloadFirst: true } : {});
+  };
+  diagnoseButton.onclick = () => { void actions.diagnoseBatch(); };
+  doneButton.onclick = () => { void actions.dismissBatch(); };
 }
 
 export function renderSidePanel(
@@ -315,22 +417,7 @@ export function renderSidePanel(
     return;
   }
   if (state.phase === 'batch') {
-    show(document, '#batch-panel');
-    required(document, '#batch-heading').textContent = state.running
-      ? '正在批量归档'
-      : '本轮批量归档完成';
-    required(document, '#batch-collected').textContent = String(state.collected);
-    required(document, '#batch-skipped').textContent = String(state.skipped);
-    required(document, '#batch-failed').textContent = String(state.failed);
-    required<HTMLElement>(document, '#batch-running-note').hidden = !state.running;
-    const actionsRow = required<HTMLElement>(document, '#batch-actions');
-    actionsRow.hidden = state.running;
-    required<HTMLButtonElement>(document, '#batch-continue-button').onclick = () => {
-      void actions.captureList(collectOverrides(document));
-    };
-    required<HTMLButtonElement>(document, '#batch-done-button').onclick = () => {
-      void actions.dismissBatch();
-    };
+    renderBatch(document, state, actions);
     return;
   }
   if (state.phase === 'collecting') {

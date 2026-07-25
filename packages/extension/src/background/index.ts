@@ -24,6 +24,7 @@ const tabs: TabsApi = {
   query: async input => chrome.tabs.query(input as chrome.tabs.QueryInfo) as Promise<BrowserTab[]>,
   sendMessage: async (id, message) =>
     chrome.tabs.sendMessage(id, message) as Promise<ExtractionResponse>,
+  reload: async id => { await chrome.tabs.reload(id); },
 };
 
 function waitForTabComplete(tabId: number, timeoutMs = 30_000): Promise<void> {
@@ -152,6 +153,8 @@ chrome.runtime.onMessage.addListener((message: unknown, _sender, sendResponse) =
   const action = async () => {
     if (request.type === 'status.get') return status();
     if (request.type === 'capture.current') {
+      // 单页任务与批量记录互斥：同一页不可能两者同时进行，清掉另一边免得状态打架。
+      await chrome.storage.local.remove('batch');
       const jobId = await runner.captureCurrent(
         (request.overrides ?? {}) as {
           userCategory?: string;
@@ -162,13 +165,29 @@ chrome.runtime.onMessage.addListener((message: unknown, _sender, sendResponse) =
       return { jobId };
     }
     if (request.type === 'capture.list') {
+      await chrome.storage.local.set({
+        lastJobId: '',
+        lastJobStatus: '',
+        lastJobUrl: '',
+        lastJobError: '',
+        lastOutputPath: '',
+      });
       return runner.captureList(
         (request.overrides ?? {}) as {
           userCategory?: string;
           userTags?: string[];
           sinks?: string[];
         },
+        // 「刷新页面并重试」：内容脚本只在页面加载时注入，插件更新后由扩展自己重载页面。
+        (request as { reloadFirst?: boolean }).reloadFirst === true ? { reloadFirst: true } : {},
       );
+    }
+    if (request.type === 'batch.stop') {
+      runner.stopBatch();
+      return { stopped: true };
+    }
+    if (request.type === 'batch.diagnose') {
+      return { diagnostics: await runner.diagnoseList() };
     }
     if (request.type === 'batch.dismiss') {
       await chrome.storage.local.remove('batch');

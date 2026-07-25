@@ -17,6 +17,7 @@ export type ExtractionResponse =
   | { ok: true; document: CollectedDocument }
   | { ok: true; list: ListPayload }
   | { ok: true; advance: { collapsed: number; loaded: number } }
+  | { ok: true; diagnostics: string }
   | { ok: false; error: { code: string; message: string } };
 
 export interface TabsApi {
@@ -25,6 +26,8 @@ export interface TabsApi {
   update(id: number, input: { active: boolean }): Promise<void>;
   query(input?: unknown): Promise<BrowserTab[]>;
   sendMessage(id: number, message: unknown): Promise<ExtractionResponse>;
+  /** 重新加载标签页：内容脚本只在页面加载时注入，插件更新后靠它自愈。 */
+  reload(id: number): Promise<void>;
 }
 
 export interface BridgeClient {
@@ -39,6 +42,7 @@ interface PayloadMap {
   document: CollectedDocument;
   list: ListPayload;
   advance: { collapsed: number; loaded: number };
+  diagnostics: string;
 }
 
 /** 按请求类型取出应答载荷；字段对不上说明页面里的内容脚本还是旧版本。 */
@@ -51,7 +55,20 @@ function payloadOf<K extends keyof PayloadMap>(
   return value as PayloadMap[K];
 }
 
-/** 批量采集的实时进度，侧栏据此显示「已保存 N 条」。 */
+/**
+ * 批量采集的终态。**「结束」不等于「完成」**：异常中止、一条没采到、全部跳过
+ * 都必须和正常跑完区分开，否则侧栏会把失败汇报成成功（见 docs/sidepanel-states.md）。
+ */
+export type BatchPhase =
+  | 'running'
+  | 'done'
+  | 'capped'
+  | 'stopped'
+  | 'empty'
+  | 'skipped_all'
+  | 'failed';
+
+/** 批量采集记录：既是实时进度，也是终态与失败原因的唯一真相源。 */
 export interface BatchProgress {
   /** 触发批量采集的列表页地址（侧栏只在同一页面展示这份进度）。 */
   url: string;
@@ -59,7 +76,11 @@ export interface BatchProgress {
   skipped: number;
   failed: number;
   rounds: number;
-  running: boolean;
+  phase: BatchPhase;
+  /** 失败原因（phase 为 failed 时必有），直接展示给用户。 */
+  error?: string;
+  /** 失败分类，决定侧栏给哪种出路按钮（如 CONTENT_SCRIPT_MISSING → 刷新页面并重试）。 */
+  code?: string;
   /** 最后一次进度更新时刻；Service Worker 中途被回收时，侧栏据此判定这批已经断了。 */
   updatedAt: number;
 }
@@ -91,6 +112,7 @@ const NEEDS_ATTENTION = new Set(['AUTH_REQUIRED', 'UNSUPPORTED_LAYOUT']);
 
 export class JobRunner {
   private remoteQueue: Promise<void> = Promise.resolve();
+  private batchStopped = false;
 
   constructor(private readonly options: JobRunnerOptions) {}
 
@@ -217,75 +239,159 @@ export class JobRunner {
    * 收起是关键：知识星球列表是滚到底懒加载，不把处理过的收走，
    * 下一轮还会把同样的帖子再提取一遍，永远推进不到新内容。
    */
+  /** 用户点了「停止」：在条与条、轮与轮之间检查，尽快收尾并如实汇报已入库条数。 */
+  stopBatch(): void {
+    this.batchStopped = true;
+  }
+
+  /** 采不到各自链接时（E4），取一份页面结构样本供适配排查。 */
+  async diagnoseList(): Promise<string> {
+    const [tab] = await this.options.tabs.query({ active: true, lastFocusedWindow: true });
+    if (tab?.id === undefined) throw new Error('当前没有可诊断的浏览器页面');
+    const response = await this.ask(tab.id, { type: 'list.diagnose' });
+    if (!response.ok) throw new Error(response.error.message);
+    return payloadOf(response, 'diagnostics');
+  }
+
   async captureList(
     overrides: CaptureOverrides = {},
-    limits: { maxRounds?: number; maxItems?: number } = {},
+    limits: { maxRounds?: number; maxItems?: number; reloadFirst?: boolean } = {},
   ): Promise<BatchProgress> {
     const [tab] = await this.options.tabs.query({ active: true, lastFocusedWindow: true });
+    // E10：连可采集的标签页都没有，写不出归属某页的记录，交给侧栏的本地粘性错误。
     if (tab?.id === undefined || !tab.url) throw new Error('当前没有可采集的浏览器页面');
     const tabId = tab.id;
     const maxRounds = limits.maxRounds ?? 12;
     const maxItems = limits.maxItems ?? 60;
+    this.batchStopped = false;
     const progress: BatchProgress = {
       url: tab.url,
       collected: 0,
       skipped: 0,
       failed: 0,
       rounds: 0,
-      running: true,
+      phase: 'running',
       updatedAt: Date.now(),
     };
     const report = () => {
       progress.updatedAt = Date.now();
       this.options.reportBatch?.({ ...progress });
     };
+    const fail = (code: string, message: string): BatchProgress => {
+      progress.phase = 'failed';
+      progress.code = code;
+      progress.error = message;
+      report();
+      return { ...progress };
+    };
     // 同一条在两轮里重复出现（列表刷新、置顶）时不重复建任务。
     const seen = new Set<string>();
     report();
 
-    try {
-      for (let round = 0; round < maxRounds; round += 1) {
-        const response = await this.ask(tabId, { type: 'extract.list' }).catch(error => {
-          // 扩展刚安装/更新时，之前打开的标签页里没有内容脚本——说清楚怎么办，别抛底层报错。
-          if (isContentScriptNotReady(error)) {
-            throw new Error('页面脚本未就绪：扩展安装或更新后，已打开的标签页需要刷新一次。请按 F5 刷新本页再批量保存。');
-          }
-          throw error;
-        });
-        if (!response.ok) throw new Error(response.error.message);
-        const list = payloadOf(response, 'list');
-        progress.rounds = round + 1;
-        progress.skipped += list.skipped;
+    // E1 的自愈：先重新加载页面再采，用户不必自己去按 F5。
+    if (limits.reloadFirst) {
+      try {
+        await this.options.tabs.reload(tabId);
+        await this.options.waitForTabComplete(tabId, 30_000);
+        await this.wait(500);
+      } catch (error) {
+        return fail(
+          'COLLECTION_FAILED',
+          error instanceof Error ? error.message : '刷新页面失败，请手动刷新后重试',
+        );
+      }
+    }
 
-        for (const document of list.documents) {
-          if (progress.collected >= maxItems) break;
-          if (seen.has(document.canonicalUrl)) continue;
-          seen.add(document.canonicalUrl);
-          if (await this.saveCollected(document, overrides)) progress.collected += 1;
-          else progress.failed += 1;
-          report();
+    let sawAnyPost = false;
+    for (let round = 0; round < maxRounds; round += 1) {
+      let response: ExtractionResponse;
+      try {
+        response = await this.ask(tabId, { type: 'extract.list' });
+      } catch (error) {
+        // E1：扩展刚安装/更新时，之前打开的标签页里没有内容脚本。
+        if (isContentScriptNotReady(error)) {
+          return fail(
+            'CONTENT_SCRIPT_MISSING',
+            '页面脚本未就绪：插件安装或更新后，之前打开的标签页需要重新加载一次。',
+          );
         }
-        if (progress.collected >= maxItems) break;
+        return fail(
+          'COLLECTION_FAILED',
+          error instanceof Error ? error.message : '读取本页帖子失败',
+        );
+      }
+      if (!response.ok) {
+        // E2 等提取器给出的明确原因（未登录、结构不支持）原样透传。
+        return fail(response.error.code, response.error.message);
+      }
+      const list = payloadOf(response, 'list');
+      progress.rounds = round + 1;
+      progress.skipped += list.skipped;
+      if (list.total > 0) sawAnyPost = true;
 
-        const advanced = await this.ask(tabId, { type: 'list.advance' });
-        if (!advanced.ok) break;
-        if (payloadOf(advanced, 'advance').loaded === 0) break;
+      for (const document of list.documents) {
+        if (this.batchStopped) break;
+        if (progress.collected >= maxItems) break;
+        if (seen.has(document.canonicalUrl)) continue;
+        seen.add(document.canonicalUrl);
+        const saved = await this.saveCollected(document, overrides);
+        if (saved === 'ok') progress.collected += 1;
+        else if (saved === 'bridge-down') {
+          // E5：本机服务断了，后面每条都会失败，立刻收尾而不是刷一屏失败。
+          return fail('BRIDGE_UNAVAILABLE', '本机服务无响应，本批已中断。');
+        } else progress.failed += 1;
         report();
       }
-    } finally {
-      progress.running = false;
+
+      if (this.batchStopped) {
+        progress.phase = 'stopped';
+        report();
+        return { ...progress };
+      }
+      if (progress.collected >= maxItems) {
+        // E9：到顶要说出来，不能静默截断。
+        progress.phase = 'capped';
+        report();
+        return { ...progress };
+      }
+
+      const advanced = await this.ask(tabId, { type: 'list.advance' }).catch(() => undefined);
+      if (!advanced?.ok || payloadOf(advanced, 'advance').loaded === 0) break;
       report();
     }
+
+    // E3 / E4：跑完了但没有产出，都不是「完成」。
+    progress.phase = !sawAnyPost
+      ? 'empty'
+      : progress.collected === 0 && progress.skipped > 0
+        ? 'skipped_all'
+        : progress.rounds >= maxRounds && progress.collected >= maxItems
+          ? 'capped'
+          : 'done';
+    report();
     return { ...progress };
   }
 
-  /** 已经提取好的一篇：建任务 → 直接回传结果（内容已在手，无需再开标签页）。 */
+  /**
+   * 已经提取好的一篇：建任务 → 直接回传结果（内容已在手，无需再开标签页）。
+   * 区分「这一条不行」和「本机服务不行」：前者继续下一条，后者立刻收尾。
+   */
   private async saveCollected(
     document: CollectedDocument,
     overrides: CaptureOverrides,
-  ): Promise<boolean> {
+  ): Promise<'ok' | 'failed' | 'bridge-down'> {
+    let job: { id: string };
     try {
-      const job = await this.options.bridge.createJob(document.canonicalUrl, overrides);
+      job = await this.options.bridge.createJob(document.canonicalUrl, overrides);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : '';
+      // 只有「连不上 / 没授权」才是整条链路的问题，值得中断整批；
+      // 服务端 5xx 更可能是这一条内容的问题，计入失败继续下一条。
+      return /Failed to fetch|NetworkError|未连接|仍在自动连接|HTTP 40[13]/i.test(message)
+        ? 'bridge-down'
+        : 'failed';
+    }
+    try {
       this.options.bridge.send('job.progress', job.id, { stage: 'collecting' });
       this.options.bridge.send('job.result', job.id, {
         document: {
@@ -294,10 +400,10 @@ export class JobRunner {
           ...(overrides.userTags ? { userTags: overrides.userTags } : {}),
         },
       });
-      return true;
+      return 'ok';
     } catch {
-      // 单条失败不该中断整批：计入 failed，继续下一条。
-      return false;
+      // WebSocket 断了，后面每条都会一样失败。
+      return 'bridge-down';
     }
   }
 }

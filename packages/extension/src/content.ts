@@ -8,7 +8,7 @@ import {
 } from './extractors/index.js';
 
 interface ExtractMessage {
-  type: 'extract.document' | 'extract.list' | 'list.advance';
+  type: 'extract.document' | 'extract.list' | 'list.advance' | 'list.diagnose';
   overrides?: {
     userCategory?: string;
     userTags?: string[];
@@ -95,13 +95,55 @@ async function advanceList(): Promise<{ collapsed: number; loaded: number }> {
   return { collapsed, loaded: 0 };
 }
 
+/**
+ * 诊断样本：帖子拿不到各自链接时（E4），把首条帖子的链接与业务属性结构导出来。
+ * 有了它就能直接改适配，不必让用户去开控制台跑脚本。
+ */
+function listDiagnostics(): string {
+  const container = document.querySelector('.topic-container');
+  if (!container) return JSON.stringify({ note: '本页没有找到 .topic-container' }, null, 2);
+  const businessAttributes = (element: Element) =>
+    element
+      .getAttributeNames()
+      .filter(name => /^(id|data-|ng-reflect-)/.test(name))
+      .map(name => [name, (element.getAttribute(name) ?? '').slice(0, 120)]);
+  return JSON.stringify(
+    {
+      url: location.href,
+      topicCount: document.querySelectorAll('.topic-container').length,
+      anchors: [...container.querySelectorAll('a')]
+        .map(anchor => anchor.getAttribute('href'))
+        .slice(0, 12),
+      containerAttrs: businessAttributes(container),
+      childAttrs: [...container.querySelectorAll('*')]
+        .slice(0, 40)
+        .flatMap(element =>
+          businessAttributes(element).map(([name, value]) => [
+            String(element.className).slice(0, 60),
+            name,
+            value,
+          ]),
+        )
+        .slice(0, 40),
+    },
+    null,
+    2,
+  );
+}
+
 chrome.runtime.onMessage.addListener((message: unknown, _sender, sendResponse) => {
   const request = message as Partial<ExtractMessage>;
   if (
     request.type !== 'extract.document' &&
     request.type !== 'extract.list' &&
-    request.type !== 'list.advance'
+    request.type !== 'list.advance' &&
+    request.type !== 'list.diagnose'
   ) {
+    return false;
+  }
+
+  if (request.type === 'list.diagnose') {
+    sendResponse({ ok: true, diagnostics: listDiagnostics() });
     return false;
   }
 
