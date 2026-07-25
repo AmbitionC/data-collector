@@ -306,6 +306,37 @@ describe('extension Bridge connection', () => {
     expect(storage.values.routing).toEqual(nextRouting);
   });
 
+  it('refreshes routing on the periodic wake-up even while the socket stays connected', async () => {
+    const storage = new MemoryStorage({ bridgeToken: 'x'.repeat(43) });
+    const socket = new MemorySocket();
+    let routing = { sinks: [{ id: 'markdown', label: '本机库', categories: [] }], defaults: {} };
+    // 浏览器的 fetch 认接收者：写成 deps.fetch(...) 会以 deps 为 this 调用并抛
+    // Illegal invocation。这里如实模拟，否则「改配置要重装扩展」这类 bug 测不出来。
+    const fetcher = vi.fn(function (this: unknown) {
+      if (this !== undefined) throw new TypeError("Failed to execute 'fetch': Illegal invocation");
+      return Promise.resolve(
+        new Response(JSON.stringify({ trustedExtensionId: 'irrelevant', routing }), {
+          headers: { 'content-type': 'application/json' },
+        }),
+      );
+    }) as unknown as typeof fetch;
+    const connection = new BridgeConnection(dependencies(storage, () => socket, fetcher));
+
+    await connection.start();
+    socket.emit('open');
+    await vi.waitFor(() => expect(storage.values.bridgeStatus).toBe('connected'));
+
+    // 用户在 Bridge 侧新建了一个去向目录后，下一次 1 分钟闹钟唤醒就应该看到它，
+    // 不需要重装扩展——连接还开着也要刷新，不能被「已连接」的提前返回挡掉。
+    routing = {
+      sinks: [{ id: 'life-teachers', label: 'life-teachers 收件箱', categories: ['投资'] }],
+      defaults: {},
+    };
+    await connection.start();
+
+    expect(storage.values.routing).toEqual(routing);
+  });
+
   it('removes a stale stored token and reauthorizes through health on the scheduled retry', async () => {
     const staleToken = 'stale-token'.padEnd(43, 'x');
     const freshToken = 'fresh-token'.padEnd(43, 'x');

@@ -1,4 +1,4 @@
-import { access, mkdir, readFile } from 'node:fs/promises';
+import { access, mkdir, readFile, writeFile } from 'node:fs/promises';
 import { readdirSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -173,6 +173,36 @@ async function serveArticleFixture(
   });
 }
 
+/** 轮询扩展页里的一段表达式，直到它返回期望值（Bridge 重启期间会话会短暂失效，逐轮重建）。 */
+async function waitForValue(
+  page: Page,
+  expression: string,
+  matches: (value: string) => boolean,
+  timeout: number,
+  label: string,
+): Promise<void> {
+  const deadline = Date.now() + timeout;
+  let seen = '';
+  while (Date.now() < deadline) {
+    const session = await page.createCDPSession();
+    try {
+      const { result } = await session.send('Runtime.evaluate', {
+        expression,
+        awaitPromise: true,
+        returnByValue: true,
+      });
+      seen = String(result.value ?? '');
+      if (matches(seen)) return;
+    } catch {
+      // 会话瞬时失效不算失败，下一轮重试。
+    } finally {
+      await session.detach().catch(() => undefined);
+    }
+    await new Promise(resolveDelay => setTimeout(resolveDelay, 500));
+  }
+  throw new Error(`等待${label}超时，当前为「${seen}」`);
+}
+
 async function clickSidePanel(page: Page, selector: string): Promise<void> {
   const session = await page.createCDPSession();
   try {
@@ -218,9 +248,10 @@ async function startStack(): Promise<{ libraryRoot: string }> {
       `--disable-extensions-except=${EXTENSION_PATH}`,
       `--load-extension=${EXTENSION_PATH}`,
     ],
+    // timeout 已经守住「启动卡死」；不要再挂 AbortSignal —— 它会在超时点直接杀掉
+    // 浏览器进程，跑得久一点的用例会莫名其妙断在半路（Connection closed）。
     timeout: 20_000,
     protocolTimeout: 20_000,
-    signal: AbortSignal.timeout(25_000),
   });
   return { libraryRoot };
 }
@@ -297,6 +328,58 @@ describe('built Chrome extension', () => {
       await readFile(join(libraryRoot, '_catalog', 'index.json'), 'utf8'),
     ) as unknown[];
     expect(catalog).toHaveLength(1);
+
+    // 改 Bridge 侧的去向配置后，扩展重连即可看到新去向——不需要重装扩展。
+    await bridge!.close();
+    const inboxRepo = await temporaryDirectories.create('data-collector-e2e-repo-');
+    await writeFile(
+      join(libraryRoot, '.config', 'sinks.json'),
+      JSON.stringify({
+        sinks: {
+          markdown: { type: 'markdown' },
+          'e2e-inbox': {
+            type: 'repo-inbox',
+            repoPath: inboxRepo,
+            label: 'E2E 收件箱',
+            categories: ['投资', '认知'],
+          },
+        },
+        routes: { wechat: ['markdown', 'e2e-inbox'] },
+      }),
+      'utf8',
+    );
+    bridge = await startBridge({
+      port: 17321,
+      libraryRoot,
+      configDir: join(libraryRoot, '.config'),
+      fetch: async () => new Response(null, { status: 404 }),
+    });
+    // 扩展自己把新去向拉进了缓存。
+    await waitForValue(
+      sidePanel,
+      `chrome.storage.local.get(null)
+        .then(v => v.bridgeStatus + '|' + (v.routing?.sinks ?? []).map(sink => sink.id).join(','))`,
+      value => value.split('|')[1].split(',').includes('e2e-inbox'),
+      70_000,
+      '扩展缓存里出现新去向 e2e-inbox',
+    );
+
+    // 而且下拉里真的能选到它：换到另一个受支持页面（当前页仍停在「已保存」屏）后重新渲染。
+    const listPage = await browser!.newPage();
+    await serveArticleFixture(
+      listPage,
+      await readFile(join(WORKSPACE, 'tests', 'fixtures', 'zsxq-list.html'), 'utf8'),
+      LIST_URL,
+    );
+    await listPage.goto(LIST_URL, { waitUntil: 'domcontentloaded' });
+    await listPage.bringToFront();
+    await waitForValue(
+      sidePanel,
+      `[...document.querySelector('#destination').options].map(option => option.value).join(',')`,
+      value => value.split(',').includes('e2e-inbox'),
+      20_000,
+      '「去向」下拉出现 e2e-inbox',
+    );
     // CLI/Codex 采集路径（扩展自开后台标签页）的浏览器行为在无头环境无法稳定夹具化：
     // 请求拦截晚于标签页导航，后台标签页拿不到夹具页、内容脚本不注入。其逻辑由
     // tests/unit/cli.test.ts 与 tests/integration/bridge.test.ts 覆盖；此处只夹紧侧栏

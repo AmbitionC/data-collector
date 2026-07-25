@@ -93,7 +93,11 @@ export class BridgeConnection {
   /** 尽力刷新「去向/分类」路由缓存；失败忽略（连接问题由 WebSocket 反映）。 */
   private async refreshRouting(port: number): Promise<void> {
     try {
-      const response = await this.dependencies.fetch(`http://127.0.0.1:${port}/health`);
+      // 必须先取成局部变量再调用：写成 this.dependencies.fetch(...) 会把 dependencies
+      // 当作 fetch 的接收者，浏览器抛 Illegal invocation，又被下面的 catch 吞掉，
+      // 表现为「改了 Bridge 配置必须重装扩展」。
+      const fetcher = this.dependencies.fetch;
+      const response = await fetcher(`http://127.0.0.1:${port}/health`);
       if (!response.ok) return;
       const health = (await response.json()) as { routing?: unknown };
       if (health.routing && typeof health.routing === 'object') {
