@@ -1,4 +1,5 @@
 import type { OrganizedDocument } from '../organize/index.js';
+import { LIBRARY_CATEGORIES } from '../organize/classify.js';
 import { MarkdownLibrary, type MarkdownLibraryOptions } from '../library/index.js';
 import type { ContentSink, SinkResult } from './types.js';
 
@@ -9,6 +10,7 @@ import type { ContentSink, SinkResult } from './types.js';
 export class MarkdownLibrarySink implements ContentSink {
   readonly id = 'markdown';
   readonly label = '本机库';
+  readonly categories = LIBRARY_CATEGORIES;
   private readonly library: MarkdownLibrary;
 
   constructor(options: MarkdownLibraryOptions) {

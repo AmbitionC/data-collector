@@ -198,25 +198,41 @@ describe('SinkRouter', () => {
     expect(warn).toHaveBeenCalledWith(expect.stringContaining('ghost'));
   });
 
-  it('describes per-source routing targets by user-facing label (no paths leaked)', () => {
+  it('describes destinations (label + categories) and per-source defaults without leaking paths', () => {
     const router = SinkRouter.build(
       {
         sinks: {
           markdown: { type: 'markdown' },
-          'fe-inbox': { type: 'repo-inbox', repoPath: '~/Code/front-end-journey-resource' },
-          lt: { type: 'repo-inbox', repoPath: '/x/life-teachers', label: 'life-teachers 收件箱' },
+          'fe-inbox': {
+            type: 'repo-inbox',
+            repoPath: '~/Code/front-end-journey-resource',
+            categories: ['面经', '知识点'],
+          },
+          lt: {
+            type: 'repo-inbox',
+            repoPath: '/x/life-teachers',
+            label: 'life-teachers 收件箱',
+            categories: ['投资', '财富', '职场', '认知', '教育', '其他'],
+          },
         },
         routes: { nowcoder: ['fe-inbox'], wechat: ['markdown', 'lt'] },
       },
       { libraryRoot: '/tmp/lib' },
     );
-    const routes = router.describeRoutes();
-    expect(routes.nowcoder).toEqual(['front-end-journey-resource 收件箱']);
-    expect(routes.wechat).toEqual(['本机库', 'life-teachers 收件箱']);
-    expect(routes.zsxq).toEqual(['本机库']); // 未配置来源回退本机库
+    const routing = router.describeRouting();
+    // 每个来源的默认去向（sink id）。
+    expect(routing.defaults.nowcoder).toEqual(['fe-inbox']);
+    expect(routing.defaults.wechat).toEqual(['markdown', 'lt']);
+    expect(routing.defaults.zsxq).toEqual(['markdown']); // 未配置来源回退本机库
+    // 可选去向带展示名与各自分类清单，供侧栏级联下拉。
+    const byId = Object.fromEntries(routing.sinks.map(sink => [sink.id, sink]));
+    expect(byId['lt']?.label).toBe('life-teachers 收件箱');
+    expect(byId['lt']?.categories).toEqual(['投资', '财富', '职场', '认知', '教育', '其他']);
+    expect(byId['fe-inbox']?.label).toBe('front-end-journey-resource 收件箱');
+    expect(byId['markdown']?.categories).toContain('人工智能');
     // 不泄露本机路径
-    expect(JSON.stringify(routes)).not.toContain('/x/');
-    expect(JSON.stringify(routes)).not.toContain('Code');
+    expect(JSON.stringify(routing)).not.toContain('/x/');
+    expect(JSON.stringify(routing)).not.toContain('Code');
   });
 
   it('honours an explicit per-job override', () => {

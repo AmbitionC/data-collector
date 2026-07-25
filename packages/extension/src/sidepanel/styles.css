@@ -97,7 +97,8 @@ body {
 }
 
 button,
-input { font: inherit; }
+input,
+select { font: inherit; }
 button { appearance: none; }
 
 :focus-visible {
@@ -274,7 +275,8 @@ label {
 
 label span { color: var(--muted); font-weight: 400; }
 
-input {
+input,
+select {
   width: 100%;
   height: 44px;
   padding: 0 14px;
@@ -285,10 +287,30 @@ input {
   transition: border-color 160ms ease, box-shadow 160ms ease;
 }
 
-input::placeholder { color: var(--muted-soft); }
-input:hover { border-color: var(--muted); }
+/* 下拉：自绘 chevron，保持与输入框一致的发丝线质感。 */
+select {
+  appearance: none;
+  padding-right: 34px;
+  cursor: pointer;
+  background-image: linear-gradient(45deg, transparent 50%, currentColor 50%),
+    linear-gradient(135deg, currentColor 50%, transparent 50%);
+  background-position: calc(100% - 18px) 20px, calc(100% - 13px) 20px;
+  background-size: 5px 5px, 5px 5px;
+  background-repeat: no-repeat;
+}
 
-input:focus {
+select:disabled {
+  color: var(--muted-soft);
+  cursor: not-allowed;
+  background-color: var(--canvas-soft);
+}
+
+input::placeholder { color: var(--muted-soft); }
+input:hover,
+select:hover:not(:disabled) { border-color: var(--muted); }
+
+input:focus,
+select:focus {
   outline: none;
   border-color: var(--primary);
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--primary) 16%, transparent);

@@ -88,18 +88,31 @@ async function status() {
     'lastJobUrl',
     'lastJobError',
     'lastOutputPath',
-    'routes',
+    'routing',
   ]);
   const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
   let supported = false;
   let routeTargets: string[] = [];
+  let destinations: { id: string; label: string; categories: string[] }[] = [];
+  let defaultSinkIds: string[] = [];
   if (tab?.url) {
     try {
       parseSupportedUrl(tab.url);
       supported = true;
       const source = descriptorForHost(new URL(tab.url).hostname)?.id;
-      const routes = values.routes as Record<string, string[]> | undefined;
-      if (source && Array.isArray(routes?.[source])) routeTargets = routes[source];
+      const routing = values.routing as
+        | {
+            sinks?: { id: string; label: string; categories: string[] }[];
+            defaults?: Record<string, string[]>;
+          }
+        | undefined;
+      if (Array.isArray(routing?.sinks)) destinations = routing.sinks;
+      if (source && Array.isArray(routing?.defaults?.[source])) {
+        defaultSinkIds = routing.defaults[source];
+        routeTargets = defaultSinkIds.map(
+          id => destinations.find(sink => sink.id === id)?.label ?? id,
+        );
+      }
     } catch {
       supported = false;
     }
@@ -111,7 +124,14 @@ async function status() {
     lastJobUrl: values.lastJobUrl,
     lastJobError: values.lastJobError,
     lastOutputPath: values.lastOutputPath,
-    page: { supported, title: tab?.title ?? '', url: tab?.url ?? '', routeTargets },
+    page: {
+      supported,
+      title: tab?.title ?? '',
+      url: tab?.url ?? '',
+      routeTargets,
+      destinations,
+      defaultSinkIds,
+    },
   };
 }
 
@@ -121,7 +141,11 @@ chrome.runtime.onMessage.addListener((message: unknown, _sender, sendResponse) =
     if (request.type === 'status.get') return status();
     if (request.type === 'capture.current') {
       const jobId = await runner.captureCurrent(
-        (request.overrides ?? {}) as { userCategory?: string; userTags?: string[] },
+        (request.overrides ?? {}) as {
+          userCategory?: string;
+          userTags?: string[];
+          sinks?: string[];
+        },
       );
       return { jobId };
     }

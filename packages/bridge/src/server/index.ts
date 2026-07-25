@@ -31,6 +31,8 @@ const createJobSchema = z.object({
   id: z.string().min(1).max(100).optional(),
   url: z.string().url().max(4096),
   requestedBy: z.enum(['codex', 'cli', 'extension']).default('cli'),
+  /** 用户为本次采集显式选择的落地去向（sink id）；缺省按来源默认路由。 */
+  sinks: z.array(z.string().trim().min(1).max(100)).max(10).optional(),
 });
 const progressSchema = z.object({ stage: z.enum(['collecting']) });
 const errorSchema = z.object({
@@ -121,6 +123,9 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
     message => console.warn(`[sinks] ${message}`),
   );
   const reveal = options.reveal ?? defaultReveal;
+  // 本次进程内的「任务 → 用户选定去向」覆盖表。Bridge 重启后该覆盖丢失，
+  // 任务回退到来源默认路由（安全的降级，不会写到未选定的目标）。
+  const sinkOverrides = new Map<string, string[]>();
   let extensionSocket: WebSocket | undefined;
   let extensionReady = false;
 
@@ -165,7 +170,12 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
         throw new Error('回传内容 URL 与采集任务不一致');
       }
       if (job.status === 'dispatched') await jobs.transition(job.id, 'collecting');
-      const sinkResults = await router.save(organize(result.document as CollectedDocument));
+      const override = sinkOverrides.get(job.id);
+      const sinkResults = await router.save(
+        organize(result.document as CollectedDocument),
+        override,
+      );
+      sinkOverrides.delete(job.id);
       const succeeded = sinkResults.filter(sinkResult => sinkResult.ok);
       if (succeeded.length === 0) {
         const detail = sinkResults
@@ -203,7 +213,7 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
         version: APP_VERSION,
         trustedExtensionId: TRUSTED_EXTENSION_ID,
         extensionConnected: extensionReady && extensionSocket?.readyState === WebSocket.OPEN,
-        routes: router.describeRoutes(),
+        routing: router.describeRouting(),
       });
     }
     const jobMatch = requestUrl.pathname.match(/^\/v1\/jobs\/([^/]+)$/);
@@ -223,6 +233,7 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
         requestedBy: input.requestedBy,
         ...(input.id ? { id: input.id } : {}),
       });
+      if (input.sinks?.length) sinkOverrides.set(job.id, input.sinks);
       sendJson(response, 202, job);
       if (job.requestedBy !== 'extension') await dispatch(job);
       return;

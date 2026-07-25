@@ -12,6 +12,8 @@ export type SidePanelState =
       category: string;
       tags: string[];
       routeTargets?: string[];
+      destinations?: { id: string; label: string; categories: string[] }[];
+      defaultSinkIds?: string[];
     }
   | { phase: 'collecting'; activeStage: number }
   | { phase: 'saved'; path: string }
@@ -22,7 +24,11 @@ export type SidePanelState =
   | { phase: 'identity_error' };
 
 export interface SidePanelActions {
-  capture(overrides: { userCategory?: string; userTags?: string[] }): Promise<void>;
+  capture(overrides: {
+    userCategory?: string;
+    userTags?: string[];
+    sinks?: string[];
+  }): Promise<void>;
   recapture(): Promise<void>;
   retry(): Promise<void>;
   copyPath(path: string): Promise<void>;
@@ -35,7 +41,14 @@ export interface BackgroundStatus {
   lastJobUrl?: string;
   lastJobError?: string;
   lastOutputPath?: string;
-  page: { supported: boolean; title: string; url: string; routeTargets?: string[] };
+  page: {
+    supported: boolean;
+    title: string;
+    url: string;
+    routeTargets?: string[];
+    destinations?: { id: string; label: string; categories: string[] }[];
+    defaultSinkIds?: string[];
+  };
 }
 
 export function sidePanelStateFromStatus(status: BackgroundStatus): SidePanelState {
@@ -82,6 +95,8 @@ export function sidePanelStateFromStatus(status: BackgroundStatus): SidePanelSta
     category: '',
     tags: [],
     ...(status.page.routeTargets?.length ? { routeTargets: status.page.routeTargets } : {}),
+    ...(status.page.destinations?.length ? { destinations: status.page.destinations } : {}),
+    ...(status.page.defaultSinkIds?.length ? { defaultSinkIds: status.page.defaultSinkIds } : {}),
   };
 }
 
@@ -165,21 +180,51 @@ export function renderSidePanel(
     required(document, '#source-label').textContent = state.sourceLabel;
     required(document, '#page-title').textContent = state.title;
     const routeHint = required<HTMLElement>(document, '#route-hint');
-    const targets = state.routeTargets ?? [];
-    if (targets.length > 0) {
-      routeHint.hidden = false;
-      routeHint.textContent = `保存去向：${targets.join(' · ')}`;
-    } else {
-      routeHint.hidden = true;
-      routeHint.textContent = '';
-    }
+    const destinationSelect = required<HTMLSelectElement>(document, '#destination');
+    const categorySelect = required<HTMLSelectElement>(document, '#category');
+    const destinations = state.destinations ?? [];
+    const defaultIds = state.defaultSinkIds ?? [];
+    const defaultLabels = state.routeTargets ?? [];
+
+    /** 「分类」选项随选定去向联动：取该去向的分类清单；默认路由取首个默认去向的清单。 */
+    const applyCategories = (options: { preserve: boolean }): void => {
+      const chosen = destinationSelect.value;
+      const effectiveId = chosen || defaultIds[0] || '';
+      const categories =
+        destinations.find(sink => sink.id === effectiveId)?.categories ?? [];
+      // 切换去向时尽量保留用户已选分类；换页面时按新页面的建议分类重置。
+      const wanted = options.preserve ? categorySelect.value : state.category;
+      categorySelect.replaceChildren();
+      categorySelect.append(new Option('自动分类（由内容判定）', ''));
+      for (const category of categories) categorySelect.append(new Option(category, category));
+      categorySelect.value = categories.includes(wanted) ? wanted : '';
+      categorySelect.disabled = categories.length === 0;
+      const labels = chosen
+        ? [destinations.find(sink => sink.id === chosen)?.label ?? chosen]
+        : defaultLabels;
+      routeHint.hidden = labels.length === 0;
+      routeHint.textContent = labels.length ? `保存去向：${labels.join(' · ')}` : '';
+    };
+
+    // 仅在切换页面时重建选项/重置输入，避免轮询刷新覆盖用户正在填的内容。
     if (panel.dataset.url !== state.url) {
       panel.dataset.url = state.url;
-      required<HTMLInputElement>(document, '#category').value = state.category;
+      destinationSelect.replaceChildren();
+      const defaultText = defaultLabels.length
+        ? `默认（${defaultLabels.join(' · ')}）`
+        : '默认去向';
+      destinationSelect.append(new Option(defaultText, ''));
+      for (const sink of destinations) destinationSelect.append(new Option(sink.label, sink.id));
+      destinationSelect.value = '';
+      destinationSelect.disabled = destinations.length === 0;
       required<HTMLInputElement>(document, '#tags').value = state.tags.join(', ');
+      applyCategories({ preserve: false });
     }
+    destinationSelect.onchange = () => applyCategories({ preserve: true });
+
     required<HTMLButtonElement>(document, '#capture-button').onclick = () => {
-      const category = required<HTMLInputElement>(document, '#category').value.trim();
+      const category = categorySelect.value.trim();
+      const destination = destinationSelect.value;
       const tags = required<HTMLInputElement>(document, '#tags').value
         .split(/[,，]/)
         .map(tag => tag.trim())
@@ -188,6 +233,7 @@ export function renderSidePanel(
       void actions.capture({
         ...(category ? { userCategory: category } : {}),
         ...(tags.length ? { userTags: tags } : {}),
+        ...(destination ? { sinks: [destination] } : {}),
       });
     };
     return;

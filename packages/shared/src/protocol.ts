@@ -86,6 +86,8 @@ export const collectJobPayloadSchema = z.object({
   url: z.string().url().max(4096),
   userCategory: z.string().trim().max(100).optional(),
   userTags: z.array(z.string().trim().min(1).max(50)).max(20).optional(),
+  /** 用户为本次采集显式选择的落地去向（sink id）；缺省按来源默认路由。 */
+  sinks: z.array(z.string().trim().min(1).max(100)).max(10).optional(),
 });
 
 export const jobResultPayloadSchema = z.object({

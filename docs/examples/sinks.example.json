@@ -6,6 +6,7 @@
       "repoPath": "~/Code/life-teachers",
       "inboxDir": "_inbox",
       "label": "life-teachers 收件箱",
+      "categories": ["投资", "财富", "职场", "认知", "教育", "其他"],
       "commit": true,
       "push": false
     },
@@ -14,6 +15,15 @@
       "repoPath": "~/Code/front-end-journey-resource",
       "inboxDir": "_inbox",
       "label": "fe-journey 收件箱",
+      "categories": [
+        "面经",
+        "Agent 与大模型核心",
+        "前端核心",
+        "服务端工程",
+        "数据工程",
+        "计算机与算法基础",
+        "项目与职业"
+      ],
       "commit": true,
       "push": false
     }

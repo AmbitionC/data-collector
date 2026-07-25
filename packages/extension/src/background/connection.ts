@@ -110,15 +110,15 @@ export class BridgeConnection {
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
         const health = (await response.json()) as {
           trustedExtensionId?: unknown;
-          routes?: unknown;
+          routing?: unknown;
         };
         if (typeof health.trustedExtensionId !== 'string') {
           throw new Error('Bridge health response is missing trustedExtensionId');
         }
         trustedExtensionId = health.trustedExtensionId;
-        // 缓存来源→去向映射（仅面向用户的 sink 名称），供侧边栏展示落地去向。
-        if (health.routes && typeof health.routes === 'object') {
-          await this.dependencies.storage.set({ routes: health.routes });
+        // 缓存路由说明（可选去向 + 各自分类 + 来源默认去向），供侧边栏渲染选择器。
+        if (health.routing && typeof health.routing === 'object') {
+          await this.dependencies.storage.set({ routing: health.routing });
         }
       } catch {
         await this.markDisconnected(generation);
@@ -278,7 +278,7 @@ export class BridgeConnection {
 
   async createJob(
     url: string,
-    _overrides?: { userCategory?: string; userTags?: string[] },
+    overrides?: { userCategory?: string; userTags?: string[]; sinks?: string[] },
   ): Promise<{ id: string }> {
     const settings = await this.settings();
     if (!settings.token) throw new Error('浏览器扩展仍在自动连接 Bridge');
@@ -293,7 +293,11 @@ export class BridgeConnection {
           authorization: `Bearer ${settings.token}`,
           'content-type': 'application/json',
         },
-        body: JSON.stringify({ url, requestedBy: 'extension' }),
+        body: JSON.stringify({
+          url,
+          requestedBy: 'extension',
+          ...(overrides?.sinks?.length ? { sinks: overrides.sinks } : {}),
+        }),
       },
     );
     if (!response.ok) throw new Error(`创建采集任务失败：HTTP ${response.status}`);

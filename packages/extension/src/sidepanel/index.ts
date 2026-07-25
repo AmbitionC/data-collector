@@ -44,7 +44,7 @@ function errorMessage(error: unknown, fallback: string): string {
 }
 
 async function capturePage(
-  overrides: { userCategory?: string; userTags?: string[] },
+  overrides: { userCategory?: string; userTags?: string[]; sinks?: string[] },
 ): Promise<void> {
   try {
     renderSidePanel(document, { phase: 'collecting', activeStage: 0 }, actions);

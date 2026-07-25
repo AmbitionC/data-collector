@@ -34,11 +34,17 @@
   - `{ "type": "repo-inbox", "repoPath": "…", "inboxDir": "_inbox", "label": "…", "commit": true, "push": false }`
     - `repoPath` 支持 `~` 展开；`inboxDir` 默认 `_inbox`。
     - `label`（可选）：侧边栏「保存去向」展示的名称；缺省由仓库目录名派生（如「life-teachers 收件箱」）。
+    - `categories`（可选）：该去向的**分类清单**，作为侧边栏「分类」下拉的选项。建议与目标仓库的真实分类一致 —— life-teachers 用其主分类（投资/财富/职场/认知/教育/其他），fe-journey 用「面经 + knowledge 各顶层分组」。留空表示不预设分类，由离线分类器/下游 Agent 判定。
     - `commit`（默认 `true`）：写入后 `git add/commit` 到当前分支（不切分支）。
     - `push`（默认 `false`）：提交后 `git push`。**本机 Agent 无需 push；若由云端定时 Routine（每次全新克隆）消费收件箱，则需 `push: true`。**
 - `routes`：`{ <source>: [sinkId, …] }`。未列出的来源回退到 `markdown`。
 
-**落地去向展示**：Bridge 的 `/health` 会返回「来源→去向名称」映射（只含 sink 的 `label`，**不含本机路径/凭证**）。扩展缓存后，侧边栏在识别到当前页面来源时显示「保存去向：本机库 · fe-journey 收件箱」，让保存前就能看清这一页会进哪些库。
+**去向 / 分类选择（级联）**：Bridge 的 `/health` 返回 `routing`：可选去向（`id`/`label`/`categories`）+ 每个来源的默认去向。**只含展示名与分类，不含本机路径/凭证**。扩展缓存后，侧边栏 ready 面板呈现两级选择：
+
+- **一级「去向」**（下拉）：`默认（…）` + 每个可选去向。选择某个去向即**覆盖本次采集的路由**（例如把一篇公众号文章临时改存到 fe-journey 收件箱）。
+- **二级「分类」**（下拉）：随一级联动，列出该去向的 `categories`；首项为「自动分类（由内容判定）」。**不再是自由输入**，避免拍脑袋写出目标库不存在的分类。
+
+选定的去向随任务发到 Bridge（`POST /v1/jobs` 的 `sinks` 字段），仅对该次采集生效；未选择则按来源默认路由。
 
 示例见 [`examples/sinks.example.json`](examples/sinks.example.json)。
 

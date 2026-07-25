@@ -115,61 +115,84 @@ describe('side panel state mapping', () => {
 });
 
 describe('side panel DOM behavior', () => {
-  it('shows the current page and submits editable organization fields', async () => {
+  it('offers destination and category as bound選項 and submits the chosen ones', async () => {
     renderSidePanel(document, {
       phase: 'ready',
       url: 'https://mp.weixin.qq.com/s/current',
       sourceLabel: '微信公众号',
       title: '一夜之间，通胀的玩笑这次开大了',
-      category: '商业与投资',
+      category: '',
       tags: ['通胀', '投资'],
+      routeTargets: ['本机库'],
+      defaultSinkIds: ['markdown'],
+      destinations: [
+        { id: 'markdown', label: '本机库', categories: ['商业与投资', '认知'] },
+        { id: 'life-teachers', label: 'life-teachers 收件箱', categories: ['投资', '财富', '认知'] },
+      ],
     }, actions);
 
     expect(document.querySelector<HTMLElement>('#ready-panel')?.hidden).toBe(false);
     expect(document.querySelector('#page-title')?.textContent).toContain('一夜之间');
-    document.querySelector<HTMLInputElement>('#category')!.value = '稍后精读';
+
+    // 一级「去向」：默认项 + 每个可选目标（不是自由输入）。
+    const destination = document.querySelector<HTMLSelectElement>('#destination')!;
+    expect([...destination.options].map(option => option.value))
+      .toEqual(['', 'markdown', 'life-teachers']);
+    expect(destination.options[0]?.textContent).toContain('默认（本机库）');
+
+    // 二级「分类」：跟随默认去向（本机库）的分类清单。
+    const category = document.querySelector<HTMLSelectElement>('#category')!;
+    expect([...category.options].map(option => option.value))
+      .toEqual(['', '商业与投资', '认知']);
+
+    // 切到 life-teachers 后，分类清单联动为该库的主分类，去向提示同步。
+    destination.value = 'life-teachers';
+    destination.dispatchEvent(new window.Event('change'));
+    expect([...category.options].map(option => option.value))
+      .toEqual(['', '投资', '财富', '认知']);
+    expect(document.querySelector('#route-hint')?.textContent)
+      .toContain('life-teachers 收件箱');
+
+    category.value = '投资';
     document.querySelector<HTMLInputElement>('#tags')!.value = '宏观, 利率';
     document.querySelector<HTMLButtonElement>('#capture-button')!.click();
     await Promise.resolve();
 
     expect(actions.capture).toHaveBeenCalledWith({
-      userCategory: '稍后精读',
+      userCategory: '投资',
       userTags: ['宏观', '利率'],
+      sinks: ['life-teachers'],
     });
   });
 
   it('preserves dirty organization fields for the same URL and resets them for a new URL', () => {
-    renderSidePanel(document, {
-      phase: 'ready',
-      url: 'https://mp.weixin.qq.com/s/a',
+    const destinations = [
+      { id: 'markdown', label: '本机库', categories: ['前端开发', '商业与投资'] },
+    ];
+    const ready = (url: string, title: string, tags: string[]) => ({
+      phase: 'ready' as const,
+      url,
       sourceLabel: '微信公众号',
-      title: '文章 A',
-      category: '初始分类',
-      tags: ['初始标签'],
-    }, actions);
-    document.querySelector<HTMLInputElement>('#category')!.value = '用户编辑分类';
+      title,
+      category: '',
+      tags,
+      destinations,
+      defaultSinkIds: ['markdown'],
+      routeTargets: ['本机库'],
+    });
+
+    renderSidePanel(document, ready('https://mp.weixin.qq.com/s/a', '文章 A', ['初始标签']), actions);
+    document.querySelector<HTMLSelectElement>('#category')!.value = '商业与投资';
     document.querySelector<HTMLInputElement>('#tags')!.value = '用户编辑标签';
 
-    renderSidePanel(document, {
-      phase: 'ready',
-      url: 'https://mp.weixin.qq.com/s/a',
-      sourceLabel: '微信公众号',
-      title: '文章 A（刷新）',
-      category: '',
-      tags: [],
-    }, actions);
-    expect(document.querySelector<HTMLInputElement>('#category')?.value).toBe('用户编辑分类');
+    // 同一 URL 的轮询刷新不得覆盖用户已选/已填内容。
+    renderSidePanel(document, ready('https://mp.weixin.qq.com/s/a', '文章 A（刷新）', []), actions);
+    expect(document.querySelector<HTMLSelectElement>('#category')?.value).toBe('商业与投资');
     expect(document.querySelector<HTMLInputElement>('#tags')?.value).toBe('用户编辑标签');
 
-    renderSidePanel(document, {
-      phase: 'ready',
-      url: 'https://mp.weixin.qq.com/s/b',
-      sourceLabel: '微信公众号',
-      title: '文章 B',
-      category: '新分类',
-      tags: ['新标签'],
-    }, actions);
-    expect(document.querySelector<HTMLInputElement>('#category')?.value).toBe('新分类');
+    // 切换到新页面时重置为默认（自动分类 + 新标签）。
+    renderSidePanel(document, ready('https://mp.weixin.qq.com/s/b', '文章 B', ['新标签']), actions);
+    expect(document.querySelector<HTMLSelectElement>('#category')?.value).toBe('');
     expect(document.querySelector<HTMLInputElement>('#tags')?.value).toBe('新标签');
   });
 

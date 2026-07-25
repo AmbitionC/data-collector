@@ -15,6 +15,8 @@ export interface RepoInboxSinkOptions {
   id: string;
   /** 面向用户的去向名称；缺省由仓库目录名派生（如「life-teachers 收件箱」）。 */
   label?: string;
+  /** 该目标仓库的分类清单（侧边栏下拉选项）；缺省为空表示交给下游 Agent 判定。 */
+  categories?: readonly string[];
   /** 目标仓库根目录（支持 ~ 展开）。 */
   repoPath: string;
   /** 收件箱子目录（相对仓库根），默认 `_inbox`。 */
@@ -95,6 +97,7 @@ function defaultRunGit(
 export class RepoInboxSink implements ContentSink {
   readonly id: string;
   readonly label: string;
+  readonly categories: readonly string[];
   private readonly repoRoot: string;
   private readonly inboxDir: string;
   private readonly commit: boolean;
@@ -108,6 +111,7 @@ export class RepoInboxSink implements ContentSink {
     this.id = options.id;
     this.repoRoot = expandPath(options.repoPath);
     this.inboxDir = options.inboxDir ?? '_inbox';
+    this.categories = options.categories ?? [];
     this.label = options.label ?? `${this.repoRoot.split(/[\\/]/).filter(Boolean).pop() ?? '仓库'} 收件箱`;
     this.commit = options.commit ?? true;
     this.push = options.push ?? false;

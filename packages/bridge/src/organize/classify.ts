@@ -1,5 +1,16 @@
 import { keywords } from './summarize.js';
 
+/** 本机库的内置分类清单（供侧边栏下拉选择；顺序与 CATEGORY_RULES 一致，末位为“其他”）。 */
+export const LIBRARY_CATEGORIES = [
+  '前端开发',
+  '人工智能',
+  '产品与设计',
+  '商业与投资',
+  '效率与工具',
+  '生活与随笔',
+  '其他',
+] as const;
+
 const CATEGORY_RULES = [
   ['前端开发', ['javascript', 'typescript', 'react', 'vue', '浏览器', 'css', '前端', '组件']],
   ['人工智能', ['ai', '大模型', 'llm', '智能体', '提示词', '机器学习']],

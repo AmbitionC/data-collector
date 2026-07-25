@@ -166,7 +166,7 @@ describe('local Bridge', () => {
       version: string;
       trustedExtensionId: string;
       extensionConnected: boolean;
-      routes: Record<string, string[]>;
+      routing: { sinks: unknown[]; defaults: Record<string, string[]> };
     }>(bridge.url, '/health');
     expect(health).toEqual({
       status: 200,
@@ -175,8 +175,20 @@ describe('local Bridge', () => {
         version: APP_VERSION,
         trustedExtensionId: TRUSTED_EXTENSION_ID,
         extensionConnected: false,
-        // 默认无 sinks.json：所有来源回退到本机库。
-        routes: { wechat: ['本机库'], zsxq: ['本机库'], nowcoder: ['本机库'] },
+        // 默认无 sinks.json：只有本机库，所有来源都回退到它；分类清单供侧栏下拉。
+        routing: {
+          sinks: [
+            {
+              id: 'markdown',
+              label: '本机库',
+              categories: [
+                '前端开发', '人工智能', '产品与设计', '商业与投资',
+                '效率与工具', '生活与随笔', '其他',
+              ],
+            },
+          ],
+          defaults: { wechat: ['markdown'], zsxq: ['markdown'], nowcoder: ['markdown'] },
+        },
       },
     });
     const unauthorized = await requestJson(bridge.url, '/v1/jobs', {

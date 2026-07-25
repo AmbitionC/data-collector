@@ -22,7 +22,7 @@ export interface BridgeClient {
   send(type: string, requestId: string, payload: unknown): void;
   createJob(
     url: string,
-    overrides?: { userCategory?: string; userTags?: string[] },
+    overrides?: { userCategory?: string; userTags?: string[]; sinks?: string[] },
   ): Promise<{ id: string }>;
 }
 
@@ -43,6 +43,8 @@ function isContentScriptNotReady(error: unknown): boolean {
 export interface CaptureOverrides {
   userCategory?: string;
   userTags?: string[];
+  /** 用户为本次采集选定的落地去向（sink id）；缺省按来源默认路由。 */
+  sinks?: string[];
 }
 
 const NEEDS_ATTENTION = new Set(['AUTH_REQUIRED', 'UNSUPPORTED_LAYOUT']);

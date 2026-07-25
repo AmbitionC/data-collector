@@ -7,12 +7,19 @@ import { z } from 'zod';
  * 所有来源都落本机库 —— 与 0.2.0 行为完全一致。
  */
 
-const markdownSinkSchema = z.object({ type: z.literal('markdown') });
+const categoriesSchema = z.array(z.string().trim().min(1).max(60)).max(40);
+
+const markdownSinkSchema = z.object({
+  type: z.literal('markdown'),
+  categories: categoriesSchema.optional(),
+});
 const repoInboxSinkSchema = z.object({
   type: z.literal('repo-inbox'),
   repoPath: z.string().trim().min(1).max(4096),
   inboxDir: z.string().trim().min(1).max(200).optional(),
   label: z.string().trim().min(1).max(60).optional(),
+  /** 该去向的分类清单（侧边栏下拉选项）。 */
+  categories: categoriesSchema.optional(),
   commit: z.boolean().optional(),
   push: z.boolean().optional(),
 });

@@ -23,5 +23,10 @@ export interface ContentSink {
   readonly id: string;
   /** 面向用户的落地目标名称（侧边栏「去向」展示用，不含本机路径等敏感信息）。 */
   readonly label: string;
+  /**
+   * 该去向可选的分类清单（侧边栏「分类」下拉的选项）。
+   * 空数组表示该去向不预设分类，交给离线分类器/下游 Agent 判定。
+   */
+  readonly categories: readonly string[];
   save(input: OrganizedDocument): Promise<SinkResult>;
 }

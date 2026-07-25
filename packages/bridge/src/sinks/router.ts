@@ -52,6 +52,7 @@ export class SinkRouter {
             id,
             repoPath: definition.repoPath,
             ...(definition.label ? { label: definition.label } : {}),
+            ...(definition.categories ? { categories: definition.categories } : {}),
             ...(definition.inboxDir ? { inboxDir: definition.inboxDir } : {}),
             ...(definition.commit !== undefined ? { commit: definition.commit } : {}),
             ...(definition.push !== undefined ? { push: definition.push } : {}),
@@ -72,15 +73,24 @@ export class SinkRouter {
   }
 
   /**
-   * 每个来源的「去向」标签列表（供侧边栏展示）。只暴露面向用户的 sink 名称，
-   * 不含本机路径、凭证等敏感信息。
+   * 路由说明：可选去向（含各自的分类清单）+ 每个来源的默认去向。
+   * 供侧边栏渲染「去向 / 分类」级联选择与「保存去向」提示。
+   * 只暴露面向用户的名称与分类，**不含本机路径、凭证等敏感信息**。
    */
-  describeRoutes(): Record<Source, string[]> {
-    const out = {} as Record<Source, string[]>;
-    for (const source of SOURCES) {
-      out[source] = this.resolveSinkIds(source).map(id => this.sinks.get(id)?.label ?? id);
-    }
-    return out;
+  describeRouting(): {
+    sinks: { id: string; label: string; categories: string[] }[];
+    defaults: Record<Source, string[]>;
+  } {
+    const defaults = {} as Record<Source, string[]>;
+    for (const source of SOURCES) defaults[source] = this.resolveSinkIds(source);
+    return {
+      sinks: [...this.sinks.entries()].map(([id, sink]) => ({
+        id,
+        label: sink.label,
+        categories: [...sink.categories],
+      })),
+      defaults,
+    };
   }
 
   /** 解析某来源要用的 sink id 列表（去重、剔除未定义项，空则回退 markdown）。 */
