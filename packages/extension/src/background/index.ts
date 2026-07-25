@@ -24,7 +24,11 @@ const tabs: TabsApi = {
   query: async input => chrome.tabs.query(input as chrome.tabs.QueryInfo) as Promise<BrowserTab[]>,
   sendMessage: async (id, message) =>
     chrome.tabs.sendMessage(id, message) as Promise<ExtractionResponse>,
-  reload: async id => { await chrome.tabs.reload(id); },
+  // 注入而不是刷新：刷新会把知识星球的「精华」分类退回默认的「最新」，
+  // 用户在精华页发起的采集就采成了别的内容。
+  inject: async (id: number) => {
+    await chrome.scripting.executeScript({ target: { tabId: id }, files: ['content.js'] });
+  },
 };
 
 function waitForTabComplete(tabId: number, timeoutMs = 30_000): Promise<void> {
@@ -178,8 +182,10 @@ chrome.runtime.onMessage.addListener((message: unknown, _sender, sendResponse) =
           userTags?: string[];
           sinks?: string[];
         },
-        // 「刷新页面并重试」：内容脚本只在页面加载时注入，插件更新后由扩展自己重载页面。
-        (request as { reloadFirst?: boolean }).reloadFirst === true ? { reloadFirst: true } : {},
+        // 「继续采下一批」是续采，保留上一批的折叠标记；重新发起则先把页面还原。
+        (request as { continuation?: boolean }).continuation === true
+          ? { continuation: true }
+          : {},
       );
     }
     if (request.type === 'batch.stop') {

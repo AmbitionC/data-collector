@@ -373,10 +373,8 @@ describe('side panel DOM behavior', () => {
       expect(document.querySelector<HTMLElement>('#batch-panel')?.dataset.tone).toBe('ok');
     }
 
-    document.querySelector<HTMLButtonElement>('#batch-continue-button')!.click();
     document.querySelector<HTMLButtonElement>('#batch-done-button')!.click();
     await Promise.resolve();
-    expect(actions.captureList).toHaveBeenCalledOnce();
     expect(actions.dismissBatch).toHaveBeenCalledOnce();
   });
 
@@ -394,35 +392,45 @@ describe('side panel DOM behavior', () => {
     }
   });
 
-  it('E1: turns the refresh instruction into a button that does the refresh', async () => {
+  it('never offers to reload the page — that would reset the site tab the user is on', async () => {
     renderSidePanel(
       document,
       batchState('failed', {
         code: 'CONTENT_SCRIPT_MISSING',
-        message: '页面脚本未就绪：插件安装或更新后，之前打开的标签页需要重新加载一次。',
+        message: '页面脚本未就绪，且自动注入没有成功。',
       }),
       actions,
     );
 
     const retry = document.querySelector<HTMLButtonElement>('#batch-retry-button')!;
-    expect(retry.textContent).toBe('刷新页面并重试');
-    expect(document.querySelector('#batch-note')?.textContent).toContain('重新加载');
+    // 知识星球的「精华」分类是应用内状态，刷新会退回「最新」，采到的就不是用户要的内容。
+    expect(retry.textContent).toBe('重试');
+    expect(document.querySelector('#batch-panel')?.textContent).not.toContain('刷新页面');
 
     retry.click();
     await Promise.resolve();
-    // 不让用户自己去按 F5：插件重载页面后自己再跑一遍。
-    expect(actions.captureList).toHaveBeenCalledWith(expect.anything(), { reloadFirst: true });
+    // 重试 = 重来一遍（先还原页面），不带 continuation。
+    const [, options] = vi.mocked(actions.captureList).mock.calls[0]!;
+    expect(options?.continuation).toBeUndefined();
   });
 
-  it('E4: offers one-click diagnostics when nothing was addressable', async () => {
-    renderSidePanel(document, batchState('skipped_all', { skipped: 21 }), actions);
+  it('continues a batch without resetting the marks, and retries with a reset', async () => {
+    renderSidePanel(document, batchState('done', { collected: 3 }), actions);
+    document.querySelector<HTMLButtonElement>('#batch-continue-button')!.click();
+    await Promise.resolve();
+    expect(actions.captureList).toHaveBeenCalledWith(expect.anything(), { continuation: true });
+  });
 
-    expect(visible('#batch-diagnose-button')).toBe(true);
+  it('E4: offers one-click diagnostics on every state that needs attention', async () => {
+    for (const phase of ['skipped_all', 'empty', 'failed'] as const) {
+      renderSidePanel(document, batchState(phase, { skipped: 21 }), actions);
+      expect(visible('#batch-diagnose-button')).toBe(true);
+    }
     document.querySelector<HTMLButtonElement>('#batch-diagnose-button')!.click();
     await Promise.resolve();
     expect(actions.diagnoseBatch).toHaveBeenCalledOnce();
 
-    // 其它终态不该出现诊断按钮。
+    // 成功终态不该出现诊断按钮。
     renderSidePanel(document, batchState('done', { collected: 3 }), actions);
     expect(visible('#batch-diagnose-button')).toBe(false);
   });

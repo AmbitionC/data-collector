@@ -5,7 +5,7 @@
   "version": "0.2.0",
   "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA5j32H1bhAUPC0m0KrRBNrt+b/aEK4NInYbdOKtnxdtBiXU2sZnw+GvWcHKe7qV5U2182ckYlquJvZWAIecHZmRN4uA/TuadXt0nQt9p0LYLHobquh8G0cBv39N/H7AzHcb+eFTgKJ/rP6F4VPKrXheELstyHwUoGl8kE8zESQxjt0i679tJon/QXsKCwqr8YVGg1Yoc0Rs/0o1EZBWEgNCthuVpD6RcmkmchdTavYhgqAhhB/nISMJv3c1xwM85hypSNBJIeTi685W7FVz/mH5nGNHKatN3wKoahtgb1UKckTDErtRwUJzv9htcvNy6sUoTqVo3fwNTU750olVEzdwIDAQAB",
   "minimum_chrome_version": "116",
-  "permissions": ["activeTab", "alarms", "sidePanel", "storage"],
+  "permissions": ["activeTab", "alarms", "scripting", "sidePanel", "storage"],
   "host_permissions": [
     "https://mp.weixin.qq.com/*",
     "https://wx.zsxq.com/*",

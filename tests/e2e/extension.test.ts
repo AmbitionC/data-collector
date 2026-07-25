@@ -386,12 +386,17 @@ describe('built Chrome extension', () => {
     // 「当前页保存」这条主用户路径（自动授权 → 识别 → 保存 → 已保存屏 + 正文落盘）。
   });
 
-  it('batch-saves a zsxq list page into one library entry per post', async () => {
+  it('batch-saves a zsxq list page into one library entry per post, without reloading it', async () => {
     const { libraryRoot } = await startStack();
 
     const fixture = await readFile(join(WORKSPACE, 'tests', 'fixtures', 'zsxq-list.html'), 'utf8');
     const listPage = await browser!.newPage();
     await serveArticleFixture(listPage, fixture, LIST_URL);
+    // 数一下这个页面被导航了几次：只应有我们自己发起的那一次。
+    let navigations = 0;
+    listPage.on('framenavigated', frame => {
+      if (frame === listPage.mainFrame()) navigations += 1;
+    });
     await listPage.goto(LIST_URL, { waitUntil: 'domcontentloaded' });
 
     const { page: sidePanel } = await sidePanelFor(listPage);
@@ -410,23 +415,27 @@ describe('built Chrome extension', () => {
     await waitForText(sidePanel, '#batch-heading', '本轮批量归档完成', 30_000);
     await sidePanel.screenshot({ path: join(screenshotDirectory, 'sidepanel-batch-done.png') });
 
-    expect(await elementText(sidePanel, '#batch-collected')).toBe('2');
-    // 第三条拿不到自身 URL，如实计入「已跳过」而不是静默少采。
+    // fixture 里有一条带着上一轮的折叠标记：新发起一批会先把页面还原，所以它也应被采到。
+    expect(await elementText(sidePanel, '#batch-collected')).toBe('3');
+    // 拿不到自身 URL 的那条如实计入「已跳过」，而不是静默少采。
     expect(await elementText(sidePanel, '#batch-skipped')).toBe('1');
     expect(await elementText(sidePanel, '#batch-failed')).toBe('0');
 
     const catalog = JSON.parse(
       await readFile(join(libraryRoot, '_catalog', 'index.json'), 'utf8'),
     ) as { url: string }[];
-    // 两条各自入库：身份由各自的 /topic/ 地址派生，不会相互覆盖。
-    expect(catalog).toHaveLength(2);
+    // 各自入库：身份由各自的 /topic/ 地址派生，不会相互覆盖。
+    expect(catalog).toHaveLength(3);
     expect(new Set(catalog.map(entry => entry.url))).toEqual(new Set([
       `${LIST_URL}/topic/511111111111111`,
       `${LIST_URL}/topic/522222222222222`,
+      `${LIST_URL}/topic/544444444444444`,
     ]));
     // 批量不开新标签页：内容已在当前页提取完毕。
     expect((await browser!.pages()).filter(page => page.url().startsWith(LIST_URL)))
       .toHaveLength(1);
+    // 而且绝不刷新用户所在的页面——刷新会把知识星球的「精华」分类退回「最新」。
+    expect(navigations).toBe(1);
   });
 
   it('reports an unproductive batch as needing attention, and the screen stays put', async () => {

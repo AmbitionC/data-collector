@@ -129,7 +129,7 @@ describe('side panel controller error precedence', () => {
             rounds: 0,
             phase: 'failed',
             code: 'CONTENT_SCRIPT_MISSING',
-            error: '页面脚本未就绪：插件安装或更新后，之前打开的标签页需要重新加载一次。',
+            error: '页面脚本未就绪，且自动注入没有成功。',
             updatedAt: Date.now(),
           },
         },
@@ -144,8 +144,10 @@ describe('side panel controller error precedence', () => {
 
     expect(visible('#batch-panel')).toBe(true);
     expect(document.querySelector('#batch-heading')?.textContent).not.toContain('完成');
+    // 绝不出现「刷新页面」：刷新会把知识星球的「精华」分类退回「最新」。
     expect(document.querySelector<HTMLButtonElement>('#batch-retry-button')?.textContent)
-      .toBe('刷新页面并重试');
+      .toBe('重试');
+    expect(document.querySelector('#batch-panel')?.textContent).not.toContain('刷新');
     expect(visible('#job-error-panel')).toBe(false);
   });
 });

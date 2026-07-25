@@ -44,7 +44,12 @@ class InMemoryTabs implements TabsApi {
   readonly updated: Array<{ id: number; active: boolean }> = [];
   /** 内容脚本收到的消息类型顺序（批量采集靠它验证「提取一轮 → 翻一页」的节奏）。 */
   readonly asked: string[] = [];
-  readonly reloaded: number[] = [];
+  /** 只保留采集节奏（去掉还原页面这类善后消息），断言更聚焦。 */
+  get rhythm(): string[] {
+    return this.asked.filter(type => type === 'extract.list' || type === 'list.advance');
+  }
+  readonly injected: number[] = [];
+  readonly restored: number[] = [];
   listRounds: Array<{ documents: CollectedDocument[]; skipped: number; total: number }> = [];
   advances: Array<{ collapsed: number; loaded: number }> = [];
   response: Awaited<ReturnType<TabsApi['sendMessage']>> = { ok: true, document: document() };
@@ -67,8 +72,8 @@ class InMemoryTabs implements TabsApi {
     return [this.activeTab];
   }
 
-  async reload(id: number): Promise<void> {
-    this.reloaded.push(id);
+  async inject(id: number): Promise<void> {
+    this.injected.push(id);
   }
 
   async sendMessage(
@@ -84,6 +89,10 @@ class InMemoryTabs implements TabsApi {
     }
     if (type === 'list.advance') {
       return { ok: true, advance: this.advances.shift() ?? { collapsed: 0, loaded: 0 } };
+    }
+    if (type === 'list.restore') {
+      this.restored.push(_id);
+      return { ok: true, advance: { collapsed: 0, loaded: 0 } };
     }
     return this.response;
   }
@@ -304,7 +313,7 @@ describe('list page batch capture', () => {
 
     const summary = await runner.captureList();
 
-    expect(tabs.asked).toEqual([
+    expect(tabs.rhythm).toEqual([
       'extract.list',
       'list.advance',
       'extract.list',
@@ -365,22 +374,62 @@ describe('list page batch capture', () => {
     // 这正是「错误一闪而过就跳到『本轮批量归档完成』」的根因：终态必须是 failed。
     expect(summary.phase).toBe('failed');
     expect(summary.code).toBe('CONTENT_SCRIPT_MISSING');
-    expect(summary.error).toContain('重新加载');
+    expect(summary.error).toContain('自动注入没有成功');
+    // 绝不能建议用户刷新页面：刷新会丢掉「精华」这类应用内分类状态。
+    expect(summary.error).not.toContain('刷新');
     expect(progress.at(-1)).toMatchObject({ phase: 'failed', code: 'CONTENT_SCRIPT_MISSING' });
     // 中途不得出现任何被当成成功的终态。
     expect(progress.some(item => ['done', 'capped', 'stopped'].includes(item.phase))).toBe(false);
   });
 
-  it('E1 自愈: reloads the tab first, then collects', async () => {
+  it('E1 自愈: injects the content script instead of reloading the page', async () => {
     const { tabs, runner } = listRunner();
-    tabs.listRounds = [{ documents: [topic('111')], skipped: 0, total: 1 }];
-    tabs.advances = [{ collapsed: 1, loaded: 0 }];
+    let missing = true;
+    tabs.sendMessage = async (id: number, message: unknown) => {
+      const type = (message as { type: string }).type;
+      if (type === 'extract.list' && missing) {
+        missing = false;
+        throw new Error('Could not establish connection. Receiving end does not exist.');
+      }
+      if (type === 'extract.list') {
+        return { ok: true as const, list: { documents: [topic('111')], skipped: 0, total: 1 } };
+      }
+      return { ok: true as const, advance: { collapsed: 1, loaded: 0 } };
+    };
 
-    const summary = await runner.captureList({}, { reloadFirst: true });
+    const summary = await runner.captureList();
 
-    // 用户不该被要求「自己按 F5」——插件自己重载页面再跑。
-    expect(tabs.reloaded).toEqual([7]);
+    // 绝不能刷新页面：知识星球的「精华」分类是应用内状态，刷新会退回「最新」，
+    // 用户在精华页发起的采集就采成了别的内容。注入不动页面状态。
+    expect(tabs.injected).toEqual([7]);
     expect(summary).toMatchObject({ collected: 1, phase: 'done' });
+  });
+
+  it('restores the page when a fresh batch starts, and keeps marks when continuing', async () => {
+    const { tabs, runner } = listRunner();
+    tabs.listRounds = [
+      { documents: [topic('111')], skipped: 0, total: 1 },
+      { documents: [topic('222')], skipped: 0, total: 1 },
+    ];
+    tabs.advances = [{ collapsed: 1, loaded: 0 }, { collapsed: 1, loaded: 0 }];
+
+    await runner.captureList();
+    expect(tabs.restored).toEqual([7]);
+
+    // 「继续采下一批」是续采：保留折叠标记才能跳过已经采过的。
+    await runner.captureList({}, { continuation: true });
+    expect(tabs.restored).toEqual([7]);
+  });
+
+  it('puts the page back when a batch produced nothing', async () => {
+    const { tabs, runner } = listRunner();
+    tabs.listRounds = [{ documents: [], skipped: 21, total: 21 }];
+
+    const summary = await runner.captureList();
+
+    expect(summary.phase).toBe('skipped_all');
+    // 一条都没采到却把 21 条帖子留在隐藏状态，用户会看到自己的星球主页凭空少了一屏。
+    expect(tabs.restored.filter(id => id === 7).length).toBeGreaterThanOrEqual(2);
   });
 
   it('E2: passes an extractor error (login wall) straight through', async () => {
@@ -448,7 +497,7 @@ describe('list page batch capture', () => {
     const summary = await runner.captureList();
 
     expect(summary).toMatchObject({ phase: 'stopped', collected: 1 });
-    expect(tabs.asked).toEqual(['extract.list']);
+    expect(tabs.rhythm).toEqual(['extract.list']);
   });
 
   it('E9: hitting the item cap is disclosed, not silently truncated', async () => {
@@ -459,7 +508,7 @@ describe('list page batch capture', () => {
 
     expect(summary).toMatchObject({ collected: 2, phase: 'capped' });
     // 到顶就收工，不再翻页。
-    expect(tabs.asked).toEqual(['extract.list']);
+    expect(tabs.rhythm).toEqual(['extract.list']);
   });
 
   it('E10: no collectable tab throws so the panel shows a sticky local error', async () => {

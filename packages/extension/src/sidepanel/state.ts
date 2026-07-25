@@ -46,8 +46,8 @@ export interface CaptureOverrides {
 
 export interface SidePanelActions {
   capture(overrides: CaptureOverrides): Promise<void>;
-  /** 批量保存当前列表页上的帖子；reloadFirst 用于「刷新页面并重试」自愈。 */
-  captureList(overrides: CaptureOverrides, options?: { reloadFirst?: boolean }): Promise<void>;
+  /** 批量保存当前列表页上的帖子；continuation 表示「继续采下一批」（保留已采标记）。 */
+  captureList(overrides: CaptureOverrides, options?: { continuation?: boolean }): Promise<void>;
   /** 中止正在跑的批量。 */
   stopBatch(): Promise<void>;
   /** 导出页面结构样本（帖子拿不到各自链接时用于排查适配）。 */
@@ -289,21 +289,20 @@ function renderBatch(
   const diagnoseButton = required<HTMLButtonElement>(document, '#batch-diagnose-button');
   const doneButton = required<HTMLButtonElement>(document, '#batch-done-button');
 
-  // E1 的自愈：不让用户去看懂提示再自己按 F5，插件自己重载页面再跑一遍。
-  const needsReload = state.code === 'CONTENT_SCRIPT_MISSING';
   const recoverable = ['empty', 'skipped_all', 'failed'].includes(state.batchPhase);
   stopButton.hidden = !running;
   continueButton.hidden = running || recoverable;
   retryButton.hidden = running || !recoverable;
-  retryButton.textContent = needsReload ? '刷新页面并重试' : '重试';
-  diagnoseButton.hidden = state.batchPhase !== 'skipped_all';
+  // 诊断按钮常驻在需要处理的终态上：结构适配问题不只出现在「全部跳过」这一种。
+  diagnoseButton.hidden = running || !recoverable;
   doneButton.hidden = running;
 
   stopButton.onclick = () => { void actions.stopBatch(); };
-  continueButton.onclick = () => { void actions.captureList(collectOverrides(document)); };
-  retryButton.onclick = () => {
-    void actions.captureList(collectOverrides(document), needsReload ? { reloadFirst: true } : {});
+  // 「继续」是续采，保留已采标记；「重试」是重来一遍，先把页面还原成完整状态。
+  continueButton.onclick = () => {
+    void actions.captureList(collectOverrides(document), { continuation: true });
   };
+  retryButton.onclick = () => { void actions.captureList(collectOverrides(document)); };
   diagnoseButton.onclick = () => { void actions.diagnoseBatch(); };
   doneButton.onclick = () => { void actions.dismissBatch(); };
 }

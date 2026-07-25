@@ -97,7 +97,7 @@ async function refresh(): Promise<void> {
 
 async function captureListPage(
   overrides: CaptureOverrides,
-  options: { reloadFirst?: boolean } = {},
+  options: { continuation?: boolean } = {},
 ): Promise<void> {
   stickyError = undefined;
   try {

@@ -26,8 +26,14 @@ export interface TabsApi {
   update(id: number, input: { active: boolean }): Promise<void>;
   query(input?: unknown): Promise<BrowserTab[]>;
   sendMessage(id: number, message: unknown): Promise<ExtractionResponse>;
-  /** 重新加载标签页：内容脚本只在页面加载时注入，插件更新后靠它自愈。 */
-  reload(id: number): Promise<void>;
+  /**
+   * 把内容脚本注入到已打开的标签页。
+   *
+   * 绝不能改用「重新加载页面」来自愈：知识星球的分类（精华 / 最新）是应用内状态，
+   * 刷新会退回默认的「最新」，用户在精华页发起的采集就采成了别的内容。
+   * 注入不动页面状态。
+   */
+  inject(id: number): Promise<void>;
 }
 
 export interface BridgeClient {
@@ -120,7 +126,11 @@ export class JobRunner {
     return this.options.delay ? this.options.delay(ms) : new Promise(resolve => setTimeout(resolve, ms));
   }
 
-  /** 向内容脚本发消息；内容脚本尚未就绪时短暂重试（最多 4 次）。 */
+  /**
+   * 向内容脚本发消息；内容脚本尚未就绪时短暂重试（最多 4 次），
+   * 并在中途补注入一次——插件更新后已打开的标签页里没有内容脚本，
+   * 注入即可自愈，不必刷新页面（刷新会丢掉「精华」这类应用内分类状态）。
+   */
   private async ask(tabId: number, message: unknown): Promise<ExtractionResponse> {
     let lastError: unknown;
     for (let attempt = 0; attempt < 4; attempt += 1) {
@@ -129,6 +139,13 @@ export class JobRunner {
       } catch (error) {
         if (!isContentScriptNotReady(error) || attempt === 3) throw error;
         lastError = error;
+        if (attempt === 0) {
+          try {
+            await this.options.tabs.inject(tabId);
+          } catch {
+            // 注入失败（如页面不在允许的站点）就按原来的重试节奏继续。
+          }
+        }
         await this.wait(150);
       }
     }
@@ -253,9 +270,21 @@ export class JobRunner {
     return payloadOf(response, 'diagnostics');
   }
 
+  /**
+   * 把页面还原成用户原本看到的样子（撤销所有折叠）。
+   * 失败静默：还原只是善后，不该让它盖过真正的失败原因。
+   */
+  private async restorePage(tabId: number): Promise<void> {
+    try {
+      await this.options.tabs.sendMessage(tabId, { type: 'list.restore' });
+    } catch {
+      // 页面已关闭或脚本不在，无需处理。
+    }
+  }
+
   async captureList(
     overrides: CaptureOverrides = {},
-    limits: { maxRounds?: number; maxItems?: number; reloadFirst?: boolean } = {},
+    limits: { maxRounds?: number; maxItems?: number; continuation?: boolean } = {},
   ): Promise<BatchProgress> {
     const [tab] = await this.options.tabs.query({ active: true, lastFocusedWindow: true });
     // E10：连可采集的标签页都没有，写不出归属某页的记录，交给侧栏的本地粘性错误。
@@ -277,7 +306,9 @@ export class JobRunner {
       progress.updatedAt = Date.now();
       this.options.reportBatch?.({ ...progress });
     };
-    const fail = (code: string, message: string): BatchProgress => {
+    const fail = async (code: string, message: string): Promise<BatchProgress> => {
+      // 一条都没采到就把页面还原：绝不能让用户的星球主页凭空少掉一屏内容。
+      if (progress.collected === 0) await this.restorePage(tabId);
       progress.phase = 'failed';
       progress.code = code;
       progress.error = message;
@@ -288,19 +319,9 @@ export class JobRunner {
     const seen = new Set<string>();
     report();
 
-    // E1 的自愈：先重新加载页面再采，用户不必自己去按 F5。
-    if (limits.reloadFirst) {
-      try {
-        await this.options.tabs.reload(tabId);
-        await this.options.waitForTabComplete(tabId, 30_000);
-        await this.wait(500);
-      } catch (error) {
-        return fail(
-          'COLLECTION_FAILED',
-          error instanceof Error ? error.message : '刷新页面失败，请手动刷新后重试',
-        );
-      }
-    }
+    // 新开一批时先把上一批的折叠标记全部撤销，让页面回到用户看到的完整状态；
+    // 「继续采下一批」是续采，保留标记才能跳过已经采过的。
+    if (!limits.continuation) await this.restorePage(tabId);
 
     let sawAnyPost = false;
     for (let round = 0; round < maxRounds; round += 1) {
@@ -310,19 +331,19 @@ export class JobRunner {
       } catch (error) {
         // E1：扩展刚安装/更新时，之前打开的标签页里没有内容脚本。
         if (isContentScriptNotReady(error)) {
-          return fail(
+          return await fail(
             'CONTENT_SCRIPT_MISSING',
-            '页面脚本未就绪：插件安装或更新后，之前打开的标签页需要重新加载一次。',
+            '页面脚本未就绪，且自动注入没有成功。请在插件管理页确认 Data Collector 已启用后重试。',
           );
         }
-        return fail(
+        return await fail(
           'COLLECTION_FAILED',
           error instanceof Error ? error.message : '读取本页帖子失败',
         );
       }
       if (!response.ok) {
         // E2 等提取器给出的明确原因（未登录、结构不支持）原样透传。
-        return fail(response.error.code, response.error.message);
+        return await fail(response.error.code, response.error.message);
       }
       const list = payloadOf(response, 'list');
       progress.rounds = round + 1;
@@ -338,7 +359,7 @@ export class JobRunner {
         if (saved === 'ok') progress.collected += 1;
         else if (saved === 'bridge-down') {
           // E5：本机服务断了，后面每条都会失败，立刻收尾而不是刷一屏失败。
-          return fail('BRIDGE_UNAVAILABLE', '本机服务无响应，本批已中断。');
+          return await fail('BRIDGE_UNAVAILABLE', '本机服务无响应，本批已中断。');
         } else progress.failed += 1;
         report();
       }
@@ -360,6 +381,8 @@ export class JobRunner {
       report();
     }
 
+    // 零产出（没找到帖子 / 全部无法定位）同样要把页面还原。
+    if (progress.collected === 0) await this.restorePage(tabId);
     // E3 / E4：跑完了但没有产出，都不是「完成」。
     progress.phase = !sawAnyPost
       ? 'empty'
