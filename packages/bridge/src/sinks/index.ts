@@ -8,6 +8,7 @@ export {
 } from './router.js';
 export {
   loadSinksConfig,
+  builtInSinksConfig,
   sinksConfigSchema,
   sinkDefinitionSchema,
   DEFAULT_SINKS_CONFIG,

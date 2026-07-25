@@ -6,6 +6,7 @@ import { organize } from '../../packages/bridge/src/organize/index.js';
 import {
   DEFAULT_SINKS_CONFIG,
   RepoInboxSink,
+  builtInSinksConfig,
   SinkRouter,
   loadSinksConfig,
   type SinksConfig,
@@ -248,10 +249,47 @@ describe('SinkRouter', () => {
 });
 
 describe('loadSinksConfig', () => {
-  it('returns the default config when the file is absent', async () => {
+  it('falls back to built-in targets when no config file exists（零配置可用）', async () => {
     const dir = await temporaryDirectory();
     const config = await loadSinksConfig(join(dir, 'missing.json'));
-    expect(config).toEqual(DEFAULT_SINKS_CONFIG);
+    // 本机库始终可用；内置去向仅在对应仓库存在时才出现，故这里只断言不变量。
+    expect(config.sinks.markdown).toEqual({ type: 'markdown' });
+    for (const [id, definition] of Object.entries(config.sinks)) {
+      if (id === 'markdown') continue;
+      expect(definition.type).toBe('repo-inbox');
+      // 内置去向必须自带分类清单，否则侧栏「分类」会是空的。
+      expect((definition as { categories?: string[] }).categories?.length).toBeGreaterThan(0);
+    }
+    // 路由只会指向已启用的去向。
+    for (const ids of Object.values(config.routes)) {
+      for (const id of ids) expect(config.sinks[id]).toBeDefined();
+    }
+  });
+
+  it('enables a built-in target only when its repository exists（存在才启用）', async () => {
+    // 只有 life-teachers 存在时：公众号/星球 双写本机库 + 收件箱，牛客仍只落本机库。
+    const onlyLifeTeachers = await builtInSinksConfig(async path =>
+      path.endsWith('/life-teachers'),
+    );
+    expect(Object.keys(onlyLifeTeachers.sinks).sort()).toEqual(['life-teachers', 'markdown']);
+    expect(onlyLifeTeachers.routes.wechat).toEqual(['markdown', 'life-teachers']);
+    expect(onlyLifeTeachers.routes.zsxq).toEqual(['markdown', 'life-teachers']);
+    expect(onlyLifeTeachers.routes.nowcoder).toBeUndefined();
+    expect(onlyLifeTeachers.sinks['life-teachers']).toMatchObject({
+      type: 'repo-inbox',
+      label: 'life-teachers 收件箱',
+      categories: ['投资', '财富', '职场', '认知', '教育', '其他'],
+    });
+
+    // 两个仓库都在：牛客路由到 fe-journey。
+    const both = await builtInSinksConfig(async () => true);
+    expect(both.routes.nowcoder).toEqual(['fe-journey']);
+    expect(both.sinks['fe-journey']).toMatchObject({ label: 'fe-journey 收件箱' });
+
+    // 都不在：降级为只有本机库，不会凭空创建目录。
+    const none = await builtInSinksConfig(async () => false);
+    expect(Object.keys(none.sinks)).toEqual(['markdown']);
+    expect(none.routes).toEqual({});
   });
 
   it('parses a config and guarantees a markdown fallback sink', async () => {

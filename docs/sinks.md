@@ -23,30 +23,34 @@
 
 `archived_at` 初始为空，表示未归档；Agent 归档后可回填。正文与本机库使用同一套 HTML→Markdown 转换，保证两条落地路径一致。
 
-## 配置：`sinks.json`
+## 零配置（默认就能用）
 
-放在配置目录（默认 `~/.data-collector/sinks.json`，权限建议 `0600`）。**只由 Bridge 读取，扩展永不接触**——业务/云凭证不进浏览器。文件缺失时只启用本机 Markdown 库，所有来源都落本机库（与 0.2.0 完全一致）。
+常用去向已内置在代码里（`packages/bridge/src/sinks/config.ts` 的 `BUILT_IN_TARGETS`），**不需要写任何配置文件**：
 
-字段：
+| 来源 | 默认去向 | 分类下拉 |
+|---|---|---|
+| 微信公众号 / 知识星球 | 本机库 **+** `~/code/life-teachers` 收件箱 | 投资 / 财富 / 职场 / 认知 / 教育 / 其他 |
+| 牛客网 | `~/code/front-end-journey-resource` 收件箱 | 面经 + knowledge 各顶层分组 |
 
-- `sinks`：`{ <id>: 定义 }`。
+仓库**存在才启用**：本机没克隆对应仓库时该去向自动消失、路由降级为只落本机库，不会凭空建目录。改路径/加去向直接改 `BUILT_IN_TARGETS` 即可。
+
+## 需要偏离默认时：`sinks.json`（可选）
+
+只有想临时覆盖内置默认（换目录、加新目标、改路由）时才建 `~/.data-collector/sinks.json`；**存在即完全接管**，内置默认不再生效。字段：
+
+- `sinks`：`{ <id>: 定义 }`
   - `{ "type": "markdown" }`
-  - `{ "type": "repo-inbox", "repoPath": "…", "inboxDir": "_inbox", "label": "…", "commit": true, "push": false }`
-    - `repoPath` 支持 `~` 展开；`inboxDir` 默认 `_inbox`。
-    - `label`（可选）：侧边栏「保存去向」展示的名称；缺省由仓库目录名派生（如「life-teachers 收件箱」）。
-    - `categories`（可选）：该去向的**分类清单**，作为侧边栏「分类」下拉的选项。建议与目标仓库的真实分类一致 —— life-teachers 用其主分类（投资/财富/职场/认知/教育/其他），fe-journey 用「面经 + knowledge 各顶层分组」。留空表示不预设分类，由离线分类器/下游 Agent 判定。
-    - `commit`（默认 `true`）：写入后 `git add/commit` 到当前分支（不切分支）。
-    - `push`（默认 `false`）：提交后 `git push`。**本机 Agent 无需 push；若由云端定时 Routine（每次全新克隆）消费收件箱，则需 `push: true`。**
+  - `{ "type": "repo-inbox", "repoPath": "…", "inboxDir": "_inbox", "label": "…", "categories": [...], "commit": true, "push": false }`
+    - `repoPath` 支持 `~` 展开；`inboxDir` 默认 `_inbox`；`label`/`categories` 缺省时分别由目录名派生 / 为空。
+    - `commit`（默认 `true`）：写入后 `git add/commit` 到**当前分支**（不切分支）。
+    - `push`（默认 `false`）：本机 Agent 无需；若由云端定时 Routine（每次全新克隆）消费收件箱才需要。
 - `routes`：`{ <source>: [sinkId, …] }`。未列出的来源回退到 `markdown`。
 
-**去向 / 分类选择（级联）**：Bridge 的 `/health` 返回 `routing`：可选去向（`id`/`label`/`categories`）+ 每个来源的默认去向。**只含展示名与分类，不含本机路径/凭证**。扩展缓存后，侧边栏 ready 面板呈现两级选择：
+**注意：`sinks.json` 只在 Bridge 启动时读取一次，改完需重启 Bridge。**
 
-- **一级「去向」**（下拉）：`默认（…）` + 每个可选去向。选择某个去向即**覆盖本次采集的路由**（例如把一篇公众号文章临时改存到 fe-journey 收件箱）。
-- **二级「分类」**（下拉）：随一级联动，列出该去向的 `categories`；首项为「自动分类（由内容判定）」。**不再是自由输入**，避免拍脑袋写出目标库不存在的分类。
+**去向 / 分类选择（级联）**：Bridge 的 `/health` 返回 `routing`（可选去向的 `id`/`label`/`categories` + 每个来源的默认去向，**不含本机路径/凭证**）。侧边栏 ready 面板据此呈现两级选择：一级「去向」（选定即覆盖本次路由，经 `POST /v1/jobs` 的 `sinks` 字段下发，仅本次生效），二级「分类」（随一级联动，首项「自动分类」）。
 
-选定的去向随任务发到 Bridge（`POST /v1/jobs` 的 `sinks` 字段），仅对该次采集生效；未选择则按来源默认路由。
-
-示例见 [`examples/sinks.example.json`](examples/sinks.example.json)。
+覆盖示例见 [`examples/sinks.example.json`](examples/sinks.example.json)。
 
 ## 端到端两层管线
 
