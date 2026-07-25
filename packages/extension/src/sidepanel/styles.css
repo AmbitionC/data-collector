@@ -507,6 +507,44 @@ select:focus {
 #collecting-panel[data-stage="2"] .visually-live { background: var(--tl-edit); }
 #collecting-panel[data-stage="3"] .visually-live { background: var(--tl-done); color: var(--on-primary); }
 
+/* ── batch 面板（列表页批量归档） ───────────────────── */
+.batch-tally {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  margin: 18px 0 0;
+  border: 1px solid var(--hairline);
+  border-radius: var(--radius-lg);
+  background: var(--canvas-soft);
+  overflow: hidden;
+}
+
+.batch-tally > div {
+  padding: 14px 10px;
+  text-align: center;
+}
+
+.batch-tally > div + div { border-left: 1px solid var(--hairline); }
+
+.batch-tally dt {
+  color: var(--muted);
+  font-size: 11px;
+  letter-spacing: 0.06em;
+}
+
+.batch-tally dd {
+  margin: 6px 0 0;
+  color: var(--ink);
+  font-family: var(--mono);
+  font-size: 22px;
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+}
+
+/* 已入库是这块面板的主指标，用主色点出来。 */
+.batch-tally > div:first-child dd { color: var(--primary); }
+
+#batch-actions { margin-top: 20px; }
+
 /* ── saved 面板 ─────────────────────────────────────── */
 .result-stamp {
   display: grid;

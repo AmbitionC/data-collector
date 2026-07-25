@@ -16,6 +16,7 @@ import { createTemporaryDirectoryTracker } from '../helpers/temp.js';
 const WORKSPACE = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const EXTENSION_PATH = join(WORKSPACE, 'packages', 'extension', 'dist');
 const TARGET_URL = 'https://mp.weixin.qq.com/s/uW5gUigjslVY24YmCYhg0g';
+const LIST_URL = 'https://wx.zsxq.com/group/48844584441158';
 let browser: Browser | undefined;
 let bridge: BridgeHandle | undefined;
 const temporaryDirectories = createTemporaryDirectoryTracker();
@@ -98,12 +99,18 @@ async function captureCurrentFromSidePanel(
         const category = document.querySelector('#category');
         const tags = document.querySelector('#tags');
         const capture = document.querySelector('#capture-button');
-        if (!(category instanceof HTMLInputElement) ||
+        // 分类是级联下拉（跟随「去向」联动），不是自由输入框。
+        if (!(category instanceof HTMLSelectElement) ||
             !(tags instanceof HTMLInputElement) ||
             !(capture instanceof HTMLButtonElement)) {
           throw new Error('Side Panel capture controls are missing');
         }
-        category.value = ${JSON.stringify(overrides.userCategory)};
+        const wanted = ${JSON.stringify(overrides.userCategory)};
+        if (![...category.options].some(option => option.value === wanted)) {
+          throw new Error('分类下拉里没有 ' + wanted + '：' +
+            [...category.options].map(option => option.value).join('/'));
+        }
+        category.value = wanted;
         tags.value = ${JSON.stringify(overrides.userTags.join(', '))};
         capture.click();
         return true;
@@ -151,10 +158,14 @@ async function preferredChrome(): Promise<string | undefined> {
   return undefined;
 }
 
-async function serveArticleFixture(page: Page, fixture: string): Promise<void> {
+async function serveArticleFixture(
+  page: Page,
+  fixture: string,
+  url: string = TARGET_URL,
+): Promise<void> {
   await page.setRequestInterception(true);
   page.on('request', request => {
-    if (request.isNavigationRequest() && request.url().startsWith(TARGET_URL)) {
+    if (request.isNavigationRequest() && request.url().startsWith(url)) {
       void request.respond({ status: 200, contentType: 'text/html; charset=utf-8', body: fixture });
     } else {
       void request.continue();
@@ -162,39 +173,77 @@ async function serveArticleFixture(page: Page, fixture: string): Promise<void> {
   });
 }
 
+async function clickSidePanel(page: Page, selector: string): Promise<void> {
+  const session = await page.createCDPSession();
+  try {
+    const { exceptionDetails } = await session.send('Runtime.evaluate', {
+      expression: `(() => {
+        const button = document.querySelector(${JSON.stringify(selector)});
+        if (!(button instanceof HTMLButtonElement)) throw new Error('找不到按钮 ${selector}');
+        button.click();
+      })()`,
+    });
+    if (exceptionDetails) throw new Error(exceptionDetails.text);
+  } finally {
+    await session.detach();
+  }
+}
+
+/** 起本机 Bridge + 装好扩展的浏览器（两个用例共用同一套真实链路）。 */
+async function startStack(): Promise<{ libraryRoot: string }> {
+  const libraryRoot = await temporaryDirectories.create('data-collector-e2e-');
+  bridge = await startBridge({
+    port: 17321,
+    libraryRoot,
+    configDir: join(libraryRoot, '.config'),
+    fetch: async () => {
+      await new Promise(resolveDelay => setTimeout(resolveDelay, 1_200));
+      return new Response(null, { status: 404 });
+    },
+  });
+  const executablePath = await preferredChrome();
+  if (!executablePath) {
+    throw new Error('未找到 Chrome；请设置 PUPPETEER_EXECUTABLE_PATH 后重试');
+  }
+  browser = await puppeteer.launch({
+    headless: true,
+    executablePath,
+    // 用浏览器自带的 --load-extension 加载扩展（不依赖 puppeteer 的
+    // Extensions CDP 域——部分 Chromium 构建未编译该域）。
+    // 容器/CI 无用户命名空间沙箱，需显式关闭沙箱；本地测试仅加载受信任 fixture。
+    args: [
+      '--no-sandbox',
+      '--disable-setuid-sandbox',
+      '--disable-dev-shm-usage',
+      `--disable-extensions-except=${EXTENSION_PATH}`,
+      `--load-extension=${EXTENSION_PATH}`,
+    ],
+    timeout: 20_000,
+    protocolTimeout: 20_000,
+    signal: AbortSignal.timeout(25_000),
+  });
+  return { libraryRoot };
+}
+
+async function waitForText(
+  page: Page,
+  selector: string,
+  expected: string,
+  timeout: number,
+): Promise<void> {
+  const deadline = Date.now() + timeout;
+  let seen = '';
+  while (Date.now() < deadline) {
+    seen = await elementText(page, selector);
+    if (seen === expected) return;
+    await new Promise(resolveDelay => setTimeout(resolveDelay, 200));
+  }
+  throw new Error(`等待 ${selector} 变为「${expected}」超时，当前为「${seen}」`);
+}
+
 describe('built Chrome extension', () => {
   it('automatically authorizes the side panel and captures the current page into the local library', async () => {
-    const libraryRoot = await temporaryDirectories.create('data-collector-e2e-');
-    bridge = await startBridge({
-      port: 17321,
-      libraryRoot,
-      configDir: join(libraryRoot, '.config'),
-      fetch: async () => {
-        await new Promise(resolveDelay => setTimeout(resolveDelay, 1_200));
-        return new Response(null, { status: 404 });
-      },
-    });
-    const executablePath = await preferredChrome();
-    if (!executablePath) {
-      throw new Error('未找到 Chrome；请设置 PUPPETEER_EXECUTABLE_PATH 后重试');
-    }
-    browser = await puppeteer.launch({
-      headless: true,
-      executablePath,
-      // 用浏览器自带的 --load-extension 加载扩展（不依赖 puppeteer 的
-      // Extensions CDP 域——部分 Chromium 构建未编译该域）。
-      // 容器/CI 无用户命名空间沙箱，需显式关闭沙箱；本地测试仅加载受信任 fixture。
-      args: [
-        '--no-sandbox',
-        '--disable-setuid-sandbox',
-        '--disable-dev-shm-usage',
-        `--disable-extensions-except=${EXTENSION_PATH}`,
-        `--load-extension=${EXTENSION_PATH}`,
-      ],
-      timeout: 20_000,
-      protocolTimeout: 20_000,
-      signal: AbortSignal.timeout(25_000),
-    });
+    const { libraryRoot } = await startStack();
 
     const fixture = await readFile(join(WORKSPACE, 'tests', 'fixtures', 'wechat-article.html'), 'utf8');
     const articlePage = await browser.newPage();
@@ -220,7 +269,8 @@ describe('built Chrome extension', () => {
     browser.on('targetcreated', recordArticleTarget);
     browser.on('targetchanged', recordArticleTarget);
     await captureCurrentFromSidePanel(sidePanel, {
-      userCategory: 'E2E 指定分类',
+      // 只能选下拉里真实存在的分类——这一条同时校验了「去向 → 分类」的联动确实渲染出来了。
+      userCategory: '商业与投资',
       userTags: ['E2E 标签', '当前页面'],
     });
     await waitForVisiblePanel(sidePanel, '#collecting-panel', 10_000);
@@ -233,7 +283,7 @@ describe('built Chrome extension', () => {
     expect(markdown).toContain('一夜之间，通胀的玩笑这次开大了');
     expect(markdown).toContain('重远投资观');
     expect(markdown).toContain(TARGET_URL);
-    expect(markdown).toContain('category: "E2E 指定分类"');
+    expect(markdown).toContain('category: "商业与投资"');
     expect(markdown).toContain('  - "E2E 标签"');
     expect(markdown).toContain('  - "当前页面"');
     expect(openedArticleTargets).toEqual([]);
@@ -251,5 +301,48 @@ describe('built Chrome extension', () => {
     // 请求拦截晚于标签页导航，后台标签页拿不到夹具页、内容脚本不注入。其逻辑由
     // tests/unit/cli.test.ts 与 tests/integration/bridge.test.ts 覆盖；此处只夹紧侧栏
     // 「当前页保存」这条主用户路径（自动授权 → 识别 → 保存 → 已保存屏 + 正文落盘）。
+  });
+
+  it('batch-saves a zsxq list page into one library entry per post', async () => {
+    const { libraryRoot } = await startStack();
+
+    const fixture = await readFile(join(WORKSPACE, 'tests', 'fixtures', 'zsxq-list.html'), 'utf8');
+    const listPage = await browser!.newPage();
+    await serveArticleFixture(listPage, fixture, LIST_URL);
+    await listPage.goto(LIST_URL, { waitUntil: 'domcontentloaded' });
+
+    const { page: sidePanel } = await sidePanelFor(listPage);
+    await waitForVisiblePanel(sidePanel, '#ready-panel', 15_000);
+    // 列表页上「保存这一页」必须变成批量入口，否则整屏帖子会被糊成一篇。
+    expect(await elementText(sidePanel, '#capture-button-label')).toBe('批量保存本页帖子');
+    await waitForVisiblePanel(sidePanel, '#list-hint', 5_000);
+
+    const screenshotDirectory = join(WORKSPACE, 'artifacts', 'screenshots');
+    await mkdir(screenshotDirectory, { recursive: true });
+    await sidePanel.screenshot({ path: join(screenshotDirectory, 'sidepanel-list-ready.png') });
+
+    await clickSidePanel(sidePanel, '#capture-button');
+    await waitForVisiblePanel(sidePanel, '#batch-panel', 10_000);
+    // 采完最后一屏还要滚动确认没有新内容（约 6s），所以给足等待。
+    await waitForText(sidePanel, '#batch-heading', '本轮批量归档完成', 30_000);
+    await sidePanel.screenshot({ path: join(screenshotDirectory, 'sidepanel-batch-done.png') });
+
+    expect(await elementText(sidePanel, '#batch-collected')).toBe('2');
+    // 第三条拿不到自身 URL，如实计入「已跳过」而不是静默少采。
+    expect(await elementText(sidePanel, '#batch-skipped')).toBe('1');
+    expect(await elementText(sidePanel, '#batch-failed')).toBe('0');
+
+    const catalog = JSON.parse(
+      await readFile(join(libraryRoot, '_catalog', 'index.json'), 'utf8'),
+    ) as { url: string }[];
+    // 两条各自入库：身份由各自的 /topic/ 地址派生，不会相互覆盖。
+    expect(catalog).toHaveLength(2);
+    expect(new Set(catalog.map(entry => entry.url))).toEqual(new Set([
+      `${LIST_URL}/topic/511111111111111`,
+      `${LIST_URL}/topic/522222222222222`,
+    ]));
+    // 批量不开新标签页：内容已在当前页提取完毕。
+    expect((await browser!.pages()).filter(page => page.url().startsWith(LIST_URL)))
+      .toHaveLength(1);
   });
 });

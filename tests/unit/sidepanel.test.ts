@@ -26,6 +26,8 @@ beforeEach(async () => {
   document.close();
   actions = {
     capture: vi.fn(async () => undefined),
+    captureList: vi.fn(async () => undefined),
+    dismissBatch: vi.fn(async () => undefined),
     recapture: vi.fn(async () => undefined),
     retry: vi.fn(async () => undefined),
     copyPath: vi.fn(async () => undefined),
@@ -94,6 +96,59 @@ describe('side panel state mapping', () => {
     expect(actions.retry).toHaveBeenCalledOnce();
   });
 
+  it('marks a list page so the panel offers batch collection instead of single save', () => {
+    const url = 'https://wx.zsxq.com/group/48844584441158';
+    expect(sidePanelStateFromStatus({
+      bridgeStatus: 'connected',
+      page: { supported: true, list: true, title: '重远投资观', url },
+    })).toMatchObject({ phase: 'ready', list: true });
+    expect(sidePanelStateFromStatus({
+      bridgeStatus: 'connected',
+      page: { supported: true, list: false, title: '某条帖子', url: `${url}/topic/555` },
+    })).toMatchObject({ phase: 'ready', list: false });
+  });
+
+  it('shows batch progress for the page that started it, and drops it elsewhere', () => {
+    const url = 'https://wx.zsxq.com/group/48844584441158';
+    const batch = {
+      url,
+      collected: 7,
+      skipped: 2,
+      failed: 0,
+      rounds: 2,
+      running: true,
+      updatedAt: 1_000,
+    };
+
+    expect(sidePanelStateFromStatus(
+      { bridgeStatus: 'connected', batch, page: { supported: true, list: true, title: '', url } },
+      () => 2_000,
+    )).toEqual({ phase: 'batch', collected: 7, skipped: 2, failed: 0, running: true });
+
+    // 换到别的页面就不再打扰（与单页任务同一套归属判断）。
+    expect(sidePanelStateFromStatus(
+      {
+        bridgeStatus: 'connected',
+        batch,
+        page: { supported: true, title: '文章', url: 'https://mp.weixin.qq.com/s/x' },
+      },
+      () => 2_000,
+    )).toMatchObject({ phase: 'ready' });
+  });
+
+  it('treats a batch whose progress went stale as finished, not forever running', () => {
+    const url = 'https://wx.zsxq.com/group/48844584441158';
+    // Service Worker 被回收时进度会停更；不能让侧栏永远转圈。
+    expect(sidePanelStateFromStatus(
+      {
+        bridgeStatus: 'connected',
+        batch: { url, collected: 3, skipped: 0, failed: 0, rounds: 1, running: true, updatedAt: 0 },
+        page: { supported: true, list: true, title: '', url },
+      },
+      () => 120_000,
+    )).toMatchObject({ phase: 'batch', collected: 3, running: false });
+  });
+
   it('keeps ready, collecting, and matching saved behavior', () => {
     const page = { supported: true, title: '通胀与估值', url: 'https://mp.weixin.qq.com/s/x' };
     expect(sidePanelStateFromStatus({ bridgeStatus: 'connected', page }))
@@ -123,6 +178,7 @@ describe('side panel DOM behavior', () => {
       title: '一夜之间，通胀的玩笑这次开大了',
       category: '',
       tags: ['通胀', '投资'],
+      list: false,
       routeTargets: ['本机库'],
       defaultSinkIds: ['markdown'],
       destinations: [
@@ -176,6 +232,7 @@ describe('side panel DOM behavior', () => {
       title,
       category: '',
       tags,
+      list: false,
       destinations,
       defaultSinkIds: ['markdown'],
       routeTargets: ['本机库'],
@@ -194,6 +251,62 @@ describe('side panel DOM behavior', () => {
     renderSidePanel(document, ready('https://mp.weixin.qq.com/s/b', '文章 B', ['新标签']), actions);
     expect(document.querySelector<HTMLSelectElement>('#category')?.value).toBe('');
     expect(document.querySelector<HTMLInputElement>('#tags')?.value).toBe('新标签');
+  });
+
+  it('turns the save action into batch collection on a list page', async () => {
+    renderSidePanel(document, {
+      phase: 'ready',
+      url: 'https://wx.zsxq.com/group/48844584441158',
+      sourceLabel: '知识星球',
+      title: '重远投资观',
+      category: '',
+      tags: [],
+      list: true,
+      routeTargets: ['life-teachers 收件箱'],
+      defaultSinkIds: ['life-teachers'],
+      destinations: [
+        { id: 'life-teachers', label: 'life-teachers 收件箱', categories: ['投资', '财富'] },
+      ],
+    }, actions);
+
+    expect(document.querySelector('#capture-button-label')?.textContent).toBe('批量保存本页帖子');
+    expect(document.querySelector<HTMLElement>('#list-hint')?.hidden).toBe(false);
+
+    document.querySelector<HTMLSelectElement>('#category')!.value = '投资';
+    document.querySelector<HTMLButtonElement>('#capture-button')!.click();
+    await Promise.resolve();
+
+    // 列表页绝不能走单页保存——那会把整个信息流糊成一篇。
+    expect(actions.capture).not.toHaveBeenCalled();
+    expect(actions.captureList).toHaveBeenCalledWith({ userCategory: '投资' });
+  });
+
+  it('counts a running batch and offers continue / done once it settles', async () => {
+    renderSidePanel(
+      document,
+      { phase: 'batch', collected: 4, skipped: 2, failed: 1, running: true },
+      actions,
+    );
+    expect(document.querySelector<HTMLElement>('#batch-panel')?.hidden).toBe(false);
+    expect(document.querySelector('#batch-heading')?.textContent).toBe('正在批量归档');
+    expect(document.querySelector('#batch-collected')?.textContent).toBe('4');
+    expect(document.querySelector('#batch-skipped')?.textContent).toBe('2');
+    expect(document.querySelector('#batch-failed')?.textContent).toBe('1');
+    // 跑着的时候不给按钮，避免同一页并发两批。
+    expect(document.querySelector<HTMLElement>('#batch-actions')?.hidden).toBe(true);
+
+    renderSidePanel(
+      document,
+      { phase: 'batch', collected: 6, skipped: 2, failed: 1, running: false },
+      actions,
+    );
+    expect(document.querySelector('#batch-heading')?.textContent).toBe('本轮批量归档完成');
+    expect(document.querySelector<HTMLElement>('#batch-actions')?.hidden).toBe(false);
+    document.querySelector<HTMLButtonElement>('#batch-continue-button')!.click();
+    document.querySelector<HTMLButtonElement>('#batch-done-button')!.click();
+    await Promise.resolve();
+    expect(actions.captureList).toHaveBeenCalledOnce();
+    expect(actions.dismissBatch).toHaveBeenCalledOnce();
   });
 
   it('shows a saved path and invokes both result actions with the exact path', async () => {
@@ -259,6 +372,7 @@ describe('persistent side panel refresh cadence', () => {
 
     expect(source).toContain("connecting: 250");
     expect(source).toContain("collecting: 700");
+    expect(source).toContain("batch: 700");
     expect(source).toContain("default: 1000");
   });
 });

@@ -2,6 +2,7 @@ import {
   sidePanelStateFromStatus,
   renderSidePanel,
   type BackgroundStatus,
+  type CaptureOverrides,
   type SidePanelActions,
   type SidePanelState,
 } from './state.js';
@@ -15,6 +16,7 @@ interface BackgroundResponse<T> {
 const POLL_INTERVALS = {
   connecting: 250,
   collecting: 700,
+  batch: 700,
   default: 1000,
 } as const;
 
@@ -32,7 +34,9 @@ function scheduleRefresh(phase: SidePanelState['phase']): void {
     ? POLL_INTERVALS.connecting
     : phase === 'collecting'
       ? POLL_INTERVALS.collecting
-      : POLL_INTERVALS.default;
+      : phase === 'batch'
+        ? POLL_INTERVALS.batch
+        : POLL_INTERVALS.default;
   pollTimer = window.setTimeout(() => {
     pollTimer = undefined;
     void refresh();
@@ -73,9 +77,40 @@ async function refresh(): Promise<void> {
   }
 }
 
+async function captureListPage(overrides: CaptureOverrides): Promise<void> {
+  try {
+    renderSidePanel(
+      document,
+      { phase: 'batch', collected: 0, skipped: 0, failed: 0, running: true },
+      actions,
+    );
+    // 批量会跑很久：先让轮询接管进度展示，不等这条消息返回。
+    scheduleRefresh('batch');
+    await message({ type: 'capture.list', overrides });
+    await refresh();
+  } catch (error) {
+    renderSidePanel(
+      document,
+      { phase: 'job_error', message: errorMessage(error, '批量采集失败，请重试。') },
+      actions,
+    );
+    scheduleRefresh('job_error');
+  }
+}
+
 const actions: SidePanelActions = {
   async capture(overrides) {
     await capturePage(overrides);
+  },
+  async captureList(overrides) {
+    await captureListPage(overrides);
+  },
+  async dismissBatch() {
+    try {
+      await message({ type: 'batch.dismiss' });
+    } finally {
+      await refresh();
+    }
   },
   async recapture() {
     await capturePage({});

@@ -6,6 +6,8 @@ import {
   ExtractionError,
   detectSource,
   extractDocument,
+  extractList,
+  pendingTopicCount,
 } from '../../packages/extension/src/extractors/index.js';
 
 const FIXTURES = join(import.meta.dirname, '..', 'fixtures');
@@ -86,10 +88,10 @@ describe('ZSXQ extraction（按真实 Angular DOM）', () => {
     expect(result.images[0]?.url).toBe('https://images.zsxq.com/chart.png');
   });
 
-  it('refuses a list page instead of archiving the whole feed as one article', async () => {
+  it('refuses to save a list page as one article and points at batch collection', async () => {
     const doc = await fixture('zsxq-list.html', LIST);
 
-    // 列表页有多条帖子，采哪条无法判断；绝不能把整个信息流当成一篇存下来。
+    // 列表页有多条帖子；绝不能把整个信息流当成一篇存下来。
     let thrown: unknown;
     try {
       extractDocument(doc, LIST, NOW);
@@ -97,7 +99,47 @@ describe('ZSXQ extraction（按真实 Angular DOM）', () => {
       thrown = error;
     }
     expect((thrown as ExtractionError).code).toBe('UNSUPPORTED_LAYOUT');
-    expect((thrown as Error).message).toContain('3 条帖子');
+    expect((thrown as Error).message).toContain('4 条帖子');
+    expect((thrown as Error).message).toContain('批量保存');
+  });
+
+  it('splits a list page into one document per post, each carrying its own topic URL', async () => {
+    const doc = await fixture('zsxq-list.html', LIST);
+
+    const list = extractList(doc, LIST, NOW);
+
+    // 身份由规范 URL 派生：每条必须带自己的 /topic/ 地址，否则会算出同一个 ID 相互覆盖。
+    expect(list.documents.map(item => item.canonicalUrl)).toEqual([
+      'https://wx.zsxq.com/group/48844584441158/topic/511111111111111',
+      'https://wx.zsxq.com/group/48844584441158/topic/522222222222222',
+    ]);
+    expect(new Set(list.documents.map(item => item.canonicalUrl)).size).toBe(2);
+    expect(list.documents[0]).toMatchObject({ source: 'zsxq', kind: 'post', author: '重远' });
+    expect(list.documents[0]?.text).toContain('第一条帖子');
+    // 拿不到自身 URL 的那条如实计入 skipped，而不是静默少采。
+    expect(list.skipped).toBe(1);
+    expect(list.total).toBe(3);
+    // 上一轮采过并打了标记的那条不再进入本轮。
+    expect(list.documents.some(item => item.text.includes('第四条帖子'))).toBe(false);
+    expect(list.containers).toHaveLength(3);
+  });
+
+  it('counts only posts that still need collecting（滚动后据此判断有没有新内容）', async () => {
+    const doc = await fixture('zsxq-list.html', LIST);
+
+    expect(pendingTopicCount(doc)).toBe(3);
+    for (const container of doc.querySelectorAll('.topic-container')) {
+      container.setAttribute('data-dc-collected', '1');
+    }
+    expect(pendingTopicCount(doc)).toBe(0);
+  });
+
+  it('refuses list extraction on sources that have no feed layout', () => {
+    const doc = new JSDOM('<main></main>').window.document;
+
+    expect(() => extractList(doc, 'https://mp.weixin.qq.com/s/abc', NOW)).toThrowError(
+      expect.objectContaining<Partial<ExtractionError>>({ code: 'UNSUPPORTED_LAYOUT' }),
+    );
   });
 
   it('reports authentication instead of scraping a login page', () => {

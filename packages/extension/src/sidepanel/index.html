@@ -55,9 +55,12 @@
         <section id="ready-panel" class="state-panel" hidden>
           <div class="source-row">
             <span id="source-label" class="source-label">已识别</span>
-            <span class="ready-copy">可以保存</span>
+            <span id="ready-copy" class="ready-copy">可以保存</span>
           </div>
           <h2 id="page-title" class="page-title"></h2>
+          <p id="list-hint" class="support compact" hidden>
+            这是列表页：会把本页帖子逐条拆开入库，采完自动滚动加载下一批。
+          </p>
           <div class="organize-grid">
             <label for="destination">去向 <span>保存到哪个知识库</span></label>
             <select id="destination"></select>
@@ -67,7 +70,7 @@
             <input id="tags" autocomplete="off" maxlength="300">
           </div>
           <button id="capture-button" type="button" class="primary-button capture-button">
-            <span>保存这一页</span><span aria-hidden="true">↘</span>
+            <span id="capture-button-label">保存这一页</span><span aria-hidden="true">↘</span>
           </button>
           <p id="route-hint" class="route-hint" hidden></p>
         </section>
@@ -83,6 +86,23 @@
             <li class="track-step" data-stage="3"><span>写入本机</span></li>
           </ol>
           <p class="support compact">侧栏可以保持打开，归档会在后台继续。</p>
+        </section>
+
+        <section id="batch-panel" class="state-panel" aria-live="polite" hidden>
+          <p class="section-kicker">批量归档</p>
+          <h2 id="batch-heading">正在批量归档</h2>
+          <dl class="batch-tally">
+            <div><dt>已入库</dt><dd id="batch-collected">0</dd></div>
+            <div><dt>已跳过</dt><dd id="batch-skipped">0</dd></div>
+            <div><dt>失败</dt><dd id="batch-failed">0</dd></div>
+          </dl>
+          <p id="batch-running-note" class="support compact" role="status" hidden>
+            采完一屏会自动收起已处理的帖子并向下加载，侧栏可以保持打开。
+          </p>
+          <div id="batch-actions" class="result-actions" hidden>
+            <button id="batch-continue-button" type="button" class="primary-button">继续采下一批</button>
+            <button id="batch-done-button" type="button" class="secondary-button">完成</button>
+          </div>
         </section>
 
         <section id="saved-panel" class="state-panel" hidden>

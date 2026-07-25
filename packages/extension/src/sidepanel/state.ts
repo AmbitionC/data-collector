@@ -11,11 +11,20 @@ export type SidePanelState =
       title: string;
       category: string;
       tags: string[];
+      /** 列表 / 精华页：一屏多条，保存动作是「批量」而不是「这一页」。 */
+      list: boolean;
       routeTargets?: string[];
       destinations?: { id: string; label: string; categories: string[] }[];
       defaultSinkIds?: string[];
     }
   | { phase: 'collecting'; activeStage: number }
+  | {
+      phase: 'batch';
+      collected: number;
+      skipped: number;
+      failed: number;
+      running: boolean;
+    }
   | { phase: 'saved'; path: string }
   | { phase: 'needs_attention'; message: string }
   | { phase: 'job_error'; message: string }
@@ -23,16 +32,32 @@ export type SidePanelState =
   | { phase: 'replaced' }
   | { phase: 'identity_error' };
 
+export interface CaptureOverrides {
+  userCategory?: string;
+  userTags?: string[];
+  sinks?: string[];
+}
+
 export interface SidePanelActions {
-  capture(overrides: {
-    userCategory?: string;
-    userTags?: string[];
-    sinks?: string[];
-  }): Promise<void>;
+  capture(overrides: CaptureOverrides): Promise<void>;
+  /** 批量保存当前列表页上的帖子。 */
+  captureList(overrides: CaptureOverrides): Promise<void>;
+  /** 收起批量结果，回到可再次采集的状态。 */
+  dismissBatch(): Promise<void>;
   recapture(): Promise<void>;
   retry(): Promise<void>;
   copyPath(path: string): Promise<void>;
   revealPath(path: string): Promise<void>;
+}
+
+export interface BatchStatus {
+  url: string;
+  collected: number;
+  skipped: number;
+  failed: number;
+  rounds: number;
+  running: boolean;
+  updatedAt: number;
 }
 
 export interface BackgroundStatus {
@@ -41,8 +66,10 @@ export interface BackgroundStatus {
   lastJobUrl?: string;
   lastJobError?: string;
   lastOutputPath?: string;
+  batch?: BatchStatus;
   page: {
     supported: boolean;
+    list?: boolean;
     title: string;
     url: string;
     routeTargets?: string[];
@@ -51,11 +78,29 @@ export interface BackgroundStatus {
   };
 }
 
-export function sidePanelStateFromStatus(status: BackgroundStatus): SidePanelState {
+/** Service Worker 被回收时进度会停更；超过这个时长仍标 running 视为已中断。 */
+const BATCH_STALE_MS = 90_000;
+
+export function sidePanelStateFromStatus(
+  status: BackgroundStatus,
+  now: () => number = Date.now,
+): SidePanelState {
   if (status.bridgeStatus === 'connecting') return { phase: 'connecting' };
   if (status.bridgeStatus === 'replaced') return { phase: 'replaced' };
   if (status.bridgeStatus === 'identity_error') return { phase: 'identity_error' };
   if (status.bridgeStatus !== 'connected') return { phase: 'bridge_unavailable' };
+
+  // 批量结果属于发起它的那一页；换页面就不再打扰（与单页任务同一套归属判断）。
+  const batch = status.batch;
+  if (batch && batch.url === status.page.url) {
+    return {
+      phase: 'batch',
+      collected: batch.collected,
+      skipped: batch.skipped,
+      failed: batch.failed,
+      running: batch.running && now() - batch.updatedAt < BATCH_STALE_MS,
+    };
+  }
 
   const jobBelongsToPage = Boolean(
     status.lastJobUrl && status.lastJobUrl === status.page.url,
@@ -96,6 +141,7 @@ export function sidePanelStateFromStatus(status: BackgroundStatus): SidePanelSta
     title: status.page.title || '未命名内容',
     category: '',
     tags: [],
+    list: status.page.list === true,
     ...(status.page.routeTargets?.length ? { routeTargets: status.page.routeTargets } : {}),
     ...(status.page.destinations?.length ? { destinations: status.page.destinations } : {}),
     ...(status.page.defaultSinkIds?.length ? { defaultSinkIds: status.page.defaultSinkIds } : {}),
@@ -118,12 +164,33 @@ function show(document: Document, selector: string): HTMLElement {
   return panel;
 }
 
+/**
+ * 读取「去向 / 分类 / 标签」三个控件当前的取值。
+ * 批量结果面板上的「继续」也用它——ready 面板只是被隐藏，取值仍在，
+ * 于是续采沿用用户这次选好的去向，而不是悄悄退回默认路由。
+ */
+function collectOverrides(document: Document): CaptureOverrides {
+  const category = required<HTMLSelectElement>(document, '#category').value.trim();
+  const destination = required<HTMLSelectElement>(document, '#destination').value;
+  const tags = required<HTMLInputElement>(document, '#tags').value
+    .split(/[,，]/)
+    .map(tag => tag.trim())
+    .filter(Boolean)
+    .slice(0, 8);
+  return {
+    ...(category ? { userCategory: category } : {}),
+    ...(tags.length ? { userTags: tags } : {}),
+    ...(destination ? { sinks: [destination] } : {}),
+  };
+}
+
 function setConnectionLabel(document: Document, state: SidePanelState): void {
   const label = required<HTMLElement>(document, '#connection-label');
   const connected = [
     'unsupported',
     'ready',
     'collecting',
+    'batch',
     'saved',
     'needs_attention',
     'job_error',
@@ -233,19 +300,36 @@ export function renderSidePanel(
     }
     destinationSelect.onchange = () => applyCategories({ preserve: true });
 
+    // 列表 / 精华页一屏多条，单页保存会把整个信息流糊成一篇，这里改成批量入口。
+    required(document, '#ready-copy').textContent = state.list ? '可批量保存' : '可以保存';
+    required(document, '#capture-button-label').textContent = state.list
+      ? '批量保存本页帖子'
+      : '保存这一页';
+    const listHint = required<HTMLElement>(document, '#list-hint');
+    listHint.hidden = !state.list;
+
     required<HTMLButtonElement>(document, '#capture-button').onclick = () => {
-      const category = categorySelect.value.trim();
-      const destination = destinationSelect.value;
-      const tags = required<HTMLInputElement>(document, '#tags').value
-        .split(/[,，]/)
-        .map(tag => tag.trim())
-        .filter(Boolean)
-        .slice(0, 8);
-      void actions.capture({
-        ...(category ? { userCategory: category } : {}),
-        ...(tags.length ? { userTags: tags } : {}),
-        ...(destination ? { sinks: [destination] } : {}),
-      });
+      const overrides = collectOverrides(document);
+      void (state.list ? actions.captureList(overrides) : actions.capture(overrides));
+    };
+    return;
+  }
+  if (state.phase === 'batch') {
+    show(document, '#batch-panel');
+    required(document, '#batch-heading').textContent = state.running
+      ? '正在批量归档'
+      : '本轮批量归档完成';
+    required(document, '#batch-collected').textContent = String(state.collected);
+    required(document, '#batch-skipped').textContent = String(state.skipped);
+    required(document, '#batch-failed').textContent = String(state.failed);
+    required<HTMLElement>(document, '#batch-running-note').hidden = !state.running;
+    const actionsRow = required<HTMLElement>(document, '#batch-actions');
+    actionsRow.hidden = state.running;
+    required<HTMLButtonElement>(document, '#batch-continue-button').onclick = () => {
+      void actions.captureList(collectOverrides(document));
+    };
+    required<HTMLButtonElement>(document, '#batch-done-button').onclick = () => {
+      void actions.dismissBatch();
     };
     return;
   }

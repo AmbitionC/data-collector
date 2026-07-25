@@ -7,9 +7,29 @@ import {
 import { ExtractionError, type Clock } from './types.js';
 import { extractNowcoder } from './nowcoder.js';
 import { extractWechat } from './wechat.js';
-import { extractZsxq } from './zsxq.js';
+import { extractZsxq, extractZsxqList, type ListExtraction } from './zsxq.js';
 
 export { ExtractionError } from './types.js';
+export { COLLECTED_ATTRIBUTE, pendingTopicCount } from './zsxq.js';
+export type { ListExtraction } from './zsxq.js';
+
+/** 列表页批量提取（当前仅知识星球有列表形态）。 */
+export function extractList(
+  document: Document,
+  rawUrl: string,
+  now: Clock = () => new Date().toISOString(),
+): ListExtraction {
+  let url: URL;
+  try {
+    url = parseSupportedUrl(rawUrl);
+  } catch {
+    throw new ExtractionError('UNSUPPORTED_URL', UNSUPPORTED_MESSAGE);
+  }
+  if (detectSource(url) !== 'zsxq') {
+    throw new ExtractionError('UNSUPPORTED_LAYOUT', '当前来源不支持列表页批量采集');
+  }
+  return extractZsxqList(document, url, now);
+}
 
 const UNSUPPORTED_MESSAGE = '当前页面不是微信公众号、知识星球或牛客网内容';
 

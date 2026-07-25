@@ -2,12 +2,14 @@ import { describe, expect, it, vi } from 'vitest';
 import { TRUSTED_EXTENSION_ID, type CollectedDocument } from '@data-collector/shared';
 import {
   JobRunner,
+  type BatchProgress,
   type BridgeClient,
   type BrowserTab,
   type TabsApi,
 } from '../../packages/extension/src/background/jobs.js';
 
 const URL = 'https://mp.weixin.qq.com/s/background-test';
+const LIST_URL = 'https://wx.zsxq.com/group/48844584441158';
 
 function document(): CollectedDocument {
   return {
@@ -24,10 +26,26 @@ function document(): CollectedDocument {
   };
 }
 
+function topic(id: string): CollectedDocument {
+  const url = `${LIST_URL}/topic/${id}`;
+  return {
+    ...document(),
+    source: 'zsxq',
+    kind: 'post',
+    url,
+    canonicalUrl: url,
+    title: `星球帖子 ${id}`,
+  };
+}
+
 class InMemoryTabs implements TabsApi {
   readonly created: Array<{ url: string; active: boolean }> = [];
   readonly removed: number[] = [];
   readonly updated: Array<{ id: number; active: boolean }> = [];
+  /** 内容脚本收到的消息类型顺序（批量采集靠它验证「提取一轮 → 翻一页」的节奏）。 */
+  readonly asked: string[] = [];
+  listRounds: Array<{ documents: CollectedDocument[]; skipped: number; total: number }> = [];
+  advances: Array<{ collapsed: number; loaded: number }> = [];
   response: Awaited<ReturnType<TabsApi['sendMessage']>> = { ok: true, document: document() };
   activeTab: BrowserTab = { id: 7, url: URL, status: 'complete' };
 
@@ -48,21 +66,43 @@ class InMemoryTabs implements TabsApi {
     return [this.activeTab];
   }
 
-  async sendMessage(): Promise<Awaited<ReturnType<TabsApi['sendMessage']>>> {
+  async sendMessage(
+    _id: number,
+    message: unknown,
+  ): Promise<Awaited<ReturnType<TabsApi['sendMessage']>>> {
+    const type = (message as { type?: string }).type ?? '';
+    this.asked.push(type);
+    if (type === 'extract.list') {
+      const round = this.listRounds.shift();
+      if (!round) return { ok: false, error: { code: 'COLLECTION_FAILED', message: '没有更多轮次' } };
+      return { ok: true, list: round };
+    }
+    if (type === 'list.advance') {
+      return { ok: true, advance: this.advances.shift() ?? { collapsed: 0, loaded: 0 } };
+    }
     return this.response;
   }
 }
 
 class InMemoryBridge implements BridgeClient {
   readonly sent: Array<{ type: string; requestId: string; payload: unknown }> = [];
+  /** 依次建过任务的 URL —— 批量采集下每条帖子必须各建各的。 */
+  readonly createdFor: string[] = [];
   createdJobId = 'current-job';
+  failCreateFor: string | undefined;
 
   send(type: string, requestId: string, payload: unknown): void {
     this.sent.push({ type, requestId, payload });
   }
 
-  async createJob(): Promise<{ id: string }> {
-    return { id: this.createdJobId };
+  async createJob(url: string): Promise<{ id: string }> {
+    this.createdFor.push(url);
+    if (this.failCreateFor === url) throw new Error('创建采集任务失败：HTTP 500');
+    return {
+      id: this.createdFor.length === 1
+        ? this.createdJobId
+        : `${this.createdJobId}-${this.createdFor.length}`,
+    };
   }
 }
 
@@ -203,6 +243,137 @@ describe('extension job runner', () => {
       requestId: 'current-job',
       payload: { document: { userCategory: '稍后阅读', userTags: ['重点'] } },
     });
+  });
+});
+
+describe('list page batch capture', () => {
+  function listRunner(): { tabs: InMemoryTabs; bridge: InMemoryBridge; runner: JobRunner; progress: BatchProgress[] } {
+    const tabs = new InMemoryTabs();
+    tabs.activeTab = { id: 7, url: LIST_URL, status: 'complete' };
+    const bridge = new InMemoryBridge();
+    const progress: BatchProgress[] = [];
+    const runner = new JobRunner({
+      tabs,
+      bridge,
+      waitForTabComplete: async () => undefined,
+      delay: async () => undefined,
+      reportBatch: snapshot => progress.push(snapshot),
+    });
+    return { tabs, bridge, runner, progress };
+  }
+
+  it('creates one job per post, each keyed by its own topic URL', async () => {
+    const { tabs, bridge, runner } = listRunner();
+    tabs.listRounds = [{ documents: [topic('111'), topic('222')], skipped: 1, total: 3 }];
+    tabs.advances = [{ collapsed: 3, loaded: 0 }];
+
+    const summary = await runner.captureList({ sinks: ['life-teachers'] });
+
+    // 每条各建各的任务：共用列表页 URL 的话三条会算出同一个内容 ID 相互覆盖。
+    expect(bridge.createdFor).toEqual([
+      `${LIST_URL}/topic/111`,
+      `${LIST_URL}/topic/222`,
+    ]);
+    const results = bridge.sent.filter(item => item.type === 'job.result');
+    expect(results).toHaveLength(2);
+    expect(results.map(item => (item.payload as { document: CollectedDocument }).document.canonicalUrl))
+      .toEqual([`${LIST_URL}/topic/111`, `${LIST_URL}/topic/222`]);
+    expect(new Set(results.map(item => item.requestId)).size).toBe(2);
+    expect(summary).toMatchObject({
+      url: LIST_URL,
+      collected: 2,
+      skipped: 1,
+      failed: 0,
+      rounds: 1,
+      running: false,
+    });
+  });
+
+  it('keeps advancing the feed until a round loads nothing new', async () => {
+    const { tabs, runner } = listRunner();
+    tabs.listRounds = [
+      { documents: [topic('111'), topic('222')], skipped: 0, total: 2 },
+      { documents: [topic('333')], skipped: 0, total: 1 },
+    ];
+    tabs.advances = [{ collapsed: 2, loaded: 1 }, { collapsed: 1, loaded: 0 }];
+
+    const summary = await runner.captureList();
+
+    expect(tabs.asked).toEqual([
+      'extract.list',
+      'list.advance',
+      'extract.list',
+      'list.advance',
+    ]);
+    expect(summary).toMatchObject({ collected: 3, rounds: 2, running: false });
+  });
+
+  it('does not re-archive a post that shows up again in a later round', async () => {
+    const { tabs, bridge, runner } = listRunner();
+    // 置顶 / 列表刷新会让同一条重复出现在下一轮里。
+    tabs.listRounds = [
+      { documents: [topic('111')], skipped: 0, total: 1 },
+      { documents: [topic('111'), topic('222')], skipped: 0, total: 2 },
+    ];
+    tabs.advances = [{ collapsed: 1, loaded: 2 }, { collapsed: 2, loaded: 0 }];
+
+    const summary = await runner.captureList();
+
+    expect(bridge.createdFor).toEqual([`${LIST_URL}/topic/111`, `${LIST_URL}/topic/222`]);
+    expect(summary).toMatchObject({ collected: 2, failed: 0 });
+  });
+
+  it('counts a failed post and carries on with the rest of the batch', async () => {
+    const { tabs, bridge, runner } = listRunner();
+    bridge.failCreateFor = `${LIST_URL}/topic/222`;
+    tabs.listRounds = [{ documents: [topic('111'), topic('222'), topic('333')], skipped: 0, total: 3 }];
+    tabs.advances = [{ collapsed: 3, loaded: 0 }];
+
+    const summary = await runner.captureList();
+
+    expect(summary).toMatchObject({ collected: 2, failed: 1 });
+    expect(bridge.sent.filter(item => item.type === 'job.result')).toHaveLength(2);
+  });
+
+  it('stops at the item cap instead of running away on an endless feed', async () => {
+    const { tabs, runner } = listRunner();
+    tabs.listRounds = [{ documents: [topic('111'), topic('222'), topic('333')], skipped: 0, total: 3 }];
+
+    const summary = await runner.captureList({}, { maxItems: 2 });
+
+    expect(summary.collected).toBe(2);
+    // 到顶就收工，不再翻页。
+    expect(tabs.asked).toEqual(['extract.list']);
+  });
+
+  it('reports live progress so the side panel can count up during a long batch', async () => {
+    const { tabs, runner, progress } = listRunner();
+    tabs.listRounds = [{ documents: [topic('111'), topic('222')], skipped: 0, total: 2 }];
+    tabs.advances = [{ collapsed: 2, loaded: 0 }];
+
+    await runner.captureList();
+
+    expect(progress[0]).toMatchObject({ collected: 0, running: true, url: LIST_URL });
+    expect(progress.map(item => item.collected)).toEqual([0, 1, 2, 2]);
+    expect(progress.at(-1)).toMatchObject({ collected: 2, running: false });
+  });
+
+  it('surfaces an extraction failure instead of reporting an empty batch as success', async () => {
+    const { tabs, runner } = listRunner();
+    tabs.listRounds = [];
+
+    await expect(runner.captureList()).rejects.toThrow('没有更多轮次');
+  });
+
+  it('tells the user to refresh when the page has no content script yet', async () => {
+    const { tabs, runner, progress } = listRunner();
+    tabs.sendMessage = async () => {
+      throw new Error('Could not establish connection. Receiving end does not exist.');
+    };
+
+    await expect(runner.captureList()).rejects.toThrow('刷新');
+    // 失败也要收尾，否则侧栏会一直显示「正在批量归档」。
+    expect(progress.at(-1)).toMatchObject({ running: false, collected: 0 });
   });
 });
 

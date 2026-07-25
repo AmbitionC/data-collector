@@ -61,6 +61,19 @@ export const SOURCE_REGISTRY: Record<Source, SourceDescriptor> = {
   },
 };
 
+/**
+ * 页面是否是「一屏多条」的列表 / 信息流（当前只有知识星球是这种形态）。
+ *
+ * 列表页不能当成一篇存档（会把 21 条帖子糊成一条），只能批量拆成多条各自入库；
+ * 这是「单页保存」与「批量保存」分流的唯一判据，扩展、侧栏、提取器都用它。
+ */
+export function isListPage(url: URL): boolean {
+  const descriptor = descriptorForHost(url.hostname);
+  if (descriptor?.id !== 'zsxq') return false;
+  // 详情页形如 /group/<群号>/topic/<帖子号>；分组 / 分类 / 精华页没有 /topic/ 段。
+  return !/\/topic\/[^/]+/.test(url.pathname);
+}
+
 /** 按主机名查找来源描述符；找不到返回 undefined。 */
 export function descriptorForHost(host: string): SourceDescriptor | undefined {
   const lower = host.toLowerCase();

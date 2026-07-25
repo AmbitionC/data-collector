@@ -1,3 +1,4 @@
+import { isListPage } from '@data-collector/shared';
 import { buildDocument, cleanText, elementText, parsePublishedAt } from './common.js';
 import { ExtractionError, type Clock } from './types.js';
 
@@ -10,6 +11,23 @@ const LOGIN_SELECTORS = [
 
 /** 真实 DOM（Angular）：每条帖子是一个 .topic-container；详情页只有一个，列表页有多个。 */
 const TOPIC_CONTAINER = '.topic-container';
+
+/**
+ * 已批量采集过的帖子标记。列表页是「滚到底自动加载下一批」，
+ * 采完一批后由内容脚本给节点打上这个标记并收起，于是：
+ * 页面高度回落 → 滚动能触发加载新内容 → 下一轮提取只看到真正的新帖子。
+ */
+export const COLLECTED_ATTRIBUTE = 'data-dc-collected';
+
+/** 尚未采集的帖子节点（已打标记的跳过，避免同一条重复入库）。 */
+function pendingContainers(document: Document): Element[] {
+  return [...document.querySelectorAll(`${TOPIC_CONTAINER}:not([${COLLECTED_ATTRIBUTE}])`)];
+}
+
+/** 剩余待采条数：批量采集用它判断滚动之后有没有加载出新内容。 */
+export function pendingTopicCount(document: Document): number {
+  return pendingContainers(document).length;
+}
 
 /** 正文容器（按可靠性排序）。评论区在 .topic-container 内、正文容器外，取正文容器可天然排除评论。 */
 const CONTENT_SELECTORS = [
@@ -32,7 +50,7 @@ function firstWithin(root: ParentNode, selectors: string[]): Element | null {
 
 /** 详情页地址形如 /group/<群号>/topic/<帖子号>；列表/分类/精华页没有 /topic/ 段。 */
 export function isTopicDetail(url: URL): boolean {
-  return /\/topic\/[^/]+/.test(url.pathname);
+  return !isListPage(url);
 }
 
 /**
@@ -53,6 +71,90 @@ function deriveTitle(content: Element, document: Document): string {
   return cleanText(document.title);
 }
 
+/**
+ * 从列表页的一条帖子节点里找出它自己的详情 URL。
+ * 列表页批量采集必须拿到**每条帖子各自的 URL** —— 稳定内容 ID 由规范 URL 派生，
+ * 若都用列表页 URL，21 条帖子会算出同一个 ID 而相互覆盖，最后只剩 1 条。
+ * 依次尝试：详情链接 → 元素 id/data-* 里的 topic id；都拿不到返回 undefined（该条跳过）。
+ */
+export function topicUrlOf(container: Element, pageUrl: URL): URL | undefined {
+  const link = container.querySelector<HTMLAnchorElement>('a[href*="/topic/"]');
+  const href = link?.getAttribute('href');
+  if (href) {
+    try {
+      const resolved = new URL(href, pageUrl);
+      if (isTopicDetail(resolved)) return resolved;
+    } catch {
+      // 继续尝试其它策略。
+    }
+  }
+
+  const groupId = pageUrl.pathname.match(/\/group\/(\d+)/)?.[1];
+  if (groupId) {
+    // Angular 常把业务 id 放在元素 id / data-* 上；topic id 是长数字串。
+    const candidates = [container, ...container.querySelectorAll('*')];
+    for (const element of candidates.slice(0, 200)) {
+      for (const attribute of element.getAttributeNames()) {
+        if (!/^(id|data-|ng-reflect-)/.test(attribute)) continue;
+        const value = element.getAttribute(attribute) ?? '';
+        const topicId = value.match(/\b(\d{15,25})\b/)?.[1];
+        if (topicId) {
+          return new URL(`/group/${groupId}/topic/${topicId}`, pageUrl);
+        }
+      }
+    }
+  }
+  return undefined;
+}
+
+export interface ListExtraction {
+  documents: ReturnType<typeof buildDocument>[];
+  /** 无法确定各自 URL 而被跳过的条数（用于如实告知用户，而不是静默少采）。 */
+  skipped: number;
+  total: number;
+  /**
+   * 本轮看到的全部帖子节点（含被跳过的）。采完这一轮后由内容脚本统一打标记收起，
+   * 跳过的也要收起——否则它们会在每一轮里被反复重新提取，批量采集永远推进不下去。
+   */
+  containers: Element[];
+}
+
+/**
+ * 列表 / 精华页批量提取：把每个 .topic-container 当作独立一篇。
+ * 只返回能确定自身 URL 的条目，其余计入 skipped。
+ */
+export function extractZsxqList(document: Document, url: URL, now: Clock): ListExtraction {
+  const containers = pendingContainers(document);
+  const documents: ReturnType<typeof buildDocument>[] = [];
+  let skipped = 0;
+
+  for (const container of containers) {
+    const topicUrl = topicUrlOf(container, url);
+    const content = firstWithin(container, CONTENT_SELECTORS) ?? container;
+    const text = elementText(content);
+    if (!topicUrl || !text || text.length < 20) {
+      skipped += 1;
+      continue;
+    }
+    const time = firstWithin(container, TIME_SELECTORS);
+    const author = elementText(firstWithin(container, AUTHOR_SELECTORS));
+    const publishedAt = parsePublishedAt(elementText(time), time?.getAttribute('datetime'));
+    documents.push(
+      buildDocument({
+        source: 'zsxq',
+        kind: 'post',
+        title: deriveTitle(content, document),
+        content,
+        url: topicUrl,
+        now,
+        ...(author ? { author } : {}),
+        ...(publishedAt ? { publishedAt } : {}),
+      }),
+    );
+  }
+  return { documents, skipped, total: containers.length, containers };
+}
+
 export function extractZsxq(document: Document, url: URL, now: Clock) {
   if (LOGIN_SELECTORS.some(selector => document.querySelector(selector))) {
     throw new ExtractionError('AUTH_REQUIRED', '请先登录知识星球，再打开需要保存的单条内容');
@@ -60,13 +162,13 @@ export function extractZsxq(document: Document, url: URL, now: Clock) {
 
   const containers = [...document.querySelectorAll(TOPIC_CONTAINER)];
 
-  // 列表 / 分类 / 精华页：页面上有多条帖子，采集哪一条无法判断。
-  // 绝不能把整个信息流当成一篇存下来，因此明确要求打开单条详情页。
+  // 列表 / 分类 / 精华页：页面上有多条帖子，绝不能把整个信息流当成一篇存下来。
+  // 这类页面走「批量保存」（extractZsxqList）逐条拆开入库，单页保存在这里明确拒绝。
   if (!isTopicDetail(url)) {
     throw new ExtractionError(
       'UNSUPPORTED_LAYOUT',
       containers.length > 1
-        ? `当前是列表页（本页有 ${containers.length} 条帖子）。请点开某条帖子的详情页（地址形如 /topic/…）后再保存。`
+        ? `当前是列表页（本页有 ${containers.length} 条帖子）。请用「批量保存本页帖子」逐条入库，或点开单条详情页（地址形如 /topic/…）再保存。`
         : '请在知识星球中打开一篇帖子的详情页（地址形如 /topic/…）后重试',
     );
   }

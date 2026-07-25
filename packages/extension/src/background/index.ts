@@ -1,4 +1,4 @@
-import { descriptorForHost, parseSupportedUrl } from '@data-collector/shared';
+import { descriptorForHost, isListPage, parseSupportedUrl } from '@data-collector/shared';
 import {
   BridgeConnection,
   type ExtensionStorage,
@@ -67,7 +67,13 @@ const connection = new BridgeConnection({
   setTimeout: (callback, milliseconds) => setTimeout(callback, milliseconds),
   clearTimeout: handle => clearTimeout(handle as number),
 });
-const runner = new JobRunner({ tabs, bridge: connection, waitForTabComplete });
+const runner = new JobRunner({
+  tabs,
+  bridge: connection,
+  waitForTabComplete,
+  // 批量采集会跑很久，进度写进 storage 由侧栏轮询展示。
+  reportBatch: progress => { void chrome.storage.local.set({ batch: progress }); },
+});
 connection.onCollect((requestId, url) => runner.runRemoteJob(requestId, url));
 
 async function configureSidePanel(): Promise<void> {
@@ -89,16 +95,20 @@ async function status() {
     'lastJobError',
     'lastOutputPath',
     'routing',
+    'batch',
   ]);
   const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
   let supported = false;
+  let list = false;
   let routeTargets: string[] = [];
   let destinations: { id: string; label: string; categories: string[] }[] = [];
   let defaultSinkIds: string[] = [];
   if (tab?.url) {
     try {
-      parseSupportedUrl(tab.url);
+      const parsed = parseSupportedUrl(tab.url);
       supported = true;
+      // 列表 / 精华页：一屏多条，走批量保存而不是单页保存。
+      list = isListPage(parsed);
       const source = descriptorForHost(new URL(tab.url).hostname)?.id;
       const routing = values.routing as
         | {
@@ -124,8 +134,10 @@ async function status() {
     lastJobUrl: values.lastJobUrl,
     lastJobError: values.lastJobError,
     lastOutputPath: values.lastOutputPath,
+    batch: values.batch,
     page: {
       supported,
+      list,
       title: tab?.title ?? '',
       url: tab?.url ?? '',
       routeTargets,
@@ -148,6 +160,19 @@ chrome.runtime.onMessage.addListener((message: unknown, _sender, sendResponse) =
         },
       );
       return { jobId };
+    }
+    if (request.type === 'capture.list') {
+      return runner.captureList(
+        (request.overrides ?? {}) as {
+          userCategory?: string;
+          userTags?: string[];
+          sinks?: string[];
+        },
+      );
+    }
+    if (request.type === 'batch.dismiss') {
+      await chrome.storage.local.remove('batch');
+      return status();
     }
     if (request.type === 'connection.retry') {
       await connection.retry();

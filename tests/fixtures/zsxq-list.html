@@ -4,9 +4,24 @@
   <body>
     <app-root>
       <div class="main-content-container">
-        <div class="topic-container"><div class="talk-content-container"><div class="content">第一条帖子的正文内容，足够长以便通过长度校验判断。</div></div></div>
-        <div class="topic-container"><div class="talk-content-container"><div class="content">第二条帖子的正文内容，同样足够长以便通过长度校验。</div></div></div>
-        <div class="topic-container"><div class="talk-content-container"><div class="content">第三条帖子的正文内容，同样足够长以便通过长度校验。</div></div></div>
+        <!-- 策略一：帖子里有指向自身详情页的链接。 -->
+        <div class="topic-container">
+          <a href="/group/48844584441158/topic/511111111111111">查看详情</a>
+          <div class="author-name">重远</div>
+          <div class="talk-content-container"><div class="content">第一条帖子的正文内容，足够长以便通过长度校验判断。</div></div>
+        </div>
+        <!-- 策略二：没有链接，帖子号落在元素属性上。 -->
+        <div class="topic-container" data-topic-id="522222222222222">
+          <div class="talk-content-container"><div class="content">第二条帖子的正文内容，同样足够长以便通过长度校验。</div></div>
+        </div>
+        <!-- 两条策略都拿不到自身 URL：宁可跳过也不能落成列表页 URL（否则彼此覆盖）。 -->
+        <div class="topic-container">
+          <div class="talk-content-container"><div class="content">第三条帖子的正文内容，同样足够长以便通过长度校验。</div></div>
+        </div>
+        <!-- 上一轮已采过并收起：本轮不该再被提取。 -->
+        <div class="topic-container" data-dc-collected="1" data-topic-id="544444444444444" style="display: none">
+          <div class="talk-content-container"><div class="content">第四条帖子上一轮已经采过，本轮不应该再出现。</div></div>
+        </div>
       </div>
     </app-root>
   </body>
