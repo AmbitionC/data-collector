@@ -59,11 +59,17 @@ export class JobRunner {
   }
 
   /** 向内容脚本请求提取；内容脚本尚未就绪时短暂重试（最多 4 次）。 */
-  private async extractWithRetry(tabId: number): Promise<ExtractionResponse> {
+  private async extractWithRetry(
+    tabId: number,
+    overrides?: CaptureOverrides,
+  ): Promise<ExtractionResponse> {
     let lastError: unknown;
     for (let attempt = 0; attempt < 4; attempt += 1) {
       try {
-        return await this.options.tabs.sendMessage(tabId, { type: 'extract.document' });
+        return await this.options.tabs.sendMessage(tabId, {
+          type: 'extract.document',
+          ...(overrides ? { overrides } : {}),
+        });
       } catch (error) {
         if (!isContentScriptNotReady(error) || attempt === 3) throw error;
         lastError = error;
@@ -120,10 +126,24 @@ export class JobRunner {
     const url = parseSupportedUrl(tab.url).href;
     const job = await this.options.bridge.createJob(url, overrides);
     this.options.bridge.send('job.progress', job.id, { stage: 'collecting' });
-    const response = await this.options.tabs.sendMessage(tab.id, {
-      type: 'extract.document',
-      overrides,
-    });
+    let response: ExtractionResponse;
+    try {
+      response = await this.extractWithRetry(tab.id, overrides);
+    } catch (error) {
+      // 内容脚本不在该标签页（常见于扩展刚安装/重载，而标签页是之前打开的）。
+      // 必须显式回报，否则任务会永远停在 collecting，侧栏一直显示「清理正文」。
+      const notReady = isContentScriptNotReady(error);
+      this.options.bridge.send('job.error', job.id, {
+        code: notReady ? 'CONTENT_SCRIPT_MISSING' : 'COLLECTION_FAILED',
+        message: notReady
+          ? '页面脚本未就绪：扩展安装或更新后，已打开的标签页需要刷新一次。请按 F5 刷新本页再保存。'
+          : error instanceof Error
+            ? error.message
+            : '浏览器采集失败',
+        needsAttention: notReady,
+      });
+      return job.id;
+    }
     if (!response.ok) {
       this.options.bridge.send('job.error', job.id, {
         code: response.error.code,

@@ -266,7 +266,8 @@ describe('extension Bridge connection', () => {
     socket.emit('open');
     await vi.waitFor(() => expect(socket.sent).toHaveLength(1));
 
-    expect(fetcher).not.toHaveBeenCalled();
+    // 已有 token 时仍会尽力刷新一次路由（失败不影响连接），但不再走 bootstrap 授权。
+    expect(fetcher).toHaveBeenCalledWith('http://127.0.0.1:17321/health');
     expect(socketFactory).toHaveBeenCalledWith(
       `ws://127.0.0.1:17321/v1/extension?token=${'x'.repeat(43)}`,
     );
@@ -275,6 +276,34 @@ describe('extension Bridge connection', () => {
       payload: { version: APP_VERSION },
     });
     expect(storage.values.bridgeStatus).toBe('connected');
+  });
+
+  it('refreshes routing on every authorized connect（改去向无需重装扩展）', async () => {
+    const storage = new MemoryStorage({
+      bridgeToken: 'x'.repeat(43),
+      routing: { sinks: [{ id: 'markdown', label: '本机库', categories: [] }], defaults: {} },
+    });
+    const socket = new MemorySocket();
+    const nextRouting = {
+      sinks: [
+        { id: 'markdown', label: '本机库', categories: ['其他'] },
+        { id: 'life-teachers', label: 'life-teachers 收件箱', categories: ['投资', '认知'] },
+      ],
+      defaults: { wechat: ['markdown', 'life-teachers'] },
+    };
+    const fetcher = vi.fn<typeof fetch>(async () =>
+      new Response(JSON.stringify({ trustedExtensionId: 'irrelevant', routing: nextRouting }), {
+        headers: { 'content-type': 'application/json' },
+      }),
+    );
+    const connection = new BridgeConnection(dependencies(storage, () => socket, fetcher));
+
+    await connection.start();
+    socket.emit('open');
+    await vi.waitFor(() => expect(storage.values.bridgeStatus).toBe('connected'));
+
+    // Bridge 侧新增的去向已进入扩展缓存，侧栏下次渲染即可见。
+    expect(storage.values.routing).toEqual(nextRouting);
   });
 
   it('removes a stale stored token and reauthorizes through health on the scheduled retry', async () => {
@@ -301,7 +330,11 @@ describe('extension Bridge connection', () => {
     expect(storage.removals).toEqual(['bridgeToken']);
     expect(storage.values.bridgeToken).toBeUndefined();
     expect(storage.values.bridgeStatus).toBe('disconnected');
-    expect(fetcher).not.toHaveBeenCalled();
+    // 带 token 的首次尝试只做一次「路由刷新」health 调用，不走 bootstrap 授权。
+    expect(fetcher).toHaveBeenCalledOnce();
+    expect(socketFactory).not.toHaveBeenCalledWith(
+      'ws://127.0.0.1:17321/v1/extension?bootstrap=1',
+    );
 
     deps.setTimeout.mock.calls[0]![0]();
     await vi.waitFor(() => expect(socketFactory).toHaveBeenCalledTimes(2));
@@ -342,7 +375,8 @@ describe('extension Bridge connection', () => {
     await vi.waitFor(() => expect(storage.values.bridgeStatus).toBe('identity_error'));
 
     expect(storage.values.bridgeToken).toBeUndefined();
-    expect(fetcher).toHaveBeenCalledOnce();
+    // 两次 health：① 带 token 时的路由刷新 ② 重试时的 bootstrap 身份校验（发现 ID 不符）。
+    expect(fetcher).toHaveBeenCalledTimes(2);
     expect(socketFactory).toHaveBeenCalledOnce();
     expect(deps.setTimeout).toHaveBeenCalledOnce();
   });

@@ -112,6 +112,31 @@ describe('extension job runner', () => {
     expect(bridge.sent.some(message => message.type === 'job.error')).toBe(false);
   });
 
+  it('reports an actionable error when the current page has no content script（不再卡在「清理正文」）', async () => {
+    const tabs = new InMemoryTabs();
+    const bridge = new InMemoryBridge();
+    tabs.sendMessage = async () => {
+      throw new Error('Could not establish connection. Receiving end does not exist.');
+    };
+    const runner = new JobRunner({
+      tabs,
+      bridge,
+      waitForTabComplete: async () => undefined,
+      delay: async () => undefined,
+    });
+
+    await runner.captureCurrent({});
+
+    // 必须回报 job.error，否则任务永远停在 collecting、侧栏一直显示「清理正文」。
+    const error = bridge.sent.find(message => message.type === 'job.error');
+    expect(error).toBeDefined();
+    const payload = error!.payload as { code: string; message: string; needsAttention: boolean };
+    expect(payload.code).toBe('CONTENT_SCRIPT_MISSING');
+    expect(payload.needsAttention).toBe(true);
+    expect(payload.message).toContain('刷新');
+    expect(bridge.sent.some(message => message.type === 'job.result')).toBe(false);
+  });
+
   it('reports COLLECTION_FAILED when the content script never becomes ready', async () => {
     const tabs = new InMemoryTabs();
     const bridge = new InMemoryBridge();

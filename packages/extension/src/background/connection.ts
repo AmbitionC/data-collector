@@ -90,6 +90,20 @@ export class BridgeConnection {
     await this.start({ force: true });
   }
 
+  /** 尽力刷新「去向/分类」路由缓存；失败忽略（连接问题由 WebSocket 反映）。 */
+  private async refreshRouting(port: number): Promise<void> {
+    try {
+      const response = await this.dependencies.fetch(`http://127.0.0.1:${port}/health`);
+      if (!response.ok) return;
+      const health = (await response.json()) as { routing?: unknown };
+      if (health.routing && typeof health.routing === 'object') {
+        await this.dependencies.storage.set({ routing: health.routing });
+      }
+    } catch {
+      // 忽略。
+    }
+  }
+
   private async startOnce(force: boolean): Promise<void> {
     await this.tokenInvalidation;
     const settings = await this.settings();
@@ -97,6 +111,9 @@ export class BridgeConnection {
       this.reconnectSuppressed = true;
       return;
     }
+    // 已授权时先尽力刷新一次路由：即使当前已连接（下面会提前 return），
+    // Bridge 侧改了去向/分类也能生效，不需要重装扩展。
+    if (settings.token) await this.refreshRouting(settings.port);
     if (this.socket?.readyState === 0 || this.socket?.readyState === 1) return;
     const generation = ++this.generation;
     const bootstrap = !settings.token;

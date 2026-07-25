@@ -63,7 +63,9 @@ export function sidePanelStateFromStatus(status: BackgroundStatus): SidePanelSta
   if (jobBelongsToPage && status.lastJobStatus === 'needs_attention') {
     return {
       phase: 'needs_attention',
-      message: '请在保留的页面中登录或打开单条详情，然后重新保存。',
+      // 优先展示具体原因（如「页面脚本未就绪，请刷新」），没有时才用通用提示。
+      message:
+        status.lastJobError || '请在保留的页面中登录或打开单条详情，然后重新保存。',
     };
   }
   if (
@@ -206,19 +208,28 @@ export function renderSidePanel(
       routeHint.textContent = labels.length ? `保存去向：${labels.join(' · ')}` : '';
     };
 
-    // 仅在切换页面时重建选项/重置输入，避免轮询刷新覆盖用户正在填的内容。
-    if (panel.dataset.url !== state.url) {
+    // 重建选项的时机：切换页面，或 Bridge 侧的去向/分类发生变化（改了配置后无需重装扩展）。
+    // 其余轮询刷新不动 DOM，避免覆盖用户正在填的内容。
+    const routingSignature = JSON.stringify([destinations, defaultIds]);
+    const routingChanged = panel.dataset.routing !== routingSignature;
+    if (panel.dataset.url !== state.url || routingChanged) {
+      const sameUrl = panel.dataset.url === state.url;
       panel.dataset.url = state.url;
+      panel.dataset.routing = routingSignature;
+      // 仅路由变化（同一页面）时保留用户已选去向，避免打断正在进行的编辑。
+      const keepDestination = sameUrl ? destinationSelect.value : '';
       destinationSelect.replaceChildren();
       const defaultText = defaultLabels.length
         ? `默认（${defaultLabels.join(' · ')}）`
         : '默认去向';
       destinationSelect.append(new Option(defaultText, ''));
       for (const sink of destinations) destinationSelect.append(new Option(sink.label, sink.id));
-      destinationSelect.value = '';
+      destinationSelect.value = destinations.some(sink => sink.id === keepDestination)
+        ? keepDestination
+        : '';
       destinationSelect.disabled = destinations.length === 0;
-      required<HTMLInputElement>(document, '#tags').value = state.tags.join(', ');
-      applyCategories({ preserve: false });
+      if (!sameUrl) required<HTMLInputElement>(document, '#tags').value = state.tags.join(', ');
+      applyCategories({ preserve: sameUrl });
     }
     destinationSelect.onchange = () => applyCategories({ preserve: true });
 
