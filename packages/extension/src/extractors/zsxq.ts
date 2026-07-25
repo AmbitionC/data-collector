@@ -1,27 +1,26 @@
-import { buildDocument, elementText, parsePublishedAt } from './common.js';
+import { buildDocument, cleanText, elementText, parsePublishedAt } from './common.js';
 import { ExtractionError, type Clock } from './types.js';
 
 const LOGIN_SELECTORS = [
-  '[data-testid="login"]',
   '.login-container',
   '.login-page',
+  'app-login',
   'form[action*="login"]',
 ];
 
-const ARTICLE_CONTAINERS = [
-  '[data-testid="article-detail"]',
-  '.article-detail',
-  '[data-testid="topic-detail"]',
-  '.topic-detail',
-];
+/** 真实 DOM（Angular）：每条帖子是一个 .topic-container；详情页只有一个，列表页有多个。 */
+const TOPIC_CONTAINER = '.topic-container';
 
+/** 正文容器（按可靠性排序）。评论区在 .topic-container 内、正文容器外，取正文容器可天然排除评论。 */
 const CONTENT_SELECTORS = [
-  '[data-testid="article-content"]',
-  '.article-content',
-  '[data-testid="topic-content"]',
-  '.topic-content',
+  '.talk-content-container',
+  '.article-content-container',
+  '.q-content-container',
   '.content',
 ];
+
+const AUTHOR_SELECTORS = ['.author-name', '.user-name', '.name', '.nickname'];
+const TIME_SELECTORS = ['time', '.create-time', '.time', '[class*="create-time"]'];
 
 function firstWithin(root: ParentNode, selectors: string[]): Element | null {
   for (const selector of selectors) {
@@ -31,71 +30,27 @@ function firstWithin(root: ParentNode, selectors: string[]): Element | null {
   return null;
 }
 
-function findTitle(root: ParentNode, document: Document): string {
-  return (
-    elementText(firstWithin(root, ['[data-testid="topic-title"]', '.article-title', 'h1'])) ||
-    elementText(document.querySelector('h1')) ||
-    elementText(document.querySelector('title'))
-  );
+/** 详情页地址形如 /group/<群号>/topic/<帖子号>；列表/分类/精华页没有 /topic/ 段。 */
+export function isTopicDetail(url: URL): boolean {
+  return /\/topic\/[^/]+/.test(url.pathname);
 }
 
-function isHidden(element: Element): boolean {
-  let current: Element | null = element;
-  while (current) {
-    if (
-      current.hasAttribute('hidden') ||
-      current.getAttribute('aria-hidden') === 'true' ||
-      /display\s*:\s*none|visibility\s*:\s*hidden/i.test(current.getAttribute('style') ?? '')
-    ) return true;
-    const style = current.ownerDocument.defaultView?.getComputedStyle(current);
-    if (style?.display === 'none' || style?.visibility === 'hidden') return true;
-    current = current.parentElement;
+/**
+ * 星球动态多数没有标题。用正文首句兜底，保证归档条目有可读标题
+ * （站点 <title> 恒为「<星球名>-知识星球」，不能当文章标题用）。
+ */
+function deriveTitle(content: Element, document: Document): string {
+  const explicit = elementText(firstWithin(content, ['h1', 'h2', '.title', '[class*="title"]']));
+  if (explicit) return explicit.slice(0, 80);
+  const body = elementText(content);
+  if (body) {
+    const firstSentence = body
+      .split(/[。！？!?\n]/)
+      .map(part => cleanText(part))
+      .find(part => part.length >= 4);
+    return (firstSentence ?? body).slice(0, 60);
   }
-  return false;
-}
-
-function visibleText(element: Element): string {
-  const walker = element.ownerDocument.createTreeWalker(element, 4);
-  const parts: string[] = [];
-  let node = walker.nextNode();
-  while (node) {
-    const parent = node.parentElement;
-    if (parent && !isHidden(parent)) parts.push(node.textContent ?? '');
-    node = walker.nextNode();
-  }
-  return parts.join(' ').replace(/[\s\u00a0]+/g, ' ').trim();
-}
-
-function scoredFallback(document: Document): Element | null {
-  const candidates = [...document.querySelectorAll('main, article, section, div')]
-    .filter(element => !isHidden(element))
-    .map(element => {
-      const text = visibleText(element);
-      const paragraphs = element.querySelectorAll('p').length;
-      const linkElements = [...element.querySelectorAll('a')].filter(link => !isHidden(link));
-      const linkTextLength = linkElements.reduce((total, link) => total + visibleText(link).length, 0);
-      const navigationRatio = linkTextLength / Math.max(1, text.length);
-      const heading = element.querySelector('h1, h2, [role="heading"]');
-      const directHeading = heading?.parentElement === element;
-      const controls = element.querySelectorAll('button, input, textarea, select').length;
-      const paragraphDensity = text.length / Math.max(1, paragraphs);
-      const score =
-        Math.min(text.length, 5_000) +
-        paragraphs * 120 +
-        Math.min(paragraphDensity, 160) +
-        (directHeading ? 260 : heading ? 60 : 0) -
-        linkTextLength * 2 -
-        linkElements.length * 30 -
-        navigationRatio * 400 -
-        controls * 50;
-      return { element, text, score };
-    })
-    .filter(candidate => candidate.text.length >= 80)
-    .sort((a, b) => b.score - a.score);
-
-  if (!candidates[0]) return null;
-  if (candidates[1] && candidates[0].score < candidates[1].score * 1.15) return null;
-  return candidates[0].element;
+  return cleanText(document.title);
 }
 
 export function extractZsxq(document: Document, url: URL, now: Clock) {
@@ -103,51 +58,36 @@ export function extractZsxq(document: Document, url: URL, now: Clock) {
     throw new ExtractionError('AUTH_REQUIRED', '请先登录知识星球，再打开需要保存的单条内容');
   }
 
-  const question = firstWithin(document, [
-    '[data-testid="question-detail"]',
-    '.question-detail',
-  ]);
-  if (question) {
-    const questionContent = firstWithin(question, ['.question-content']);
-    const answers = [...question.querySelectorAll('.answer-content')];
-    if (!questionContent) {
-      throw new ExtractionError('CONTENT_EMPTY', '未找到问题正文');
-    }
-    const combined = document.createElement('div');
-    combined.append(questionContent.cloneNode(true));
-    for (const answer of answers) combined.append(answer.cloneNode(true));
-    return buildDocument({
-      source: 'zsxq',
-      kind: 'question',
-      title: findTitle(question, document),
-      content: combined,
-      url,
-      now,
-      author: elementText(firstWithin(question, ['[data-testid="author-name"]', '.author-name'])),
-      sourceMetadata: { answerCount: answers.length },
-    });
-  }
+  const containers = [...document.querySelectorAll(TOPIC_CONTAINER)];
 
-  const detail = firstWithin(document, ARTICLE_CONTAINERS);
-  const content = (detail && firstWithin(detail, CONTENT_SELECTORS)) || scoredFallback(document);
-  const titleRoot = detail ?? content;
-  const title = titleRoot ? findTitle(titleRoot, document) : '';
-  if (!content || !title || elementText(content).length < 20) {
+  // 列表 / 分类 / 精华页：页面上有多条帖子，采集哪一条无法判断。
+  // 绝不能把整个信息流当成一篇存下来，因此明确要求打开单条详情页。
+  if (!isTopicDetail(url)) {
     throw new ExtractionError(
       'UNSUPPORTED_LAYOUT',
-      '请在知识星球中打开一篇文章、动态或问答的详情页后重试',
+      containers.length > 1
+        ? `当前是列表页（本页有 ${containers.length} 条帖子）。请点开某条帖子的详情页（地址形如 /topic/…）后再保存。`
+        : '请在知识星球中打开一篇帖子的详情页（地址形如 /topic/…）后重试',
     );
   }
 
-  const time = (detail ?? content).querySelector('time');
-  const author = elementText(
-    firstWithin(detail ?? content, ['[data-testid="author-name"]', '.author-name', '.name']),
-  );
+  const container = containers[0] ?? document.body;
+  const content = firstWithin(container, CONTENT_SELECTORS) ?? container;
+  const text = elementText(content);
+  if (!text || text.length < 20) {
+    throw new ExtractionError(
+      'CONTENT_EMPTY',
+      '未读到帖子正文：请确认页面已加载完成（必要时先点开「展开全文」）后重试',
+    );
+  }
+
+  const time = firstWithin(container, TIME_SELECTORS);
+  const author = elementText(firstWithin(container, AUTHOR_SELECTORS));
   const publishedAt = parsePublishedAt(elementText(time), time?.getAttribute('datetime'));
   return buildDocument({
     source: 'zsxq',
-    kind: detail?.matches('[data-testid="article-detail"], .article-detail') ? 'article' : 'post',
-    title,
+    kind: 'post',
+    title: deriveTitle(content, document),
     content,
     url,
     now,

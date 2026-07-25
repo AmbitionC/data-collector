@@ -19,7 +19,7 @@ async function fixture(name: string, url: string): Promise<Document> {
 describe('source detection', () => {
   it('detects the supported sources', () => {
     expect(detectSource(new URL('https://mp.weixin.qq.com/s/x'))).toBe('wechat');
-    expect(detectSource(new URL('https://wx.zsxq.com/dweb2/index/topic_detail/x'))).toBe('zsxq');
+    expect(detectSource(new URL('https://wx.zsxq.com/group/123/topic/456'))).toBe('zsxq');
     expect(detectSource(new URL('https://www.nowcoder.com/discuss/123'))).toBe('nowcoder');
   });
 });
@@ -68,73 +68,44 @@ describe('WeChat extraction', () => {
   });
 });
 
-describe('ZSXQ extraction', () => {
-  it('extracts a single article detail', async () => {
-    const url = 'https://wx.zsxq.com/dweb2/index/topic_detail/123';
-    const result = extractDocument(await fixture('zsxq-article.html', url), url, NOW);
+describe('ZSXQ extraction（按真实 Angular DOM）', () => {
+  const DETAIL = 'https://wx.zsxq.com/group/48844584441158/topic/55522452154844124';
+  const LIST = 'https://wx.zsxq.com/group/48844584441158';
 
-    expect(result).toMatchObject({
-      source: 'zsxq',
-      kind: 'article',
-      title: '浏览器知识采集的三个边界',
-      author: '陈同学',
-      publishedAt: '2026-07-16T01:00:00.000Z',
-    });
-    expect(result.images[0]?.url).toBe('https://wx.zsxq.com/assets/collector.png');
+  it('extracts a topic detail, derives a title from the body, and drops the comments', async () => {
+    const result = extractDocument(await fixture('zsxq-topic.html', DETAIL), DETAIL, NOW);
+
+    expect(result).toMatchObject({ source: 'zsxq', kind: 'post', author: '陈老师' });
+    // 站点 <title> 恒为「…-知识星球」，标题必须由正文首句派生。
+    expect(result.title).toContain('创业板已经跌破 60 日线');
+    expect(result.title).not.toContain('知识星球');
+    expect(result.text).toContain('股价是业绩的期货');
+    // 评论在正文容器之外，不应混入归档正文。
+    expect(result.text).not.toContain('查看更多评论');
+    expect(result.text).not.toContain('网友甲');
+    expect(result.images[0]?.url).toBe('https://images.zsxq.com/chart.png');
   });
 
-  it('combines a question and its visible answer', async () => {
-    const url = 'https://wx.zsxq.com/dweb2/index/topic_detail/456';
-    const result = extractDocument(await fixture('zsxq-question.html', url), url, NOW);
+  it('refuses a list page instead of archiving the whole feed as one article', async () => {
+    const doc = await fixture('zsxq-list.html', LIST);
 
-    expect(result.kind).toBe('question');
-    expect(result.title).toBe('如何把收藏内容沉淀为知识库？');
-    expect(result.text).toContain('我收藏了很多文章');
-    expect(result.text).toContain('先保存原始来源');
-    expect(result.sourceMetadata).toMatchObject({ answerCount: 1 });
+    // 列表页有多条帖子，采哪条无法判断；绝不能把整个信息流当成一篇存下来。
+    let thrown: unknown;
+    try {
+      extractDocument(doc, LIST, NOW);
+    } catch (error) {
+      thrown = error;
+    }
+    expect((thrown as ExtractionError).code).toBe('UNSUPPORTED_LAYOUT');
+    expect((thrown as Error).message).toContain('3 条帖子');
   });
 
   it('reports authentication instead of scraping a login page', () => {
-    const doc = new JSDOM('<main data-testid="login">登录知识星球后继续</main>').window.document;
+    const doc = new JSDOM('<app-login>请登录</app-login>').window.document;
 
-    expect(() => extractDocument(doc, 'https://wx.zsxq.com/dweb2/index/group/1', NOW))
-      .toThrowError(expect.objectContaining<Partial<ExtractionError>>({ code: 'AUTH_REQUIRED' }));
-  });
-
-  it('rejects ambiguous feed pages', () => {
-    const doc = new JSDOM('<main><article>短动态一</article><article>短动态二</article></main>').window.document;
-
-    expect(() => extractDocument(doc, 'https://wx.zsxq.com/dweb2/index/group/1', NOW))
-      .toThrowError(expect.objectContaining<Partial<ExtractionError>>({ code: 'UNSUPPORTED_LAYOUT' }));
-  });
-
-  it('selects a unique visible detail by density and navigation noise', () => {
-    const doc = new JSDOM(`
-      <style>.hidden-copy { display: none }</style>
-      <main>
-        <nav><a>首页导航很长</a><a>星球列表很长</a><a>用户中心很长</a><a>消息通知很长</a></nav>
-        <div class="hidden-copy"><h1>隐藏副本</h1><p>${'隐藏噪声'.repeat(100)}</p></div>
-        <section>
-          <h1>一篇没有固定选择器的星球动态</h1>
-          <p>这是用户打开的单条详情正文，包含足够明确的段落结构和实际信息。</p>
-          <p>正文说明本地采集、分类归纳以及后续写入知识库的具体工作方式。</p>
-          <p>最后一个段落用于拉开与导航、侧栏和隐藏副本之间的正文密度差异。</p>
-        </section>
-        <aside><a>推荐一</a><a>推荐二</a><a>推荐三</a></aside>
-      </main>
-    `).window.document;
-
-    const result = extractDocument(
-      doc,
-      'https://wx.zsxq.com/dweb2/index/topic_detail/fallback',
-      NOW,
+    expect(() => extractDocument(doc, DETAIL, NOW)).toThrowError(
+      expect.objectContaining<Partial<ExtractionError>>({ code: 'AUTH_REQUIRED' }),
     );
-
-    expect(result.kind).toBe('post');
-    expect(result.title).toBe('一篇没有固定选择器的星球动态');
-    expect(result.text).toContain('单条详情正文');
-    expect(result.text).not.toContain('首页导航');
-    expect(result.text).not.toContain('隐藏噪声');
   });
 });
 
