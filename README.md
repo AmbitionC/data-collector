@@ -58,21 +58,30 @@ npm run package
 
 1. 打开 `edge://extensions`，启用“开发人员模式”。
 2. 点击“加载解压缩的扩展”，选择绝对路径 `~/Code/data-collector/artifacts/data-collector-extension`。
-3. 在终端保持 Bridge 运行：
+3. 装好本机服务（**只做一次**）：
 
    ```bash
    cd ~/Code/data-collector
-   npm run collector -- bridge start
+   npm run setup
    ```
+
+   这条命令会构建、把本机服务装成登录项（macOS 用 LaunchAgent，Linux 用 systemd user 服务）、
+   立刻启动并等它就绪。之后每次开机自动运行，进程意外退出也会自动拉起 —— 不需要再手动
+   `bridge start`，也不用留着一个终端窗口。
 
 4. 在受支持的文章页点击工具栏中的 Data Collector。Edge 会打开 Side Panel，扩展将以固定身份自动连接本机 Bridge。
 
-默认知识库位于 `~/Documents/data-collector`，认证配置位于 `~/.data-collector/auth.json`。可通过参数或环境变量更改：
+服务相关的其余命令：
 
 ```bash
-npm run collector -- bridge start -- --library ~/Knowledge/data-collector --config ~/.data-collector
-# 或 DATA_COLLECTOR_LIBRARY、DATA_COLLECTOR_CONFIG、DATA_COLLECTOR_PORT
+npm run collector -- bridge status      # 看服务在不在
+npm run collector -- bridge uninstall   # 取消开机自动运行
+npm run collector -- bridge start       # 前台临时跑一次（调试用）
 ```
+
+默认知识库位于 `~/Documents/data-collector`，认证配置位于 `~/.data-collector/auth.json`，
+服务日志在 `~/.data-collector/bridge.log`。可通过环境变量更改：
+`DATA_COLLECTOR_LIBRARY`、`DATA_COLLECTOR_CONFIG`、`DATA_COLLECTOR_PORT`。
 
 ### 从旧版迁移
 
@@ -81,7 +90,7 @@ npm run collector -- bridge start -- --library ~/Knowledge/data-collector --conf
 1. 在 `edge://extensions` 找到旧的 Data Collector 并点击“删除”。
 2. 运行 `npm run package`，确认新的 0.2.0 ZIP 和稳定安装目录都已生成。
 3. 选择 `artifacts/data-collector-extension` 重新“加载解压缩的扩展”。
-4. 启动 Bridge，打开受支持页面并点击扩展图标；Side Panel 应自动显示“本机在线”。
+4. 运行 `npm run setup` 装好本机服务，打开受支持页面并点击扩展图标；Side Panel 应自动显示“本机在线”。
 
 不要同时保留旧 ID 和 0.2.0；Bridge 只信任正式固定 ID。若仍显示“扩展身份异常”，再次确认旧扩展已删除、安装目录来自最新打包结果，然后重新安装。
 
@@ -148,7 +157,7 @@ npm run package
 
 ## 故障排查
 
-- **Side Panel 显示“服务离线”**：启动 Bridge，再点击“重新连接”。
+- **Side Panel 显示“服务离线”**：先跑 `npm run collector -- bridge status` 确认服务是否在跑。没在跑就执行一次 `npm run setup`（它会构建 + 装登录项 + 启动 + 等就绪），再点“重新连接”。注意 `dist/` 不进版本库，`git pull` 之后没构建过时 `npm run collector` 会直接报找不到模块——`npm run setup` 已经包含构建。
 - **Side Panel 显示“扩展身份异常”**：按旧版迁移步骤删除旧 ID，并从最新稳定安装目录重新安装。
 - **Side Panel 显示“另一个浏览器实例已接管”**：另一个 Chrome/Edge 实例正在使用 Bridge；关闭另一实例，或点击“在此实例重新连接”主动接管。旧实例不会自动反复重连。
 - **Codex/CLI 超时**：确认 Side Panel 显示“本机在线”、Edge 未退出，并运行 `npm run collector -- health`。

@@ -1,7 +1,12 @@
 #!/usr/bin/env node
+import { execFile } from 'node:child_process';
+import { mkdir, rm, writeFile } from 'node:fs/promises';
+import { homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
-import { resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
+import { promisify } from 'node:util';
 import { AccessTokenManager } from './auth.js';
+import { autostartPlan, UnsupportedPlatformError } from './autostart.js';
 import { loadConfig, type ConfigOverrides } from './config.js';
 import { startBridge } from './server/index.js';
 
@@ -9,6 +14,42 @@ export interface CliIo {
   stdout(value: string): void;
   stderr(value: string): void;
 }
+
+/** 安装登录项时要碰的外部世界；测试注入替身。 */
+export interface AutostartHost {
+  platform: NodeJS.Platform;
+  home: string;
+  appData?: string;
+  nodePath: string;
+  cliPath: string;
+  writeFile(path: string, contents: string): Promise<void>;
+  mkdir(path: string): Promise<void>;
+  remove(path: string): Promise<void>;
+  run(command: string, args: string[]): Promise<void>;
+  probe(url: string): Promise<boolean>;
+}
+
+const execFileAsync = promisify(execFile);
+
+const PROCESS_HOST: AutostartHost = {
+  platform: process.platform,
+  home: homedir(),
+  ...(process.env.APPDATA ? { appData: process.env.APPDATA } : {}),
+  nodePath: process.execPath,
+  cliPath: fileURLToPath(new URL('./cli.js', import.meta.url)),
+  writeFile: (path, contents) => writeFile(path, contents, 'utf8'),
+  mkdir: async path => { await mkdir(path, { recursive: true }); },
+  remove: path => rm(path, { force: true }),
+  run: async (command, args) => { await execFileAsync(command, args); },
+  probe: async url => {
+    try {
+      const response = await fetch(url, { signal: AbortSignal.timeout(2_000) });
+      return response.ok;
+    } catch {
+      return false;
+    }
+  },
+};
 
 const PROCESS_IO: CliIo = {
   stdout: value => process.stdout.write(value),
@@ -86,8 +127,126 @@ async function health(args: string[], io: CliIo): Promise<number> {
   return 0;
 }
 
+/** 等服务真的能应答再报成功——登录项加载和端口就绪之间有几百毫秒。 */
+async function waitUntilHealthy(host: AutostartHost, url: string): Promise<boolean> {
+  for (let attempt = 0; attempt < 15; attempt += 1) {
+    if (await host.probe(url)) return true;
+    await new Promise(resolveTimeout => setTimeout(resolveTimeout, 400));
+  }
+  return false;
+}
+
+export async function installAutostart(
+  args: string[],
+  io: CliIo,
+  host: AutostartHost = PROCESS_HOST,
+): Promise<number> {
+  const config = loadConfig(configOverrides(args));
+  const healthUrl = `http://${config.host}:${config.port}/health`;
+  let plan;
+  try {
+    plan = autostartPlan({
+      platform: host.platform,
+      home: host.home,
+      nodePath: host.nodePath,
+      cliPath: host.cliPath,
+      logFile: join(config.configDir, 'bridge.log'),
+      ...(host.appData ? { appData: host.appData } : {}),
+    });
+  } catch (error) {
+    if (error instanceof UnsupportedPlatformError) {
+      io.stderr(`${error.message}\n`);
+      return 1;
+    }
+    throw error;
+  }
+
+  await host.mkdir(dirname(plan.file));
+  await host.mkdir(config.configDir);
+  await host.writeFile(plan.file, plan.contents);
+  for (const step of plan.commands) {
+    try {
+      await host.run(step.command, step.args);
+    } catch (error) {
+      if (step.allowFailure) continue;
+      // 常见于容器 / WSL / 无桌面会话：系统压根没有登录项机制可用。
+      // 说清楚发生了什么、以及不装登录项该怎么用，别丢一句原始报错。
+      io.stderr(`无法把本机服务装成登录项：${step.command} ${step.args.join(' ')} 执行失败。\n`);
+      io.stderr(`原因：${error instanceof Error ? error.message.split('\n')[0] : error}\n`);
+      io.stderr(`已写入的文件：${plan.file}（不生效，可以删掉）\n`);
+      io.stderr('这台机器上请改用手动方式，在一个终端里保持运行：\n');
+      io.stderr('  npm run collector -- bridge start\n');
+      return 1;
+    }
+  }
+
+  if (!(await waitUntilHealthy(host, healthUrl))) {
+    io.stderr(`登录项已写入 ${plan.file}，但本机服务没有在预期时间内就绪。\n`);
+    io.stderr(`请查看日志：${join(config.configDir, 'bridge.log')}\n`);
+    return 1;
+  }
+  io.stdout(`本机服务已启动，并已设为开机自动运行（${plan.file}）。\n`);
+  io.stdout('以后打开浏览器直接用插件即可，不需要再手动启动。\n');
+  return 0;
+}
+
+export async function uninstallAutostart(
+  args: string[],
+  io: CliIo,
+  host: AutostartHost = PROCESS_HOST,
+): Promise<number> {
+  const config = loadConfig(configOverrides(args));
+  let plan;
+  try {
+    plan = autostartPlan({
+      platform: host.platform,
+      home: host.home,
+      nodePath: host.nodePath,
+      cliPath: host.cliPath,
+      logFile: join(config.configDir, 'bridge.log'),
+      ...(host.appData ? { appData: host.appData } : {}),
+    });
+  } catch (error) {
+    if (error instanceof UnsupportedPlatformError) {
+      io.stderr(`${error.message}\n`);
+      return 1;
+    }
+    throw error;
+  }
+  for (const step of plan.uninstallCommands) {
+    try {
+      await host.run(step.command, step.args);
+    } catch {
+      // 没装过也算卸载成功。
+    }
+  }
+  await host.remove(plan.file);
+  io.stdout('已取消开机自动运行。\n');
+  return 0;
+}
+
+async function bridgeStatus(
+  args: string[],
+  io: CliIo,
+  host: AutostartHost = PROCESS_HOST,
+): Promise<number> {
+  const config = loadConfig(configOverrides(args));
+  const healthy = await host.probe(`http://${config.host}:${config.port}/health`);
+  io.stdout(
+    healthy
+      ? `本机服务在运行：http://${config.host}:${config.port}\n`
+      : `本机服务没有在 ${config.port} 端口响应。运行 npm run setup 安装并启动。\n`,
+  );
+  return healthy ? 0 : 1;
+}
+
 async function bridge(args: string[], io: CliIo): Promise<number> {
-  if (args[1] !== 'start') throw new Error('用法：data-collector bridge start [--port 17321]');
+  if (args[1] === 'install') return installAutostart(args, io);
+  if (args[1] === 'uninstall') return uninstallAutostart(args, io);
+  if (args[1] === 'status') return bridgeStatus(args, io);
+  if (args[1] !== 'start') {
+    throw new Error('用法：data-collector bridge <start|install|uninstall|status> [--port 17321]');
+  }
   const handle = await startBridge(configOverrides(args));
   io.stderr(`Data Collector Bridge: ${handle.url}\n`);
   io.stderr('等待受信任的 Data Collector 扩展自动连接\n');
@@ -106,7 +265,9 @@ export async function runCli(args: string[], io: CliIo = PROCESS_IO): Promise<nu
     if (command === 'collect') return await collect(args, io);
     if (command === 'health') return await health(args, io);
     if (command === 'bridge') return await bridge(args, io);
-    io.stderr('用法：data-collector <bridge start|collect URL|health>\n');
+    io.stderr(
+      '用法：data-collector <bridge install|bridge start|bridge status|bridge uninstall|collect URL|health>\n',
+    );
     return 2;
   } catch (error) {
     io.stderr(`${error instanceof Error ? error.message : '未知错误'}\n`);

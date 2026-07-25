@@ -63,7 +63,7 @@ describe('side panel state mapping', () => {
     renderSidePanel(document, state, actions);
     expect(document.querySelector<HTMLElement>('#bridge-unavailable-panel')?.hidden).toBe(false);
     expect(document.querySelector('#bridge-unavailable-panel')?.textContent)
-      .toContain('npm run collector -- bridge start');
+      .toContain('npm run setup');
     document.querySelector<HTMLButtonElement>('#retry-button')!.click();
     expect(actions.retry).toHaveBeenCalledOnce();
   });

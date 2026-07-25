@@ -29,7 +29,10 @@
         <section id="bridge-unavailable-panel" class="state-panel" hidden>
           <p class="section-kicker warning">服务离线</p>
           <h2>本机服务没有响应</h2>
-          <p class="support">在终端运行 <code>npm run collector -- bridge start</code>，看到服务启动后再重试。</p>
+          <p class="support">
+            在 data-collector 目录下运行一次 <code>npm run setup</code>：它会装好本机服务并设为开机自动运行，
+            以后打开浏览器直接用，不用再启动任何东西。
+          </p>
           <button id="retry-button" type="button" class="secondary-button">重新连接</button>
         </section>
 
