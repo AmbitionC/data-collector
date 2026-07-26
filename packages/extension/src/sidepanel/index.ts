@@ -1,6 +1,7 @@
 import {
   sidePanelStateFromStatus,
   renderSidePanel,
+  renderUpdateBanner,
   type BackgroundStatus,
   type CaptureOverrides,
   type SidePanelActions,
@@ -88,6 +89,7 @@ async function refresh(): Promise<void> {
     const status = await message<BackgroundStatus>({ type: 'status.get' });
     const state = sidePanelStateFromStatus(status);
     renderSidePanel(document, state, actions);
+    renderUpdateBanner(document, status.updateAvailable === true, actions);
     scheduleRefresh(state.phase);
   } catch {
     renderSidePanel(document, { phase: 'bridge_unavailable' }, actions);
@@ -166,6 +168,10 @@ const actions: SidePanelActions = {
   },
   async copyPath(path) {
     await navigator.clipboard.writeText(path);
+  },
+  async reloadExtension() {
+    // 扩展重新加载会连带关掉这个侧栏，重新打开就是新版了。
+    await message({ type: 'extension.reload' }).catch(() => undefined);
   },
   async revealPath(path) {
     await message({ type: 'library.reveal', path });

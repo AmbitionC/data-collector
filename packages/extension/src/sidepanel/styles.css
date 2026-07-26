@@ -206,6 +206,33 @@ button { appearance: none; }
 .connection-label[data-connected="true"] { color: var(--success); }
 .connection-label[data-connected="true"]::before { background: var(--success); }
 
+/* ── 更新横幅（跨状态常驻） ─────────────────────────── */
+.update-banner {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 14px;
+  border: 1px solid var(--primary);
+  border-radius: var(--radius-lg);
+  background: var(--canvas-soft);
+  color: var(--ink);
+  font-size: 13px;
+}
+
+.update-banner button {
+  flex: none;
+  padding: 5px 12px;
+  border: 1px solid var(--primary);
+  border-radius: 9999px;
+  background: var(--primary);
+  color: var(--on-primary);
+  font: inherit;
+  cursor: pointer;
+}
+
+.update-banner button:hover { background: var(--primary-active); }
+
 /* ── 内容区 ─────────────────────────────────────────── */
 .panel-content { flex: 1 0 auto; display: flex; }
 

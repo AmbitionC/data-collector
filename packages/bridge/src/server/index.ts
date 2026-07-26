@@ -26,6 +26,14 @@ import { organize } from '../organize/index.js';
 import { loadSinksConfig, SinkRouter } from '../sinks/index.js';
 import { attachExtensionWebSocket } from './websocket.js';
 import { bearerToken, HttpError, isLoopback, readJson, sendJson } from './http.js';
+import { execFile } from 'node:child_process';
+import { existsSync } from 'node:fs';
+import { join, resolve as resolvePath } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { promisify } from 'node:util';
+import { updateWorkspace, type UpdateOutcome } from '../autoUpdate.js';
+
+const execFileAsync = promisify(execFile);
 
 const createJobSchema = z.object({
   id: z.string().min(1).max(100).optional(),
@@ -46,6 +54,18 @@ export interface StartBridgeOptions extends ConfigOverrides {
   fetch?: typeof fetch;
   resolveAddresses?: ResolveAddresses;
   reveal?: (path: string) => Promise<void>;
+  /**
+   * 自更新：仓库根目录。服务常驻在用户机器上，顺手把代码拉新并重新构建，
+   * 用户只剩「重新加载插件」一步。
+   *
+   * **缺省关闭**：库函数被调用不该顺带跑 git / npm（测试、嵌入使用都会被殃及）。
+   * 只有 CLI 的 `bridge start` 会显式打开它。
+   */
+  repoRoot?: string | null;
+  /** 自更新检查间隔（毫秒），默认 10 分钟。 */
+  updateIntervalMs?: number;
+  /** 可注入的更新实现（测试用）。 */
+  runUpdate?: (repoRoot: string) => Promise<UpdateOutcome>;
 }
 
 export interface BridgeHandle {
@@ -53,6 +73,29 @@ export interface BridgeHandle {
   wsUrl: string;
   close(): Promise<void>;
 }
+
+/**
+ * 仓库根目录：本文件在 <repo>/packages/bridge/dist/server/index.js，回退四层即仓库根。
+ * 推导不出来（比如被单独拷贝出去用）就返回 undefined，自更新自动关闭。
+ */
+export function discoverRepoRoot(): string | undefined {
+  try {
+    const here = fileURLToPath(new URL('.', import.meta.url));
+    const root = resolvePath(here, '..', '..', '..', '..');
+    return existsSync(join(root, '.git')) ? root : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** 真正去跑 git / npm；只在这里碰子进程，纯逻辑留在 autoUpdate.ts 里好测。 */
+const processUpdateHost = {
+  run: async (command: string, args: readonly string[], cwd: string): Promise<string> => {
+    const { stdout } = await execFileAsync(command, [...args], { cwd, timeout: 10 * 60_000 });
+    return stdout;
+  },
+  now: () => new Date().toISOString(),
+};
 
 function envelope<T>(type: string, requestId: string, payload: T): WsEnvelope<string, T> {
   return {
@@ -123,6 +166,26 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
     message => console.warn(`[sinks] ${message}`),
   );
   const reveal = options.reveal ?? defaultReveal;
+
+  // ── 自更新 ───────────────────────────────────────────────────────────
+  // 失败一律只记录、不抛：更新是附加能力，绝不能把采集服务带下水。
+  let update: UpdateOutcome | undefined;
+  const repoRoot = options.repoRoot ?? undefined;
+  const runUpdate = options.runUpdate ?? (root => updateWorkspace(root, processUpdateHost));
+  const checkForUpdate = async (): Promise<void> => {
+    if (!repoRoot) return;
+    try {
+      update = await runUpdate(repoRoot);
+      if (update.changed) console.warn(`[update] ${update.message}`);
+    } catch (error) {
+      console.warn(`[update] 检查更新失败：${error instanceof Error ? error.message : error}`);
+    }
+  };
+  const updateTimer = repoRoot
+    ? setInterval(() => void checkForUpdate(), options.updateIntervalMs ?? 10 * 60_000)
+    : undefined;
+  updateTimer?.unref?.();
+  void checkForUpdate();
   // 本次进程内的「任务 → 用户选定去向」覆盖表。Bridge 重启后该覆盖丢失，
   // 任务回退到来源默认路由（安全的降级，不会写到未选定的目标）。
   const sinkOverrides = new Map<string, string[]>();
@@ -214,6 +277,8 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
         trustedExtensionId: TRUSTED_EXTENSION_ID,
         extensionConnected: extensionReady && extensionSocket?.readyState === WebSocket.OPEN,
         routing: router.describeRouting(),
+        // 扩展据此判断「我加载的是不是当前这一版」，是就不打扰，不是就提示重新加载。
+        ...(update ? { update } : {}),
       });
     }
     const jobMatch = requestUrl.pathname.match(/^\/v1\/jobs\/([^/]+)$/);
@@ -322,6 +387,7 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
     url,
     wsUrl: `ws://${config.host}:${address.port}/v1/extension`,
     async close() {
+      if (updateTimer) clearInterval(updateTimer);
       extensionSocket?.close(1001, 'server shutdown');
       websocketServer.close();
       server.close();

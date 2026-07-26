@@ -71,10 +71,18 @@ npm run package
 
 4. 在受支持的文章页点击工具栏中的 Data Collector。Edge 会打开 Side Panel，扩展将以固定身份自动连接本机 Bridge。
 
+**自更新**：常驻的本机服务每 10 分钟检查一次远端，有新提交就**快进拉取并重新构建**，
+然后侧栏顶部出现「本机服务已拉取并构建了新版本 / 立即加载」——点一下就生效，
+不用开终端、也不用去 `edge://extensions`。
+
+三条硬约束：只快进（分叉了宁可不动）、**本地有未提交改动就完全跳过**（不覆盖你正在改的东西）、
+更新失败绝不影响采集。想关掉就用 `bridge start --no-update`。
+
 服务相关的其余命令：
 
 ```bash
 npm run collector -- bridge status      # 看服务在不在
+npm run collector -- bridge update      # 立刻拉一次并重新构建
 npm run collector -- bridge uninstall   # 取消开机自动运行
 npm run collector -- bridge start       # 前台临时跑一次（调试用）
 ```

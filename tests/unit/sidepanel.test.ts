@@ -5,6 +5,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   sidePanelStateFromStatus,
   renderSidePanel,
+  renderUpdateBanner,
   type SidePanelActions,
 } from '../../packages/extension/src/sidepanel/state.js';
 
@@ -34,6 +35,7 @@ beforeEach(async () => {
     retry: vi.fn(async () => undefined),
     copyPath: vi.fn(async () => undefined),
     revealPath: vi.fn(async () => undefined),
+    reloadExtension: vi.fn(async () => undefined),
   };
 });
 
@@ -525,6 +527,19 @@ describe('side panel DOM behavior', () => {
 
     renderSidePanel(document, { phase: 'saved', path: '/library/b/index.md' }, actions);
     expect(copyButton.textContent).toBe('复制文件路径');
+  });
+
+  it('offers one-click reload when the local service already built a newer version', async () => {
+    renderUpdateBanner(document, true, actions);
+
+    // 用户只该做这一件事：点一下。不用去 edge://extensions，也不用开终端。
+    expect(document.querySelector<HTMLElement>('#update-banner')?.hidden).toBe(false);
+    document.querySelector<HTMLButtonElement>('#update-reload-button')!.click();
+    await Promise.resolve();
+    expect(actions.reloadExtension).toHaveBeenCalledOnce();
+
+    renderUpdateBanner(document, false, actions);
+    expect(document.querySelector<HTMLElement>('#update-banner')?.hidden).toBe(true);
   });
 
   it('contains no manual connection form or legacy copy', async () => {

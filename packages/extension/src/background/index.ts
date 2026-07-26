@@ -101,6 +101,8 @@ async function status() {
     'lastOutputPath',
     'routing',
     'batch',
+    'update',
+    'loadedCommit',
   ]);
   const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
   let supported = false;
@@ -132,8 +134,12 @@ async function status() {
       supported = false;
     }
   }
+  // 本机服务构建出的版本和「本扩展加载时的版本」不一致 → 磁盘上已有新版，等一次重新加载。
+  const built = (values.update as { commit?: string } | undefined)?.commit;
+  const loaded = values.loadedCommit as string | undefined;
   return {
     bridgeStatus: values.bridgeStatus ?? 'disconnected',
+    ...(built && loaded && built !== loaded ? { updateAvailable: true } : {}),
     lastJobId: values.lastJobId,
     lastJobStatus: values.lastJobStatus,
     lastJobUrl: values.lastJobUrl,
@@ -199,6 +205,11 @@ chrome.runtime.onMessage.addListener((message: unknown, _sender, sendResponse) =
       await chrome.storage.local.remove('batch');
       return status();
     }
+    if (request.type === 'extension.reload') {
+      // 未打包扩展重新加载会重新读磁盘上的文件，等同于扩展管理页那个 ↻ 按钮。
+      chrome.runtime.reload();
+      return { reloading: true };
+    }
     if (request.type === 'connection.retry') {
       await connection.retry();
       return status();
@@ -220,10 +231,20 @@ chrome.runtime.onMessage.addListener((message: unknown, _sender, sendResponse) =
   return true;
 });
 
+/**
+ * 记下「本次加载对应的代码版本」。onInstalled 在未打包扩展每次重新加载时都会触发，
+ * 所以这就是「我现在跑的是哪一版」。之后本机服务构建出新版本，两者不一致即可提示。
+ */
+async function stampLoadedBuild(): Promise<void> {
+  const { update } = await chrome.storage.local.get(['update']);
+  const commit = (update as { commit?: string } | undefined)?.commit;
+  await chrome.storage.local.set({ loadedCommit: commit ?? '' });
+}
+
 chrome.runtime.onInstalled.addListener(() => {
   void chrome.alarms.create('bridge-reconnect', { periodInMinutes: 1 });
   void configureSidePanel();
-  void connection.start();
+  void connection.start().then(stampLoadedBuild);
 });
 chrome.runtime.onStartup.addListener(() => {
   void configureSidePanel();

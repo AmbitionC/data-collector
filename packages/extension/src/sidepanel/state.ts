@@ -60,6 +60,8 @@ export interface SidePanelActions {
   retry(): Promise<void>;
   copyPath(path: string): Promise<void>;
   revealPath(path: string): Promise<void>;
+  /** 重新加载扩展本身，让本机服务刚构建好的新版生效。 */
+  reloadExtension(): Promise<void>;
 }
 
 export interface BatchStatus {
@@ -76,6 +78,8 @@ export interface BatchStatus {
 
 export interface BackgroundStatus {
   bridgeStatus: string;
+  /** 本机服务已经拉新并构建出更新的版本，等一次重新加载才会生效。 */
+  updateAvailable?: boolean;
   lastJobStatus?: string;
   lastJobUrl?: string;
   lastJobError?: string;
@@ -320,6 +324,22 @@ function renderBatch(
   retryButton.onclick = () => { void actions.captureList(collectOverrides(document)); };
   diagnoseButton.onclick = () => { void actions.diagnoseBatch(); };
   doneButton.onclick = () => { void actions.dismissBatch(); };
+}
+
+/**
+ * 「有新版可加载」横幅。它独立于状态机，任何一屏都可能出现——
+ * 本机服务已经把代码拉新并构建好了，只差扩展重新读一次磁盘。
+ */
+export function renderUpdateBanner(
+  document: Document,
+  available: boolean,
+  actions: SidePanelActions,
+): void {
+  const banner = document.querySelector<HTMLElement>('#update-banner');
+  if (!banner) return;
+  banner.hidden = !available;
+  const button = banner.querySelector<HTMLButtonElement>('#update-reload-button');
+  if (button) button.onclick = () => { void actions.reloadExtension(); };
 }
 
 export function renderSidePanel(

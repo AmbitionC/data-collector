@@ -99,10 +99,14 @@ export class BridgeConnection {
       const fetcher = this.dependencies.fetch;
       const response = await fetcher(`http://127.0.0.1:${port}/health`);
       if (!response.ok) return;
-      const health = (await response.json()) as { routing?: unknown };
-      if (health.routing && typeof health.routing === 'object') {
-        await this.dependencies.storage.set({ routing: health.routing });
-      }
+      const health = (await response.json()) as { routing?: unknown; update?: unknown };
+      await this.dependencies.storage.set({
+        ...(health.routing && typeof health.routing === 'object'
+          ? { routing: health.routing }
+          : {}),
+        // 本机服务会自己拉新代码并重新构建；扩展据此提示「有新版可加载」。
+        ...(health.update && typeof health.update === 'object' ? { update: health.update } : {}),
+      });
     } catch {
       // 忽略。
     }

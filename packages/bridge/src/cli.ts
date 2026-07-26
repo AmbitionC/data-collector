@@ -7,8 +7,9 @@ import { dirname, join, resolve } from 'node:path';
 import { promisify } from 'node:util';
 import { AccessTokenManager } from './auth.js';
 import { autostartPlan, UnsupportedPlatformError } from './autostart.js';
+import { updateWorkspace } from './autoUpdate.js';
 import { loadConfig, type ConfigOverrides } from './config.js';
-import { startBridge } from './server/index.js';
+import { discoverRepoRoot, startBridge } from './server/index.js';
 
 export interface CliIo {
   stdout(value: string): void;
@@ -240,14 +241,39 @@ async function bridgeStatus(
   return healthy ? 0 : 1;
 }
 
+async function bridgeUpdate(io: CliIo): Promise<number> {
+  const repoRoot = discoverRepoRoot();
+  if (!repoRoot) {
+    io.stderr('找不到 data-collector 仓库目录，无法自更新。\n');
+    return 1;
+  }
+  const outcome = await updateWorkspace(repoRoot, {
+    run: async (command, commandArgs, cwd) => {
+      const { stdout } = await execFileAsync(command, [...commandArgs], { cwd });
+      return stdout;
+    },
+    now: () => new Date().toISOString(),
+  });
+  io.stdout(`${outcome.message}\n`);
+  return outcome.message.includes('失败') ? 1 : 0;
+}
+
 async function bridge(args: string[], io: CliIo): Promise<number> {
+  if (args[1] === 'update') return bridgeUpdate(io);
   if (args[1] === 'install') return installAutostart(args, io);
   if (args[1] === 'uninstall') return uninstallAutostart(args, io);
   if (args[1] === 'status') return bridgeStatus(args, io);
   if (args[1] !== 'start') {
-    throw new Error('用法：data-collector bridge <start|install|uninstall|status> [--port 17321]');
+    throw new Error(
+      '用法：data-collector bridge <start|install|uninstall|status|update> [--port 17321]',
+    );
   }
-  const handle = await startBridge(configOverrides(args));
+  // 只有真正常驻的服务才开自更新：拉新代码 + 重新构建，用户只剩「重新加载插件」。
+  // --no-update 可关掉。
+  const handle = await startBridge({
+    ...configOverrides(args),
+    ...(args.includes('--no-update') ? {} : { repoRoot: discoverRepoRoot() ?? null }),
+  });
   io.stderr(`Data Collector Bridge: ${handle.url}\n`);
   io.stderr('等待受信任的 Data Collector 扩展自动连接\n');
   await new Promise<void>(resolveSignal => {
