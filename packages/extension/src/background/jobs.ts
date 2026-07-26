@@ -6,13 +6,32 @@ export interface BrowserTab {
   status?: string;
 }
 
-/** 列表页一轮提取的结果（内容脚本已剥掉无法跨消息边界传递的 DOM 节点）。 */
+/** 列表页一轮里的一条帖子（内容脚本已剥掉无法跨消息边界传递的 DOM 节点）。 */
+export interface ListItem {
+  /** 稳定标识，侧栏点它就能滚回页面上的那一条并高亮。 */
+  key: string;
+  title: string;
+  document?: CollectedDocument;
+  /** 无法采集的原因。 */
+  reason?: string;
+}
+
 export interface ListPayload {
-  documents: CollectedDocument[];
+  items: ListItem[];
   skipped: number;
   total: number;
   /** 已捕获到的帖子号条数；为 0 说明还没截到应用的接口响应。 */
   captured?: number;
+}
+
+/** 逐条结果：侧栏的「本轮明细」列表就是它，用户据此逐条核对。 */
+export interface BatchItem {
+  key: string;
+  title: string;
+  status: 'saved' | 'skipped' | 'failed';
+  /** 跳过 / 失败的原因。 */
+  reason?: string;
+  url?: string;
 }
 
 export type ExtractionResponse =
@@ -20,6 +39,7 @@ export type ExtractionResponse =
   | { ok: true; list: ListPayload }
   | { ok: true; advance: { collapsed: number; loaded: number } }
   | { ok: true; diagnostics: string }
+  | { ok: true; highlight: { found: boolean } }
   | { ok: false; error: { code: string; message: string } };
 
 export interface TabsApi {
@@ -51,6 +71,7 @@ interface PayloadMap {
   list: ListPayload;
   advance: { collapsed: number; loaded: number };
   diagnostics: string;
+  highlight: { found: boolean };
 }
 
 /** 按请求类型取出应答载荷；字段对不上说明页面里的内容脚本还是旧版本。 */
@@ -91,6 +112,11 @@ export interface BatchProgress {
   code?: string;
   /** 最后一次进度更新时刻；Service Worker 中途被回收时，侧栏据此判定这批已经断了。 */
   updatedAt: number;
+  /**
+   * 排查用的运行记录：每一轮看到多少、采了多少、滚动有没有加载出新内容。
+   * 批量是个多轮的长流程，出问题时没有这个就只能靠猜。
+   */
+  log: string[];
 }
 
 export interface JobRunnerOptions {
@@ -101,6 +127,8 @@ export interface JobRunnerOptions {
   delay?: (ms: number) => Promise<void>;
   /** 批量采集的进度回调（写入 storage 供侧栏轮询）。 */
   reportBatch?: (progress: BatchProgress) => void;
+  /** 逐条结果回调（写入 storage 供侧栏的「本轮明细」列表使用）。 */
+  reportItems?: (items: BatchItem[]) => void;
 }
 
 /** 内容脚本在标签页 complete 后可能仍未注册消息监听，这类错误可短暂重试。 */
@@ -263,6 +291,14 @@ export class JobRunner {
     this.batchStopped = true;
   }
 
+  /** 侧栏点某条时，让页面滚过去并高亮它，方便逐条核对采到的内容。 */
+  async highlight(key: string): Promise<boolean> {
+    const [tab] = await this.options.tabs.query({ active: true, lastFocusedWindow: true });
+    if (tab?.id === undefined) return false;
+    const response = await this.ask(tab.id, { type: 'list.highlight', key }).catch(() => undefined);
+    return Boolean(response?.ok && payloadOf(response, 'highlight').found);
+  }
+
   /** 采不到各自链接时（E4），取一份页面结构样本供适配排查。 */
   async diagnoseList(): Promise<string> {
     const [tab] = await this.options.tabs.query({ active: true, lastFocusedWindow: true });
@@ -303,10 +339,17 @@ export class JobRunner {
       rounds: 0,
       phase: 'running',
       updatedAt: Date.now(),
+      log: [],
+    };
+    const note = (line: string): void => {
+      progress.log.push(`${new Date().toISOString().slice(11, 19)} ${line}`);
+      if (progress.log.length > 200) progress.log.shift();
+      console.info(`[data-collector] ${line}`);
     };
     const report = () => {
       progress.updatedAt = Date.now();
       this.options.reportBatch?.({ ...progress });
+      this.options.reportItems?.([...items]);
     };
     const fail = async (code: string, message: string): Promise<BatchProgress> => {
       // 一条都没采到就把页面还原：绝不能让用户的星球主页凭空少掉一屏内容。
@@ -319,11 +362,27 @@ export class JobRunner {
     };
     // 同一条在两轮里重复出现（列表刷新、置顶）时不重复建任务。
     const seen = new Set<string>();
+    const items: BatchItem[] = [];
     report();
 
-    // 新开一批时先把上一批的折叠标记全部撤销，让页面回到用户看到的完整状态；
-    // 「继续采下一批」是续采，保留标记才能跳过已经采过的。
-    if (!limits.continuation) await this.restorePage(tabId);
+    if (limits.continuation) {
+      // 「继续采下一批」：本屏都处理过了，得先滚动把下一页加载出来再提取，
+      // 否则一上来就是「没有待采内容」。
+      note('继续采下一批：先滚动加载下一页');
+      const advanced = await this.ask(tabId, { type: 'list.advance' }).catch(() => undefined);
+      const loaded = advanced?.ok ? payloadOf(advanced, 'advance').loaded : 0;
+      note(`滚动后新加载出 ${loaded} 条待采内容`);
+      if (loaded === 0) {
+        progress.phase = 'done';
+        progress.error = '滚动到底也没有加载出新内容，本页应该已经采完了。';
+        report();
+        return { ...progress };
+      }
+    } else {
+      // 新开一批：清掉上一批的处理标记，让整页重新可采。
+      await this.restorePage(tabId);
+      note('新的一批：已清除上一轮的处理标记');
+    }
 
     let sawAnyPost = false;
     let captured = 0;
@@ -353,18 +412,33 @@ export class JobRunner {
       progress.skipped += list.skipped;
       if (list.total > 0) sawAnyPost = true;
       captured = Math.max(captured, list.captured ?? 0);
+      note(
+        `第 ${round + 1} 轮：本屏待采 ${list.total} 条，其中 ${list.total - list.skipped} 条可入库，`
+        + `已捕获帖子号 ${list.captured ?? 0} 个`,
+      );
 
-      for (const document of list.documents) {
+      for (const item of list.items) {
         if (this.batchStopped) break;
         if (progress.collected >= maxItems) break;
+        if (!item.document) {
+          items.push({ key: item.key, title: item.title, status: 'skipped', ...(item.reason ? { reason: item.reason } : {}) });
+          continue;
+        }
+        const document = item.document;
         if (seen.has(document.canonicalUrl)) continue;
         seen.add(document.canonicalUrl);
         const saved = await this.saveCollected(document, overrides);
-        if (saved === 'ok') progress.collected += 1;
-        else if (saved === 'bridge-down') {
+        if (saved === 'ok') {
+          progress.collected += 1;
+          items.push({ key: item.key, title: item.title, status: 'saved', url: document.canonicalUrl });
+        } else if (saved === 'bridge-down') {
           // E5：本机服务断了，后面每条都会失败，立刻收尾而不是刷一屏失败。
+          note('本机服务无响应，提前收尾');
           return await fail('BRIDGE_UNAVAILABLE', '本机服务无响应，本批已中断。');
-        } else progress.failed += 1;
+        } else {
+          progress.failed += 1;
+          items.push({ key: item.key, title: item.title, status: 'failed', reason: '写入本机失败' });
+        }
         report();
       }
 
@@ -381,7 +455,9 @@ export class JobRunner {
       }
 
       const advanced = await this.ask(tabId, { type: 'list.advance' }).catch(() => undefined);
-      if (!advanced?.ok || payloadOf(advanced, 'advance').loaded === 0) break;
+      const loaded = advanced?.ok ? payloadOf(advanced, 'advance').loaded : 0;
+      note(`滚动加载下一页：新增待采 ${loaded} 条`);
+      if (loaded === 0) break;
       report();
     }
 

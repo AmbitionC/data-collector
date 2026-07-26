@@ -14,11 +14,14 @@ const LOGIN_SELECTORS = [
 const TOPIC_CONTAINER = '.topic-container';
 
 /**
- * 已批量采集过的帖子标记。列表页是「滚到底自动加载下一批」，
- * 采完一批后由内容脚本给节点打上这个标记并收起，于是：
- * 页面高度回落 → 滚动能触发加载新内容 → 下一轮提取只看到真正的新帖子。
+ * 已处理过的帖子标记。只是个不可见的属性——**绝不改变页面外观**：
+ * 用户要肉眼核对采到的内容对不对，把帖子藏起来会直接妨碍验证。
+ * 加载下一批靠的是滚动到底触发站点自己的懒加载，不需要靠隐藏来压缩页面高度。
  */
 export const COLLECTED_ATTRIBUTE = 'data-dc-collected';
+
+/** 稳定标识：贴在节点上，供侧栏点击某条时滚回页面并高亮它。 */
+export const KEY_ATTRIBUTE = 'data-dc-key';
 
 /**
  * `.topic-container` 不全是帖子：分类标签栏（最新 / 精华 / 只看星主…）也用同一个类名，
@@ -128,16 +131,24 @@ export function topicUrlOf(
   return fromIndex ? new URL(`/group/${groupId}/topic/${fromIndex}`, pageUrl) : undefined;
 }
 
+/** 本轮看到的一条帖子：能采的带上 document，不能采的带上原因。 */
+export interface ListEntry {
+  /** 页面节点，留在内容脚本里（无法跨消息边界传递）。 */
+  container: Element;
+  /** 稳定标识，侧栏用它点回页面上的这一条。 */
+  key: string;
+  /** 列表里显示用的标题（正文首句）。 */
+  title: string;
+  document?: ReturnType<typeof buildDocument>;
+  /** 无法采集的原因，如实展示给用户。 */
+  reason?: string;
+}
+
 export interface ListExtraction {
-  documents: ReturnType<typeof buildDocument>[];
+  entries: ListEntry[];
   /** 无法确定各自 URL 而被跳过的条数（用于如实告知用户，而不是静默少采）。 */
   skipped: number;
   total: number;
-  /**
-   * 本轮看到的全部帖子节点（含被跳过的）。采完这一轮后由内容脚本统一打标记收起，
-   * 跳过的也要收起——否则它们会在每一轮里被反复重新提取，批量采集永远推进不下去。
-   */
-  containers: Element[];
 }
 
 /**
@@ -151,35 +162,51 @@ export function extractZsxqList(
   topics?: TopicIndex,
 ): ListExtraction {
   const containers = pendingContainers(document);
-  const documents: ReturnType<typeof buildDocument>[] = [];
+  const entries: ListEntry[] = [];
   let skipped = 0;
 
-  for (const container of containers) {
+  for (const [index, container] of containers.entries()) {
+    // 稳定 key：第一次见到就贴上，之后一直跟着这个节点走。
+    let key = container.getAttribute(KEY_ATTRIBUTE);
+    if (!key) {
+      key = `t${now()}-${index}`;
+      container.setAttribute(KEY_ATTRIBUTE, key);
+    }
     const content = firstWithin(container, CONTENT_SELECTORS) ?? container;
     const text = elementText(content);
+    const title = deriveTitle(content, document);
     // 用正文（而不是整个节点）去对号：整个节点还带着作者名、时间、点赞数这些外围文案。
     const topicUrl = topicUrlOf(container, url, topics, text);
-    if (!topicUrl || !text || text.length < 20) {
+    if (!text || text.length < 20) {
       skipped += 1;
+      entries.push({ container, key, title: title || '（空内容）', reason: '正文太短或为空' });
+      continue;
+    }
+    if (!topicUrl) {
+      skipped += 1;
+      entries.push({ container, key, title, reason: '没能对上帖子号，无法确定它自己的地址' });
       continue;
     }
     const time = firstWithin(container, TIME_SELECTORS);
     const author = elementText(firstWithin(container, AUTHOR_SELECTORS));
     const publishedAt = parsePublishedAt(elementText(time), time?.getAttribute('datetime'));
-    documents.push(
-      buildDocument({
+    entries.push({
+      container,
+      key,
+      title,
+      document: buildDocument({
         source: 'zsxq',
         kind: 'post',
-        title: deriveTitle(content, document),
+        title,
         content,
         url: topicUrl,
         now,
         ...(author ? { author } : {}),
         ...(publishedAt ? { publishedAt } : {}),
       }),
-    );
+    });
   }
-  return { documents, skipped, total: containers.length, containers };
+  return { entries, skipped, total: containers.length };
 }
 
 export function extractZsxq(document: Document, url: URL, now: Clock) {

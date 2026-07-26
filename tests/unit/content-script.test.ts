@@ -14,7 +14,7 @@ type Listener = (
 interface ListResponse {
   ok: true;
   list: {
-    documents: { canonicalUrl: string }[];
+    items: { key: string; title: string; document?: { canonicalUrl: string }; reason?: string }[];
     skipped: number;
     total: number;
     captured: number;
@@ -105,15 +105,17 @@ describe('content script list collection', () => {
     const response = await ask<ListResponse>({ type: 'extract.list' });
 
     expect(response.ok).toBe(true);
-    expect(response.list.documents.map(item => item.canonicalUrl)).toEqual([
+    expect(response.list.items.flatMap(item => item.document?.canonicalUrl ?? [])).toEqual([
       'https://wx.zsxq.com/group/48844584441158/topic/511111111111111',
       'https://wx.zsxq.com/group/48844584441158/topic/522222222222222',
     ]);
+    // 每条都带 key 和标题，侧栏明细列表点它能滚回页面上的那一条。
+    expect(response.list.items.every(item => item.key && item.title)).toBe(true);
     expect(response.list.skipped).toBe(1);
     // 捕获到的帖子号条数要如实回报：为 0 时失败原因得说得具体。
     expect(response.list.captured).toBe(2);
     // DOM 节点无法跨消息边界传递，必须留在内容脚本里。
-    expect(response.list).not.toHaveProperty('containers');
+    expect(JSON.stringify(response.list)).not.toContain('topic-container');
   });
 
   it('reports zero captured topics when the app never answered an API call', async () => {
@@ -121,24 +123,25 @@ describe('content script list collection', () => {
 
     expect(response.list.captured).toBe(0);
     // 没有帖子号就一条都不入库，绝不用列表页地址凑数。
-    expect(response.list.documents).toEqual([]);
+    expect(response.list.items.every(item => item.document === undefined)).toBe(true);
     expect(response.list.skipped).toBe(3);
   });
 
-  it('collapses every post it has already handled so scrolling can load the next batch', async () => {
+  it('marks handled posts without ever hiding them from the user', async () => {
     await ask<ListResponse>({ type: 'extract.list' });
     vi.useFakeTimers();
 
     const advance = ask<AdvanceResponse>({ type: 'list.advance' });
-    await vi.advanceTimersByTimeAsync(7_000);
+    await vi.advanceTimersByTimeAsync(13_000);
 
     expect((await advance).advance).toEqual({ collapsed: 3, loaded: 0 });
-    // 采到的和跳过的都要收起：跳过的留在页面上会被下一轮反复重新提取，批量永远推进不下去。
-    const collapsed = [...document.querySelectorAll<HTMLElement>('.topic-container')].filter(
+    const marked = [...document.querySelectorAll<HTMLElement>('.topic-container')].filter(
       node => node.hasAttribute('data-dc-collected'),
     );
-    expect(collapsed).toHaveLength(3);
-    expect(collapsed.every(node => node.style.display === 'none')).toBe(true);
+    // 打标记是为了下一轮不重复提取；但**绝不能改变页面外观**——
+    // 用户正在肉眼核对采到的内容对不对，把帖子藏起来是硬伤。
+    expect(marked).toHaveLength(3);
+    expect(marked.every(node => node.style.display === '')).toBe(true);
   });
 
   it('reports newly loaded posts so the batch keeps going', async () => {
@@ -155,25 +158,25 @@ describe('content script list collection', () => {
     expect((await advance).advance).toMatchObject({ loaded: 1 });
   });
 
-  it('skips posts that were collapsed in an earlier round', async () => {
+  it('skips posts that were handled in an earlier round', async () => {
     await ask<ListResponse>({ type: 'extract.list' });
     vi.useFakeTimers();
     const advance = ask<AdvanceResponse>({ type: 'list.advance' });
-    await vi.advanceTimersByTimeAsync(7_000);
+    await vi.advanceTimersByTimeAsync(13_000);
     await advance;
     vi.useRealTimers();
 
     const second = await ask<ListResponse>({ type: 'extract.list' });
 
-    expect(second.list.documents).toEqual([]);
+    expect(second.list.items).toEqual([]);
     expect(second.list.total).toBe(0);
   });
 
-  it('puts every collapsed post back so the page never silently loses a screenful', async () => {
+  it('clears the marks so a fresh batch sees the whole page again', async () => {
     await ask<ListResponse>({ type: 'extract.list' });
     vi.useFakeTimers();
     const advance = ask<AdvanceResponse>({ type: 'list.advance' });
-    await vi.advanceTimersByTimeAsync(7_000);
+    await vi.advanceTimersByTimeAsync(13_000);
     await advance;
     vi.useRealTimers();
     expect(document.querySelectorAll('[data-dc-collected]')).toHaveLength(3);
@@ -182,13 +185,32 @@ describe('content script list collection', () => {
 
     expect(restored.advance.collapsed).toBe(3);
     expect(document.querySelectorAll('[data-dc-collected]')).toHaveLength(0);
-    // 还原后再提取，帖子重新可见可采。
-    expect(
-      [...document.querySelectorAll<HTMLElement>('.topic-container')]
-        .every(node => node.style.display !== 'none'),
-    ).toBe(true);
     const second = await ask<ListResponse>({ type: 'extract.list' });
     expect(second.list.total).toBe(3);
+  });
+
+  it('scrolls to a post and outlines it when the side panel asks', async () => {
+    const first = await ask<ListResponse>({ type: 'extract.list' });
+    const key = first.list.items[0]!.key;
+    const target = document.querySelector<HTMLElement>(`[data-dc-key="${key}"]`)!;
+    let scrolled = false;
+    target.scrollIntoView = () => { scrolled = true; };
+
+    const response = await ask<{ ok: true; highlight: { found: boolean } }>({
+      type: 'list.highlight',
+      key,
+    });
+
+    expect(response.highlight.found).toBe(true);
+    expect(scrolled).toBe(true);
+    expect(target.classList.contains('data-collector-highlight')).toBe(true);
+
+    // 找不到的 key 要如实说没找到，而不是假装成功。
+    const missing = await ask<{ ok: true; highlight: { found: boolean } }>({
+      type: 'list.highlight',
+      key: 'nope',
+    });
+    expect(missing.highlight.found).toBe(false);
   });
 
   it('samples a live post for diagnostics, not one that was already collapsed', async () => {

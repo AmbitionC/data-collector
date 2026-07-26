@@ -4,6 +4,7 @@ import {
   renderUpdateBanner,
   type BackgroundStatus,
   type CaptureOverrides,
+  type ItemFilter,
   type SidePanelActions,
   type SidePanelState,
 } from './state.js';
@@ -30,6 +31,17 @@ async function message<T>(payload: unknown): Promise<T> {
 let pollTimer: number | undefined;
 
 /**
+ * 侧栏被关掉后就别再轮询了：页面已经不在，继续问后台纯属浪费，
+ * 而且会往一个正在销毁的文档上渲染。
+ */
+let stopped = false;
+window.addEventListener('pagehide', () => {
+  stopped = true;
+  if (pollTimer !== undefined) window.clearTimeout(pollTimer);
+  pollTimer = undefined;
+});
+
+/**
  * 本地粘性错误（优先级最高，见 docs/sidepanel-states.md）。
  *
  * 用户点击后立刻失败、且失败信息没能写进 storage 的情况，只能活在侧栏本地。
@@ -39,8 +51,13 @@ let pollTimer: number | undefined;
  */
 let stickyError: string | undefined;
 
+/** 「本轮明细」子页面的开关与筛选，只活在侧栏本地（纯视图状态）。 */
+let itemsOpen = false;
+let itemsFilter: ItemFilter = 'all';
+
 function scheduleRefresh(phase: SidePanelState['phase']): void {
   if (pollTimer !== undefined) window.clearTimeout(pollTimer);
+  if (stopped) return;
   const interval = phase === 'connecting'
     ? POLL_INTERVALS.connecting
     : phase === 'collecting'
@@ -87,10 +104,20 @@ async function refresh(): Promise<void> {
   }
   try {
     const status = await message<BackgroundStatus>({ type: 'status.get' });
-    const state = sidePanelStateFromStatus(status);
+    const derived = sidePanelStateFromStatus(status);
+    // 明细是叠在批量结果之上的子页面：只有批量结果还在时才有意义。
+    const state: SidePanelState = itemsOpen && derived.phase === 'batch'
+      ? {
+          phase: 'items',
+          items: status.batchItems ?? [],
+          filter: itemsFilter,
+          log: status.batch?.log ?? [],
+        }
+      : derived;
+    if (derived.phase !== 'batch') itemsOpen = false;
     renderSidePanel(document, state, actions);
     renderUpdateBanner(document, status.updateAvailable === true, actions);
-    scheduleRefresh(state.phase);
+    scheduleRefresh(state.phase === 'items' ? 'batch' : state.phase);
   } catch {
     renderSidePanel(document, { phase: 'bridge_unavailable' }, actions);
     scheduleRefresh('bridge_unavailable');
@@ -168,6 +195,34 @@ const actions: SidePanelActions = {
   },
   async copyPath(path) {
     await navigator.clipboard.writeText(path);
+  },
+  showItems(open) {
+    itemsOpen = open;
+    void refresh();
+  },
+  filterItems(filter) {
+    itemsFilter = filter;
+    void refresh();
+  },
+  async locateItem(key) {
+    // 找不到说明那条已经被站点从 DOM 里回收了，如实提示而不是静默无反应。
+    const { found } = await message<{ found: boolean }>({ type: 'list.locate', key });
+    if (!found) {
+      const empty = document.querySelector<HTMLElement>('#items-empty');
+      if (empty) {
+        empty.hidden = false;
+        empty.textContent = '这一条已经不在页面上了（站点可能已回收该节点），滚动或重新加载后再试。';
+      }
+    }
+  },
+  async copyLog(log) {
+    const button = document.querySelector<HTMLButtonElement>('#items-log-button');
+    try {
+      await navigator.clipboard.writeText(log.join('\n') || '（本轮没有记录）');
+      if (button) button.textContent = '记录已复制';
+    } catch {
+      if (button) button.textContent = '复制失败';
+    }
   },
   async reloadExtension() {
     // 扩展重新加载会连带关掉这个侧栏，重新打开就是新版了。

@@ -34,6 +34,27 @@ function readyStatus() {
   };
 }
 
+function batchStatus(phase: string, extra: Record<string, unknown> = {}) {
+  return {
+    ...readyStatus(),
+    batch: {
+      url: LIST_URL,
+      collected: 2,
+      skipped: 1,
+      failed: 0,
+      rounds: 1,
+      phase,
+      updatedAt: Date.now(),
+      log: ['12:00:00 第 1 轮：本屏待采 3 条'],
+      ...extra,
+    },
+    batchItems: [
+      { key: 'a', title: '已入库的一条', status: 'saved' },
+      { key: 'b', title: '跳过的一条', status: 'skipped', reason: '没能对上帖子号' },
+    ],
+  };
+}
+
 /** 模拟旧 bug 的现场：后台留下一条「已结束」的批量记录。 */
 function finishedBatchStatus() {
   return {
@@ -69,8 +90,51 @@ beforeEach(async () => {
 });
 
 afterEach(() => {
+  // 上一个用例导入的侧栏模块还在轮询，会继续往同一个 document 上渲染、
+  // 把下一个用例的屏幕覆盖掉。侧栏关闭时本来就该停轮询，这里发一次 pagehide
+  // 让它按生产逻辑收工。
+  window.dispatchEvent(new Event('pagehide'));
   vi.useRealTimers();
   vi.unstubAllGlobals();
+});
+
+describe('side panel details view', () => {
+  it('opens the per-post list from the batch result and can come back', async () => {
+    handler = async message =>
+      message.type === 'capture.list'
+        ? { ok: true, value: { phase: 'done' } }
+        : { ok: true, value: batchStatus('done') };
+
+    document.querySelector<HTMLButtonElement>('#capture-button')!.click();
+    await vi.waitFor(() => expect(visible('#batch-panel')).toBe(true));
+
+    document.querySelector<HTMLButtonElement>('#batch-items-button')!.click();
+    await vi.waitFor(() => expect(visible('#items-panel')).toBe(true));
+    expect(document.querySelectorAll('#items-list li')).toHaveLength(2);
+
+    document.querySelector<HTMLButtonElement>('#items-back-button')!.click();
+    await vi.waitFor(() => expect(visible('#batch-panel')).toBe(true));
+  });
+
+  it('asks the page to scroll to and highlight the clicked post', async () => {
+    const located: string[] = [];
+    handler = async message => {
+      if (message.type === 'capture.list') return { ok: true, value: { phase: 'done' } };
+      if (message.type === 'list.locate') {
+        located.push((message as unknown as { key: string }).key);
+        return { ok: true, value: { found: true } };
+      }
+      return { ok: true, value: batchStatus('done') };
+    };
+
+    document.querySelector<HTMLButtonElement>('#capture-button')!.click();
+    await vi.waitFor(() => expect(visible('#batch-panel')).toBe(true));
+    document.querySelector<HTMLButtonElement>('#batch-items-button')!.click();
+    await vi.waitFor(() => expect(visible('#items-panel')).toBe(true));
+
+    document.querySelector<HTMLButtonElement>('#items-list button')!.click();
+    await vi.waitFor(() => expect(located).toEqual(['a']));
+  });
 });
 
 describe('side panel controller error precedence', () => {

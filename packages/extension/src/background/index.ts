@@ -78,6 +78,8 @@ const runner = new JobRunner({
   waitForTabComplete,
   // 批量采集会跑很久，进度写进 storage 由侧栏轮询展示。
   reportBatch: progress => { void chrome.storage.local.set({ batch: progress }); },
+  // 逐条结果单独存：明细列表要用，也方便出问题时直接看每条的判定。
+  reportItems: items => { void chrome.storage.local.set({ batchItems: items }); },
 });
 connection.onCollect((requestId, url) => runner.runRemoteJob(requestId, url));
 
@@ -103,6 +105,7 @@ async function status() {
     'batch',
     'update',
     'loadedCommit',
+    'batchItems',
   ]);
   const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
   let supported = false;
@@ -146,6 +149,7 @@ async function status() {
     lastJobError: values.lastJobError,
     lastOutputPath: values.lastOutputPath,
     batch: values.batch,
+    batchItems: values.batchItems,
     page: {
       supported,
       list,
@@ -164,7 +168,7 @@ chrome.runtime.onMessage.addListener((message: unknown, _sender, sendResponse) =
     if (request.type === 'status.get') return status();
     if (request.type === 'capture.current') {
       // 单页任务与批量记录互斥：同一页不可能两者同时进行，清掉另一边免得状态打架。
-      await chrome.storage.local.remove('batch');
+      await chrome.storage.local.remove(['batch', 'batchItems']);
       const jobId = await runner.captureCurrent(
         (request.overrides ?? {}) as {
           userCategory?: string;
@@ -194,6 +198,9 @@ chrome.runtime.onMessage.addListener((message: unknown, _sender, sendResponse) =
           : {},
       );
     }
+    if (request.type === 'list.locate') {
+      return { found: await runner.highlight(String((request as { key?: unknown }).key ?? '')) };
+    }
     if (request.type === 'batch.stop') {
       runner.stopBatch();
       return { stopped: true };
@@ -202,7 +209,7 @@ chrome.runtime.onMessage.addListener((message: unknown, _sender, sendResponse) =
       return { diagnostics: await runner.diagnoseList() };
     }
     if (request.type === 'batch.dismiss') {
-      await chrome.storage.local.remove('batch');
+      await chrome.storage.local.remove(['batch', 'batchItems']);
       return status();
     }
     if (request.type === 'extension.reload') {

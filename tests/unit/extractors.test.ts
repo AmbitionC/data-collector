@@ -118,20 +118,25 @@ describe('ZSXQ extraction（按真实 Angular DOM）', () => {
 
     const list = extractList(doc, LIST, topicIndex(), NOW);
 
+    const collected = list.entries.flatMap(entry => entry.document ?? []);
     // 身份由规范 URL 派生：每条必须带自己的 /topic/ 地址，否则会算出同一个 ID 相互覆盖。
-    expect(list.documents.map(item => item.canonicalUrl)).toEqual([
+    expect(collected.map(item => item.canonicalUrl)).toEqual([
       'https://wx.zsxq.com/group/48844584441158/topic/511111111111111',
       'https://wx.zsxq.com/group/48844584441158/topic/522222222222222',
     ]);
-    expect(new Set(list.documents.map(item => item.canonicalUrl)).size).toBe(2);
-    expect(list.documents[0]).toMatchObject({ source: 'zsxq', kind: 'post', author: '重远' });
-    expect(list.documents[0]?.text).toContain('第一条帖子');
+    expect(collected[0]).toMatchObject({ source: 'zsxq', kind: 'post', author: '重远' });
+    expect(collected[0]?.text).toContain('第一条帖子');
     // 接口里没有的那条如实计入 skipped，绝不猜一个 id（猜错会把两条写到同一个文件上）。
     expect(list.skipped).toBe(1);
     expect(list.total).toBe(3);
     // 分类标签栏也用 .topic-container，绝不能被当成一篇帖子。
-    expect(list.documents.some(item => item.text.includes('只看星主'))).toBe(false);
-    expect(list.containers).toHaveLength(3);
+    expect(collected.some(item => item.text.includes('只看星主'))).toBe(false);
+    // 每条都带稳定 key 与标题：侧栏明细列表点它就能滚回页面上的那一条。
+    expect(list.entries).toHaveLength(3);
+    expect(new Set(list.entries.map(entry => entry.key)).size).toBe(3);
+    expect(list.entries.every(entry => entry.title.length > 0)).toBe(true);
+    // 跳过的那条要带上原因，而不是无声消失。
+    expect(list.entries.find(entry => !entry.document)?.reason).toContain('帖子号');
   });
 
   it('skips every post when no topic ids were captured, rather than inventing URLs', async () => {
@@ -140,7 +145,7 @@ describe('ZSXQ extraction（按真实 Angular DOM）', () => {
     const list = extractList(doc, LIST, undefined, NOW);
 
     // 没有帖子号来源时一条都不该入库：共用列表页地址会让它们算出同一个 ID 相互覆盖。
-    expect(list.documents).toEqual([]);
+    expect(list.entries.every(entry => entry.document === undefined)).toBe(true);
     expect(list.skipped).toBe(3);
   });
 

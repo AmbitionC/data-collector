@@ -1,7 +1,23 @@
 import { descriptorForHost } from '@data-collector/shared';
-import type { BatchPhase } from '../background/jobs.js';
+import type { BatchItem, BatchPhase } from '../background/jobs.js';
 
-export type { BatchPhase };
+export type { BatchItem, BatchPhase };
+
+/** 明细列表的状态筛选。 */
+export type ItemFilter = 'all' | 'saved' | 'skipped' | 'failed';
+
+const FILTER_LABELS: Record<ItemFilter, string> = {
+  all: '全部',
+  saved: '已入库',
+  skipped: '已跳过',
+  failed: '失败',
+};
+
+const STATUS_LABELS: Record<BatchItem['status'], string> = {
+  saved: '已入库',
+  skipped: '已跳过',
+  failed: '失败',
+};
 
 export type SidePanelState =
   | { phase: 'loading' }
@@ -33,6 +49,13 @@ export type SidePanelState =
       /** 本批最后写入的文件路径：结果页据此提供「在文件夹中查看」，不让用户没头没尾。 */
       outputPath?: string;
     }
+  | {
+      /** 本轮明细：逐条列出采到 / 跳过 / 失败，点一条就滚回页面上的那条并高亮。 */
+      phase: 'items';
+      items: BatchItem[];
+      filter: ItemFilter;
+      log: string[];
+    }
   | { phase: 'saved'; path: string }
   | { phase: 'needs_attention'; message: string }
   | { phase: 'job_error'; message: string }
@@ -56,6 +79,14 @@ export interface SidePanelActions {
   diagnoseBatch(): Promise<void>;
   /** 收起批量结果，回到可再次采集的状态。 */
   dismissBatch(): Promise<void>;
+  /** 打开 / 关闭「本轮明细」子页面。 */
+  showItems(open: boolean): void;
+  /** 切换明细的状态筛选。 */
+  filterItems(filter: ItemFilter): void;
+  /** 点击某条：让页面滚过去并高亮它。 */
+  locateItem(key: string): Promise<void>;
+  /** 复制运行记录，便于排查。 */
+  copyLog(log: string[]): Promise<void>;
   recapture(): Promise<void>;
   retry(): Promise<void>;
   copyPath(path: string): Promise<void>;
@@ -66,6 +97,7 @@ export interface SidePanelActions {
 
 export interface BatchStatus {
   url: string;
+  log?: string[];
   collected: number;
   skipped: number;
   failed: number;
@@ -85,6 +117,8 @@ export interface BackgroundStatus {
   lastJobError?: string;
   lastOutputPath?: string;
   batch?: BatchStatus;
+  /** 本轮逐条结果，供「本轮明细」子页面展示。 */
+  batchItems?: BatchItem[];
   page: {
     supported: boolean;
     list?: boolean;
@@ -220,6 +254,7 @@ function setConnectionLabel(document: Document, state: SidePanelState): void {
     'ready',
     'collecting',
     'batch',
+    'items',
     'saved',
     'needs_attention',
     'job_error',
@@ -298,6 +333,7 @@ function renderBatch(
   const retryButton = required<HTMLButtonElement>(document, '#batch-retry-button');
   const diagnoseButton = required<HTMLButtonElement>(document, '#batch-diagnose-button');
   const doneButton = required<HTMLButtonElement>(document, '#batch-done-button');
+  const itemsButton = required<HTMLButtonElement>(document, '#batch-items-button');
   const revealButton = required<HTMLButtonElement>(document, '#batch-reveal-button');
   const pathLine = required<HTMLElement>(document, '#batch-path');
 
@@ -322,6 +358,9 @@ function renderBatch(
     void actions.captureList(collectOverrides(document), { continuation: true });
   };
   retryButton.onclick = () => { void actions.captureList(collectOverrides(document)); };
+  // 明细入口：只要看到过帖子就该能逐条核对，不管这一批最后是什么结局。
+  itemsButton.hidden = running || state.collected + state.skipped + state.failed === 0;
+  itemsButton.onclick = () => actions.showItems(true);
   diagnoseButton.onclick = () => { void actions.diagnoseBatch(); };
   doneButton.onclick = () => { void actions.dismissBatch(); };
 }
@@ -340,6 +379,67 @@ export function renderUpdateBanner(
   banner.hidden = !available;
   const button = banner.querySelector<HTMLButtonElement>('#update-reload-button');
   if (button) button.onclick = () => { void actions.reloadExtension(); };
+}
+
+function renderItems(
+  document: Document,
+  state: Extract<SidePanelState, { phase: 'items' }>,
+  actions: SidePanelActions,
+): void {
+  show(document, '#items-panel');
+  const counts: Record<ItemFilter, number> = {
+    all: state.items.length,
+    saved: state.items.filter(item => item.status === 'saved').length,
+    skipped: state.items.filter(item => item.status === 'skipped').length,
+    failed: state.items.filter(item => item.status === 'failed').length,
+  };
+  required(document, '#items-heading').textContent = `本轮看到 ${counts.all} 条`;
+
+  const filters = required<HTMLElement>(document, '#items-filters');
+  filters.replaceChildren();
+  for (const filter of ['all', 'saved', 'skipped', 'failed'] as const) {
+    const chip = document.createElement('button');
+    chip.type = 'button';
+    chip.textContent = `${FILTER_LABELS[filter]} ${counts[filter]}`;
+    chip.setAttribute('aria-pressed', String(state.filter === filter));
+    chip.onclick = () => actions.filterItems(filter);
+    filters.append(chip);
+  }
+
+  const visible = state.filter === 'all'
+    ? state.items
+    : state.items.filter(item => item.status === state.filter);
+  const list = required<HTMLElement>(document, '#items-list');
+  list.replaceChildren();
+  for (const item of visible) {
+    const row = document.createElement('li');
+    row.dataset.status = item.status;
+    const button = document.createElement('button');
+    button.type = 'button';
+    const title = document.createElement('span');
+    title.className = 'item-title';
+    title.textContent = item.title || '（无标题）';
+    const meta = document.createElement('span');
+    meta.className = 'item-meta';
+    const status = document.createElement('span');
+    status.className = 'item-status';
+    status.textContent = STATUS_LABELS[item.status];
+    meta.append(status);
+    if (item.reason) {
+      const reason = document.createElement('span');
+      reason.textContent = item.reason;
+      meta.append(reason);
+    }
+    button.append(title, meta);
+    button.onclick = () => { void actions.locateItem(item.key); };
+    row.append(button);
+    list.append(row);
+  }
+  required<HTMLElement>(document, '#items-empty').hidden = visible.length > 0;
+  required<HTMLButtonElement>(document, '#items-back-button').onclick = () => actions.showItems(false);
+  required<HTMLButtonElement>(document, '#items-log-button').onclick = () => {
+    void actions.copyLog(state.log);
+  };
 }
 
 export function renderSidePanel(
@@ -452,6 +552,10 @@ export function renderSidePanel(
   }
   if (state.phase === 'batch') {
     renderBatch(document, state, actions);
+    return;
+  }
+  if (state.phase === 'items') {
+    renderItems(document, state, actions);
     return;
   }
   if (state.phase === 'collecting') {

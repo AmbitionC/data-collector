@@ -51,6 +51,22 @@ class InMemoryTabs implements TabsApi {
   readonly injected: number[] = [];
   readonly restored: number[] = [];
   listRounds: Array<{ documents: CollectedDocument[]; skipped: number; total: number }> = [];
+  /** 把用例里写的 documents 转成内容脚本真正回传的逐条结构。 */
+  private toPayload(round: { documents: CollectedDocument[]; skipped: number; total: number }) {
+    const items = round.documents.map((document, index) => ({
+      key: `k${index}-${document.canonicalUrl}`,
+      title: document.title,
+      document,
+    }));
+    for (let index = 0; index < round.skipped; index += 1) {
+      items.push({
+        key: `skip-${index}`,
+        title: `跳过的第 ${index} 条`,
+        reason: '没能对上帖子号',
+      } as never);
+    }
+    return { items, skipped: round.skipped, total: round.total };
+  }
   advances: Array<{ collapsed: number; loaded: number }> = [];
   response: Awaited<ReturnType<TabsApi['sendMessage']>> = { ok: true, document: document() };
   activeTab: BrowserTab = { id: 7, url: URL, status: 'complete' };
@@ -85,7 +101,7 @@ class InMemoryTabs implements TabsApi {
     if (type === 'extract.list') {
       const round = this.listRounds.shift();
       if (!round) return { ok: false, error: { code: 'COLLECTION_FAILED', message: '没有更多轮次' } };
-      return { ok: true, list: round };
+      return { ok: true, list: this.toPayload(round) };
     }
     if (type === 'list.advance') {
       return { ok: true, advance: this.advances.shift() ?? { collapsed: 0, loaded: 0 } };
@@ -392,7 +408,14 @@ describe('list page batch capture', () => {
         throw new Error('Could not establish connection. Receiving end does not exist.');
       }
       if (type === 'extract.list') {
-        return { ok: true as const, list: { documents: [topic('111')], skipped: 0, total: 1 } };
+        return {
+          ok: true as const,
+          list: {
+            items: [{ key: 'k0', title: '星球帖子 111', document: topic('111') }],
+            skipped: 0,
+            total: 1,
+          },
+        };
       }
       return { ok: true as const, advance: { collapsed: 1, loaded: 0 } };
     };
@@ -416,9 +439,14 @@ describe('list page batch capture', () => {
     await runner.captureList();
     expect(tabs.restored).toEqual([7]);
 
-    // 「继续采下一批」是续采：保留折叠标记才能跳过已经采过的。
+    // 「继续采下一批」是续采：不清标记，而且要先滚动把下一页加载出来，
+    // 否则本屏都处理过了，一上来就是「没有待采内容」。
+    const before = tabs.rhythm.length;
+    tabs.advances = [{ collapsed: 0, loaded: 1 }, { collapsed: 1, loaded: 0 }];
+    tabs.listRounds = [{ documents: [topic('222')], skipped: 0, total: 1 }];
     await runner.captureList({}, { continuation: true });
     expect(tabs.restored).toEqual([7]);
+    expect(tabs.rhythm[before]).toBe('list.advance');
   });
 
   it('puts the page back when a batch produced nothing', async () => {

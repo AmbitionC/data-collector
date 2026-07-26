@@ -577,6 +577,80 @@ select:focus {
 #batch-actions { margin-top: 20px; }
 #batch-actions:not(:has(button:not([hidden]))) { display: none; }
 
+/* ── 本轮明细（逐条核对） ───────────────────────────── */
+.filter-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 14px 0 12px;
+}
+
+.filter-chips button {
+  padding: 4px 12px;
+  border: 1px solid var(--hairline-strong);
+  border-radius: 9999px;
+  background: var(--surface);
+  color: var(--body);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.filter-chips button[aria-pressed="true"] {
+  border-color: var(--ink);
+  background: var(--ink);
+  color: var(--canvas);
+}
+
+.collected-list {
+  max-height: 46vh;
+  margin: 0;
+  padding: 0;
+  overflow-y: auto;
+  list-style: none;
+  border-top: 1px solid var(--hairline);
+}
+
+.collected-list li { border-bottom: 1px solid var(--hairline); }
+
+.collected-list button {
+  display: grid;
+  width: 100%;
+  gap: 4px;
+  padding: 12px 2px;
+  border: 0;
+  background: none;
+  color: var(--ink);
+  text-align: left;
+  cursor: pointer;
+}
+
+.collected-list button:hover { background: var(--canvas-soft); }
+
+.collected-list .item-title {
+  font-size: 13px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.collected-list .item-meta {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.collected-list .item-status {
+  padding: 1px 8px;
+  border-radius: 9999px;
+  border: 1px solid currentColor;
+  flex: none;
+}
+
+.collected-list [data-status="saved"] .item-status { color: var(--success); }
+.collected-list [data-status="skipped"] .item-status { color: var(--muted); }
+.collected-list [data-status="failed"] .item-status { color: var(--error); }
+
 /* ── saved 面板 ─────────────────────────────────────── */
 .result-stamp {
   display: grid;

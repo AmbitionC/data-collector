@@ -36,6 +36,10 @@ beforeEach(async () => {
     copyPath: vi.fn(async () => undefined),
     revealPath: vi.fn(async () => undefined),
     reloadExtension: vi.fn(async () => undefined),
+    showItems: vi.fn(),
+    filterItems: vi.fn(),
+    locateItem: vi.fn(async () => undefined),
+    copyLog: vi.fn(async () => undefined),
   };
 });
 
@@ -488,6 +492,65 @@ describe('side panel DOM behavior', () => {
     renderSidePanel(document, batchState('skipped_all', { skipped: 21 }), actions);
     expect(visible('#batch-path')).toBe(false);
     expect(visible('#batch-reveal-button')).toBe(false);
+  });
+
+  it('lists every post with its status, filters by status, and locates one on click', async () => {
+    const items = [
+      { key: 'a', title: '创业板已经跌破 60 日线', status: 'saved' as const, url: 'https://x/topic/1' },
+      { key: 'b', title: '一条没对上号的帖子', status: 'skipped' as const, reason: '没能对上帖子号' },
+      { key: 'c', title: '写入失败的帖子', status: 'failed' as const, reason: '写入本机失败' },
+    ];
+    renderSidePanel(document, { phase: 'items', items, filter: 'all', log: ['第一轮 ...'] }, actions);
+
+    expect(visible('#items-panel')).toBe(true);
+    expect(document.querySelector('#items-heading')?.textContent).toBe('本轮看到 3 条');
+    expect(document.querySelectorAll('#items-list li')).toHaveLength(3);
+    // 状态要看得见，而不是只有一个总数。
+    expect(document.querySelector('#items-list li')?.getAttribute('data-status')).toBe('saved');
+    expect(document.querySelector('#items-list')?.textContent).toContain('没能对上帖子号');
+
+    // 顶部筛选按状态分组，并带上各自条数。
+    const chips = [...document.querySelectorAll('#items-filters button')].map(chip => chip.textContent);
+    expect(chips).toEqual(['全部 3', '已入库 1', '已跳过 1', '失败 1']);
+    document.querySelectorAll<HTMLButtonElement>('#items-filters button')[1]!.click();
+    expect(actions.filterItems).toHaveBeenCalledWith('saved');
+
+    // 点某一条 → 让页面滚过去并高亮它。
+    document.querySelector<HTMLButtonElement>('#items-list button')!.click();
+    await Promise.resolve();
+    expect(actions.locateItem).toHaveBeenCalledWith('a');
+
+    document.querySelector<HTMLButtonElement>('#items-log-button')!.click();
+    await Promise.resolve();
+    expect(actions.copyLog).toHaveBeenCalledWith(['第一轮 ...']);
+  });
+
+  it('applies the active filter and says so when nothing matches', () => {
+    const items = [
+      { key: 'a', title: '已入库的', status: 'saved' as const },
+      { key: 'b', title: '跳过的', status: 'skipped' as const },
+    ];
+    renderSidePanel(document, { phase: 'items', items, filter: 'skipped', log: [] }, actions);
+
+    expect(document.querySelectorAll('#items-list li')).toHaveLength(1);
+    expect(document.querySelector('#items-list')?.textContent).toContain('跳过的');
+    expect(visible('#items-empty')).toBe(false);
+
+    renderSidePanel(document, { phase: 'items', items, filter: 'failed', log: [] }, actions);
+    expect(document.querySelectorAll('#items-list li')).toHaveLength(0);
+    expect(visible('#items-empty')).toBe(true);
+  });
+
+  it('offers the details entry on any terminal state that saw posts', () => {
+    renderSidePanel(document, batchState('skipped_all', { skipped: 21 }), actions);
+    // 全部跳过时最需要逐条看为什么被跳过。
+    expect(visible('#batch-items-button')).toBe(true);
+
+    renderSidePanel(document, batchState('running', { collected: 2 }), actions);
+    expect(visible('#batch-items-button')).toBe(false);
+
+    renderSidePanel(document, batchState('empty'), actions);
+    expect(visible('#batch-items-button')).toBe(false);
   });
 
   it('shows the concrete failure reason rather than a generic one', () => {

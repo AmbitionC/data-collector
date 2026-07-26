@@ -478,6 +478,33 @@ describe('built Chrome extension', () => {
       .toHaveLength(1);
     // 而且绝不刷新用户所在的页面——刷新会把知识星球的「精华」分类退回「最新」。
     expect(navigations).toBe(1);
+
+    // 验证阶段用户要肉眼核对采到的内容，页面上一条都不许被藏起来。
+    const hidden = await listPage.evaluate(() =>
+      [...document.querySelectorAll<HTMLElement>('.topic-container')]
+        .filter(node => node.style.display === 'none').length,
+    );
+    expect(hidden).toBe(0);
+
+    // 「本轮明细」：逐条列出状态，点一条能滚回页面并高亮。
+    await clickSidePanel(sidePanel, '#batch-items-button');
+    await waitForVisiblePanel(sidePanel, '#items-panel', 5_000);
+    expect(await elementText(sidePanel, '#items-heading')).toContain('本轮看到');
+    const statuses = await sidePanel.evaluate(() =>
+      [...document.querySelectorAll('#items-list li')].map(row => row.getAttribute('data-status')),
+    );
+    expect(statuses).toEqual(['saved', 'saved', 'skipped']);
+
+    await sidePanel.evaluate(() =>
+      document.querySelector<HTMLButtonElement>('#items-list button')!.click(),
+    );
+    await waitForValue(
+      listPage,
+      `document.querySelectorAll('.data-collector-highlight').length`,
+      value => value === '1',
+      10_000,
+      '页面上出现高亮的那一条',
+    );
   });
 
   it('reports an unproductive batch as needing attention, and the screen stays put', async () => {
