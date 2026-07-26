@@ -74,6 +74,14 @@ describe('extension package validation', () => {
       .join('');
 
     expect(manifest.permissions).toContain('sidePanel');
+    // 内容脚本缺失时靠注入自愈（绝不刷新页面，那会丢掉站内分类状态）。
+    expect(manifest.permissions).toContain('scripting');
+    // 主世界脚本必须在 document_start 就位，否则应用的首批接口响应就漏掉了。
+    const mainWorld = manifest.content_scripts.find(
+      (entry: { world?: string }) => entry.world === 'MAIN',
+    );
+    expect(mainWorld).toMatchObject({ run_at: 'document_start', js: ['inject.js'] });
+    expect(mainWorld.matches.every((pattern: string) => pattern.includes('zsxq.com'))).toBe(true);
     expect(manifest.side_panel).toEqual({ default_path: 'sidepanel/index.html' });
     expect(manifest.action.default_popup).toBeUndefined();
     expect(manifest.key).toBe(MANIFEST_PUBLIC_KEY);

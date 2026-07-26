@@ -1,4 +1,5 @@
 import { isListPage } from '@data-collector/shared';
+import type { TopicIndex } from '../topicIndex.js';
 import { buildDocument, cleanText, elementText, parsePublishedAt } from './common.js';
 import { ExtractionError, type Clock } from './types.js';
 
@@ -19,9 +20,19 @@ const TOPIC_CONTAINER = '.topic-container';
  */
 export const COLLECTED_ATTRIBUTE = 'data-dc-collected';
 
+/**
+ * `.topic-container` 不全是帖子：分类标签栏（最新 / 精华 / 只看星主…）也用同一个类名，
+ * 里面装的是 <app-menu>。不排掉的话它会被当成一篇「帖子」参与统计甚至入库。
+ */
+function isPost(container: Element): boolean {
+  return !container.querySelector('app-menu, .menu-container');
+}
+
 /** 尚未采集的帖子节点（已打标记的跳过，避免同一条重复入库）。 */
 function pendingContainers(document: Document): Element[] {
-  return [...document.querySelectorAll(`${TOPIC_CONTAINER}:not([${COLLECTED_ATTRIBUTE}])`)];
+  return [
+    ...document.querySelectorAll(`${TOPIC_CONTAINER}:not([${COLLECTED_ATTRIBUTE}])`),
+  ].filter(isPost);
 }
 
 /** 剩余待采条数：批量采集用它判断滚动之后有没有加载出新内容。 */
@@ -73,11 +84,21 @@ function deriveTitle(content: Element, document: Document): string {
 
 /**
  * 从列表页的一条帖子节点里找出它自己的详情 URL。
+ *
  * 列表页批量采集必须拿到**每条帖子各自的 URL** —— 稳定内容 ID 由规范 URL 派生，
  * 若都用列表页 URL，21 条帖子会算出同一个 ID 而相互覆盖，最后只剩 1 条。
- * 依次尝试：详情链接 → 元素 id/data-* 里的 topic id；都拿不到返回 undefined（该条跳过）。
+ *
+ * 实测这个站点的 DOM 上**没有**帖子号：没有 <a>、没有 data-*、整棵子树找不到长数字。
+ * 因此主要来源是 topicIndex（旁观应用自己的接口响应得到的「正文 → 帖子号」对照表）；
+ * DOM 上的链接/属性仍然照查一遍，将来页面结构变了也能直接用上。
  */
-export function topicUrlOf(container: Element, pageUrl: URL): URL | undefined {
+export function topicUrlOf(
+  container: Element,
+  pageUrl: URL,
+  topics?: TopicIndex,
+  /** 正文文本（不含作者名等外围文案），用来和接口响应对号；缺省用整个节点的文本。 */
+  bodyText?: string,
+): URL | undefined {
   const link = container.querySelector<HTMLAnchorElement>('a[href*="/topic/"]');
   const href = link?.getAttribute('href');
   if (href) {
@@ -90,21 +111,21 @@ export function topicUrlOf(container: Element, pageUrl: URL): URL | undefined {
   }
 
   const groupId = pageUrl.pathname.match(/\/group\/(\d+)/)?.[1];
-  if (groupId) {
-    // Angular 常把业务 id 放在元素 id / data-* 上；topic id 是长数字串。
-    const candidates = [container, ...container.querySelectorAll('*')];
-    for (const element of candidates.slice(0, 200)) {
-      for (const attribute of element.getAttributeNames()) {
-        if (!/^(id|data-|ng-reflect-)/.test(attribute)) continue;
-        const value = element.getAttribute(attribute) ?? '';
-        const topicId = value.match(/\b(\d{15,25})\b/)?.[1];
-        if (topicId) {
-          return new URL(`/group/${groupId}/topic/${topicId}`, pageUrl);
-        }
-      }
+  if (!groupId) return undefined;
+
+  // 兜底：万一哪天页面把 id 放回了 DOM（长数字串最像帖子号）。
+  const candidates = [container, ...container.querySelectorAll('*')];
+  for (const element of candidates.slice(0, 200)) {
+    for (const attribute of element.getAttributeNames()) {
+      if (!/^(id|data-|ng-reflect-)/.test(attribute)) continue;
+      const topicId = (element.getAttribute(attribute) ?? '').match(/\b(\d{15,25})\b/)?.[1];
+      if (topicId) return new URL(`/group/${groupId}/topic/${topicId}`, pageUrl);
     }
   }
-  return undefined;
+
+  // 主路径：用正文把这条帖子对回接口响应里的 topic_id。
+  const fromIndex = topics?.find(bodyText ?? container.textContent ?? '');
+  return fromIndex ? new URL(`/group/${groupId}/topic/${fromIndex}`, pageUrl) : undefined;
 }
 
 export interface ListExtraction {
@@ -123,15 +144,21 @@ export interface ListExtraction {
  * 列表 / 精华页批量提取：把每个 .topic-container 当作独立一篇。
  * 只返回能确定自身 URL 的条目，其余计入 skipped。
  */
-export function extractZsxqList(document: Document, url: URL, now: Clock): ListExtraction {
+export function extractZsxqList(
+  document: Document,
+  url: URL,
+  now: Clock,
+  topics?: TopicIndex,
+): ListExtraction {
   const containers = pendingContainers(document);
   const documents: ReturnType<typeof buildDocument>[] = [];
   let skipped = 0;
 
   for (const container of containers) {
-    const topicUrl = topicUrlOf(container, url);
     const content = firstWithin(container, CONTENT_SELECTORS) ?? container;
     const text = elementText(content);
+    // 用正文（而不是整个节点）去对号：整个节点还带着作者名、时间、点赞数这些外围文案。
+    const topicUrl = topicUrlOf(container, url, topics, text);
     if (!topicUrl || !text || text.length < 20) {
       skipped += 1;
       continue;

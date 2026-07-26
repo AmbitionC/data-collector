@@ -11,6 +11,8 @@ export interface ListPayload {
   documents: CollectedDocument[];
   skipped: number;
   total: number;
+  /** 已捕获到的帖子号条数；为 0 说明还没截到应用的接口响应。 */
+  captured?: number;
 }
 
 export type ExtractionResponse =
@@ -324,6 +326,7 @@ export class JobRunner {
     if (!limits.continuation) await this.restorePage(tabId);
 
     let sawAnyPost = false;
+    let captured = 0;
     for (let round = 0; round < maxRounds; round += 1) {
       let response: ExtractionResponse;
       try {
@@ -349,6 +352,7 @@ export class JobRunner {
       progress.rounds = round + 1;
       progress.skipped += list.skipped;
       if (list.total > 0) sawAnyPost = true;
+      captured = Math.max(captured, list.captured ?? 0);
 
       for (const document of list.documents) {
         if (this.batchStopped) break;
@@ -391,6 +395,14 @@ export class JobRunner {
         : progress.rounds >= maxRounds && progress.collected >= maxItems
           ? 'capped'
           : 'done';
+    if (progress.phase === 'skipped_all') {
+      // 区分两种「全部跳过」：还没截到接口响应（用户能自己解决），
+      // 还是截到了但对不上号（需要我改适配）。
+      progress.error = captured === 0
+        ? '还没有截到本页的接口响应，因而拿不到每条帖子的地址。请在页面里滚动一屏、或把分类切走再切回来，然后重试。'
+        : `已获取 ${captured} 条帖子号，但和页面上的帖子对不上号。请复制诊断信息发给开发者。`;
+      progress.code = captured === 0 ? 'TOPIC_INDEX_EMPTY' : 'TOPIC_INDEX_MISMATCH';
+    }
     report();
     return { ...progress };
   }

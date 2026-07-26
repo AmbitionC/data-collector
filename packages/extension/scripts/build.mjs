@@ -13,6 +13,8 @@ await build({
   entryPoints: {
     background: join(packageRoot, 'src', 'background', 'index.ts'),
     content: join(packageRoot, 'src', 'content.ts'),
+    // 页面主世界脚本：旁观应用自己的接口响应，取回帖子号（DOM 上没有）。
+    inject: join(packageRoot, 'src', 'inject.ts'),
     'sidepanel/index': join(packageRoot, 'src', 'sidepanel', 'index.ts'),
   },
   outdir: outputDirectory,

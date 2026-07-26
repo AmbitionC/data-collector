@@ -17,6 +17,7 @@ const WORKSPACE = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const EXTENSION_PATH = join(WORKSPACE, 'packages', 'extension', 'dist');
 const TARGET_URL = 'https://mp.weixin.qq.com/s/uW5gUigjslVY24YmCYhg0g';
 const LIST_URL = 'https://wx.zsxq.com/group/48844584441158';
+const TOPICS_API = 'https://wx.zsxq.com/v2/groups/48844584441158/topics';
 let browser: Browser | undefined;
 let bridge: BridgeHandle | undefined;
 const temporaryDirectories = createTemporaryDirectoryTracker();
@@ -162,15 +163,40 @@ async function serveArticleFixture(
   page: Page,
   fixture: string,
   url: string = TARGET_URL,
+  /** 额外的接口桩（必须和导航桩同在一个 handler 里，否则两个 handler 会抢同一个请求）。 */
+  routes: { match: string; json: unknown }[] = [],
 ): Promise<void> {
   await page.setRequestInterception(true);
   page.on('request', request => {
     if (request.isNavigationRequest() && request.url().startsWith(url)) {
       void request.respond({ status: 200, contentType: 'text/html; charset=utf-8', body: fixture });
-    } else {
-      void request.continue();
+      return;
     }
+    const route = routes.find(candidate => request.url().startsWith(candidate.match));
+    if (route) {
+      void request.respond({
+        status: 200,
+        contentType: 'application/json; charset=utf-8',
+        body: JSON.stringify(route.json),
+      });
+      return;
+    }
+    void request.continue();
   });
+}
+
+/** 在页面主世界里求值（puppeteer 的 evaluate 跑在隔离世界，看不到页面自己的补丁）。 */
+async function evaluateInMainWorld(page: Page, expression: string): Promise<void> {
+  const session = await page.createCDPSession();
+  try {
+    const { exceptionDetails } = await session.send('Runtime.evaluate', {
+      expression,
+      awaitPromise: true,
+    });
+    if (exceptionDetails) throw new Error(exceptionDetails.text);
+  } finally {
+    await session.detach();
+  }
 }
 
 /** 轮询扩展页里的一段表达式，直到它返回期望值（Bridge 重启期间会话会短暂失效，逐轮重建）。 */
@@ -391,13 +417,31 @@ describe('built Chrome extension', () => {
 
     const fixture = await readFile(join(WORKSPACE, 'tests', 'fixtures', 'zsxq-list.html'), 'utf8');
     const listPage = await browser!.newPage();
-    await serveArticleFixture(listPage, fixture, LIST_URL);
+    // 帖子号不在 DOM 上，只能从应用自己的接口响应里旁观得到。
+    // 这里让夹具页真的发一次接口请求，走完整条「主世界捕获 → 隔离世界索引 → 对号」链路。
+    await serveArticleFixture(listPage, fixture, LIST_URL, [
+      {
+        match: TOPICS_API,
+        json: {
+          resp_data: {
+            topics: [
+              { topic_id: 511111111111111, talk: { text: '第一条帖子的正文内容，足够长以便通过长度校验判断。' } },
+              { topic_id: 522222222222222, talk: { text: '第二条帖子的正文内容，同样足够长以便通过长度校验。' } },
+            ],
+          },
+        },
+      },
+    ]);
     // 数一下这个页面被导航了几次：只应有我们自己发起的那一次。
     let navigations = 0;
     listPage.on('framenavigated', frame => {
       if (frame === listPage.mainFrame()) navigations += 1;
     });
     await listPage.goto(LIST_URL, { waitUntil: 'domcontentloaded' });
+    // 模拟应用自己去拉帖子列表（主世界脚本已在 document_start 就位）。
+    // 必须走 CDP 在**主世界**里发：puppeteer 的 page.evaluate 跑在自己的隔离世界，
+    // 那里的 fetch 没被打补丁，等于绕过了要测的这条链路。
+    await evaluateInMainWorld(listPage, `fetch(${JSON.stringify(TOPICS_API)})`);
 
     const { page: sidePanel } = await sidePanelFor(listPage);
     await waitForVisiblePanel(sidePanel, '#ready-panel', 15_000);
@@ -415,9 +459,8 @@ describe('built Chrome extension', () => {
     await waitForText(sidePanel, '#batch-heading', '本轮批量归档完成', 30_000);
     await sidePanel.screenshot({ path: join(screenshotDirectory, 'sidepanel-batch-done.png') });
 
-    // fixture 里有一条带着上一轮的折叠标记：新发起一批会先把页面还原，所以它也应被采到。
-    expect(await elementText(sidePanel, '#batch-collected')).toBe('3');
-    // 拿不到自身 URL 的那条如实计入「已跳过」，而不是静默少采。
+    // 接口响应里给了两条帖子号，这两条入库；第三条对不上号，如实跳过。
+    expect(await elementText(sidePanel, '#batch-collected')).toBe('2');
     expect(await elementText(sidePanel, '#batch-skipped')).toBe('1');
     expect(await elementText(sidePanel, '#batch-failed')).toBe('0');
 
@@ -425,11 +468,10 @@ describe('built Chrome extension', () => {
       await readFile(join(libraryRoot, '_catalog', 'index.json'), 'utf8'),
     ) as { url: string }[];
     // 各自入库：身份由各自的 /topic/ 地址派生，不会相互覆盖。
-    expect(catalog).toHaveLength(3);
+    expect(catalog).toHaveLength(2);
     expect(new Set(catalog.map(entry => entry.url))).toEqual(new Set([
       `${LIST_URL}/topic/511111111111111`,
       `${LIST_URL}/topic/522222222222222`,
-      `${LIST_URL}/topic/544444444444444`,
     ]));
     // 批量不开新标签页：内容已在当前页提取完毕。
     expect((await browser!.pages()).filter(page => page.url().startsWith(LIST_URL)))

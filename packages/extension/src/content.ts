@@ -6,6 +6,19 @@ import {
   extractList,
   pendingTopicCount,
 } from './extractors/index.js';
+import { TOPIC_MESSAGE, TopicIndex, type TopicRecord } from './topicIndex.js';
+
+/**
+ * 帖子号索引。帖子号不在 DOM 上，只能从应用自己的接口响应里取（见 inject.ts）。
+ * 主世界脚本捕获后 postMessage 过来，这里累积成「正文 → 帖子号」的对照表。
+ */
+const topics = new TopicIndex();
+window.addEventListener('message', event => {
+  if (event.source !== window) return;
+  const data = event.data as { source?: unknown; records?: unknown };
+  if (data?.source !== TOPIC_MESSAGE || !Array.isArray(data.records)) return;
+  topics.add(data.records as TopicRecord[]);
+});
 
 interface ExtractMessage {
   type: 'extract.document' | 'extract.list' | 'list.advance' | 'list.diagnose' | 'list.restore';
@@ -155,6 +168,8 @@ function listDiagnostics(): string {
     {
       url: location.href,
       topicCount: all.length,
+      // 为 0 说明一次接口响应都没捕获到——帖子号无从谈起，先滚动一屏或切一次分类。
+      capturedTopics: topics.size,
       sampledCollapsed: container.hasAttribute(COLLECTED_ATTRIBUTE),
       textSample: (container.textContent ?? '').replace(/\s+/g, ' ').trim().slice(0, 80),
       anchors: [...container.querySelectorAll('a')]
@@ -228,10 +243,11 @@ if (!alreadyRegistered) chrome.runtime.onMessage.addListener((message: unknown, 
   const run = (): void => {
     try {
       if (wantsList) {
-        const { containers, ...list } = extractList(document, location.href);
+        const { containers, ...list } = extractList(document, location.href, topics);
         // 节点留在内容脚本里（无法跨消息边界传递），等 list.advance 时统一收起。
         lastListContainers = containers;
-        sendResponse({ ok: true, list });
+        // 捕获到的帖子号条数一并回报：为 0 时失败原因要说得具体，不能只说「适配问题」。
+        sendResponse({ ok: true, list: { ...list, captured: topics.size } });
         return;
       }
       const extracted = extractDocument(document, location.href);

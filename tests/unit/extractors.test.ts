@@ -9,6 +9,17 @@ import {
   extractList,
   pendingTopicCount,
 } from '../../packages/extension/src/extractors/index.js';
+import { TopicIndex } from '../../packages/extension/src/topicIndex.js';
+
+/** 接口响应里拿到的帖子号（DOM 上没有），前两条能对上号，第三条对不上。 */
+function topicIndex(): TopicIndex {
+  const index = new TopicIndex();
+  index.add([
+    { topicId: '511111111111111', text: '第一条帖子的正文内容，足够长以便通过长度校验判断。' },
+    { topicId: '522222222222222', text: '第二条帖子的正文内容，同样足够长以便通过长度校验。' },
+  ]);
+  return index;
+}
 
 const FIXTURES = join(import.meta.dirname, '..', 'fixtures');
 const NOW = () => '2026-07-18T00:00:00.000Z';
@@ -99,14 +110,13 @@ describe('ZSXQ extraction（按真实 Angular DOM）', () => {
       thrown = error;
     }
     expect((thrown as ExtractionError).code).toBe('UNSUPPORTED_LAYOUT');
-    expect((thrown as Error).message).toContain('4 条帖子');
     expect((thrown as Error).message).toContain('批量保存');
   });
 
   it('splits a list page into one document per post, each carrying its own topic URL', async () => {
     const doc = await fixture('zsxq-list.html', LIST);
 
-    const list = extractList(doc, LIST, NOW);
+    const list = extractList(doc, LIST, topicIndex(), NOW);
 
     // 身份由规范 URL 派生：每条必须带自己的 /topic/ 地址，否则会算出同一个 ID 相互覆盖。
     expect(list.documents.map(item => item.canonicalUrl)).toEqual([
@@ -116,12 +126,22 @@ describe('ZSXQ extraction（按真实 Angular DOM）', () => {
     expect(new Set(list.documents.map(item => item.canonicalUrl)).size).toBe(2);
     expect(list.documents[0]).toMatchObject({ source: 'zsxq', kind: 'post', author: '重远' });
     expect(list.documents[0]?.text).toContain('第一条帖子');
-    // 拿不到自身 URL 的那条如实计入 skipped，而不是静默少采。
+    // 接口里没有的那条如实计入 skipped，绝不猜一个 id（猜错会把两条写到同一个文件上）。
     expect(list.skipped).toBe(1);
     expect(list.total).toBe(3);
-    // 上一轮采过并打了标记的那条不再进入本轮。
-    expect(list.documents.some(item => item.text.includes('第四条帖子'))).toBe(false);
+    // 分类标签栏也用 .topic-container，绝不能被当成一篇帖子。
+    expect(list.documents.some(item => item.text.includes('只看星主'))).toBe(false);
     expect(list.containers).toHaveLength(3);
+  });
+
+  it('skips every post when no topic ids were captured, rather than inventing URLs', async () => {
+    const doc = await fixture('zsxq-list.html', LIST);
+
+    const list = extractList(doc, LIST, undefined, NOW);
+
+    // 没有帖子号来源时一条都不该入库：共用列表页地址会让它们算出同一个 ID 相互覆盖。
+    expect(list.documents).toEqual([]);
+    expect(list.skipped).toBe(3);
   });
 
   it('counts only posts that still need collecting（滚动后据此判断有没有新内容）', async () => {
@@ -137,7 +157,7 @@ describe('ZSXQ extraction（按真实 Angular DOM）', () => {
   it('refuses list extraction on sources that have no feed layout', () => {
     const doc = new JSDOM('<main></main>').window.document;
 
-    expect(() => extractList(doc, 'https://mp.weixin.qq.com/s/abc', NOW)).toThrowError(
+    expect(() => extractList(doc, 'https://mp.weixin.qq.com/s/abc', undefined, NOW)).toThrowError(
       expect.objectContaining<Partial<ExtractionError>>({ code: 'UNSUPPORTED_LAYOUT' }),
     );
   });

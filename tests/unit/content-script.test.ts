@@ -3,6 +3,7 @@
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { TOPIC_MESSAGE } from '../../packages/extension/src/topicIndex.js';
 
 type Listener = (
   message: unknown,
@@ -12,7 +13,12 @@ type Listener = (
 
 interface ListResponse {
   ok: true;
-  list: { documents: { canonicalUrl: string }[]; skipped: number; total: number };
+  list: {
+    documents: { canonicalUrl: string }[];
+    skipped: number;
+    total: number;
+    captured: number;
+  };
 }
 
 interface AdvanceResponse {
@@ -39,6 +45,30 @@ function ask<T>(message: unknown): Promise<T> {
   return new Promise<T>(resolve => {
     listener(message, {}, response => resolve(response as T));
   });
+}
+
+/**
+ * 模拟主世界脚本送来的帖子号（DOM 上没有帖子号，只能从应用自己的接口响应里取）。
+ * 前两条能对上号，第三条对不上——对不上就如实跳过。
+ */
+async function feedTopics(): Promise<void> {
+  // 内容脚本只认「来自本窗口」的消息（防止别的 iframe 伪造）。jsdom 的
+  // window.postMessage 不会带上 source，这里直接派发一个带 source 的事件，
+  // 以便按生产环境的真实前提测试，而不是为测试放宽生产代码的校验。
+  window.dispatchEvent(
+    new MessageEvent('message', {
+      source: window,
+      origin: window.location.origin,
+      data: {
+        source: TOPIC_MESSAGE,
+        records: [
+          { topicId: '511111111111111', text: '第一条帖子的正文内容，足够长以便通过长度校验判断。' },
+          { topicId: '522222222222222', text: '第二条帖子的正文内容，同样足够长以便通过长度校验。' },
+        ],
+      },
+    }),
+  );
+  await new Promise(resolve => setTimeout(resolve, 0));
 }
 
 beforeEach(async () => {
@@ -70,6 +100,8 @@ describe('content script list collection', () => {
   });
 
   it('returns one document per post and keeps DOM nodes on this side of the message boundary', async () => {
+    await feedTopics();
+
     const response = await ask<ListResponse>({ type: 'extract.list' });
 
     expect(response.ok).toBe(true);
@@ -78,8 +110,19 @@ describe('content script list collection', () => {
       'https://wx.zsxq.com/group/48844584441158/topic/522222222222222',
     ]);
     expect(response.list.skipped).toBe(1);
+    // 捕获到的帖子号条数要如实回报：为 0 时失败原因得说得具体。
+    expect(response.list.captured).toBe(2);
     // DOM 节点无法跨消息边界传递，必须留在内容脚本里。
     expect(response.list).not.toHaveProperty('containers');
+  });
+
+  it('reports zero captured topics when the app never answered an API call', async () => {
+    const response = await ask<ListResponse>({ type: 'extract.list' });
+
+    expect(response.list.captured).toBe(0);
+    // 没有帖子号就一条都不入库，绝不用列表页地址凑数。
+    expect(response.list.documents).toEqual([]);
+    expect(response.list.skipped).toBe(3);
   });
 
   it('collapses every post it has already handled so scrolling can load the next batch', async () => {
@@ -94,7 +137,7 @@ describe('content script list collection', () => {
     const collapsed = [...document.querySelectorAll<HTMLElement>('.topic-container')].filter(
       node => node.hasAttribute('data-dc-collected'),
     );
-    expect(collapsed).toHaveLength(4);
+    expect(collapsed).toHaveLength(3);
     expect(collapsed.every(node => node.style.display === 'none')).toBe(true);
   });
 
@@ -133,11 +176,11 @@ describe('content script list collection', () => {
     await vi.advanceTimersByTimeAsync(7_000);
     await advance;
     vi.useRealTimers();
-    expect(document.querySelectorAll('[data-dc-collected]')).toHaveLength(4);
+    expect(document.querySelectorAll('[data-dc-collected]')).toHaveLength(3);
 
     const restored = await ask<AdvanceResponse>({ type: 'list.restore' });
 
-    expect(restored.advance.collapsed).toBe(4);
+    expect(restored.advance.collapsed).toBe(3);
     expect(document.querySelectorAll('[data-dc-collected]')).toHaveLength(0);
     // 还原后再提取，帖子重新可见可采。
     expect(
@@ -145,7 +188,7 @@ describe('content script list collection', () => {
         .every(node => node.style.display !== 'none'),
     ).toBe(true);
     const second = await ask<ListResponse>({ type: 'extract.list' });
-    expect(second.list.total).toBe(4);
+    expect(second.list.total).toBe(3);
   });
 
   it('samples a live post for diagnostics, not one that was already collapsed', async () => {
@@ -163,20 +206,25 @@ describe('content script list collection', () => {
     };
 
     expect(sample.sampledCollapsed).toBe(false);
-    expect(sample.textSample).toContain('第二条帖子');
+    // 第一个 .topic-container 是分类标签栏（app-menu），不是帖子。
+    expect(sample.textSample).toContain('第一条帖子');
     expect(sample.topicCount).toBe(4);
     // 结构本身最能说明问题。
     expect(sample.htmlHead).toContain('topic-container');
   });
 
-  it('surfaces any long numeric attribute anywhere in the subtree as a topic-id candidate', async () => {
-    const response = await ask<{ ok: true; diagnostics: string }>({ type: 'list.diagnose' });
-    const sample = JSON.parse(response.diagnostics) as {
-      longNumbers: { name: string; value: string }[];
-    };
+  it('reports how many topic ids were captured so a dry index is diagnosable', async () => {
+    const before = JSON.parse(
+      (await ask<{ ok: true; diagnostics: string }>({ type: 'list.diagnose' })).diagnostics,
+    ) as { capturedTopics: number };
+    expect(before.capturedTopics).toBe(0);
 
-    // fixture 第二条把帖子号放在 data-topic-id 上；扫描不限定属性名。
-    expect(sample.longNumbers.some(entry => entry.value.includes('522222222222222'))).toBe(true);
+    await feedTopics();
+
+    const after = JSON.parse(
+      (await ask<{ ok: true; diagnostics: string }>({ type: 'list.diagnose' })).diagnostics,
+    ) as { capturedTopics: number };
+    expect(after.capturedTopics).toBe(2);
   });
 
   it('refuses to save a list page as one document', async () => {

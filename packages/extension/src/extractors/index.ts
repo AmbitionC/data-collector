@@ -4,6 +4,7 @@ import {
   type CollectedDocument,
   type Source,
 } from '@data-collector/shared';
+import type { TopicIndex } from '../topicIndex.js';
 import { ExtractionError, type Clock } from './types.js';
 import { extractNowcoder } from './nowcoder.js';
 import { extractWechat } from './wechat.js';
@@ -17,6 +18,7 @@ export type { ListExtraction } from './zsxq.js';
 export function extractList(
   document: Document,
   rawUrl: string,
+  topics?: TopicIndex,
   now: Clock = () => new Date().toISOString(),
 ): ListExtraction {
   let url: URL;
@@ -28,7 +30,7 @@ export function extractList(
   if (detectSource(url) !== 'zsxq') {
     throw new ExtractionError('UNSUPPORTED_LAYOUT', '当前来源不支持列表页批量采集');
   }
-  return extractZsxqList(document, url, now);
+  return extractZsxqList(document, url, now, topics);
 }
 
 const UNSUPPORTED_MESSAGE = '当前页面不是微信公众号、知识星球或牛客网内容';
