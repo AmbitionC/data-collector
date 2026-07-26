@@ -13,6 +13,10 @@
         <p class="eyebrow">本地采集 · 归档</p>
         <h1 id="app-title">Data Collector</h1>
         <span id="connection-label" class="connection-label">读取状态</span>
+        <nav class="top-nav" aria-label="页面切换">
+          <button id="nav-collect" type="button" aria-pressed="true">采集</button>
+          <button id="nav-library" type="button" aria-pressed="false">已入库</button>
+        </nav>
       </header>
 
       <div id="update-banner" class="update-banner" hidden>
@@ -76,6 +80,8 @@
             <select id="category"></select>
             <label for="tags">标签 <span>用逗号分隔</span></label>
             <input id="tags" autocomplete="off" maxlength="300">
+            <label id="target-label" for="target" hidden>本次采集条数 <span>采够就自动停</span></label>
+            <input id="target" type="number" min="1" max="60" step="1" value="20" hidden>
           </div>
           <button id="capture-button" type="button" class="primary-button capture-button">
             <span id="capture-button-label">保存这一页</span><span aria-hidden="true">↘</span>
@@ -115,6 +121,19 @@
             <button id="batch-diagnose-button" type="button" class="secondary-button" hidden>复制诊断信息</button>
             <button id="batch-done-button" type="button" class="secondary-button" hidden>完成</button>
           </div>
+        </section>
+
+        <section id="library-panel" class="state-panel" hidden>
+          <p class="section-kicker">本机知识库</p>
+          <h2 id="library-heading">已入库内容</h2>
+          <div id="library-filters" class="filter-chips" role="group" aria-label="按来源筛选"></div>
+          <ul id="library-list" class="collected-list"></ul>
+          <p id="library-empty" class="support compact" hidden>还没有已入库的内容。</p>
+          <div class="result-actions">
+            <button id="library-refresh-button" type="button" class="secondary-button">刷新</button>
+            <button id="library-clear-button" type="button" class="secondary-button danger">清空全部</button>
+          </div>
+          <p id="library-confirm" class="support compact" hidden></p>
         </section>
 
         <section id="items-panel" class="state-panel" hidden>

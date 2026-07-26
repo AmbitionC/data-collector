@@ -322,14 +322,19 @@ export class JobRunner {
 
   async captureList(
     overrides: CaptureOverrides = {},
-    limits: { maxRounds?: number; maxItems?: number; continuation?: boolean } = {},
+    limits: {
+      maxRounds?: number;
+      /** 本次要采够多少条；采够即停，不需要用户盯着手动停。 */
+      maxItems?: number;
+      continuation?: boolean;
+    } = {},
   ): Promise<BatchProgress> {
     const [tab] = await this.options.tabs.query({ active: true, lastFocusedWindow: true });
     // E10：连可采集的标签页都没有，写不出归属某页的记录，交给侧栏的本地粘性错误。
     if (tab?.id === undefined || !tab.url) throw new Error('当前没有可采集的浏览器页面');
     const tabId = tab.id;
     const maxRounds = limits.maxRounds ?? 12;
-    const maxItems = limits.maxItems ?? 60;
+    const maxItems = limits.maxItems ?? 20;
     this.batchStopped = false;
     const progress: BatchProgress = {
       url: tab.url,
@@ -440,6 +445,8 @@ export class JobRunner {
           items.push({ key: item.key, title: item.title, status: 'failed', reason: '写入本机失败' });
         }
         report();
+        // 条与条之间留一点随机间隔：连续无间隔的请求最像脚本。
+        if (progress.collected < maxItems) await this.wait(250 + Math.random() * 450);
       }
 
       if (this.batchStopped) {
@@ -448,7 +455,8 @@ export class JobRunner {
         return { ...progress };
       }
       if (progress.collected >= maxItems) {
-        // E9：到顶要说出来，不能静默截断。
+        // 采够目标条数就收工——这是正常完成，不是被截断。
+        note(`已采够目标条数 ${maxItems} 条，收工`);
         progress.phase = 'capped';
         report();
         return { ...progress };

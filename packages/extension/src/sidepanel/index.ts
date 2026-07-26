@@ -1,10 +1,12 @@
 import {
   sidePanelStateFromStatus,
   renderSidePanel,
+  renderTopNav,
   renderUpdateBanner,
   type BackgroundStatus,
   type CaptureOverrides,
   type ItemFilter,
+  type LibraryEntry,
   type SidePanelActions,
   type SidePanelState,
 } from './state.js';
@@ -55,6 +57,40 @@ let stickyError: string | undefined;
 let itemsOpen = false;
 let itemsFilter: ItemFilter = 'all';
 
+/** 「已入库」页面的本地视图状态。 */
+let page: 'collect' | 'library' = 'collect';
+let library: LibraryEntry[] = [];
+let librarySource = '';
+let libraryLoading = false;
+let libraryPending: Extract<SidePanelState, { phase: 'library' }>['pending'];
+let libraryError: string | undefined;
+
+function libraryState(): SidePanelState {
+  return {
+    phase: 'library',
+    entries: library,
+    source: librarySource,
+    loading: libraryLoading,
+    ...(libraryPending ? { pending: libraryPending } : {}),
+    ...(libraryError ? { error: libraryError } : {}),
+  };
+}
+
+async function loadLibrary(): Promise<void> {
+  libraryLoading = true;
+  libraryError = undefined;
+  renderSidePanel(document, libraryState(), actions);
+  try {
+    const { entries } = await message<{ entries: LibraryEntry[] }>({ type: 'library.list' });
+    library = entries;
+  } catch (error) {
+    libraryError = errorMessage(error, '读取已入库内容失败。');
+  } finally {
+    libraryLoading = false;
+    renderSidePanel(document, libraryState(), actions);
+  }
+}
+
 function scheduleRefresh(phase: SidePanelState['phase']): void {
   if (pollTimer !== undefined) window.clearTimeout(pollTimer);
   if (stopped) return;
@@ -96,6 +132,13 @@ async function capturePage(
 }
 
 async function refresh(): Promise<void> {
+  // 「已入库」是个独立页面，不跟着采集状态走。
+  if (page === 'library') {
+    renderTopNav(document, page, actions);
+    renderSidePanel(document, libraryState(), actions);
+    return;
+  }
+  renderTopNav(document, page, actions);
   // 粘性错误挡住一切推导状态：不清掉它之前，轮询不许改屏。
   if (stickyError) {
     renderSidePanel(document, { phase: 'job_error', message: stickyError }, actions);
@@ -215,6 +258,48 @@ const actions: SidePanelActions = {
       }
     }
   },
+  openPage(next) {
+    page = next;
+    libraryPending = undefined;
+    libraryError = undefined;
+    renderTopNav(document, page, actions);
+    if (next === 'library') void loadLibrary();
+    else void refresh();
+  },
+  async reloadLibrary() {
+    libraryPending = undefined;
+    await loadLibrary();
+  },
+  filterLibrary(source) {
+    librarySource = source;
+    renderSidePanel(document, libraryState(), actions);
+  },
+  askDelete(target) {
+    // 只进入确认态，绝不在这里动文件。
+    libraryPending = target;
+    libraryError = undefined;
+    renderSidePanel(document, libraryState(), actions);
+  },
+  cancelDelete() {
+    libraryPending = undefined;
+    renderSidePanel(document, libraryState(), actions);
+  },
+  async confirmDelete() {
+    const target = libraryPending;
+    if (!target) return;
+    libraryPending = undefined;
+    try {
+      await message(
+        target.kind === 'all'
+          ? { type: 'library.delete', all: true }
+          : { type: 'library.delete', ids: [target.id] },
+      );
+      await loadLibrary();
+    } catch (error) {
+      libraryError = errorMessage(error, '删除失败。');
+      renderSidePanel(document, libraryState(), actions);
+    }
+  },
   async copyLog(log) {
     const button = document.querySelector<HTMLButtonElement>('#items-log-button');
     try {
@@ -234,4 +319,5 @@ const actions: SidePanelActions = {
 };
 
 renderSidePanel(document, { phase: 'loading' }, actions);
+renderTopNav(document, page, actions);
 void refresh();

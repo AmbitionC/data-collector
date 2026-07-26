@@ -153,9 +153,30 @@ describe('content script list collection', () => {
     const fresh = document.createElement('div');
     fresh.className = 'topic-container';
     document.querySelector('.main-content-container')!.append(fresh);
-    await vi.advanceTimersByTimeAsync(500);
+    // 滚动节奏是随机化的（拟人），推足一轮的时间即可。
+    await vi.advanceTimersByTimeAsync(8_000);
 
     expect((await advance).advance).toMatchObject({ loaded: 1 });
+  });
+
+  it('scrolls in human-sized steps instead of teleporting to the bottom', async () => {
+    await ask<ListResponse>({ type: 'extract.list' });
+    const steps: number[] = [];
+    window.scrollBy = (options?: number | ScrollToOptions) => {
+      steps.push(typeof options === 'object' ? Number(options?.top ?? 0) : 0);
+    };
+    Object.defineProperty(window, 'innerHeight', { value: 800, configurable: true });
+
+    vi.useFakeTimers();
+    const advance = ask<AdvanceResponse>({ type: 'list.advance' });
+    await vi.advanceTimersByTimeAsync(30_000);
+    await advance;
+
+    // 每次只滚不到一屏、分多次滚——不是「每 500 毫秒瞬移到底」那种机器节奏。
+    expect(steps.length).toBeGreaterThan(1);
+    expect(steps.every(step => step > 0 && step <= 800)).toBe(true);
+    // 步长是随机的，不该每次都一模一样。
+    expect(new Set(steps).size).toBeGreaterThan(1);
   });
 
   it('skips posts that were handled in an earlier round', async () => {

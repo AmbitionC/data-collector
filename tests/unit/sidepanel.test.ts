@@ -40,6 +40,12 @@ beforeEach(async () => {
     filterItems: vi.fn(),
     locateItem: vi.fn(async () => undefined),
     copyLog: vi.fn(async () => undefined),
+    openPage: vi.fn(),
+    reloadLibrary: vi.fn(async () => undefined),
+    filterLibrary: vi.fn(),
+    askDelete: vi.fn(),
+    confirmDelete: vi.fn(async () => undefined),
+    cancelDelete: vi.fn(),
   };
 });
 
@@ -303,6 +309,7 @@ describe('side panel DOM behavior', () => {
       userCategory: '投资',
       userTags: ['宏观', '利率'],
       sinks: ['life-teachers'],
+      maxItems: 20,
     });
   });
 
@@ -361,9 +368,16 @@ describe('side panel DOM behavior', () => {
     document.querySelector<HTMLButtonElement>('#capture-button')!.click();
     await Promise.resolve();
 
+    // 目标条数只对批量有意义，列表页才显示。
+    expect(document.querySelector<HTMLElement>('#target')?.hidden).toBe(false);
+    document.querySelector<HTMLInputElement>('#target')!.value = '8';
+    document.querySelector<HTMLButtonElement>('#capture-button')!.click();
+    await Promise.resolve();
+
     // 列表页绝不能走单页保存——那会把整个信息流糊成一篇。
     expect(actions.capture).not.toHaveBeenCalled();
-    expect(actions.captureList).toHaveBeenCalledWith({ userCategory: '投资' });
+    // 采够 8 条就自动停，用户不必盯着手动停。
+    expect(actions.captureList).toHaveBeenLastCalledWith({ userCategory: '投资', maxItems: 8 });
   });
 
   const batchState = (
@@ -603,6 +617,64 @@ describe('side panel DOM behavior', () => {
 
     renderUpdateBanner(document, false, actions);
     expect(document.querySelector<HTMLElement>('#update-banner')?.hidden).toBe(true);
+  });
+
+  it('lists library entries, filters by source, and never deletes without confirmation', async () => {
+    const entries = [
+      { id: 'a', source: '知识星球', title: '第一条', url: 'https://x/a', category: '投资', updatedAt: '2026-07-25T00:00:00.000Z' },
+      { id: 'b', source: '微信公众号', title: '第二条', url: 'https://x/b', category: '认知', updatedAt: '2026-07-24T00:00:00.000Z' },
+    ];
+    renderSidePanel(document, { phase: 'library', entries, source: '', loading: false }, actions);
+
+    expect(visible('#library-panel')).toBe(true);
+    expect(document.querySelector('#library-heading')?.textContent).toBe('已入库 2 条');
+    expect(document.querySelectorAll('#library-list li')).toHaveLength(2);
+    expect([...document.querySelectorAll('#library-filters button')].map(chip => chip.textContent))
+      .toEqual(['全部 2', '微信公众号 1', '知识星球 1']);
+
+    document.querySelectorAll<HTMLButtonElement>('#library-filters button')[1]!.click();
+    expect(actions.filterLibrary).toHaveBeenCalledWith('微信公众号');
+
+    // 点删除只进入确认态，绝不直接删。
+    document.querySelector<HTMLButtonElement>('.item-delete')!.click();
+    expect(actions.askDelete).toHaveBeenCalledWith({ kind: 'one', id: 'a', title: '第一条' });
+    expect(actions.confirmDelete).not.toHaveBeenCalled();
+  });
+
+  it('spells out what a destructive action will remove before doing it', async () => {
+    const entries = [
+      { id: 'a', source: '知识星球', title: '第一条', url: 'https://x/a', category: '投资', updatedAt: '2026-07-25T00:00:00.000Z' },
+    ];
+    renderSidePanel(
+      document,
+      {
+        phase: 'library',
+        entries,
+        source: '',
+        loading: false,
+        pending: { kind: 'all', count: 12 },
+      },
+      actions,
+    );
+
+    const confirm = document.querySelector('#library-confirm');
+    expect(visible('#library-confirm')).toBe(true);
+    expect(confirm?.textContent).toContain('全部 12 条');
+    expect(confirm?.textContent).toContain('不可恢复');
+
+    document.querySelector<HTMLButtonElement>('#library-confirm-yes')!.click();
+    await Promise.resolve();
+    expect(actions.confirmDelete).toHaveBeenCalledOnce();
+
+    document.querySelector<HTMLButtonElement>('#library-confirm-no')!.click();
+    expect(actions.cancelDelete).toHaveBeenCalledOnce();
+  });
+
+  it('disables 清空 when the library is already empty', () => {
+    renderSidePanel(document, { phase: 'library', entries: [], source: '', loading: false }, actions);
+
+    expect(document.querySelector<HTMLButtonElement>('#library-clear-button')?.disabled).toBe(true);
+    expect(visible('#library-empty')).toBe(true);
   });
 
   it('contains no manual connection form or legacy copy', async () => {

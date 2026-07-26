@@ -1,5 +1,6 @@
 import { isListPage } from '@data-collector/shared';
 import type { TopicIndex } from '../topicIndex.js';
+import { excludedBy } from '../topicFilter.js';
 import { buildDocument, cleanText, elementText, parsePublishedAt } from './common.js';
 import { ExtractionError, type Clock } from './types.js';
 
@@ -180,6 +181,14 @@ export function extractZsxqList(
     if (!text || text.length < 20) {
       skipped += 1;
       entries.push({ container, key, title: title || '（空内容）', reason: '正文太短或为空' });
+      continue;
+    }
+    // 选题过滤：用户明确不看的类别（如打新）不入库，但**照样出现在明细里**，
+    // 状态是已跳过、原因写明类别——绝不静默丢弃。
+    const excluded = excludedBy(text);
+    if (excluded) {
+      skipped += 1;
+      entries.push({ container, key, title, reason: `${excluded.label}（按选题偏好跳过）` });
       continue;
     }
     if (!topicUrl) {

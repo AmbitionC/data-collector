@@ -233,6 +233,51 @@ button { appearance: none; }
 
 .update-banner button:hover { background: var(--primary-active); }
 
+/* ── 顶部页面切换 ───────────────────────────────────── */
+.top-nav {
+  grid-column: 1 / -1;
+  display: flex;
+  gap: 4px;
+  margin-top: 12px;
+}
+
+.top-nav button {
+  padding: 5px 14px;
+  border: 1px solid transparent;
+  border-radius: 9999px;
+  background: none;
+  color: var(--muted);
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.top-nav button[aria-pressed="true"] {
+  border-color: var(--hairline-strong);
+  background: var(--surface);
+  color: var(--ink);
+}
+
+.secondary-button.danger { color: var(--error); border-color: var(--error); }
+
+.collected-list .item-actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.collected-list .item-delete {
+  flex: none;
+  padding: 2px 10px;
+  border: 1px solid var(--hairline-strong);
+  border-radius: 9999px;
+  background: none;
+  color: var(--muted);
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.collected-list .item-delete:hover { color: var(--error); border-color: var(--error); }
+
 /* ── 内容区 ─────────────────────────────────────────── */
 .panel-content { flex: 1 0 auto; display: flex; }
 

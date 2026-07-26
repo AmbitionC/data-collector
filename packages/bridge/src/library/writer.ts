@@ -31,7 +31,7 @@ export interface MarkdownLibraryOptions {
   resolveAddresses?: ResolveAddresses;
 }
 
-async function atomicWriteText(root: string, path: string, contents: string): Promise<void> {
+export async function atomicWriteText(root: string, path: string, contents: string): Promise<void> {
   await assertSafeWritePath(root, dirname(path));
   await mkdir(dirname(path), { recursive: true });
   await assertSafeWritePath(root, path);

@@ -31,7 +31,14 @@ import { existsSync } from 'node:fs';
 import { join, resolve as resolvePath } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
+import { clearLibrary, deleteEntries, listLibrary } from '../library/index.js';
 import { updateWorkspace, type UpdateOutcome } from '../autoUpdate.js';
+
+/** 删除请求：要么给明确的 id 列表，要么显式 all:true —— 不接受隐式全删。 */
+const deleteLibrarySchema = z.object({
+  ids: z.array(z.string().min(1).max(200)).max(2_000).optional(),
+  all: z.boolean().optional(),
+});
 
 const execFileAsync = promisify(execFile);
 
@@ -285,6 +292,8 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
     const isProtectedRoute =
       (request.method === 'POST' && requestUrl.pathname === '/v1/jobs') ||
       (request.method === 'POST' && requestUrl.pathname === '/v1/reveal') ||
+      (request.method === 'GET' && requestUrl.pathname === '/v1/library') ||
+      (request.method === 'POST' && requestUrl.pathname === '/v1/library/delete') ||
       (request.method === 'GET' && Boolean(jobMatch?.[1]));
     if (!isProtectedRoute) throw new HttpError(404, 'NOT_FOUND', '接口不存在');
 
@@ -302,6 +311,17 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
       sendJson(response, 202, job);
       if (job.requestedBy !== 'extension') await dispatch(job);
       return;
+    }
+    if (request.method === 'GET' && requestUrl.pathname === '/v1/library') {
+      return sendJson(response, 200, { entries: await listLibrary(config.libraryRoot) });
+    }
+    if (request.method === 'POST' && requestUrl.pathname === '/v1/library/delete') {
+      const input = deleteLibrarySchema.parse(await readJson(request));
+      // 「清空」必须显式请求，绝不把「没传 ids」理解成「删全部」。
+      const outcome = input.all
+        ? await clearLibrary(config.libraryRoot)
+        : await deleteEntries(config.libraryRoot, input.ids ?? []);
+      return sendJson(response, 200, outcome);
     }
     if (request.method === 'POST' && requestUrl.pathname === '/v1/reveal') {
       const input = revealSchema.parse(await readJson(request));

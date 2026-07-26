@@ -3,6 +3,16 @@ import type { BatchItem, BatchPhase } from '../background/jobs.js';
 
 export type { BatchItem, BatchPhase };
 
+/** 已入库的一条内容。 */
+export interface LibraryEntry {
+  id: string;
+  source: string;
+  title: string;
+  url: string;
+  category: string;
+  updatedAt: string;
+}
+
 /** 明细列表的状态筛选。 */
 export type ItemFilter = 'all' | 'saved' | 'skipped' | 'failed';
 
@@ -56,6 +66,17 @@ export type SidePanelState =
       filter: ItemFilter;
       log: string[];
     }
+  | {
+      /** 「已入库」页面：查看本机知识库里已有的内容，并可删除 / 清空。 */
+      phase: 'library';
+      entries: LibraryEntry[];
+      /** 按来源筛选；空串表示全部。 */
+      source: string;
+      /** 待确认的破坏性操作（删除不可逆，必须二次确认）。 */
+      pending?: { kind: 'one'; id: string; title: string } | { kind: 'all'; count: number };
+      loading: boolean;
+      error?: string;
+    }
   | { phase: 'saved'; path: string }
   | { phase: 'needs_attention'; message: string }
   | { phase: 'job_error'; message: string }
@@ -67,6 +88,8 @@ export interface CaptureOverrides {
   userCategory?: string;
   userTags?: string[];
   sinks?: string[];
+  /** 批量：本次要采够多少条，采够自动停（用户不必盯着手动停）。 */
+  maxItems?: number;
 }
 
 export interface SidePanelActions {
@@ -87,6 +110,18 @@ export interface SidePanelActions {
   locateItem(key: string): Promise<void>;
   /** 复制运行记录，便于排查。 */
   copyLog(log: string[]): Promise<void>;
+  /** 顶部页面切换。 */
+  openPage(page: 'collect' | 'library'): void;
+  /** 重新拉取已入库列表。 */
+  reloadLibrary(): Promise<void>;
+  /** 按来源筛选已入库列表。 */
+  filterLibrary(source: string): void;
+  /** 请求删除（先进入确认态，不直接删）。 */
+  askDelete(target: { kind: 'one'; id: string; title: string } | { kind: 'all'; count: number }): void;
+  /** 确认执行删除。 */
+  confirmDelete(): Promise<void>;
+  /** 放弃删除。 */
+  cancelDelete(): void;
   recapture(): Promise<void>;
   retry(): Promise<void>;
   copyPath(path: string): Promise<void>;
@@ -240,10 +275,12 @@ function collectOverrides(document: Document): CaptureOverrides {
     .map(tag => tag.trim())
     .filter(Boolean)
     .slice(0, 8);
+  const target = Number(required<HTMLInputElement>(document, '#target').value);
   return {
     ...(category ? { userCategory: category } : {}),
     ...(tags.length ? { userTags: tags } : {}),
     ...(destination ? { sinks: [destination] } : {}),
+    ...(Number.isFinite(target) && target > 0 ? { maxItems: Math.min(60, Math.round(target)) } : {}),
   };
 }
 
@@ -255,6 +292,7 @@ function setConnectionLabel(document: Document, state: SidePanelState): void {
     'collecting',
     'batch',
     'items',
+    'library',
     'saved',
     'needs_attention',
     'job_error',
@@ -283,7 +321,7 @@ const BATCH_COPY: Record<BatchPhase, { heading: string; note: string; tone: 'ok'
     tone: 'ok',
   },
   capped: {
-    heading: '已达单次上限',
+    heading: '已采够本次目标',
     note: '本页可能还有更多帖子。点「继续采下一批」接着采，已入库的不会重复。',
     tone: 'ok',
   },
@@ -442,6 +480,111 @@ function renderItems(
   };
 }
 
+function renderLibrary(
+  document: Document,
+  state: Extract<SidePanelState, { phase: 'library' }>,
+  actions: SidePanelActions,
+): void {
+  show(document, '#library-panel');
+  const sources = [...new Set(state.entries.map(entry => entry.source))].sort();
+  const visible = state.source
+    ? state.entries.filter(entry => entry.source === state.source)
+    : state.entries;
+
+  required(document, '#library-heading').textContent = state.loading
+    ? '正在读取…'
+    : `已入库 ${state.entries.length} 条`;
+
+  const filters = required<HTMLElement>(document, '#library-filters');
+  filters.replaceChildren();
+  for (const source of ['', ...sources]) {
+    const count = source
+      ? state.entries.filter(entry => entry.source === source).length
+      : state.entries.length;
+    const chip = document.createElement('button');
+    chip.type = 'button';
+    chip.textContent = `${source || '全部'} ${count}`;
+    chip.setAttribute('aria-pressed', String(state.source === source));
+    chip.onclick = () => actions.filterLibrary(source);
+    filters.append(chip);
+  }
+
+  const list = required<HTMLElement>(document, '#library-list');
+  list.replaceChildren();
+  for (const entry of visible) {
+    const row = document.createElement('li');
+    row.dataset.id = entry.id;
+    const label = document.createElement('span');
+    label.className = 'item-title';
+    label.textContent = entry.title || '（无标题）';
+    const meta = document.createElement('span');
+    meta.className = 'item-meta';
+    const tag = document.createElement('span');
+    tag.className = 'item-status';
+    tag.textContent = entry.source;
+    const when = document.createElement('span');
+    when.textContent = `${entry.category} · ${entry.updatedAt.slice(0, 10)}`;
+    const remove = document.createElement('button');
+    remove.type = 'button';
+    remove.className = 'item-delete';
+    remove.textContent = '删除';
+    remove.onclick = () => actions.askDelete({ kind: 'one', id: entry.id, title: entry.title });
+    meta.append(tag, when);
+    const actionsRow = document.createElement('span');
+    actionsRow.className = 'item-actions';
+    actionsRow.append(meta, remove);
+    row.append(label, actionsRow);
+    list.append(row);
+  }
+  required<HTMLElement>(document, '#library-empty').hidden = visible.length > 0 || state.loading;
+
+  required<HTMLButtonElement>(document, '#library-refresh-button').onclick = () => {
+    void actions.reloadLibrary();
+  };
+  const clearButton = required<HTMLButtonElement>(document, '#library-clear-button');
+  clearButton.disabled = state.entries.length === 0;
+  clearButton.onclick = () =>
+    actions.askDelete({ kind: 'all', count: state.entries.length });
+
+  // 删除不可逆：先说清楚要删什么，再给确认。
+  const confirm = required<HTMLElement>(document, '#library-confirm');
+  confirm.replaceChildren();
+  confirm.hidden = !state.pending && !state.error;
+  if (state.error) {
+    confirm.textContent = state.error;
+    return;
+  }
+  if (!state.pending) return;
+  const question = document.createElement('span');
+  question.textContent = state.pending.kind === 'all'
+    ? `确认删除全部 ${state.pending.count} 条？文件会从本机知识库中移除，不可恢复。`
+    : `确认删除「${state.pending.title}」？文件会从本机知识库中移除，不可恢复。`;
+  const yes = document.createElement('button');
+  yes.type = 'button';
+  yes.id = 'library-confirm-yes';
+  yes.className = 'item-delete';
+  yes.textContent = '确认删除';
+  yes.onclick = () => { void actions.confirmDelete(); };
+  const no = document.createElement('button');
+  no.type = 'button';
+  no.id = 'library-confirm-no';
+  no.className = 'item-delete';
+  no.textContent = '取消';
+  no.onclick = () => actions.cancelDelete();
+  confirm.append(question, yes, no);
+}
+
+/** 顶部页面切换按钮的选中态。 */
+export function renderTopNav(document: Document, page: 'collect' | 'library', actions: SidePanelActions): void {
+  const collect = document.querySelector<HTMLButtonElement>('#nav-collect');
+  const library = document.querySelector<HTMLButtonElement>('#nav-library');
+  if (!collect || !library) return;
+  collect.setAttribute('aria-pressed', String(page === 'collect'));
+  library.setAttribute('aria-pressed', String(page === 'library'));
+  collect.onclick = () => actions.openPage('collect');
+  library.onclick = () => actions.openPage('library');
+}
+
 export function renderSidePanel(
   document: Document,
   state: SidePanelState,
@@ -543,6 +686,9 @@ export function renderSidePanel(
       : '保存这一页';
     const listHint = required<HTMLElement>(document, '#list-hint');
     listHint.hidden = !state.list;
+    // 目标条数只对批量有意义。
+    required<HTMLElement>(document, '#target-label').hidden = !state.list;
+    required<HTMLElement>(document, '#target').hidden = !state.list;
 
     required<HTMLButtonElement>(document, '#capture-button').onclick = () => {
       const overrides = collectOverrides(document);
@@ -556,6 +702,10 @@ export function renderSidePanel(
   }
   if (state.phase === 'items') {
     renderItems(document, state, actions);
+    return;
+  }
+  if (state.phase === 'library') {
+    renderLibrary(document, state, actions);
     return;
   }
   if (state.phase === 'collecting') {

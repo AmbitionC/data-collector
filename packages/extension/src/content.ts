@@ -131,10 +131,25 @@ function scrollHost(): HTMLElement | undefined {
   return undefined;
 }
 
-function scrollToBottom(): void {
+/** 人不会一秒滚好几次、也不会瞬移到底：随机化的间隔与步长。 */
+function humanPause(min: number, max: number): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, min + Math.random() * (max - min)));
+}
+
+/**
+ * 像人一样往下滚：分几次、每次滚不到一屏、间隔随机。
+ * 早先是「每 500 毫秒瞬移到底」，那个节奏机器味太重，容易触发风控。
+ */
+async function scrollLikeHuman(): Promise<void> {
   const host = scrollHost();
-  if (host) host.scrollTop = host.scrollHeight;
-  window.scrollTo(0, document.documentElement.scrollHeight);
+  const steps = 2 + Math.floor(Math.random() * 3);
+  for (let step = 0; step < steps; step += 1) {
+    const viewport = host ? host.clientHeight : window.innerHeight;
+    const distance = Math.round(viewport * (0.5 + Math.random() * 0.35));
+    if (host) host.scrollTop += distance;
+    else window.scrollBy({ top: distance, behavior: 'smooth' });
+    await humanPause(450, 1_100);
+  }
 }
 
 /**
@@ -144,10 +159,10 @@ function scrollToBottom(): void {
 async function advanceList(): Promise<{ collapsed: number; loaded: number }> {
   const collapsed = markProcessed();
   const before = document.querySelectorAll('.topic-container').length;
-  scrollToBottom();
-  // 站点是「滚到底再加载一页」，加载要走网络，给足时间并反复触底。
-  for (let waited = 0; waited < 12_000; waited += 500) {
-    await new Promise(resolve => setTimeout(resolve, 500));
+  // 最多三轮「滚一段 → 停下来看看」，每轮之间有较长的停顿，节奏接近真人翻页。
+  for (let round = 0; round < 3; round += 1) {
+    await scrollLikeHuman();
+    await humanPause(900, 1_800);
     const loaded = pendingTopicCount(document);
     if (loaded > 0) {
       console.info(
@@ -156,9 +171,8 @@ async function advanceList(): Promise<{ collapsed: number; loaded: number }> {
       );
       return { collapsed, loaded };
     }
-    scrollToBottom();
   }
-  console.info(`[data-collector] 滚动 12 秒没有加载出新内容，本页帖子仍为 ${before}`);
+  console.info(`[data-collector] 滚动多轮仍未加载出新内容，本页帖子仍为 ${before}`);
   return { collapsed, loaded: 0 };
 }
 

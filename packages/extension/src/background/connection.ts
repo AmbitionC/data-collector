@@ -337,6 +337,37 @@ export class BridgeConnection {
     return { id: job.id };
   }
 
+  /** 已入库内容列表（供侧栏的「已入库」页面）。 */
+  async library(): Promise<unknown[]> {
+    const { baseUrl, token } = await this.authorized();
+    const fetcher = this.dependencies.fetch;
+    const response = await fetcher(`${baseUrl}/v1/library`, {
+      headers: { authorization: `Bearer ${token}` },
+    });
+    if (!response.ok) throw new Error(`读取已入库内容失败：HTTP ${response.status}`);
+    const body = (await response.json()) as { entries?: unknown };
+    return Array.isArray(body.entries) ? body.entries : [];
+  }
+
+  /** 删除已入库条目；all 为 true 表示清空（必须由调用方显式指定）。 */
+  async deleteLibrary(input: { ids?: string[]; all?: boolean }): Promise<{ deleted: number }> {
+    const { baseUrl, token } = await this.authorized();
+    const fetcher = this.dependencies.fetch;
+    const response = await fetcher(`${baseUrl}/v1/library/delete`, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+      body: JSON.stringify(input),
+    });
+    if (!response.ok) throw new Error(`删除失败：HTTP ${response.status}`);
+    return (await response.json()) as { deleted: number };
+  }
+
+  private async authorized(): Promise<{ baseUrl: string; token: string }> {
+    const settings = await this.settings();
+    if (!settings.token) throw new Error('浏览器扩展仍在自动连接 Bridge');
+    return { baseUrl: `http://127.0.0.1:${settings.port}`, token: settings.token };
+  }
+
   async reveal(path: string): Promise<void> {
     const settings = await this.settings();
     if (!settings.token) throw new Error('浏览器扩展仍在自动连接 Bridge');

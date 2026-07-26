@@ -186,17 +186,30 @@ chrome.runtime.onMessage.addListener((message: unknown, _sender, sendResponse) =
         lastJobError: '',
         lastOutputPath: '',
       });
-      return runner.captureList(
-        (request.overrides ?? {}) as {
-          userCategory?: string;
-          userTags?: string[];
-          sinks?: string[];
-        },
-        // 「继续采下一批」是续采，保留上一批的折叠标记；重新发起则先把页面还原。
-        (request as { continuation?: boolean }).continuation === true
+      const overrides = (request.overrides ?? {}) as {
+        userCategory?: string;
+        userTags?: string[];
+        sinks?: string[];
+        maxItems?: number;
+      };
+      return runner.captureList(overrides, {
+        // 采够目标条数就自动停，用户不必盯着手动停。
+        ...(overrides.maxItems ? { maxItems: overrides.maxItems } : {}),
+        // 「继续采下一批」是续采，保留上一批的处理标记；重新发起则先把页面还原。
+        ...((request as { continuation?: boolean }).continuation === true
           ? { continuation: true }
-          : {},
-      );
+          : {}),
+      });
+    }
+    if (request.type === 'library.list') {
+      return { entries: await connection.library() };
+    }
+    if (request.type === 'library.delete') {
+      const input = request as { ids?: string[]; all?: boolean };
+      return connection.deleteLibrary({
+        ...(input.ids ? { ids: input.ids } : {}),
+        ...(input.all ? { all: true } : {}),
+      });
     }
     if (request.type === 'list.locate') {
       return { found: await runner.highlight(String((request as { key?: unknown }).key ?? '')) };
