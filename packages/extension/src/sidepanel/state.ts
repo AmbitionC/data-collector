@@ -30,6 +30,8 @@ export type SidePanelState =
       failed: number;
       message: string;
       code?: string;
+      /** 本批最后写入的文件路径：结果页据此提供「在文件夹中查看」，不让用户没头没尾。 */
+      outputPath?: string;
     }
   | { phase: 'saved'; path: string }
   | { phase: 'needs_attention'; message: string }
@@ -118,6 +120,10 @@ export function sidePanelStateFromStatus(
         ? '浏览器回收了插件的后台进程，本批已中断。已入库的不会重复，可以直接续采。'
         : batch.error ?? '',
       ...(stalled ? { code: 'WORKER_EVICTED' } : batch.code ? { code: batch.code } : {}),
+      // 采到东西了就得给出「东西在哪」——批量结束时 lastOutputPath 是本批最后写入的文件。
+      ...(batch.collected > 0 && status.lastOutputPath
+        ? { outputPath: status.lastOutputPath }
+        : {}),
     };
   }
 
@@ -288,6 +294,8 @@ function renderBatch(
   const retryButton = required<HTMLButtonElement>(document, '#batch-retry-button');
   const diagnoseButton = required<HTMLButtonElement>(document, '#batch-diagnose-button');
   const doneButton = required<HTMLButtonElement>(document, '#batch-done-button');
+  const revealButton = required<HTMLButtonElement>(document, '#batch-reveal-button');
+  const pathLine = required<HTMLElement>(document, '#batch-path');
 
   const recoverable = ['empty', 'skipped_all', 'failed'].includes(state.batchPhase);
   stopButton.hidden = !running;
@@ -296,6 +304,13 @@ function renderBatch(
   // 诊断按钮常驻在需要处理的终态上：结构适配问题不只出现在「全部跳过」这一种。
   diagnoseButton.hidden = running || !recoverable;
   doneButton.hidden = running;
+
+  // 有产出就告诉用户东西落在哪、并给一个直接打开的入口。
+  const outputPath = state.outputPath;
+  pathLine.hidden = !outputPath;
+  pathLine.textContent = outputPath ?? '';
+  revealButton.hidden = running || !outputPath;
+  revealButton.onclick = () => { if (outputPath) void actions.revealPath(outputPath); };
 
   stopButton.onclick = () => { void actions.stopBatch(); };
   // 「继续」是续采，保留已采标记；「重试」是重来一遍，先把页面还原成完整状态。

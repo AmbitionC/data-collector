@@ -22,6 +22,7 @@ import { createTemporaryDirectoryTracker } from '../helpers/temp.js';
 const REQUIRED_FILES = [
   'background.js',
   'content.js',
+  'inject.js',
   'manifest.json',
   'sidepanel/index.html',
   'sidepanel/index.js',
@@ -175,6 +176,7 @@ describe('extension package validation', () => {
     expect((await readdir(stable, { recursive: true })).sort()).toEqual([
       'background.js',
       'content.js',
+      'inject.js',
       'manifest.json',
       'sidepanel',
       'sidepanel/index.html',

@@ -166,6 +166,8 @@ function listDiagnostics(): string {
   }
   return JSON.stringify(
     {
+      // 版本号：贴回来的样本能一眼看出跑的是哪一版插件，不用靠字段有无去猜。
+      diagnosticsVersion: 2,
       url: location.href,
       topicCount: all.length,
       // 为 0 说明一次接口响应都没捕获到——帖子号无从谈起，先滚动一屏或切一次分类。

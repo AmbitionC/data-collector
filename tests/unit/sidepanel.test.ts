@@ -169,6 +169,36 @@ describe('side panel state mapping', () => {
     expect((state as { message: string }).message).toContain('中断');
   });
 
+  it('carries the output path through so the result screen can point somewhere', () => {
+    const url = 'https://wx.zsxq.com/group/48844584441158';
+    const batch = {
+      url,
+      collected: 6,
+      skipped: 0,
+      failed: 0,
+      rounds: 1,
+      phase: 'done' as const,
+      updatedAt: 1_000,
+    };
+    const page = { supported: true, list: true, title: '', url };
+
+    expect(sidePanelStateFromStatus(
+      { bridgeStatus: 'connected', batch, lastOutputPath: '/library/a/index.md', page },
+      () => 2_000,
+    )).toMatchObject({ phase: 'batch', outputPath: '/library/a/index.md' });
+
+    // 零产出时不给路径：没有东西可看。
+    expect(sidePanelStateFromStatus(
+      {
+        bridgeStatus: 'connected',
+        batch: { ...batch, collected: 0, phase: 'empty' },
+        lastOutputPath: '/library/a/index.md',
+        page,
+      },
+      () => 2_000,
+    )).not.toHaveProperty('outputPath');
+  });
+
   it('carries the batch failure reason through instead of dropping it', () => {
     const url = 'https://wx.zsxq.com/group/48844584441158';
     const state = sidePanelStateFromStatus(
@@ -433,6 +463,29 @@ describe('side panel DOM behavior', () => {
     // 成功终态不该出现诊断按钮。
     renderSidePanel(document, batchState('done', { collected: 3 }), actions);
     expect(visible('#batch-diagnose-button')).toBe(false);
+  });
+
+  it('tells the user where the batch put things, and offers to open it', async () => {
+    renderSidePanel(
+      document,
+      { ...batchState('done', { collected: 6 }), outputPath: '/Users/x/code/life-teachers/_inbox/知识星球/a/original.md' },
+      actions,
+    );
+
+    // 采了 6 条却不说落在哪，用户只能干看着——结果页必须给出去向和入口。
+    expect(visible('#batch-path')).toBe(true);
+    expect(document.querySelector('#batch-path')?.textContent).toContain('_inbox');
+    expect(visible('#batch-reveal-button')).toBe(true);
+    document.querySelector<HTMLButtonElement>('#batch-reveal-button')!.click();
+    await Promise.resolve();
+    expect(actions.revealPath).toHaveBeenCalledWith(
+      '/Users/x/code/life-teachers/_inbox/知识星球/a/original.md',
+    );
+
+    // 一条都没采到时不该出现路径和入口。
+    renderSidePanel(document, batchState('skipped_all', { skipped: 21 }), actions);
+    expect(visible('#batch-path')).toBe(false);
+    expect(visible('#batch-reveal-button')).toBe(false);
   });
 
   it('shows the concrete failure reason rather than a generic one', () => {

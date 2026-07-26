@@ -6,6 +6,8 @@ import { unzipSync, zipSync } from 'fflate';
 const ALLOWED_FILES = [
   'background.js',
   'content.js',
+  // 页面主世界脚本：旁观应用自己的接口响应，取回 DOM 上没有的帖子号。
+  'inject.js',
   'manifest.json',
   'sidepanel/index.html',
   'sidepanel/index.js',
