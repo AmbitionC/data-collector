@@ -85,6 +85,16 @@ export function needsTopicHook(url: URL): boolean {
   return descriptorForHost(url.hostname)?.id === 'zsxq';
 }
 
+/**
+ * 来源标识 → 面向用户的名称。
+ *
+ * 目录索引里存的是标识（`zsxq`），界面上必须显示「知识星球」——
+ * 把内部标识直接摆给用户看是低级错误。不认识的标识原样返回，不编造。
+ */
+export function sourceLabel(id: string): string {
+  return (SOURCE_REGISTRY as Record<string, SourceDescriptor | undefined>)[id]?.label ?? id;
+}
+
 /** 按主机名查找来源描述符；找不到返回 undefined。 */
 export function descriptorForHost(host: string): SourceDescriptor | undefined {
   const lower = host.toLowerCase();

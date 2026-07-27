@@ -31,7 +31,7 @@ import { existsSync } from 'node:fs';
 import { join, resolve as resolvePath } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
-import { clearLibrary, deleteEntries, listLibrary } from '../library/index.js';
+import { clearLibrary, deleteEntries, listLibrary, readEntry } from '../library/index.js';
 import { updateWorkspace, type UpdateOutcome } from '../autoUpdate.js';
 
 /** 删除请求：要么给明确的 id 列表，要么显式 all:true —— 不接受隐式全删。 */
@@ -324,6 +324,14 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
     }
     if (request.method === 'GET' && requestUrl.pathname === '/v1/library') {
       return sendJson(response, 200, { entries: await listLibrary(config.libraryRoot) });
+    }
+    if (request.method === 'GET' && requestUrl.pathname === '/v1/library/entry') {
+      const id = requestUrl.searchParams.get('id')?.trim() ?? '';
+      if (!id) throw new HttpError(400, 'INVALID_REQUEST', '缺少条目 id');
+      const entry = await readEntry(config.libraryRoot, id);
+      // 索引里有、文件没了也算「找不到」——绝不返回一片空白让用户以为内容就是空的。
+      if (!entry) throw new HttpError(404, 'ENTRY_NOT_FOUND', '这一条已经不在本机知识库里了');
+      return sendJson(response, 200, entry);
     }
     if (request.method === 'POST' && requestUrl.pathname === '/v1/library/delete') {
       const input = deleteLibrarySchema.parse(await readJson(request));

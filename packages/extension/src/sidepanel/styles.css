@@ -263,9 +263,14 @@ button { appearance: none; }
   display: flex;
   gap: 8px;
   align-items: center;
+  justify-content: space-between;
+  padding: 0 2px 12px;
 }
 
 .collected-list .item-delete {
+  /* display/width 显式写死，不再指望「上面那条规则不会选中我」。 */
+  display: inline-flex;
+  width: auto;
   flex: none;
   padding: 2px 10px;
   border: 1px solid var(--hairline-strong);
@@ -657,7 +662,9 @@ select:focus {
 
 .collected-list li { border-bottom: 1px solid var(--hairline); }
 
-.collected-list button {
+/* 整行可点的那个按钮。**必须限定到 .item-open**：早先写成 `.collected-list button`，
+   把 display:grid + width:100% 漏给了行内的「删除」按钮，那颗小圆角按钮被撑成整行宽。 */
+.collected-list .item-open {
   display: grid;
   width: 100%;
   gap: 4px;
@@ -669,7 +676,7 @@ select:focus {
   cursor: pointer;
 }
 
-.collected-list button:hover { background: var(--canvas-soft); }
+.collected-list .item-open:hover { background: var(--canvas-soft); }
 
 .collected-list .item-title {
   font-size: 13px;
@@ -783,4 +790,72 @@ select:focus {
     transition: none !important;
     animation: none !important;
   }
+}
+
+/* ── 已入库内容浮层 ─────────────────────────────────── */
+.entry-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 10;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: clamp(16px, 5vw, 24px);
+  background: var(--canvas);
+  overflow-y: auto;
+}
+
+.entry-head {
+  display: flex;
+  gap: 12px;
+  align-items: flex-start;
+  justify-content: space-between;
+}
+
+.entry-head h2 {
+  margin: 0;
+  color: var(--ink);
+  font-size: 18px;
+  font-weight: 500;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+
+.entry-close {
+  flex: none;
+  width: 28px;
+  height: 28px;
+  border: 1px solid var(--hairline-strong);
+  border-radius: 50%;
+  background: var(--surface);
+  color: var(--muted);
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.entry-close:hover { color: var(--ink); border-color: var(--ink); }
+
+.entry-meta {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+/* 正文按原样展示（Markdown 源码），必须换行，否则长行会把整个侧栏撑出横向滚动条。 */
+.entry-body {
+  flex: 1;
+  margin: 0;
+  padding: 12px;
+  border: 1px solid var(--hairline);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+  color: var(--body);
+  font-family: var(--mono);
+  font-size: 12px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  overflow-y: auto;
 }

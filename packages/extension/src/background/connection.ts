@@ -349,6 +349,19 @@ export class BridgeConnection {
     return Array.isArray(body.entries) ? body.entries : [];
   }
 
+  /** 读一条已入库内容的正文（供侧栏「查看内容」）。 */
+  async libraryEntry(id: string): Promise<unknown> {
+    const { baseUrl, token } = await this.authorized();
+    const fetcher = this.dependencies.fetch;
+    const response = await fetcher(
+      `${baseUrl}/v1/library/entry?id=${encodeURIComponent(id)}`,
+      { headers: { authorization: `Bearer ${token}` } },
+    );
+    if (response.status === 404) throw new Error('这一条已经不在本机知识库里了');
+    if (!response.ok) throw new Error(`读取内容失败：HTTP ${response.status}`);
+    return response.json();
+  }
+
   /** 删除已入库条目；all 为 true 表示清空（必须由调用方显式指定）。 */
   async deleteLibrary(input: { ids?: string[]; all?: boolean }): Promise<{ deleted: number }> {
     const { baseUrl, token } = await this.authorized();

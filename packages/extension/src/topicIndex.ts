@@ -37,19 +37,46 @@ export interface TopicRecord {
 }
 
 /**
- * 文本归一：去掉空白和标点，只留前若干字符。
+ * 去掉知识星球正文里的内联标记，换回它在页面上**显示出来的**样子。
+ *
+ * 接口返回的 `talk.text` 不是纯文本，话题标签、@提及、外链都是内联标记，形如
+ * `<e type="hashtag" hid="123" title="%23投资%23" />`；页面上渲染出来的却是「#投资#」。
+ * 不还原的话，凡是以话题标签开头的帖子（星球里非常常见）在接口侧的开头是
+ * `etypehashtaghid…`，和页面文本从第一个字就对不上——这正是「20 条只对上 4 条」的成因。
+ */
+export function stripInlineMarkup(value: string): string {
+  return value
+    // 带 title 的内联标记：把 title 里被 URL 编码的可见文字换回来。
+    .replace(/<[^>]*\btitle="([^"]*)"[^>]*>/g, (_match, title: string) => decodePercent(title))
+    // 其余标记整块丢掉（表情、图片占位之类，页面上不是文字）。
+    .replace(/<[^>]*>/g, ' ');
+}
+
+function decodePercent(value: string): string {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    // 半截的百分号编码不该让整条记录作废。
+    return value;
+  }
+}
+
+/**
+ * 文本归一：去掉内联标记、空白和标点，只留前若干字符。
  *
  * 接口里的正文和页面上渲染出来的未必逐字一致（换行、缩进、零宽字符、
  * 标点全半角差异都可能出现），去掉这些噪声再比才对得上。
- * 保留的仍是 24 个实义字符，撞车风险可以忽略。
  */
 export function normalizeForMatch(value: string, length = 24): string {
-  return value
+  return stripInlineMarkup(value)
     .replace(/\s+/g, '')
     .replace(/[\u200b-\u200f\ufeff]/g, '')
     .replace(/[\u3000-\u303f\uff00-\uff65!-/:-@[-`{-~]/g, '')
     .slice(0, length);
 }
+
+/** 用于比对的正文长度上限：够长足以定位，又不至于把索引撑大。 */
+const MATCH_TEXT_LIMIT = 240;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null;
@@ -99,7 +126,9 @@ export function harvestTopics(payload: unknown, limit = 400): TopicRecord[] {
 
     const rawId = node.topic_id ?? node.topicId;
     if (typeof rawId === 'number' || (typeof rawId === 'string' && /^\d+$/.test(rawId))) {
-      const text = normalizeForMatch(textOf(node), 40);
+      // 必须留足长度：接口正文和页面文本常常**开头就不一样**，
+      // 只留 40 字等于把「共同片段」这条退路也砍掉了。
+      const text = normalizeForMatch(textOf(node), MATCH_TEXT_LIMIT);
       if (text) found.push({ topicId: String(rawId), text });
     }
     for (const value of Object.values(node)) queue.push(value);
@@ -108,11 +137,30 @@ export function harvestTopics(payload: unknown, limit = 400): TopicRecord[] {
 }
 
 /**
+ * 允许做「包含」判断的最短长度。归一化后已去掉空白标点，24 个实义字符是一整句话的量级；
+ * 再短就可能是套话，包含关系不足以证明是同一条。
+ */
+const MIN_CONTAINS = 24;
+
+/**
  * 文本 → 帖子号。同一条帖子可能在多次响应里重复出现，后到的覆盖先到的没有坏处。
- * 匹配用「归一化后的前缀」而不是全等：页面上的正文可能被折叠、带上「展开」等附加文案。
+ *
+ * 为什么不能只比开头 24 个字：接口正文和页面文本经常**开头就不一样**——话题标签在
+ * 接口里是内联标记（已由 stripInlineMarkup 还原）、引用块的位置也可能不同，
+ * 页面上的正文有时是从帖子中段开始渲染的。只比截断后的前缀，结果是大部分帖子对不上号
+ * （实测 20 条只对上 4 条）。
+ *
+ * 所以额外允许「整段包含」：两边的完整正文只要一方是另一方的**连续子串**，就是同一条。
+ * 这条规则刻意选得很严——只容忍截断和外围文案，**不容忍任何一个字的差异**。
+ * 曾经试过放宽成「共有一段足够长的文字」，结果「第三条…」被判成了「第二条…」
+ * （两者只差一个字），两条内容会写进同一个文件——误配比漏配严重得多。
+ *
+ * 仍有歧义（多条都包含得上）时返回 undefined，让该条如实计入「已跳过」。**绝不猜。**
  */
 export class TopicIndex {
   private readonly byText = new Map<string, string>();
+  /** 完整正文 → 帖子号，用于「整段包含」这条退路。 */
+  private readonly byFullText = new Map<string, string>();
   private count = 0;
 
   /** 已收录的帖子数（诊断用：为 0 说明一次接口响应都没捕获到）。 */
@@ -120,27 +168,50 @@ export class TopicIndex {
     return this.count;
   }
 
+  /**
+   * 诊断样本：接口那边归一化后长什么样。
+   * 对不上号时，把它和页面文本摆在一起看，一眼就知道是哪里对不上——
+   * 光报一个「已捕获 N 个」根本没法定位。
+   */
+  samples(limit = 4): { topicId: string; normalized: string }[] {
+    const out: { topicId: string; normalized: string }[] = [];
+    for (const [normalized, topicId] of this.byText) {
+      if (out.length >= limit) break;
+      out.push({ topicId, normalized });
+    }
+    return out;
+  }
+
   add(records: readonly TopicRecord[]): void {
     for (const record of records) {
-      const key = normalizeForMatch(record.text);
+      const full = normalizeForMatch(record.text, MATCH_TEXT_LIMIT);
+      const key = full.slice(0, 24);
       if (!key) continue;
       if (!this.byText.has(key)) this.count += 1;
       this.byText.set(key, record.topicId);
+      this.byFullText.set(full, record.topicId);
     }
   }
 
   /** 用页面节点的正文找回帖子号；找不到返回 undefined（该条如实计入跳过）。 */
   find(text: string): string | undefined {
-    const key = normalizeForMatch(text);
+    const full = normalizeForMatch(text, MATCH_TEXT_LIMIT);
+    const key = full.slice(0, 24);
     if (!key) return undefined;
     const exact = this.byText.get(key);
     if (exact) return exact;
-    // 页面正文与接口正文可能一长一短（折叠、外围文案），互为前缀或包含即认为是同一条。
-    // 比的是 24 个实义字符，误配概率可以忽略；对不上就返回 undefined，绝不猜。
+    // 开头一致、一长一短（折叠、尾部多了「展开」之类）——同一条。
     for (const [candidate, topicId] of this.byText) {
       if (candidate.startsWith(key) || key.startsWith(candidate)) return topicId;
-      if (key.includes(candidate) || candidate.includes(key)) return topicId;
     }
-    return undefined;
+    // 开头对不上：只认「整段包含」，且必须唯一。
+    if (full.length < MIN_CONTAINS) return undefined;
+    const hits = new Set<string>();
+    for (const [candidate, topicId] of this.byFullText) {
+      if (candidate.length < MIN_CONTAINS) continue;
+      if (candidate.includes(full) || full.includes(candidate)) hits.add(topicId);
+      if (hits.size > 1) return undefined;
+    }
+    return hits.size === 1 ? [...hits][0] : undefined;
   }
 }

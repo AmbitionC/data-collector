@@ -2,6 +2,7 @@ import type { CollectedDocument } from '@data-collector/shared';
 import {
   COLLECTED_ATTRIBUTE,
   KEY_ATTRIBUTE,
+  listBodyText,
   ExtractionError,
   extractDocument,
   extractList,
@@ -221,11 +222,18 @@ function listDiagnostics(): string {
   return JSON.stringify(
     {
       // 版本号：贴回来的样本能一眼看出跑的是哪一版插件，不用靠字段有无去猜。
-      diagnosticsVersion: 2,
+      diagnosticsVersion: 3,
       url: location.href,
       topicCount: all.length,
       // 为 0 说明一次接口响应都没捕获到——帖子号无从谈起，先滚动一屏或切一次分类。
       capturedTopics: topics.size,
+      // 成对样本：接口那边归一化后是什么样、页面这边又是什么样。
+      // 「对不上号」的排查全靠这两栏摆在一起看，只报一个总数根本定位不了。
+      capturedSamples: topics.samples(4),
+      pageSamples: all.slice(0, 4).map(node => ({
+        matched: Boolean(topics.find(listBodyText(node))),
+        text: listBodyText(node).replace(/\s+/g, '').slice(0, 60),
+      })),
       sampledCollapsed: container.hasAttribute(COLLECTED_ATTRIBUTE),
       textSample: (container.textContent ?? '').replace(/\s+/g, ' ').trim().slice(0, 80),
       anchors: [...container.querySelectorAll('a')]

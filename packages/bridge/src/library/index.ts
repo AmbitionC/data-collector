@@ -4,6 +4,8 @@ export {
   clearLibrary,
   deleteEntries,
   listLibrary,
+  readEntry,
   type DeleteOutcome,
   type LibraryEntry,
+  type LibraryEntryContent,
 } from './manage.js';

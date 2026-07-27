@@ -11,7 +11,7 @@ import { extractWechat } from './wechat.js';
 import { extractZsxq, extractZsxqList, type ListExtraction } from './zsxq.js';
 
 export { ExtractionError } from './types.js';
-export { COLLECTED_ATTRIBUTE, KEY_ATTRIBUTE, pendingTopicCount } from './zsxq.js';
+export { COLLECTED_ATTRIBUTE, KEY_ATTRIBUTE, listBodyText, pendingTopicCount } from './zsxq.js';
 export type { ListEntry, ListExtraction } from './zsxq.js';
 
 /** 列表页批量提取（当前仅知识星球有列表形态）。 */

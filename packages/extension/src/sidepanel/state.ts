@@ -1,4 +1,4 @@
-import { descriptorForHost } from '@data-collector/shared';
+import { descriptorForHost, sourceLabel } from '@data-collector/shared';
 import type { BatchItem, BatchPhase } from '../background/jobs.js';
 
 export type { BatchItem, BatchPhase };
@@ -11,6 +11,21 @@ export interface LibraryEntry {
   url: string;
   category: string;
   updatedAt: string;
+}
+
+/** 打开某条查看正文时的浮层状态。 */
+export interface EntryView {
+  id: string;
+  title: string;
+  loading: boolean;
+  /** Markdown 正文；读取中或失败时为空。 */
+  markdown?: string;
+  truncated?: boolean;
+  source?: string;
+  category?: string;
+  url?: string;
+  absolutePath?: string;
+  error?: string;
 }
 
 /** 明细列表的状态筛选。 */
@@ -76,6 +91,8 @@ export type SidePanelState =
       pending?: { kind: 'one'; id: string; title: string } | { kind: 'all'; count: number };
       loading: boolean;
       error?: string;
+      /** 正在查看的那一条（浮层）。 */
+      viewing?: EntryView;
     }
   | { phase: 'saved'; path: string; targets: string[] }
   | { phase: 'needs_attention'; message: string }
@@ -116,6 +133,12 @@ export interface SidePanelActions {
   reloadLibrary(): Promise<void>;
   /** 按来源筛选已入库列表。 */
   filterLibrary(source: string): void;
+  /** 打开某条的正文浮层。 */
+  openEntry(id: string, title: string): void;
+  /** 关掉正文浮层。 */
+  closeEntry(): void;
+  /** 在浏览器里打开这条内容的原始地址。 */
+  openSource(url: string): void;
   /** 请求删除（先进入确认态，不直接删）。 */
   askDelete(target: { kind: 'one'; id: string; title: string } | { kind: 'all'; count: number }): void;
   /** 确认执行删除。 */
@@ -470,6 +493,7 @@ function renderItems(
     row.dataset.status = item.status;
     const button = document.createElement('button');
     button.type = 'button';
+    button.className = 'item-open';
     const title = document.createElement('span');
     title.className = 'item-title';
     title.textContent = item.title || '（无标题）';
@@ -496,12 +520,62 @@ function renderItems(
   };
 }
 
+/**
+ * 已入库条目的正文浮层。
+ *
+ * 「点开看不了内容」等于这个页面白做——用户没法核对自己到底采到了什么。
+ * 读取中 / 读失败都要说出来，绝不给一片空白让人以为内容就是空的。
+ */
+function renderEntryOverlay(
+  document: Document,
+  view: EntryView | undefined,
+  actions: SidePanelActions,
+): void {
+  const overlay = document.querySelector<HTMLElement>('#entry-overlay');
+  if (!overlay) return;
+  overlay.hidden = !view;
+  if (!view) return;
+
+  required(document, '#entry-title').textContent = view.title || '（无标题）';
+  const meta = [
+    view.source ? sourceLabel(view.source) : '',
+    view.category ?? '',
+    view.absolutePath ?? '',
+  ].filter(Boolean);
+  required(document, '#entry-meta').textContent = meta.join(' · ');
+
+  const status = required<HTMLElement>(document, '#entry-status');
+  const statusText = view.error
+    ?? (view.loading ? '正在读取本机文件…' : view.truncated ? '内容较长，这里只显示前一部分。' : '');
+  status.hidden = statusText === '';
+  status.textContent = statusText;
+
+  required(document, '#entry-body').textContent = view.markdown ?? '';
+
+  const openSource = required<HTMLButtonElement>(document, '#entry-open-source');
+  openSource.hidden = !view.url;
+  openSource.onclick = () => { if (view.url) actions.openSource(view.url); };
+
+  const reveal = required<HTMLButtonElement>(document, '#entry-reveal');
+  reveal.hidden = !view.absolutePath;
+  reveal.onclick = async () => {
+    if (!view.absolutePath) return;
+    try {
+      await actions.revealPath(view.absolutePath);
+    } catch {
+      reveal.textContent = '打不开，改用文件管理器';
+    }
+  };
+  required<HTMLButtonElement>(document, '#entry-close').onclick = () => actions.closeEntry();
+}
+
 function renderLibrary(
   document: Document,
   state: Extract<SidePanelState, { phase: 'library' }>,
   actions: SidePanelActions,
 ): void {
   show(document, '#library-panel');
+  renderEntryOverlay(document, state.viewing, actions);
   const sources = [...new Set(state.entries.map(entry => entry.source))].sort();
   const visible = state.source
     ? state.entries.filter(entry => entry.source === state.source)
@@ -519,7 +593,8 @@ function renderLibrary(
       : state.entries.length;
     const chip = document.createElement('button');
     chip.type = 'button';
-    chip.textContent = `${source || '全部'} ${count}`;
+    // 筛选值仍是标识（要和索引对得上），显示的必须是人话。
+    chip.textContent = `${source ? sourceLabel(source) : '全部'} ${count}`;
     chip.setAttribute('aria-pressed', String(state.source === source));
     chip.onclick = () => actions.filterLibrary(source);
     filters.append(chip);
@@ -530,6 +605,11 @@ function renderLibrary(
   for (const entry of visible) {
     const row = document.createElement('li');
     row.dataset.id = entry.id;
+    // 整行可点 → 打开正文浮层。此前这里是个 <span>，压根点不动，
+    // 用户看不到自己采到了什么，「已入库」页也就只剩一张没用的清单。
+    const open = document.createElement('button');
+    open.type = 'button';
+    open.className = 'item-open';
     const label = document.createElement('span');
     label.className = 'item-title';
     label.textContent = entry.title || '（无标题）';
@@ -537,19 +617,23 @@ function renderLibrary(
     meta.className = 'item-meta';
     const tag = document.createElement('span');
     tag.className = 'item-status';
-    tag.textContent = entry.source;
+    // 显示来源名而不是内部标识：用户不该在界面上看到 zsxq 这种东西。
+    tag.textContent = sourceLabel(entry.source);
     const when = document.createElement('span');
     when.textContent = `${entry.category} · ${entry.updatedAt.slice(0, 10)}`;
+    meta.append(tag, when);
+    open.append(label, meta);
+    open.onclick = () => actions.openEntry(entry.id, entry.title);
+
     const remove = document.createElement('button');
     remove.type = 'button';
     remove.className = 'item-delete';
     remove.textContent = '删除';
     remove.onclick = () => actions.askDelete({ kind: 'one', id: entry.id, title: entry.title });
-    meta.append(tag, when);
     const actionsRow = document.createElement('span');
     actionsRow.className = 'item-actions';
-    actionsRow.append(meta, remove);
-    row.append(label, actionsRow);
+    actionsRow.append(remove);
+    row.append(open, actionsRow);
     list.append(row);
   }
   required<HTMLElement>(document, '#library-empty').hidden = visible.length > 0 || state.loading;

@@ -5,6 +5,7 @@ import {
   renderUpdateBanner,
   type BackgroundStatus,
   type CaptureOverrides,
+  type EntryView,
   type ItemFilter,
   type LibraryEntry,
   type SidePanelActions,
@@ -64,6 +65,8 @@ let librarySource = '';
 let libraryLoading = false;
 let libraryPending: Extract<SidePanelState, { phase: 'library' }>['pending'];
 let libraryError: string | undefined;
+/** 正在查看正文的那一条（浮层），只活在侧栏本地。 */
+let viewing: EntryView | undefined;
 
 function libraryState(): SidePanelState {
   return {
@@ -73,7 +76,43 @@ function libraryState(): SidePanelState {
     loading: libraryLoading,
     ...(libraryPending ? { pending: libraryPending } : {}),
     ...(libraryError ? { error: libraryError } : {}),
+    ...(viewing ? { viewing } : {}),
   };
+}
+
+/** 读一条已入库内容的正文，失败如实写在浮层上。 */
+async function loadEntry(id: string, title: string): Promise<void> {
+  viewing = { id, title, loading: true };
+  renderSidePanel(document, libraryState(), actions);
+  try {
+    const entry = await message<{
+      markdown: string;
+      truncated: boolean;
+      source: string;
+      category: string;
+      url: string;
+      absolutePath: string;
+      title: string;
+    }>({ type: 'library.entry', id });
+    // 期间用户可能已经关掉或点了别的条目，这次结果就作废。
+    if (viewing?.id !== id) return;
+    viewing = {
+      id,
+      title: entry.title || title,
+      loading: false,
+      markdown: entry.markdown,
+      truncated: entry.truncated,
+      source: entry.source,
+      category: entry.category,
+      url: entry.url,
+      absolutePath: entry.absolutePath,
+    };
+  } catch (error) {
+    if (viewing?.id !== id) return;
+    viewing = { id, title, loading: false, error: errorMessage(error, '读取这一条的内容失败。') };
+  } finally {
+    if (viewing?.id === id) renderSidePanel(document, libraryState(), actions);
+  }
 }
 
 async function loadLibrary(): Promise<void> {
@@ -289,17 +328,30 @@ const actions: SidePanelActions = {
     page = next;
     libraryPending = undefined;
     libraryError = undefined;
+    viewing = undefined;
     renderTopNav(document, page, actions);
     if (next === 'library') void loadLibrary();
     else void refresh();
   },
   async reloadLibrary() {
     libraryPending = undefined;
+    viewing = undefined;
     await loadLibrary();
   },
   filterLibrary(source) {
     librarySource = source;
     renderSidePanel(document, libraryState(), actions);
+  },
+  openEntry(id, title) {
+    void loadEntry(id, title);
+  },
+  closeEntry() {
+    viewing = undefined;
+    renderSidePanel(document, libraryState(), actions);
+  },
+  openSource(url) {
+    // 新标签页打开原文，不动用户当前所在的页面。
+    void chrome.tabs.create({ url, active: true });
   },
   askDelete(target) {
     // 只进入确认态，绝不在这里动文件。
@@ -321,6 +373,8 @@ const actions: SidePanelActions = {
           ? { type: 'library.delete', all: true }
           : { type: 'library.delete', ids: [target.id] },
       );
+      // 删掉的正是正在看的那条时必须收起浮层，否则会停在一份已经不存在的内容上。
+      if (target.kind === 'all' || viewing?.id === target.id) viewing = undefined;
       await loadLibrary();
     } catch (error) {
       libraryError = errorMessage(error, '删除失败。');

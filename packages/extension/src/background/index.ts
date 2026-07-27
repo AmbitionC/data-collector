@@ -221,6 +221,9 @@ chrome.runtime.onMessage.addListener((message: unknown, _sender, sendResponse) =
     if (request.type === 'library.list') {
       return { entries: await connection.library() };
     }
+    if (request.type === 'library.entry' && typeof (request as { id?: unknown }).id === 'string') {
+      return connection.libraryEntry((request as { id: string }).id);
+    }
     if (request.type === 'library.delete') {
       const input = request as { ids?: string[]; all?: boolean };
       return connection.deleteLibrary({

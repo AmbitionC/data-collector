@@ -6,6 +6,7 @@ import {
   clearLibrary,
   deleteEntries,
   listLibrary,
+  readEntry,
 } from '../../packages/bridge/src/library/manage.js';
 import { createTemporaryDirectoryTracker } from '../helpers/temp.js';
 
@@ -127,6 +128,47 @@ describe('已入库内容管理', () => {
 
     // 再删一次同一条：文件没了，索引里也没了，不该报错。
     expect(await deleteEntries(root, ['aaa'])).toEqual({ deleted: 0, missing: 0 });
+  });
+
+  it('读得出一条的正文，并给出可用于打开文件夹的绝对路径', async () => {
+    // 「点开看不了内容」等于这个页面白做——用户没法核对自己到底采到了什么。
+    const root = await seedLibrary(SEEDS);
+
+    const entry = await readEntry(root, 'aaa');
+
+    expect(entry).toMatchObject({ id: 'aaa', title: '第一条', markdown: '# 第一条\n', truncated: false });
+    expect(entry?.absolutePath).toBe(join(root, SEEDS[0]!.relativePath));
+  });
+
+  it('索引里有、文件已经不在了：如实说找不到，而不是给一片空白', async () => {
+    const root = await seedLibrary(SEEDS);
+    await deleteEntries(root, ['aaa']);
+
+    expect(await readEntry(root, 'aaa')).toBeUndefined();
+    expect(await readEntry(root, '根本不存在的 id')).toBeUndefined();
+  });
+
+  it('索引里指向库外的路径一律读不出来（relativePath 是外部数据）', async () => {
+    const root = await seedLibrary(SEEDS);
+    const outside = await temporaryDirectories.create('outside-read-');
+    await writeFile(join(outside, 'secret.md'), '不该被读到', 'utf8');
+    await writeFile(
+      join(root, '_catalog', 'index.json'),
+      JSON.stringify([
+        {
+          id: 'evil',
+          source: 'x',
+          title: '越界条目',
+          url: 'https://x/evil',
+          category: '其他',
+          relativePath: join('..', '..', '..', outside, 'secret.md'),
+          updatedAt: '2026-07-25T00:00:00.000Z',
+        },
+      ]),
+      'utf8',
+    );
+
+    expect(await readEntry(root, 'evil')).toBeUndefined();
   });
 
   it('没有索引文件时列表为空、清空是空操作', async () => {

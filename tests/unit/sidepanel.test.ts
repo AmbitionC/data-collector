@@ -46,6 +46,9 @@ beforeEach(async () => {
     askDelete: vi.fn(),
     confirmDelete: vi.fn(async () => undefined),
     cancelDelete: vi.fn(),
+    openEntry: vi.fn(),
+    closeEntry: vi.fn(),
+    openSource: vi.fn(),
   };
 });
 
@@ -745,5 +748,97 @@ describe('persistent side panel refresh cadence', () => {
     expect(source).toContain("collecting: 700");
     expect(source).toContain("batch: 700");
     expect(source).toContain("default: 1000");
+  });
+});
+
+describe('已入库页面', () => {
+  const ENTRIES = [
+    {
+      id: 'aaa',
+      source: 'zsxq',
+      title: '创业板跌破 60 日线',
+      url: 'https://wx.zsxq.com/topic/511',
+      category: '投资',
+      updatedAt: '2026-07-26T00:00:00.000Z',
+    },
+  ];
+
+  it('来源显示成人话，不把内部标识摆给用户看', () => {
+    renderSidePanel(document, { phase: 'library', entries: ENTRIES, source: '', loading: false }, actions);
+
+    expect(document.querySelector('#library-list .item-status')?.textContent).toBe('知识星球');
+    expect(document.querySelector('#library-list')?.textContent).not.toContain('zsxq');
+    // 筛选按钮同理：显示中文，但筛选值仍是标识（要和索引对得上）。
+    const chips = [...document.querySelectorAll<HTMLButtonElement>('#library-filters button')];
+    expect(chips.map(chip => chip.textContent)).toEqual(['全部 1', '知识星球 1']);
+    chips[1]!.click();
+    expect(actions.filterLibrary).toHaveBeenCalledWith('zsxq');
+  });
+
+  it('整行可点，点了就去读这一条的正文', () => {
+    // 早先这里是个 <span>，压根点不动——用户看不到自己采到了什么。
+    renderSidePanel(document, { phase: 'library', entries: ENTRIES, source: '', loading: false }, actions);
+
+    const row = document.querySelector<HTMLButtonElement>('#library-list .item-open');
+    expect(row).not.toBeNull();
+    row!.click();
+    expect(actions.openEntry).toHaveBeenCalledWith('aaa', '创业板跌破 60 日线');
+  });
+
+  it('删除按钮和整行按钮是两颗按钮，删除不会被撑成整行宽', () => {
+    // 回归：样式写成 `.collected-list button` 时，display:grid + width:100%
+    // 漏给了「删除」，那颗小圆角按钮被撑满整行。类名分开是这条的前提。
+    renderSidePanel(document, { phase: 'library', entries: ENTRIES, source: '', loading: false }, actions);
+
+    const remove = document.querySelector<HTMLButtonElement>('#library-list .item-delete');
+    expect(remove?.textContent).toBe('删除');
+    expect(remove?.classList.contains('item-open')).toBe(false);
+    remove!.click();
+    expect(actions.askDelete).toHaveBeenCalledWith({
+      kind: 'one', id: 'aaa', title: '创业板跌破 60 日线',
+    });
+  });
+
+  it('正文浮层：读取中说在读、读到了显示正文、失败说清原因', () => {
+    const base = { phase: 'library' as const, entries: ENTRIES, source: '', loading: false };
+
+    renderSidePanel(document, {
+      ...base,
+      viewing: { id: 'aaa', title: '创业板跌破 60 日线', loading: true },
+    }, actions);
+    expect(document.querySelector<HTMLElement>('#entry-overlay')?.hidden).toBe(false);
+    expect(document.querySelector('#entry-status')?.textContent).toContain('正在读取');
+
+    renderSidePanel(document, {
+      ...base,
+      viewing: {
+        id: 'aaa',
+        title: '创业板跌破 60 日线',
+        loading: false,
+        markdown: '# 标题\n\n正文内容。',
+        truncated: false,
+        source: 'zsxq',
+        category: '投资',
+        url: 'https://wx.zsxq.com/topic/511',
+        absolutePath: '/library/知识星球/投资/2026/aaa/index.md',
+      },
+    }, actions);
+    expect(document.querySelector('#entry-body')?.textContent).toContain('正文内容。');
+    expect(document.querySelector('#entry-meta')?.textContent).toContain('知识星球');
+    expect(document.querySelector<HTMLElement>('#entry-status')?.hidden).toBe(true);
+
+    renderSidePanel(document, {
+      ...base,
+      viewing: { id: 'aaa', title: '创业板跌破 60 日线', loading: false, error: '这一条已经不在本机知识库里了' },
+    }, actions);
+    // 读不到必须说出来，绝不给一片空白让人以为内容就是空的。
+    expect(document.querySelector('#entry-status')?.textContent).toBe('这一条已经不在本机知识库里了');
+    expect(document.querySelector('#entry-body')?.textContent).toBe('');
+  });
+
+  it('没在看任何一条时浮层是收起的', () => {
+    renderSidePanel(document, { phase: 'library', entries: ENTRIES, source: '', loading: false }, actions);
+
+    expect(document.querySelector<HTMLElement>('#entry-overlay')?.hidden).toBe(true);
   });
 });

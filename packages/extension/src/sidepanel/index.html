@@ -136,6 +136,22 @@
           <p id="library-confirm" class="support compact" hidden></p>
         </section>
 
+        <!-- 已入库条目的内容浮层：盖住整个侧栏，看完关掉就回到列表。 -->
+        <section id="entry-overlay" class="entry-overlay" role="dialog" aria-modal="true"
+                 aria-labelledby="entry-title" hidden>
+          <header class="entry-head">
+            <h2 id="entry-title"></h2>
+            <button id="entry-close" type="button" class="entry-close" aria-label="关闭">×</button>
+          </header>
+          <p id="entry-meta" class="entry-meta"></p>
+          <p id="entry-status" class="support compact" hidden></p>
+          <pre id="entry-body" class="entry-body"></pre>
+          <div class="result-actions">
+            <button id="entry-open-source" type="button" class="secondary-button">打开原文</button>
+            <button id="entry-reveal" type="button" class="secondary-button">在文件夹中查看</button>
+          </div>
+        </section>
+
         <section id="items-panel" class="state-panel" hidden>
           <p class="section-kicker">本轮明细</p>
           <h2 id="items-heading">已收集的帖子</h2>

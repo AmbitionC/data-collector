@@ -48,6 +48,52 @@ export async function listLibrary(root: string): Promise<LibraryEntry[]> {
   );
 }
 
+/** 一条已入库内容的正文（供侧栏「查看内容」）。 */
+export interface LibraryEntryContent extends LibraryEntry {
+  /** Markdown 全文；超长会截断，并置 truncated。 */
+  markdown: string;
+  truncated: boolean;
+  /** 正文文件的绝对路径，便于「在文件夹中查看」。 */
+  absolutePath: string;
+}
+
+/** 单条正文的读取上限：侧栏是个窄面板，读进来几百 KB 毫无意义还会卡住渲染。 */
+const MAX_CONTENT_BYTES = 200_000;
+
+/**
+ * 读一条已入库内容的正文。
+ *
+ * relativePath 来自目录索引，是**外部数据**，因此和删除走同一条越界校验：
+ * 只允许读知识库根目录之内的文件。
+ */
+export async function readEntry(
+  root: string,
+  id: string,
+): Promise<LibraryEntryContent | undefined> {
+  const entry = (await readCatalog(root)).find(candidate => candidate.id === id);
+  if (!entry) return undefined;
+  let absolutePath: string;
+  try {
+    absolutePath = assertInsideRoot(root, join(root, entry.relativePath));
+  } catch {
+    return undefined;
+  }
+  let markdown: string;
+  try {
+    markdown = await readFile(absolutePath, 'utf8');
+  } catch {
+    // 索引里有、文件没了：如实说不出内容，而不是渲染一片空白。
+    return undefined;
+  }
+  const truncated = markdown.length > MAX_CONTENT_BYTES;
+  return {
+    ...entry,
+    absolutePath,
+    truncated,
+    markdown: truncated ? markdown.slice(0, MAX_CONTENT_BYTES) : markdown,
+  };
+}
+
 export interface DeleteOutcome {
   deleted: number;
   /** 索引里有、但文件已经不在了的条目数（照样从索引里清掉）。 */

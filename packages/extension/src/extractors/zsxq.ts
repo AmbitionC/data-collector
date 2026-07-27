@@ -153,6 +153,15 @@ export interface ListExtraction {
 }
 
 /**
+ * 一条帖子在页面上**用于对号的正文文本**（不含作者名、时间、点赞数等外围文案）。
+ * 诊断要拿它和接口正文摆在一起比，所以必须和 extractZsxqList 走同一条取文路径，
+ * 否则比的是另一段文字，看着「明明一样」却对不上。
+ */
+export function listBodyText(container: Element): string {
+  return elementText(firstWithin(container, CONTENT_SELECTORS) ?? container);
+}
+
+/**
  * 列表 / 精华页批量提取：把每个 .topic-container 当作独立一篇。
  * 只返回能确定自身 URL 的条目，其余计入 skipped。
  */
