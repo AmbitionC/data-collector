@@ -28,5 +28,11 @@ export interface ContentSink {
    * 空数组表示该去向不预设分类，交给离线分类器/下游 Agent 判定。
    */
   readonly categories: readonly string[];
+  /**
+   * 该 sink 写入内容的根目录（绝对路径）。
+   * 「在文件夹中查看」据此判断一个路径是不是我们自己写出来的——
+   * 只认本机库根目录的话，投到仓库收件箱的条目会被当成越界请求一律拒掉。
+   */
+  readonly root: string;
   save(input: OrganizedDocument): Promise<SinkResult>;
 }

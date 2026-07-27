@@ -138,23 +138,33 @@ async function defaultReveal(path: string): Promise<void> {
   });
 }
 
-async function verifiedLibraryPath(root: string, requestedPath: string): Promise<string> {
-  const candidate = resolve(requestedPath);
+/** 词法 + realpath 双重判断：candidate 是否确实落在 root 之内。 */
+async function containedBy(root: string, candidate: string): Promise<boolean> {
   const lexicalRelative = relative(root, candidate);
-  if (lexicalRelative.startsWith('..') || isAbsolute(lexicalRelative)) {
-    throw new HttpError(400, 'INVALID_LIBRARY_PATH', '只能打开知识库内的文件');
-  }
+  if (lexicalRelative.startsWith('..') || isAbsolute(lexicalRelative)) return false;
   try {
     const [realRoot, realCandidate] = await Promise.all([realpath(root), realpath(candidate)]);
     const realRelative = relative(realRoot, realCandidate);
-    if (realRelative.startsWith('..') || isAbsolute(realRelative)) {
-      throw new HttpError(400, 'INVALID_LIBRARY_PATH', '路径通过符号链接离开了知识库');
-    }
-    return candidate;
-  } catch (error) {
-    if (error instanceof HttpError) throw error;
-    throw new HttpError(400, 'INVALID_LIBRARY_PATH', '知识库文件不存在');
+    return !realRelative.startsWith('..') && !isAbsolute(realRelative);
+  } catch {
+    // 目录不存在或路径通过符号链接跑出去了，都不放行。
+    return false;
   }
+}
+
+/**
+ * 「在文件夹中查看」的越界校验。
+ *
+ * 允许的不止本机库：默认路由可能把内容只投到仓库收件箱，那时产出路径根本不在
+ * 本机库下，只认库根目录会把这些条目一律 400 —— 用户点了按钮却毫无反应。
+ * 放行范围严格等于「我们自己写过内容的根目录」，不多一个。
+ */
+async function verifiedRevealPath(roots: readonly string[], requestedPath: string): Promise<string> {
+  const candidate = resolve(requestedPath);
+  for (const root of roots) {
+    if (root && (await containedBy(root, candidate))) return candidate;
+  }
+  throw new HttpError(400, 'INVALID_LIBRARY_PATH', '只能打开 Data Collector 自己写入的文件');
 }
 
 export async function startBridge(options: StartBridgeOptions = {}): Promise<BridgeHandle> {
@@ -325,7 +335,10 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
     }
     if (request.method === 'POST' && requestUrl.pathname === '/v1/reveal') {
       const input = revealSchema.parse(await readJson(request));
-      const path = await verifiedLibraryPath(config.libraryRoot, input.path);
+      const path = await verifiedRevealPath(
+        [config.libraryRoot, ...router.revealRoots()],
+        input.path,
+      );
       await reveal(path);
       return sendJson(response, 200, { ok: true });
     }

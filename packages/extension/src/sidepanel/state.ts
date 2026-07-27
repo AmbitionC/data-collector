@@ -77,7 +77,7 @@ export type SidePanelState =
       loading: boolean;
       error?: string;
     }
-  | { phase: 'saved'; path: string }
+  | { phase: 'saved'; path: string; targets: string[] }
   | { phase: 'needs_attention'; message: string }
   | { phase: 'job_error'; message: string }
   | { phase: 'bridge_unavailable' }
@@ -151,6 +151,8 @@ export interface BackgroundStatus {
   lastJobUrl?: string;
   lastJobError?: string;
   lastOutputPath?: string;
+  /** 本篇真正写成功的去向 id（默认路由可能同时写多处）。 */
+  lastSinkIds?: string[];
   batch?: BatchStatus;
   /** 本轮逐条结果，供「本轮明细」子页面展示。 */
   batchItems?: BatchItem[];
@@ -226,7 +228,13 @@ export function sidePanelStateFromStatus(
     };
   }
   if (jobBelongsToPage && status.lastJobStatus === 'saved' && status.lastOutputPath) {
-    return { phase: 'saved', path: status.lastOutputPath };
+    // 去向名从路由表反查：结果屏必须说清内容到底进了哪几处，
+    // 而不是一律写「本地知识库」——选了「只存到收件箱」时那句话就是错的。
+    const known = status.page.destinations ?? [];
+    const targets = (status.lastSinkIds ?? []).map(
+      id => known.find(sink => sink.id === id)?.label ?? id,
+    );
+    return { phase: 'saved', path: status.lastOutputPath, targets };
   }
   if (jobBelongsToPage && status.lastJobStatus === 'failed') {
     return { phase: 'job_error', message: status.lastJobError || '采集失败，请重新保存。' };
@@ -312,7 +320,7 @@ function setConnectionLabel(document: Document, state: SidePanelState): void {
 const BATCH_COPY: Record<BatchPhase, { heading: string; note: string; tone: 'ok' | 'warn' }> = {
   running: {
     heading: '正在批量归档',
-    note: '采完一屏会自动收起已处理的帖子并向下加载，侧栏可以保持打开。',
+    note: '采完一屏会像人一样慢慢往下滚，加载出下一批。页面外观一动不动，随时可以肉眼核对。',
     tone: 'ok',
   },
   done: {
@@ -388,7 +396,15 @@ function renderBatch(
   pathLine.hidden = !outputPath;
   pathLine.textContent = outputPath ?? '';
   revealButton.hidden = running || !outputPath;
-  revealButton.onclick = () => { if (outputPath) void actions.revealPath(outputPath); };
+  // 打不开就把原因写在按钮上：静默无反应最难排查（曾经收件箱路径一律 400 且悄无声息）。
+  revealButton.onclick = async () => {
+    if (!outputPath) return;
+    try {
+      await actions.revealPath(outputPath);
+    } catch {
+      revealButton.textContent = '打不开，改用「复制路径」';
+    }
+  };
 
   stopButton.onclick = () => { void actions.stopBatch(); };
   // 「继续」是续采，保留已采标记；「重试」是重来一遍，先把页面还原成完整状态。
@@ -634,24 +650,46 @@ export function renderSidePanel(
     const defaultIds = state.defaultSinkIds ?? [];
     const defaultLabels = state.routeTargets ?? [];
 
-    /** 「分类」选项随选定去向联动：取该去向的分类清单；默认路由取首个默认去向的清单。 */
+    /** 「分类」选项随选定去向联动：列出当前生效的每个去向的分类清单。 */
     const applyCategories = (options: { preserve: boolean }): void => {
       const chosen = destinationSelect.value;
-      const effectiveId = chosen || defaultIds[0] || '';
-      const categories =
-        destinations.find(sink => sink.id === effectiveId)?.categories ?? [];
+      // 默认路由可能同时写多处（本机库 + 仓库收件箱），两边的分类体系并不一样。
+      // 只取首个去向的清单，星球帖子看到的会是本机库那套「前端开发 / 人工智能」，
+      // 而它真正要去的 life-teachers 用的是「投资 / 财富 / 职场」——所以全都列出来。
+      const activeIds = chosen ? [chosen] : defaultIds;
+      const groups = activeIds.flatMap(id => {
+        const sink = destinations.find(candidate => candidate.id === id);
+        return sink && sink.categories.length > 0 ? [sink] : [];
+      });
+      const categories = [...new Set(groups.flatMap(sink => sink.categories))];
       // 切换去向时尽量保留用户已选分类；换页面时按新页面的建议分类重置。
       const wanted = options.preserve ? categorySelect.value : state.category;
       categorySelect.replaceChildren();
       categorySelect.append(new Option('自动分类（由内容判定）', ''));
-      for (const category of categories) categorySelect.append(new Option(category, category));
+      if (groups.length > 1) {
+        // 多个去向时按去向分组，一眼看得出这个分类属于哪套体系。
+        for (const sink of groups) {
+          const group = document.createElement('optgroup');
+          group.label = sink.label;
+          for (const category of sink.categories) group.append(new Option(category, category));
+          categorySelect.append(group);
+        }
+      } else {
+        for (const category of categories) categorySelect.append(new Option(category, category));
+      }
       categorySelect.value = categories.includes(wanted) ? wanted : '';
       categorySelect.disabled = categories.length === 0;
       const labels = chosen
         ? [destinations.find(sink => sink.id === chosen)?.label ?? chosen]
         : defaultLabels;
       routeHint.hidden = labels.length === 0;
-      routeHint.textContent = labels.length ? `保存去向：${labels.join(' · ')}` : '';
+      // 选具体去向是**覆盖**默认路由，不是在默认之外再加一份。默认可能同时写两处
+      // （本机库 + 仓库收件箱），一选就只剩一处 —— 不写出来用户根本看不出区别。
+      const dropped = chosen ? defaultLabels.filter(label => !labels.includes(label)) : [];
+      routeHint.textContent = labels.length
+        ? `保存去向：${labels.join(' + ')}`
+          + (dropped.length ? `（不再写入 ${dropped.join(' · ')}）` : '')
+        : '';
     };
 
     // 重建选项的时机：切换页面，或 Bridge 侧的去向/分类发生变化（改了配置后无需重装扩展）。
@@ -665,11 +703,16 @@ export function renderSidePanel(
       // 仅路由变化（同一页面）时保留用户已选去向，避免打断正在进行的编辑。
       const keepDestination = sameUrl ? destinationSelect.value : '';
       destinationSelect.replaceChildren();
+      // 默认 = 同时写这几处；具体去向 = 只写它一处。用「+」和「只存到」把这层语义
+      // 写进选项文字本身，光列名字的话「默认（本机库 · life-teachers 收件箱）」和
+      // 「life-teachers 收件箱」看着像同一回事，实际差着「还留不留本机备份」。
       const defaultText = defaultLabels.length
-        ? `默认（${defaultLabels.join(' · ')}）`
+        ? `默认：${defaultLabels.join(' + ')}`
         : '默认去向';
       destinationSelect.append(new Option(defaultText, ''));
-      for (const sink of destinations) destinationSelect.append(new Option(sink.label, sink.id));
+      for (const sink of destinations) {
+        destinationSelect.append(new Option(`只存到 ${sink.label}`, sink.id));
+      }
       destinationSelect.value = destinations.some(sink => sink.id === keepDestination)
         ? keepDestination
         : '';
@@ -725,6 +768,11 @@ export function renderSidePanel(
   }
   if (state.phase === 'saved') {
     const panel = show(document, '#saved-panel');
+    // 标题必须说真话：默认路由写两处、选了「只存到收件箱」就只写一处，
+    // 一律写死「内容已进入本地知识库」在后一种情况下是错的。
+    required(document, '#saved-heading').textContent = state.targets.length
+      ? `内容已进入 ${state.targets.join(' + ')}`
+      : '内容已入库';
     required(document, '#saved-path').textContent = state.path;
     const copyButton = required<HTMLButtonElement>(document, '#copy-path-button');
     if (panel.dataset.path !== state.path) {
@@ -735,8 +783,14 @@ export function renderSidePanel(
       await actions.copyPath(state.path);
       if (panel.dataset.path === state.path) copyButton.textContent = '路径已复制';
     };
-    required<HTMLButtonElement>(document, '#reveal-path-button').onclick = () => {
-      void actions.revealPath(state.path);
+    const revealButton = required<HTMLButtonElement>(document, '#reveal-path-button');
+    revealButton.onclick = async () => {
+      try {
+        await actions.revealPath(state.path);
+      } catch {
+        // 同上：失败必须看得见。
+        revealButton.textContent = '打不开，改用「复制路径」';
+      }
     };
     return;
   }

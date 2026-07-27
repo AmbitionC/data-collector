@@ -87,6 +87,25 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
+/**
+ * 把假时钟推到某个 promise 落定为止。
+ *
+ * 拟人滚动的节奏是随机的（每轮 2–4 次滚动、每次间隔 450–1100ms，轮间还有 900–1800ms），
+ * 三轮最坏要将近 19 秒。推一个固定时长（原先是 13 秒）必然偶发失败——实测已经飘红过一次。
+ * 上限只是防死循环，正常路径远远推不到。
+ */
+async function settle<T>(pending: Promise<T>, limitMs = 60_000): Promise<T> {
+  let done = false;
+  const tracked = pending.then(
+    value => { done = true; return value; },
+    error => { done = true; throw error; },
+  );
+  for (let elapsed = 0; !done && elapsed < limitMs; elapsed += 500) {
+    await vi.advanceTimersByTimeAsync(500);
+  }
+  return tracked;
+}
+
 describe('content script list collection', () => {
   it('registers only one message listener even if injected twice', async () => {
     const listeners: Listener[] = [];
@@ -131,8 +150,7 @@ describe('content script list collection', () => {
     await ask<ListResponse>({ type: 'extract.list' });
     vi.useFakeTimers();
 
-    const advance = ask<AdvanceResponse>({ type: 'list.advance' });
-    await vi.advanceTimersByTimeAsync(13_000);
+    const advance = settle(ask<AdvanceResponse>({ type: 'list.advance' }));
 
     expect((await advance).advance).toEqual({ collapsed: 3, loaded: 0 });
     const marked = [...document.querySelectorAll<HTMLElement>('.topic-container')].filter(
@@ -153,10 +171,8 @@ describe('content script list collection', () => {
     const fresh = document.createElement('div');
     fresh.className = 'topic-container';
     document.querySelector('.main-content-container')!.append(fresh);
-    // 滚动节奏是随机化的（拟人），推足一轮的时间即可。
-    await vi.advanceTimersByTimeAsync(8_000);
-
-    expect((await advance).advance).toMatchObject({ loaded: 1 });
+    // 滚动节奏是随机化的（拟人），推到它自己收工为止。
+    expect((await settle(advance)).advance).toMatchObject({ loaded: 1 });
   });
 
   it('scrolls in human-sized steps instead of teleporting to the bottom', async () => {
@@ -168,9 +184,7 @@ describe('content script list collection', () => {
     Object.defineProperty(window, 'innerHeight', { value: 800, configurable: true });
 
     vi.useFakeTimers();
-    const advance = ask<AdvanceResponse>({ type: 'list.advance' });
-    await vi.advanceTimersByTimeAsync(30_000);
-    await advance;
+    await settle(ask<AdvanceResponse>({ type: 'list.advance' }));
 
     // 每次只滚不到一屏、分多次滚——不是「每 500 毫秒瞬移到底」那种机器节奏。
     expect(steps.length).toBeGreaterThan(1);
@@ -182,9 +196,7 @@ describe('content script list collection', () => {
   it('skips posts that were handled in an earlier round', async () => {
     await ask<ListResponse>({ type: 'extract.list' });
     vi.useFakeTimers();
-    const advance = ask<AdvanceResponse>({ type: 'list.advance' });
-    await vi.advanceTimersByTimeAsync(13_000);
-    await advance;
+    await settle(ask<AdvanceResponse>({ type: 'list.advance' }));
     vi.useRealTimers();
 
     const second = await ask<ListResponse>({ type: 'extract.list' });
@@ -196,9 +208,7 @@ describe('content script list collection', () => {
   it('clears the marks so a fresh batch sees the whole page again', async () => {
     await ask<ListResponse>({ type: 'extract.list' });
     vi.useFakeTimers();
-    const advance = ask<AdvanceResponse>({ type: 'list.advance' });
-    await vi.advanceTimersByTimeAsync(13_000);
-    await advance;
+    await settle(ask<AdvanceResponse>({ type: 'list.advance' }));
     vi.useRealTimers();
     expect(document.querySelectorAll('[data-dc-collected]')).toHaveLength(3);
 

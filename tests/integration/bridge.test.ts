@@ -1,4 +1,4 @@
-import { readFile, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import WebSocket, { type RawData } from 'ws';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -422,6 +422,51 @@ describe('local Bridge', () => {
     expect(rejected.status).toBe(400);
     expect(reveal).toHaveBeenCalledOnce();
     expect(reveal).toHaveBeenCalledWith(target);
+  });
+
+  it('reveals entries written into a configured repo inbox, not just the library', async () => {
+    // 选了「只存到 xx 收件箱」时，产出路径根本不在本机库下。
+    // 只认库根目录会把这些条目一律 400，用户点「在文件夹中查看」毫无反应。
+    const root = await temporaryDirectory();
+    const repo = await temporaryDirectory();
+    const configDir = join(root, '.config');
+    await mkdir(configDir, { recursive: true });
+    await writeFile(
+      join(configDir, 'sinks.json'),
+      JSON.stringify({
+        sinks: {
+          markdown: { type: 'markdown' },
+          'life-teachers': { type: 'repo-inbox', repoPath: repo, label: 'life-teachers 收件箱' },
+        },
+        routes: { zsxq: ['life-teachers'] },
+      }),
+    );
+    const entry = join(repo, '_inbox', 'zsxq', 'x', 'original.md');
+    await mkdir(join(entry, '..'), { recursive: true });
+    await writeFile(entry, '正文');
+    const outside = join(root, 'outside.md');
+    await writeFile(outside, '库外文件');
+
+    const reveal = vi.fn(async () => undefined);
+    const bridge = await startBridge({ port: 0, libraryRoot: root, configDir, reveal });
+    handles.push(bridge);
+    const { token } = await authorize(bridge);
+
+    const accepted = await requestJson(bridge.url, '/v1/reveal', {
+      method: 'POST',
+      token,
+      body: { path: entry },
+    });
+    // 放行范围严格等于「我们自己写过内容的根目录」，不多一个。
+    const rejected = await requestJson(bridge.url, '/v1/reveal', {
+      method: 'POST',
+      token,
+      body: { path: join(repo, '..', 'elsewhere.md') },
+    });
+
+    expect(accepted.status).toBe(200);
+    expect(rejected.status).toBe(400);
+    expect(reveal).toHaveBeenCalledExactlyOnceWith(entry);
   });
 
   it('rejects untrusted bootstrap Origins without creating an access token', async () => {

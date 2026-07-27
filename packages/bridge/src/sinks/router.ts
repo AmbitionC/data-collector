@@ -93,6 +93,14 @@ export class SinkRouter {
     };
   }
 
+  /**
+   * 所有 sink 的写入根目录，供「在文件夹中查看」做越界校验。
+   * **只在 Bridge 内部使用**，不经 describeRouting 暴露给扩展（那份刻意不含本机路径）。
+   */
+  revealRoots(): string[] {
+    return [...new Set([...this.sinks.values()].map(sink => sink.root).filter(Boolean))];
+  }
+
   /** 解析某来源要用的 sink id 列表（去重、剔除未定义项，空则回退 markdown）。 */
   resolveSinkIds(source: Source, override?: readonly string[]): string[] {
     const requested = override ?? this.routes[source] ?? [FALLBACK_SINK_ID];

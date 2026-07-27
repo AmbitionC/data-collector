@@ -1,4 +1,5 @@
 import { descriptorForHost, isListPage, parseSupportedUrl } from '@data-collector/shared';
+import { injectionPlan } from './injection.js';
 import {
   BridgeConnection,
   type ExtensionStorage,
@@ -25,9 +26,23 @@ const tabs: TabsApi = {
   sendMessage: async (id, message) =>
     chrome.tabs.sendMessage(id, message) as Promise<ExtractionResponse>,
   // 注入而不是刷新：刷新会把知识星球的「精华」分类退回默认的「最新」，
-  // 用户在精华页发起的采集就采成了别的内容。
+  // 用户在精华页发起的采集就采成了别的内容。清单与理由见 injection.ts。
   inject: async (id: number) => {
-    await chrome.scripting.executeScript({ target: { tabId: id }, files: ['content.js'] });
+    let url: string | undefined;
+    try {
+      url = (await chrome.tabs.get(id)).url;
+    } catch {
+      // 标签页刚被关掉：按「不需要主世界钩子」处理，内容脚本那步自己会抛错。
+    }
+    for (const step of injectionPlan(url)) {
+      const done = chrome.scripting.executeScript({
+        target: { tabId: id },
+        files: step.files,
+        ...(step.world ? { world: step.world } : {}),
+      });
+      if (step.required) await done;
+      else await done.catch(() => undefined);
+    }
   },
 };
 
@@ -101,6 +116,7 @@ async function status() {
     'lastJobUrl',
     'lastJobError',
     'lastOutputPath',
+    'lastSinkIds',
     'routing',
     'batch',
     'update',
@@ -148,6 +164,7 @@ async function status() {
     lastJobUrl: values.lastJobUrl,
     lastJobError: values.lastJobError,
     lastOutputPath: values.lastOutputPath,
+    lastSinkIds: values.lastSinkIds,
     batch: values.batch,
     batchItems: values.batchItems,
     page: {

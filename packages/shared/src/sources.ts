@@ -74,6 +74,17 @@ export function isListPage(url: URL): boolean {
   return !/\/topic\/[^/]+/.test(url.pathname);
 }
 
+/**
+ * 该页面是否需要主世界的帖子号钩子（inject.js）。
+ *
+ * 只有知识星球把帖子号藏在自己的接口响应里（DOM 上完全找不到），所以也只有它需要
+ * MAIN world 补丁。其余来源一律不注入，注入面保持最小 —— manifest 里的声明式注入
+ * 和后台补注入必须用同一条判据，否则两边会漂移。
+ */
+export function needsTopicHook(url: URL): boolean {
+  return descriptorForHost(url.hostname)?.id === 'zsxq';
+}
+
 /** 按主机名查找来源描述符；找不到返回 undefined。 */
 export function descriptorForHost(host: string): SourceDescriptor | undefined {
   const lower = host.toLowerCase();

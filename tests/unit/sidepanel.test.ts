@@ -256,7 +256,32 @@ describe('side panel state mapping', () => {
       lastJobUrl: page.url,
       lastOutputPath: '/tmp/x/index.md',
       page,
-    })).toEqual({ phase: 'saved', path: '/tmp/x/index.md' });
+    })).toEqual({ phase: 'saved', path: '/tmp/x/index.md', targets: [] });
+  });
+
+  it('names every destination a saved job actually reached', () => {
+    // 默认路由同时写两处时，结果屏必须两处都说出来——只说「本地知识库」是在骗人。
+    const page = {
+      supported: true,
+      title: '通胀与估值',
+      url: 'https://wx.zsxq.com/topic/511',
+      destinations: [
+        { id: 'markdown', label: '本机库', categories: [] },
+        { id: 'life-teachers', label: 'life-teachers 收件箱', categories: [] },
+      ],
+    };
+    expect(sidePanelStateFromStatus({
+      bridgeStatus: 'connected',
+      lastJobStatus: 'saved',
+      lastJobUrl: page.url,
+      lastOutputPath: '/tmp/x/index.md',
+      lastSinkIds: ['markdown', 'life-teachers'],
+      page,
+    })).toEqual({
+      phase: 'saved',
+      path: '/tmp/x/index.md',
+      targets: ['本机库', 'life-teachers 收件箱'],
+    });
   });
 });
 
@@ -285,7 +310,9 @@ describe('side panel DOM behavior', () => {
     const destination = document.querySelector<HTMLSelectElement>('#destination')!;
     expect([...destination.options].map(option => option.value))
       .toEqual(['', 'markdown', 'life-teachers']);
-    expect(destination.options[0]?.textContent).toContain('默认（本机库）');
+    // 选项文字必须自带语义：默认是「同时写这几处」，选具体去向是「只写它一处」。
+    expect(destination.options[0]?.textContent).toBe('默认：本机库');
+    expect(destination.options[2]?.textContent).toBe('只存到 life-teachers 收件箱');
 
     // 二级「分类」：跟随默认去向（本机库）的分类清单。
     const category = document.querySelector<HTMLSelectElement>('#category')!;
@@ -299,6 +326,9 @@ describe('side panel DOM behavior', () => {
       .toEqual(['', '投资', '财富', '认知']);
     expect(document.querySelector('#route-hint')?.textContent)
       .toContain('life-teachers 收件箱');
+    // 选了单一去向就等于放弃默认里的其它去向，提示必须写出来。
+    expect(document.querySelector('#route-hint')?.textContent)
+      .toContain('不再写入 本机库');
 
     category.value = '投资';
     document.querySelector<HTMLInputElement>('#tags')!.value = '宏观, 利率';
@@ -581,7 +611,7 @@ describe('side panel DOM behavior', () => {
 
   it('shows a saved path and invokes both result actions with the exact path', async () => {
     const path = '/Users/chenhao/Documents/data-collector/微信公众号/商业与投资/index.md';
-    renderSidePanel(document, { phase: 'saved', path }, actions);
+    renderSidePanel(document, { phase: 'saved', path, targets: ['本机库'] }, actions);
     document.querySelector<HTMLButtonElement>('#copy-path-button')!.click();
     document.querySelector<HTMLButtonElement>('#reveal-path-button')!.click();
     await Promise.resolve();
@@ -592,17 +622,17 @@ describe('side panel DOM behavior', () => {
   });
 
   it('preserves copied text for the same saved path and resets it for a new path', async () => {
-    renderSidePanel(document, { phase: 'saved', path: '/library/a/index.md' }, actions);
+    renderSidePanel(document, { phase: 'saved', path: '/library/a/index.md', targets: [] }, actions);
     const copyButton = document.querySelector<HTMLButtonElement>('#copy-path-button')!;
     copyButton.click();
     await Promise.resolve();
     await Promise.resolve();
     expect(copyButton.textContent).toBe('路径已复制');
 
-    renderSidePanel(document, { phase: 'saved', path: '/library/a/index.md' }, actions);
+    renderSidePanel(document, { phase: 'saved', path: '/library/a/index.md', targets: [] }, actions);
     expect(copyButton.textContent).toBe('路径已复制');
 
-    renderSidePanel(document, { phase: 'saved', path: '/library/b/index.md' }, actions);
+    renderSidePanel(document, { phase: 'saved', path: '/library/b/index.md', targets: [] }, actions);
     expect(copyButton.textContent).toBe('复制文件路径');
   });
 

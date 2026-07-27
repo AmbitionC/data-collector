@@ -20,6 +20,16 @@
  */
 export const TOPIC_MESSAGE = 'data-collector:topics';
 
+/**
+ * 主世界补丁的防重标记（挂在页面 window 上）。
+ *
+ * manifest 会在 document_start 声明式注入一次，扩展更新后后台还会对已打开的标签页
+ * 补注入一次；同一页打两遍补丁会把已包装的 fetch 再包一层，每条响应重复上报。
+ * 常量放这里而不是 inject.ts —— inject.ts 是经典脚本，**一个 export 都不能有**，
+ * 而测试需要在用例之间清掉这个标记。
+ */
+export const TOPIC_HOOK_FLAG = '__dataCollectorTopicHook';
+
 export interface TopicRecord {
   topicId: string;
   /** 该帖的正文文本（用于和页面上的节点对上号）。 */

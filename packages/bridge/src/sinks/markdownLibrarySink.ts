@@ -11,9 +11,11 @@ export class MarkdownLibrarySink implements ContentSink {
   readonly id = 'markdown';
   readonly label = '本机库';
   readonly categories = LIBRARY_CATEGORIES;
+  readonly root: string;
   private readonly library: MarkdownLibrary;
 
   constructor(options: MarkdownLibraryOptions) {
+    this.root = options.root;
     this.library = new MarkdownLibrary(options);
   }
 

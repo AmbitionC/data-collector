@@ -10,7 +10,7 @@
  * - 只取 topic_id 和用于对号的正文文本，其余字段一律不外传；
  * - 只在知识星球域名下注入（manifest 里限定），结果通过 postMessage 交给隔离世界。
  */
-import { TOPIC_MESSAGE, harvestTopics, type TopicRecord } from './topicIndex.js';
+import { TOPIC_HOOK_FLAG, TOPIC_MESSAGE, harvestTopics, type TopicRecord } from './topicIndex.js';
 
 // 本文件**不能导出任何东西**：内容脚本按经典脚本执行，打包产物里留下 export 会
 // 直接语法错误，整个补丁一行都不会跑（这个坑已经踩过一次，靠 e2e 才发现）。
@@ -66,5 +66,10 @@ function patchXhr(): void {
   } as typeof open;
 }
 
-patchFetch();
-patchXhr();
+// 防重复打补丁，理由见 TOPIC_HOOK_FLAG。
+const store = window as unknown as Record<string, unknown>;
+if (!store[TOPIC_HOOK_FLAG]) {
+  store[TOPIC_HOOK_FLAG] = true;
+  patchFetch();
+  patchXhr();
+}

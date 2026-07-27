@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 // @vitest-environment-options { "url": "https://wx.zsxq.com/group/48844584441158" }
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { TOPIC_MESSAGE } from '../../packages/extension/src/topicIndex.js';
+import { TOPIC_HOOK_FLAG, TOPIC_MESSAGE } from '../../packages/extension/src/topicIndex.js';
 
 interface Published {
   source: string;
@@ -23,9 +23,13 @@ let originalFetch: typeof fetch;
 let originalOpen: typeof XMLHttpRequest.prototype.open;
 let collect: (event: MessageEvent) => void;
 
-/** 主世界脚本只在导入时打补丁一次，每个用例都还原成未打补丁的状态。 */
+/**
+ * 主世界脚本只在导入时打补丁一次，每个用例都还原成未打补丁的状态。
+ * 防重标记挂在 window 上、跨用例存活，不清掉的话第二个用例根本不会打补丁。
+ */
 async function loadInject(fetchImplementation: typeof fetch): Promise<void> {
   window.fetch = fetchImplementation;
+  delete (window as unknown as Record<string, unknown>)[TOPIC_HOOK_FLAG];
   vi.resetModules();
   await import('../../packages/extension/src/inject.js');
 }
@@ -95,6 +99,26 @@ describe('main-world topic capture', () => {
     // 旁观不能改变页面自己的行为：失败还是要照常抛给调用方。
     await expect(window.fetch('https://api.zsxq.com/v2/groups/1/topics'))
       .rejects.toThrow('Failed to fetch');
+  });
+
+  it('只打一次补丁，重复注入不会把响应上报两遍', async () => {
+    // manifest 在 document_start 注入一次，扩展更新后后台还会对已打开的标签页补注入
+    // 一次。没有防重标记的话，第二次会把已包装的 fetch 再包一层，每条响应重复上报。
+    await loadInject(async () =>
+      new Response(JSON.stringify(TOPICS_RESPONSE), {
+        headers: { 'content-type': 'application/json' },
+      }),
+    );
+    const patchedOnce = window.fetch;
+    // 第二次注入：不清标记，模拟真实的重复注入。
+    vi.resetModules();
+    await import('../../packages/extension/src/inject.js');
+    expect(window.fetch).toBe(patchedOnce);
+
+    await window.fetch('https://api.zsxq.com/v2/groups/1/topics?scope=digests');
+    await vi.waitFor(() => expect(published).toHaveLength(1));
+    await new Promise(resolve => setTimeout(resolve, 20));
+    expect(published).toHaveLength(1);
   });
 
   it('publishes nothing when the payload has no topic ids', async () => {

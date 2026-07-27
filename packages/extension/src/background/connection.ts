@@ -434,6 +434,7 @@ export class BridgeConnection {
             lastJobUrl: payload.url,
             lastJobError: '',
             lastOutputPath: '',
+            lastSinkIds: [],
           });
           if (committed && isCurrent()) {
             await this.collectHandler?.(message.requestId, payload.url);
@@ -441,10 +442,18 @@ export class BridgeConnection {
         }
       } else if (message.type === 'job.saved' && isCurrent()) {
         // Bridge 的 job.saved 载荷为 { outputPath, results }（多 sink 后的首要产出路径）。
-        const payload = message.payload as { outputPath?: unknown };
+        const payload = message.payload as { outputPath?: unknown; results?: unknown };
+        // 真正写成功的去向要留下来：默认路由可能同时写两处，结果屏光说「本地知识库」
+        // 是在骗人——用户正是因此搞不清内容到底进了哪里。
+        const sinkIds = Array.isArray(payload.results)
+          ? (payload.results as { sinkId?: unknown; ok?: unknown }[])
+              .filter(result => result?.ok === true && typeof result.sinkId === 'string')
+              .map(result => result.sinkId as string)
+          : [];
         await this.transitionJob(generation, isCurrent, {
           lastJobId: message.requestId,
           lastJobStatus: 'saved',
+          lastSinkIds: sinkIds,
           ...(typeof payload.outputPath === 'string'
             ? { lastOutputPath: payload.outputPath }
             : {}),

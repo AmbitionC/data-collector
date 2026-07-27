@@ -153,7 +153,7 @@ async function scrollLikeHuman(): Promise<void> {
 }
 
 /**
- * 推进到下一批：收起已处理的帖子 → 滚到底触发懒加载 → 等新帖子出现。
+ * 推进到下一批：给已处理的帖子打上不可见标记 → 拟人滚动触发懒加载 → 等新帖子出现。
  * 返回新加载出的待采条数；为 0 表示已经到底（批量采集据此收尾）。
  */
 async function advanceList(): Promise<{ collapsed: number; loaded: number }> {
@@ -179,7 +179,7 @@ async function advanceList(): Promise<{ collapsed: number; loaded: number }> {
 /**
  * 诊断样本：帖子拿不到各自链接时，把页面结构导出来供适配排查。
  *
- * 取样必须挑**没被收起过**的帖子：收起的节点框架可能已经回收了内容，
+ * 取样必须挑**没被处理过**的帖子：站点可能已经回收了旧节点里的内容，
  * 拿它取样会得出「页面里什么都没有」的错误结论。
  */
 function listDiagnostics(): string {

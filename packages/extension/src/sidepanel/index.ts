@@ -167,6 +167,30 @@ async function refresh(): Promise<void> {
   }
 }
 
+/**
+ * 「和后台失联」与「后台明确告诉我失败了」是两回事。
+ *
+ * 前者是浏览器抛出的原生英文报错（端口关闭 / 上下文失效），只说明这条消息回不来了，
+ * 批量本身可能已经跑了一半——真相在批量记录里（含 E8「后台被回收」判定）。
+ * 后者是后台深思熟虑给出的中文原因（如「当前没有可采集的浏览器页面」），
+ * 必须原样粘在屏上给用户看，绝不能被别的状态盖掉。
+ */
+function isTransportError(error: unknown): boolean {
+  const text = error instanceof Error ? error.message : String(error);
+  return /message port closed|could not establish connection|extension context invalidated|receiving end does not exist/i
+    .test(text);
+}
+
+/** 后台是否已经为本页建起批量记录（建起来了就由它呈现终态，而不是原始报错）。 */
+async function batchRecorded(): Promise<boolean> {
+  try {
+    const status = await message<BackgroundStatus>({ type: 'status.get' });
+    return Boolean(status.batch && status.batch.url === status.page.url);
+  } catch {
+    return false;
+  }
+}
+
 async function captureListPage(
   overrides: CaptureOverrides,
   options: { continuation?: boolean } = {},
@@ -183,9 +207,12 @@ async function captureListPage(
     await message({ type: 'capture.list', overrides, ...options });
     await refresh();
   } catch (error) {
-    // 批量自身的失败已经写进 batch 记录并由 refresh 呈现；
-    // 走到这里说明连批量记录都没建起来（如找不到可采集的标签页）。
-    showStickyError(error, '批量采集没能开始，请重试。');
+    // 批量要跑好几分钟，中途后台被回收时这条消息的端口会断，抛出来的是
+    // 「message port closed」这类原生英文报错——那对用户毫无意义，而且会被粘性错误
+    // 顶在最前面，把精心写好的「已中断，可续采」屏彻底盖住。
+    // 只有这种失联才让位给批量记录；后台明说的失败原因照旧粘住。
+    if (isTransportError(error) && (await batchRecorded())) await refresh();
+    else showStickyError(error, '批量采集没能开始，请重试。');
   }
 }
 

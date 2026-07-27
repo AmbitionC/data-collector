@@ -159,6 +159,22 @@ describe('side panel controller error precedence', () => {
     expect(document.querySelector('#job-error-message')?.textContent).toContain('没有可采集');
   });
 
+  it('和后台失联时让批量记录说话，而不是把原生英文报错粘在屏上', async () => {
+    // 批量要跑好几分钟，中途后台被回收时这条消息的端口会断，抛出来的是
+    // 「message port closed」这类原生报错。它对用户毫无意义，而且会顶在最前面，
+    // 把写好的「已中断，可续采」屏彻底盖掉——E8 那条路径因此一直走不到。
+    handler = async message =>
+      message.type === 'capture.list'
+        ? { ok: false, error: 'The message port closed before a response was received.' }
+        : { ok: true, value: finishedBatchStatus() };
+
+    document.querySelector<HTMLButtonElement>('#capture-button')!.click();
+    await vi.waitFor(() => expect(visible('#batch-panel')).toBe(true));
+    expect(visible('#job-error-panel')).toBe(false);
+    // 原生英文报错一个字都不该出现在界面上。
+    expect(document.body.textContent).not.toContain('message port closed');
+  });
+
   it('clears the sticky failure once the user asks to retry', async () => {
     handler = async message =>
       message.type === 'capture.list'

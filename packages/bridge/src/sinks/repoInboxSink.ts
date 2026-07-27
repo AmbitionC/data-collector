@@ -120,6 +120,11 @@ export class RepoInboxSink implements ContentSink {
     this.runGit = options.runGit ?? defaultRunGit;
   }
 
+  /** 写入根目录：这里投出去的条目也应当能「在文件夹中查看」。 */
+  get root(): string {
+    return this.repoRoot;
+  }
+
   async save(input: OrganizedDocument): Promise<SinkResult> {
     const result = this.saveQueue.then(() => this.saveNow(input));
     this.saveQueue = result.then(
