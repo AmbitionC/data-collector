@@ -82,10 +82,21 @@ export function normalizeForMatch(value: string, length = 24): string {
     .slice(0, length);
 }
 
-/** 用于比对的正文长度上限：够长足以定位，又不至于把索引撑大。 */
+/**
+ * 「拿去找」的那段文字有多长（needle）。够长足以唯一定位，又不至于处处不匹配。
+ */
 const MATCH_TEXT_LIMIT = 240;
-/** 保留的接口原文长度上限（诊断要看原始形状，但不必把整篇存下来）。 */
-const RAW_TEXT_LIMIT = 400;
+/**
+ * 「被查找」的那段文字有多长（haystack）。**必须明显长于 needle。**
+ *
+ * 曾经两边都截到 240 字再判断「整段包含」——那样只要接口正文开头多一点点东西
+ * （标题、引用块、标记残留），接口侧保留的正文就比页面侧短一截，两边互相都不可能包含，
+ * 于是所有超过 240 字的帖子全都对不上（实测 20 条只对上 4 条，对上的那几条是开头
+ * 恰好一模一样、走了前面的前缀路径）。needle 短、haystack 长，才有得比。
+ */
+const HAYSTACK_LIMIT = 2_000;
+/** 保留的接口原文长度上限；诊断展示时再截短。 */
+const RAW_TEXT_LIMIT = HAYSTACK_LIMIT;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null;
@@ -197,12 +208,12 @@ export class TopicIndex {
 
   add(records: readonly TopicRecord[]): void {
     for (const record of records) {
-      const full = normalizeForMatch(record.text, MATCH_TEXT_LIMIT);
-      const key = full.slice(0, 24);
+      const haystack = normalizeForMatch(record.text, HAYSTACK_LIMIT);
+      const key = haystack.slice(0, 24);
       if (!key) continue;
       if (!this.byText.has(key)) this.count += 1;
       this.byText.set(key, record.topicId);
-      this.byFullText.set(full, record.topicId);
+      this.byFullText.set(haystack, record.topicId);
       this.raw.set(record.topicId, record);
     }
   }
@@ -230,9 +241,10 @@ export class TopicIndex {
       const record = this.raw.get(topicId);
       return {
         topicId,
-        overlap: longestCommonSubstring(page, apiNormalized),
-        rawApiText: record?.text ?? '',
-        apiNormalized,
+        // 只在前 240 字上算，够看出问题，也不至于让一次点击卡住。
+        overlap: longestCommonSubstring(page, apiNormalized.slice(0, MATCH_TEXT_LIMIT)),
+        rawApiText: (record?.text ?? '').slice(0, 400),
+        apiNormalized: apiNormalized.slice(0, MATCH_TEXT_LIMIT),
         ...(record?.keys ? { apiKeys: record.keys } : {}),
       };
     });
@@ -242,8 +254,8 @@ export class TopicIndex {
 
   /** 用页面节点的正文找回帖子号；找不到返回 undefined（该条如实计入跳过）。 */
   find(text: string): string | undefined {
-    const full = normalizeForMatch(text, MATCH_TEXT_LIMIT);
-    const key = full.slice(0, 24);
+    const haystack = normalizeForMatch(text, HAYSTACK_LIMIT);
+    const key = haystack.slice(0, 24);
     if (!key) return undefined;
     const exact = this.byText.get(key);
     if (exact) return exact;
@@ -251,12 +263,17 @@ export class TopicIndex {
     for (const [candidate, topicId] of this.byText) {
       if (candidate.startsWith(key) || key.startsWith(candidate)) return topicId;
     }
-    // 开头对不上：只认「整段包含」，且必须唯一。
-    if (full.length < MIN_CONTAINS) return undefined;
+    // 开头对不上：只认「一方的开头整段出现在另一方里」。
+    // needle 取 240 字、haystack 留 2000 字，两边都截同一长度是比不出来的（见 HAYSTACK_LIMIT）。
+    const needle = haystack.slice(0, MATCH_TEXT_LIMIT);
+    if (needle.length < MIN_CONTAINS) return undefined;
     const hits = new Set<string>();
     for (const [candidate, topicId] of this.byFullText) {
-      if (candidate.length < MIN_CONTAINS) continue;
-      if (candidate.includes(full) || full.includes(candidate)) hits.add(topicId);
+      const candidateNeedle = candidate.slice(0, MATCH_TEXT_LIMIT);
+      if (candidateNeedle.length < MIN_CONTAINS) continue;
+      // 双向：页面正文出现在接口正文里（接口开头多了东西），
+      // 或接口正文出现在页面正文里（页面开头多了东西）。仍然一个字都不容差。
+      if (candidate.includes(needle) || haystack.includes(candidateNeedle)) hits.add(topicId);
       if (hits.size > 1) return undefined;
     }
     return hits.size === 1 ? [...hits][0] : undefined;

@@ -140,6 +140,26 @@ describe('接口正文与页面文本对不上号的真实形态', () => {
       .toBe('522222222222222');
   });
 
+  it('长帖 + 接口开头多一段：两边截同一长度就永远比不出来（回归）', () => {
+    // 这是「20 条只对上 4 条」的真正主因。
+    // 曾经 needle 和 haystack 都截到 240 字：接口那侧开头多了一段，它保留的正文
+    // 就比页面那侧短一截，两边互相都不可能包含 —— 于是所有超过 240 字的长帖全跳过。
+    const body = '关于长期投资的一点想法。'.repeat(40); // 远超 240 字
+    const index = new TopicIndex();
+    index.add([{ topicId: '588888888888888', text: `【本周复盘】${body}` }]);
+
+    // 页面上标题渲染在别处，正文从 body 开头起。
+    expect(index.find(body)).toBe('588888888888888');
+  });
+
+  it('反向也成立：页面那侧开头多一段时同样对得上', () => {
+    const body = '仓位管理的三条纪律，逐条说明。'.repeat(40);
+    const index = new TopicIndex();
+    index.add([{ topicId: '599999999999999', text: body }]);
+
+    expect(index.find(`星主推荐 ${body}`)).toBe('599999999999999');
+  });
+
   it('长帖被折叠、页面只显示前半截，照样对得上', () => {
     const index = new TopicIndex();
     const full = '关于长期投资的一点想法，先说结论：大多数人亏在频繁交易上，而不是选错了标的。'
