@@ -21,6 +21,8 @@ import { createTemporaryDirectoryTracker } from '../helpers/temp.js';
 
 const REQUIRED_FILES = [
   'background.js',
+  // 构建标记：侧栏右下角显示的「这份产物来自哪个提交」。
+  'build-id.txt',
   'content.js',
   'inject.js',
   'manifest.json',
@@ -87,7 +89,19 @@ describe('extension package validation', () => {
     expect(manifest.action.default_popup).toBeUndefined();
     expect(manifest.key).toBe(MANIFEST_PUBLIC_KEY);
     expect(derivedId).toBe(TRUSTED_EXTENSION_ID);
-    expect(manifest.version).toBe('0.2.0');
+    // 不钉死具体版本号（每次迭代都要 bump），钉的是「三处版本必须一致」——
+    // 不一致会让 zip 名、侧栏右下角的构建标记和实际产物对不上。
+    const packageVersion = JSON.parse(
+      await readFile(join(import.meta.dirname, '..', '..', 'package.json'), 'utf8'),
+    ).version;
+    const extensionVersion = JSON.parse(
+      await readFile(
+        join(import.meta.dirname, '..', '..', 'packages', 'extension', 'package.json'),
+        'utf8',
+      ),
+    ).version;
+    expect(manifest.version).toBe(packageVersion);
+    expect(extensionVersion).toBe(packageVersion);
   });
 
   it('contains no legacy popup or manual-pairing language in extension production inputs', async () => {
@@ -173,16 +187,9 @@ describe('extension package validation', () => {
     expect(await packageExtension(workspace)).toBe(
       join(workspace, 'artifacts', 'data-collector-extension-0.2.0.zip'),
     );
-    expect((await readdir(stable, { recursive: true })).sort()).toEqual([
-      'background.js',
-      'content.js',
-      'inject.js',
-      'manifest.json',
-      'sidepanel',
-      'sidepanel/index.html',
-      'sidepanel/index.js',
-      'sidepanel/styles.css',
-    ]);
+    expect((await readdir(stable, { recursive: true })).sort()).toEqual(
+      [...REQUIRED_FILES, 'sidepanel'].sort(),
+    );
     expect(await readFile(join(stable, 'background.js'), 'utf8')).toBe(
       await readFile(join(dist, 'background.js'), 'utf8'),
     );

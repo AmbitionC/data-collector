@@ -740,6 +740,15 @@ select:focus {
   font-size: 12px;
 }
 
+/* 构建版本靠右下角，等宽字体便于和 git 里的短 sha 逐字比对。 */
+.build-id {
+  margin-left: auto;
+  color: var(--muted);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11px;
+  white-space: nowrap;
+}
+
 .local-dot {
   width: 6px;
   height: 6px;

@@ -8,6 +8,8 @@ const ALLOWED_FILES = [
   'content.js',
   // 页面主世界脚本：旁观应用自己的接口响应，取回 DOM 上没有的帖子号。
   'inject.js',
+  // 构建标记：侧栏右下角显示的「这份产物来自哪个提交」，排查时也能直接 cat。
+  'build-id.txt',
   'manifest.json',
   'sidepanel/index.html',
   'sidepanel/index.js',

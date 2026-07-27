@@ -52,7 +52,7 @@ npm run package
 打包命令会从构建后的 manifest 读取版本，并生成：
 
 - 稳定的已解压安装目录：`artifacts/data-collector-extension`
-- 可复现发布包：`artifacts/data-collector-extension-0.2.0.zip`
+- 可复现发布包：`artifacts/data-collector-extension-<版本>.zip`
 
 安装步骤：
 
@@ -189,6 +189,25 @@ npm run collector -- health
 ```
 
 每篇 Markdown 包含可追溯 URL、作者、时间、摘要、分类、标签、图片失败数和清洗后的正文。详情参见 [产品方案](docs/product.md)、[协议说明](docs/protocol.md)、[测试手册](docs/testing.md) 与 [安全说明](SECURITY.md)。
+
+## 怎么确认自己装的是最新版
+
+侧栏**右下角**常驻 `v<版本> · <短 sha>`，例如 `v0.2.1 · 14c6cfa`。
+它是打包时烙进产物的，和 `git log --oneline -1` 的短 sha 逐字对得上；
+本地有未提交改动时会显示 `<sha>+本地改动`。
+
+对不上就说明浏览器里加载的还是旧构建，重新执行：
+
+```bash
+cd ~/code/data-collector
+git pull origin master
+npm run package          # 刷新 Edge 实际加载的 artifacts/data-collector-extension
+```
+
+然后在 `edge://extensions` 点一次 Data Collector 的「重新加载」。
+
+> `npm run setup` 只负责构建并把**本机服务**装成登录项，**不会**刷新 Edge 加载的解压目录——
+> 要更新扩展本体必须跑 `npm run package`。
 
 ## 常用开发命令
 

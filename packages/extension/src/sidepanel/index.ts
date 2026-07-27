@@ -345,6 +345,13 @@ const actions: SidePanelActions = {
   },
 };
 
+// 右下角常驻构建版本：加载的到底是不是最新构建，看一眼就知道，
+// 不必靠「某个功能怎么没出现」去反推。
+// typeof 守卫：__BUILD_ID__ 是打包时替换的，直接跑源码（测试、调试）时它不存在，
+// 裸引用会抛 ReferenceError 把整个侧栏带崩。
+const buildId = document.querySelector<HTMLElement>('#build-id');
+if (buildId) buildId.textContent = typeof __BUILD_ID__ === 'string' ? __BUILD_ID__ : '开发构建';
+
 renderSidePanel(document, { phase: 'loading' }, actions);
 renderTopNav(document, page, actions);
 void refresh();

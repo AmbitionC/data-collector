@@ -98,6 +98,17 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
+describe('side panel build stamp', () => {
+  it('右下角常驻显示构建版本', () => {
+    // 用户无法从浏览器里判断自己加载的是不是最新构建，只能靠「某个功能怎么没出现」
+    // 反推——实际就这么踩过一次：功能全做完了，用户看到的还是旧版。
+    const stamp = document.querySelector<HTMLElement>('#build-id');
+    expect(stamp).not.toBeNull();
+    // 直接跑源码时没有打包期注入的 __BUILD_ID__，必须退化成明确文案而不是空白或崩溃。
+    expect(stamp?.textContent).toBe('开发构建');
+  });
+});
+
 describe('side panel details view', () => {
   it('opens the per-post list from the batch result and can come back', async () => {
     handler = async message =>

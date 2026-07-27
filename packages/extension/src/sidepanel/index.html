@@ -177,6 +177,9 @@
       <footer class="privacy-note">
         <span class="local-dot" aria-hidden="true"></span>
         <span>正文默认只保存在你的电脑</span>
+        <!-- 右下角固定显示这份产物是从哪个提交构建的：没有它，用户在浏览器里
+             根本无从判断自己加载的是不是最新构建。 -->
+        <span id="build-id" class="build-id" title="当前加载的构建版本"></span>
       </footer>
     </main>
     <script type="module" src="index.js"></script>
