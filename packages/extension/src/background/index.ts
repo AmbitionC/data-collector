@@ -218,6 +218,9 @@ chrome.runtime.onMessage.addListener((message: unknown, _sender, sendResponse) =
           : {}),
       });
     }
+    if (request.type === 'list.itemDiagnose' && typeof (request as { key?: unknown }).key === 'string') {
+      return { diagnostics: await runner.itemDiagnostics((request as { key: string }).key) };
+    }
     if (request.type === 'library.list') {
       return { entries: await connection.library() };
     }

@@ -179,3 +179,44 @@ describe('接口正文与页面文本对不上号的真实形态', () => {
     expect(index.find('周末带孩子去了趟博物馆，顺便聊聊教育投入的边际效用。')).toBeUndefined();
   });
 });
+
+describe('取证：这一条为什么没对上', () => {
+  it('把页面文本、接口原文、归一化结果和最长共同片段一并摆出来', () => {
+    // 靠猜已经绕了太多圈：证据包必须能一眼区分「接口没返回这条」
+    // 「内联标记没还原干净」「字段顺序不同」三种成因。
+    const index = new TopicIndex();
+    index.add([
+      {
+        topicId: '511111111111111',
+        text: '<e type="hashtag" title="%23%E6%8A%95%E8%B5%84%23" />创业板已经跌破 60 日线，仓位要降。',
+        keys: ['topic_id', 'talk', 'likes_count'],
+      },
+      { topicId: '522222222222222', text: '完全无关的一条：周末带孩子去了趟博物馆。' },
+    ]);
+
+    const report = index.diagnose('创业板已经跌破 60 日线，仓位要降。');
+
+    expect(report.pageNormalized).toContain('创业板已经跌破60日线');
+    // 最像的排在最前，并且**保留接口原文**——能看出内联标记长什么样。
+    expect(report.candidates[0]?.topicId).toBe('511111111111111');
+    expect(report.candidates[0]?.rawApiText).toContain('<e type="hashtag"');
+    expect(report.candidates[0]?.apiKeys).toEqual(['topic_id', 'talk', 'likes_count']);
+    expect(report.candidates[0]!.overlap).toBeGreaterThan(report.candidates[1]!.overlap);
+  });
+
+  it('索引为空时给出空候选，而不是抛错', () => {
+    // 「一个帖子号都没截到」是最常见的成因，取证本身绝不能在这时崩掉。
+    expect(new TopicIndex().diagnose('随便一段正文')).toEqual({
+      pageNormalized: '随便一段正文',
+      candidates: [],
+    });
+  });
+
+  it('接口原文原样保留，不在采集阶段就被归一化抹掉', () => {
+    const raw = '<e type="hashtag" title="%23投资%23" />正文正文正文正文正文正文正文正文';
+    const harvested = harvestTopics({ topic_id: 511, talk: { text: raw } });
+
+    expect(harvested[0]?.text).toContain('<e type="hashtag"');
+    expect(harvested[0]?.keys).toContain('topic_id');
+  });
+});

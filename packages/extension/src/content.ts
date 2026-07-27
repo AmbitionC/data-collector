@@ -29,7 +29,8 @@ interface ExtractMessage {
     | 'list.advance'
     | 'list.diagnose'
     | 'list.restore'
-    | 'list.highlight';
+    | 'list.highlight'
+    | 'list.itemDiagnose';
   /** list.highlight：要滚过去并高亮的那一条。 */
   key?: string;
   overrides?: {
@@ -178,6 +179,44 @@ async function advanceList(): Promise<{ collapsed: number; loaded: number }> {
 }
 
 /**
+ * 单条帖子的「为什么没对上号」证据包。
+ *
+ * 整页诊断给的是页面结构，回答不了「这一条到底差在哪」。用户点某条跳过的帖子时
+ * 复制这份，把页面文本和接口原文摆在一起——不猜，看证据。
+ */
+function itemDiagnostics(key: string): string {
+  const container = [...document.querySelectorAll(`[${KEY_ATTRIBUTE}]`)]
+    .find(node => node.getAttribute(KEY_ATTRIBUTE) === key);
+  if (!container) {
+    return JSON.stringify(
+      { note: '这一条已经不在页面上了（站点可能已回收该节点）', key, url: location.href },
+      null,
+      2,
+    );
+  }
+  const body = listBodyText(container);
+  return JSON.stringify(
+    {
+      diagnosticsVersion: 4,
+      kind: 'item',
+      // 构建版本随证据一起走：不然还得先花一轮确认用户跑的是哪一版。
+      build: typeof __BUILD_ID__ === 'string' ? __BUILD_ID__ : '开发构建',
+      url: location.href,
+      key,
+      // 页面上有多少条 vs 截到多少个帖子号。两者差距很大 = 接口那边压根没给全，
+      // 差距不大却对不上 = 文本对号的问题。先看这两个数再看下面的候选。
+      pageTopics: document.querySelectorAll('.topic-container').length,
+      capturedTopics: topics.size,
+      matched: Boolean(topics.find(body)),
+      pageText: body.replace(/\s+/g, ' ').slice(0, 400),
+      ...topics.diagnose(body),
+    },
+    null,
+    2,
+  );
+}
+
+/**
  * 诊断样本：帖子拿不到各自链接时，把页面结构导出来供适配排查。
  *
  * 取样必须挑**没被处理过**的帖子：站点可能已经回收了旧节点里的内容，
@@ -273,8 +312,14 @@ if (!alreadyRegistered) chrome.runtime.onMessage.addListener((message: unknown, 
     request.type !== 'list.advance' &&
     request.type !== 'list.diagnose' &&
     request.type !== 'list.restore' &&
-    request.type !== 'list.highlight'
+    request.type !== 'list.highlight' &&
+    request.type !== 'list.itemDiagnose'
   ) {
+    return false;
+  }
+
+  if (request.type === 'list.itemDiagnose') {
+    sendResponse({ ok: true, diagnostics: itemDiagnostics(String(request.key ?? '')) });
     return false;
   }
 

@@ -146,6 +146,58 @@ describe('side panel details view', () => {
     document.querySelector<HTMLButtonElement>('#items-list button')!.click();
     await vi.waitFor(() => expect(located).toEqual(['a']));
   });
+
+  it('点没入库的那条：滚过去之外，还把证据复制到剪贴板', async () => {
+    // 「为什么这条被跳过」必须能一键取证，否则只能靠来回猜——已经绕了太多圈。
+    const copied: string[] = [];
+    const diagnosed: string[] = [];
+    vi.stubGlobal('navigator', {
+      clipboard: { writeText: async (text: string) => { copied.push(text); } },
+    });
+    handler = async message => {
+      if (message.type === 'capture.list') return { ok: true, value: { phase: 'done' } };
+      if (message.type === 'list.locate') return { ok: true, value: { found: true } };
+      if (message.type === 'list.itemDiagnose') {
+        diagnosed.push((message as unknown as { key: string }).key);
+        return { ok: true, value: { diagnostics: '{"kind":"item","key":"b"}' } };
+      }
+      return { ok: true, value: batchStatus('done') };
+    };
+
+    document.querySelector<HTMLButtonElement>('#capture-button')!.click();
+    await vi.waitFor(() => expect(visible('#batch-panel')).toBe(true));
+    document.querySelector<HTMLButtonElement>('#batch-items-button')!.click();
+    await vi.waitFor(() => expect(visible('#items-panel')).toBe(true));
+
+    // 第二条是「已跳过」，正是需要取证的那种。
+    document.querySelectorAll<HTMLButtonElement>('#items-list button')[1]!.click();
+    await vi.waitFor(() => expect(copied).toEqual(['{"kind":"item","key":"b"}']));
+    expect(diagnosed).toEqual(['b']);
+    expect(document.querySelector('#items-hint')?.textContent).toContain('已复制到剪贴板');
+  });
+
+  it('已入库的那条不取证，避免无谓打扰', async () => {
+    const diagnosed: string[] = [];
+    vi.stubGlobal('navigator', { clipboard: { writeText: async () => undefined } });
+    handler = async message => {
+      if (message.type === 'capture.list') return { ok: true, value: { phase: 'done' } };
+      if (message.type === 'list.locate') return { ok: true, value: { found: true } };
+      if (message.type === 'list.itemDiagnose') {
+        diagnosed.push('called');
+        return { ok: true, value: { diagnostics: '{}' } };
+      }
+      return { ok: true, value: batchStatus('done') };
+    };
+
+    document.querySelector<HTMLButtonElement>('#capture-button')!.click();
+    await vi.waitFor(() => expect(visible('#batch-panel')).toBe(true));
+    document.querySelector<HTMLButtonElement>('#batch-items-button')!.click();
+    await vi.waitFor(() => expect(visible('#items-panel')).toBe(true));
+
+    document.querySelector<HTMLButtonElement>('#items-list button')!.click();
+    await new Promise(resolve => setTimeout(resolve, 50));
+    expect(diagnosed).toEqual([]);
+  });
 });
 
 describe('side panel controller error precedence', () => {

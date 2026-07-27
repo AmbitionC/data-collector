@@ -293,6 +293,18 @@ export class JobRunner {
     this.batchStopped = true;
   }
 
+  /**
+   * 单条帖子的「为什么没对上号」证据包（页面文本 vs 接口原文）。
+   * 整页诊断回答不了「这一条差在哪」，跳过的条目必须能单独取证。
+   */
+  async itemDiagnostics(key: string): Promise<string> {
+    const [tab] = await this.options.tabs.query({ active: true, lastFocusedWindow: true });
+    if (tab?.id === undefined) throw new Error('当前没有可采集的浏览器页面');
+    const response = await this.ask(tab.id, { type: 'list.itemDiagnose', key });
+    if (!response.ok) throw new Error(response.error.message);
+    return payloadOf(response, 'diagnostics');
+  }
+
   /** 侧栏点某条时，让页面滚过去并高亮它，方便逐条核对采到的内容。 */
   async highlight(key: string): Promise<boolean> {
     const [tab] = await this.options.tabs.query({ active: true, lastFocusedWindow: true });

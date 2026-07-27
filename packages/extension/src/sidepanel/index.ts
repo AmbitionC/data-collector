@@ -313,7 +313,8 @@ const actions: SidePanelActions = {
     itemsFilter = filter;
     void refresh();
   },
-  async locateItem(key) {
+  async locateItem(key, status) {
+    const notice = document.querySelector<HTMLElement>('#items-hint');
     // 找不到说明那条已经被站点从 DOM 里回收了，如实提示而不是静默无反应。
     const { found } = await message<{ found: boolean }>({ type: 'list.locate', key });
     if (!found) {
@@ -321,6 +322,26 @@ const actions: SidePanelActions = {
       if (empty) {
         empty.hidden = false;
         empty.textContent = '这一条已经不在页面上了（站点可能已回收该节点），滚动或重新加载后再试。';
+      }
+      return;
+    }
+    // 已入库的那些没什么好查的；没成的才需要证据。
+    if (status === 'saved') return;
+    try {
+      const { diagnostics } = await message<{ diagnostics: string }>({
+        type: 'list.itemDiagnose',
+        key,
+      });
+      await navigator.clipboard.writeText(diagnostics);
+      if (notice) {
+        notice.hidden = false;
+        notice.textContent = '这一条的证据已复制到剪贴板，可以直接粘贴发出来。';
+      }
+    } catch {
+      // 复制失败也要说话：静默无反应最难排查。
+      if (notice) {
+        notice.hidden = false;
+        notice.textContent = '证据复制失败，请重试（或用下方「复制运行记录」）。';
       }
     }
   },

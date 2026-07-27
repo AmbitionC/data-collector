@@ -123,8 +123,11 @@ export interface SidePanelActions {
   showItems(open: boolean): void;
   /** 切换明细的状态筛选。 */
   filterItems(filter: ItemFilter): void;
-  /** 点击某条：让页面滚过去并高亮它。 */
-  locateItem(key: string): Promise<void>;
+  /**
+   * 点击某条：让页面滚过去并高亮它；没能入库的那些同时把证据包复制到剪贴板。
+   * 「为什么这条被跳过」必须能一键取证，否则只能靠来回猜。
+   */
+  locateItem(key: string, status: BatchItem['status']): Promise<void>;
   /** 复制运行记录，便于排查。 */
   copyLog(log: string[]): Promise<void>;
   /** 顶部页面切换。 */
@@ -471,6 +474,10 @@ function renderItems(
     failed: state.items.filter(item => item.status === 'failed').length,
   };
   required(document, '#items-heading').textContent = `本轮看到 ${counts.all} 条`;
+  const hint = required<HTMLElement>(document, '#items-hint');
+  const unresolved = counts.skipped + counts.failed;
+  hint.hidden = unresolved === 0;
+  hint.textContent = '点未入库的条目：页面滚过去并高亮，同时把「为什么没成」的证据复制到剪贴板。';
 
   const filters = required<HTMLElement>(document, '#items-filters');
   filters.replaceChildren();
@@ -509,7 +516,7 @@ function renderItems(
       meta.append(reason);
     }
     button.append(title, meta);
-    button.onclick = () => { void actions.locateItem(item.key); };
+    button.onclick = () => { void actions.locateItem(item.key, item.status); };
     row.append(button);
     list.append(row);
   }

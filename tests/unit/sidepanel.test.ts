@@ -565,7 +565,7 @@ describe('side panel DOM behavior', () => {
     // 点某一条 → 让页面滚过去并高亮它。
     document.querySelector<HTMLButtonElement>('#items-list button')!.click();
     await Promise.resolve();
-    expect(actions.locateItem).toHaveBeenCalledWith('a');
+    expect(actions.locateItem).toHaveBeenCalledWith('a', 'saved');
 
     document.querySelector<HTMLButtonElement>('#items-log-button')!.click();
     await Promise.resolve();

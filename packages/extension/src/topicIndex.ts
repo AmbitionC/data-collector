@@ -32,8 +32,15 @@ export const TOPIC_HOOK_FLAG = '__dataCollectorTopicHook';
 
 export interface TopicRecord {
   topicId: string;
-  /** 该帖的正文文本（用于和页面上的节点对上号）。 */
+  /**
+   * 该帖的正文文本，**保持接口返回的原样**（只做长度截断）。
+   *
+   * 刻意不在这里归一化：归一化后就再也看不出接口到底给了什么形状，
+   * 而「对不上号」的排查恰恰全靠这个。归一化交给 TopicIndex 内部做。
+   */
   text: string;
+  /** 该帖对象的顶层字段名，诊断时用来看接口结构（不含字段值）。 */
+  keys?: string[];
 }
 
 /**
@@ -77,6 +84,8 @@ export function normalizeForMatch(value: string, length = 24): string {
 
 /** 用于比对的正文长度上限：够长足以定位，又不至于把索引撑大。 */
 const MATCH_TEXT_LIMIT = 240;
+/** 保留的接口原文长度上限（诊断要看原始形状，但不必把整篇存下来）。 */
+const RAW_TEXT_LIMIT = 400;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null;
@@ -127,9 +136,11 @@ export function harvestTopics(payload: unknown, limit = 400): TopicRecord[] {
     const rawId = node.topic_id ?? node.topicId;
     if (typeof rawId === 'number' || (typeof rawId === 'string' && /^\d+$/.test(rawId))) {
       // 必须留足长度：接口正文和页面文本常常**开头就不一样**，
-      // 只留 40 字等于把「共同片段」这条退路也砍掉了。
-      const text = normalizeForMatch(textOf(node), MATCH_TEXT_LIMIT);
-      if (text) found.push({ topicId: String(rawId), text });
+      // 截太短等于把「整段包含」这条退路也砍掉了。
+      const text = textOf(node).slice(0, RAW_TEXT_LIMIT);
+      if (normalizeForMatch(text)) {
+        found.push({ topicId: String(rawId), text, keys: Object.keys(node).slice(0, 24) });
+      }
     }
     for (const value of Object.values(node)) queue.push(value);
   }
@@ -161,6 +172,8 @@ export class TopicIndex {
   private readonly byText = new Map<string, string>();
   /** 完整正文 → 帖子号，用于「整段包含」这条退路。 */
   private readonly byFullText = new Map<string, string>();
+  /** 帖子号 → 原始记录，只为诊断保留（find 不看它）。 */
+  private readonly raw = new Map<string, TopicRecord>();
   private count = 0;
 
   /** 已收录的帖子数（诊断用：为 0 说明一次接口响应都没捕获到）。 */
@@ -190,7 +203,41 @@ export class TopicIndex {
       if (!this.byText.has(key)) this.count += 1;
       this.byText.set(key, record.topicId);
       this.byFullText.set(full, record.topicId);
+      this.raw.set(record.topicId, record);
     }
+  }
+
+  /**
+   * 「这一条为什么没对上」的证据包。
+   *
+   * 不做任何猜测，只把双方摆出来：页面文本、接口原文（未归一化，能看出内联标记）、
+   * 两者归一化后的样子，以及最长共同片段有多长。有了它就能一眼判断是
+   * 「接口压根没返回这条」「标记没还原干净」还是「字段顺序不同」——
+   * 靠猜已经绕了太多圈。
+   */
+  diagnose(text: string, limit = 5): {
+    pageNormalized: string;
+    candidates: {
+      topicId: string;
+      overlap: number;
+      rawApiText: string;
+      apiNormalized: string;
+      apiKeys?: string[];
+    }[];
+  } {
+    const page = normalizeForMatch(text, MATCH_TEXT_LIMIT);
+    const scored = [...this.byFullText].map(([apiNormalized, topicId]) => {
+      const record = this.raw.get(topicId);
+      return {
+        topicId,
+        overlap: longestCommonSubstring(page, apiNormalized),
+        rawApiText: record?.text ?? '',
+        apiNormalized,
+        ...(record?.keys ? { apiKeys: record.keys } : {}),
+      };
+    });
+    scored.sort((a, b) => b.overlap - a.overlap);
+    return { pageNormalized: page, candidates: scored.slice(0, limit) };
   }
 
   /** 用页面节点的正文找回帖子号；找不到返回 undefined（该条如实计入跳过）。 */
@@ -214,4 +261,24 @@ export class TopicIndex {
     }
     return hits.size === 1 ? [...hits][0] : undefined;
   }
+}
+
+/**
+ * 最长共同子串的长度。只用于诊断排序，不参与 find 的判定——
+ * 「有一段共同文字」不足以证明是同一条（只差一个字的两条帖子共同片段也很长）。
+ */
+function longestCommonSubstring(a: string, b: string): number {
+  if (!a || !b) return 0;
+  let best = 0;
+  let previous = new Uint16Array(b.length + 1);
+  for (let i = 1; i <= a.length; i += 1) {
+    const current = new Uint16Array(b.length + 1);
+    for (let j = 1; j <= b.length; j += 1) {
+      if (a[i - 1] !== b[j - 1]) continue;
+      current[j] = (previous[j - 1] ?? 0) + 1;
+      if (current[j]! > best) best = current[j]!;
+    }
+    previous = current;
+  }
+  return best;
 }
