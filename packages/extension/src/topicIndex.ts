@@ -39,6 +39,14 @@ export interface TopicRecord {
    * 而「对不上号」的排查恰恰全靠这个。归一化交给 TopicIndex 内部做。
    */
   text: string;
+  /**
+   * 组成正文的各段（问答帖就是「问题」「回答」两段）。
+   *
+   * 必须分开索引：页面上问和答是两个独立的块，取到的往往只是其中一段；
+   * 而拼接后的整段里，问与答之间的边界在页面上可能夹着「提问 / 回答」这类标签，
+   * 两边就都不是对方的连续子串了。分段索引后，任意一段能对上即可。
+   */
+  parts?: string[];
   /** 该帖对象的顶层字段名，诊断时用来看接口结构（不含字段值）。 */
   keys?: string[];
 }
@@ -103,7 +111,8 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 /** 把一个帖子对象里能当正文的字段拼起来（talk/article/question 各有各的字段名）。 */
-function textOf(node: Record<string, unknown>): string {
+/** 正文的各段（问答帖会得到「问题」「回答」两段），顺序即接口给出的顺序。 */
+function partsOf(node: Record<string, unknown>): string[] {
   const parts: string[] = [];
   const visit = (value: unknown, depth: number): void => {
     if (depth > 3 || parts.length > 8) return;
@@ -121,7 +130,7 @@ function textOf(node: Record<string, unknown>): string {
     }
   };
   visit(node, 0);
-  return parts.join(' ');
+  return parts;
 }
 
 /**
@@ -148,9 +157,15 @@ export function harvestTopics(payload: unknown, limit = 400): TopicRecord[] {
     if (typeof rawId === 'number' || (typeof rawId === 'string' && /^\d+$/.test(rawId))) {
       // 必须留足长度：接口正文和页面文本常常**开头就不一样**，
       // 截太短等于把「整段包含」这条退路也砍掉了。
-      const text = textOf(node).slice(0, RAW_TEXT_LIMIT);
+      const parts = partsOf(node).map(part => part.slice(0, RAW_TEXT_LIMIT));
+      const text = parts.join(' ').slice(0, RAW_TEXT_LIMIT);
       if (normalizeForMatch(text)) {
-        found.push({ topicId: String(rawId), text, keys: Object.keys(node).slice(0, 24) });
+        found.push({
+          topicId: String(rawId),
+          text,
+          parts,
+          keys: Object.keys(node).slice(0, 24),
+        });
       }
     }
     for (const value of Object.values(node)) queue.push(value);
@@ -214,6 +229,15 @@ export class TopicIndex {
       if (!this.byText.has(key)) this.count += 1;
       this.byText.set(key, record.topicId);
       this.byFullText.set(haystack, record.topicId);
+      // 各段单独入索引：问答帖在页面上问和答是分开的块，只索引拼接结果就对不上。
+      // 都映射到同一个帖子号，因此不会制造歧义。
+      for (const part of record.parts ?? []) {
+        const normalized = normalizeForMatch(part, HAYSTACK_LIMIT);
+        if (normalized.length < MIN_CONTAINS) continue;
+        this.byFullText.set(normalized, record.topicId);
+        const partKey = normalized.slice(0, 24);
+        if (!this.byText.has(partKey)) this.byText.set(partKey, record.topicId);
+      }
       this.raw.set(record.topicId, record);
     }
   }

@@ -139,6 +139,35 @@ describe('ZSXQ extraction（按真实 Angular DOM）', () => {
     expect(list.entries.find(entry => !entry.document)?.reason).toContain('帖子号');
   });
 
+  it('问答帖：问和答都归档，且靠任意一段就能对上帖子号', async () => {
+    // 精华里混着不少问答帖。页面上问与答是两块、中间还夹着「回答」这类标签，
+    // 接口那边则是 question / answer 两段。只取第一块 → 丢掉回答，
+    // 只索引拼接结果 → 两边都不是对方的连续子串，整条对不上号（实测第 7 条就这样漏掉）。
+    const doc = await fixture('zsxq-qa-list.html', LIST);
+    const index = new TopicIndex();
+    index.add([
+      {
+        topicId: '577777777777777',
+        text: '老师您好，创业板已经跌破 60 日线了，现在这个位置还能继续加仓吗？ 跌破 60 日线就该降仓，这是纪律问题，不是判断问题。等站回去再说。',
+        parts: [
+          '老师您好，创业板已经跌破 60 日线了，现在这个位置还能继续加仓吗？',
+          '跌破 60 日线就该降仓，这是纪律问题，不是判断问题。等站回去再说。',
+        ],
+      },
+    ]);
+
+    const list = extractList(doc, LIST, index, NOW);
+
+    const document = list.entries[0]?.document;
+    expect(document?.canonicalUrl).toBe(
+      'https://wx.zsxq.com/group/48844584441158/topic/577777777777777',
+    );
+    // 回答是这类帖子里最有价值的部分，绝不能只存问题。
+    expect(document?.text).toContain('还能继续加仓吗');
+    expect(document?.text).toContain('跌破 60 日线就该降仓');
+    expect(list.skipped).toBe(0);
+  });
+
   it('skips every post when no topic ids were captured, rather than inventing URLs', async () => {
     const doc = await fixture('zsxq-list.html', LIST);
 

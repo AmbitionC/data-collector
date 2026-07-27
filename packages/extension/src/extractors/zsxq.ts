@@ -63,6 +63,37 @@ function firstWithin(root: ParentNode, selectors: string[]): Element | null {
   return null;
 }
 
+/**
+ * 一条帖子里的全部正文块。
+ *
+ * 问答帖有**两块**（问题、回答），只取第一块会有两个后果：归档时丢掉回答，
+ * 对号时也只拿着半段去比。按选择器分组取，同一组内全取，避免 `.content` 这类
+ * 宽泛选择器把外层容器和内层正文重复算两次。
+ */
+function contentBlocks(container: Element): Element[] {
+  for (const selector of CONTENT_SELECTORS) {
+    const found = [...container.querySelectorAll(selector)];
+    // 嵌套的只留最外层：`.talk-content-container .content` 会命中两次同一段文字。
+    const outermost = found.filter(node => !found.some(other => other !== node && other.contains(node)));
+    if (outermost.length > 0) return outermost;
+  }
+  return [];
+}
+
+/**
+ * 把多个正文块合成一个**游离**的元素供归档使用。
+ *
+ * 用克隆拼装，**绝不改动页面本身**：用户正在肉眼核对采到的内容。
+ * 只有一块时直接返回那一块，不做无谓包装。
+ */
+function contentRoot(document: Document, blocks: Element[], container: Element): Element {
+  if (blocks.length === 0) return container;
+  if (blocks.length === 1) return blocks[0]!;
+  const merged = document.createElement('div');
+  for (const block of blocks) merged.append(block.cloneNode(true));
+  return merged;
+}
+
 /** 详情页地址形如 /group/<群号>/topic/<帖子号>；列表/分类/精华页没有 /topic/ 段。 */
 export function isTopicDetail(url: URL): boolean {
   return !isListPage(url);
@@ -100,8 +131,11 @@ export function topicUrlOf(
   container: Element,
   pageUrl: URL,
   topics?: TopicIndex,
-  /** 正文文本（不含作者名等外围文案），用来和接口响应对号；缺省用整个节点的文本。 */
-  bodyText?: string,
+  /**
+   * 用来和接口响应对号的候选正文，按可靠度从高到低依次尝试；缺省用整个节点的文本。
+   * 之所以是多个：问答帖的问与答在页面上是分开的块，得一块块试才对得上。
+   */
+  bodyText?: string | readonly string[],
 ): URL | undefined {
   const link = container.querySelector<HTMLAnchorElement>('a[href*="/topic/"]');
   const href = link?.getAttribute('href');
@@ -118,8 +152,8 @@ export function topicUrlOf(
   if (!groupId) return undefined;
 
   // 兜底：万一哪天页面把 id 放回了 DOM（长数字串最像帖子号）。
-  const candidates = [container, ...container.querySelectorAll('*')];
-  for (const element of candidates.slice(0, 200)) {
+  const elements = [container, ...container.querySelectorAll('*')];
+  for (const element of elements.slice(0, 200)) {
     for (const attribute of element.getAttributeNames()) {
       if (!/^(id|data-|ng-reflect-)/.test(attribute)) continue;
       const topicId = (element.getAttribute(attribute) ?? '').match(/\b(\d{15,25})\b/)?.[1];
@@ -127,9 +161,15 @@ export function topicUrlOf(
     }
   }
 
-  // 主路径：用正文把这条帖子对回接口响应里的 topic_id。
-  const fromIndex = topics?.find(bodyText ?? container.textContent ?? '');
-  return fromIndex ? new URL(`/group/${groupId}/topic/${fromIndex}`, pageUrl) : undefined;
+  // 主路径：用正文把这条帖子对回接口响应里的 topic_id。逐个候选试，第一个对上就用它。
+  const candidates = bodyText === undefined
+    ? [container.textContent ?? '']
+    : typeof bodyText === 'string' ? [bodyText] : [...bodyText];
+  for (const candidate of candidates) {
+    const fromIndex = topics?.find(candidate);
+    if (fromIndex) return new URL(`/group/${groupId}/topic/${fromIndex}`, pageUrl);
+  }
+  return undefined;
 }
 
 /** 本轮看到的一条帖子：能采的带上 document，不能采的带上原因。 */
@@ -158,7 +198,25 @@ export interface ListExtraction {
  * 否则比的是另一段文字，看着「明明一样」却对不上。
  */
 export function listBodyText(container: Element): string {
-  return elementText(firstWithin(container, CONTENT_SELECTORS) ?? container);
+  const blocks = contentBlocks(container);
+  return blocks.length > 0
+    ? blocks.map(block => elementText(block)).join(' ')
+    : elementText(container);
+}
+
+/**
+ * 用来和接口正文对号的候选文本，从最可靠到最兜底。
+ *
+ * 问答帖单独一块块地试很关键：页面上问与答之间夹着「提问 / 回答」这类标签，
+ * 拼起来的整段就不再是接口正文的连续子串了，只有单独一段才对得上。
+ */
+function matchTexts(container: Element, blocks: Element[]): string[] {
+  const texts = [
+    blocks.map(block => elementText(block)).join(' '),
+    ...blocks.map(block => elementText(block)),
+    elementText(container),
+  ];
+  return [...new Set(texts.filter(Boolean))];
 }
 
 /**
@@ -182,11 +240,14 @@ export function extractZsxqList(
       key = `t${now()}-${index}`;
       container.setAttribute(KEY_ATTRIBUTE, key);
     }
-    const content = firstWithin(container, CONTENT_SELECTORS) ?? container;
-    const text = elementText(content);
-    const title = deriveTitle(content, document);
+    // 问答帖有「问题」「回答」两块正文：两块都要归档（丢掉回答等于丢掉一半内容），
+    // 对号时也要一块块单独试。
+    const blocks = contentBlocks(container);
+    const content = contentRoot(document, blocks, container);
+    const text = listBodyText(container);
+    const title = deriveTitle(blocks[0] ?? content, document);
     // 用正文（而不是整个节点）去对号：整个节点还带着作者名、时间、点赞数这些外围文案。
-    const topicUrl = topicUrlOf(container, url, topics, text);
+    const topicUrl = topicUrlOf(container, url, topics, matchTexts(container, blocks));
     if (!text || text.length < 20) {
       skipped += 1;
       entries.push({ container, key, title: title || '（空内容）', reason: '正文太短或为空' });
