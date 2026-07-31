@@ -1,4 +1,5 @@
 import { parseSupportedUrl, type CollectedDocument } from '@data-collector/shared';
+import type { HookStats } from '../topicIndex.js';
 
 export interface BrowserTab {
   id?: number;
@@ -40,6 +41,7 @@ export type ExtractionResponse =
   | { ok: true; advance: { collapsed: number; loaded: number } }
   | { ok: true; diagnostics: string }
   | { ok: true; highlight: { found: boolean } }
+  | { ok: true; hook: HookStats }
   | { ok: false; error: { code: string; message: string } };
 
 export interface TabsApi {
@@ -72,6 +74,7 @@ interface PayloadMap {
   advance: { collapsed: number; loaded: number };
   diagnostics: string;
   highlight: { found: boolean };
+  hook: HookStats;
 }
 
 /** 按请求类型取出应答载荷；字段对不上说明页面里的内容脚本还是旧版本。 */
@@ -293,6 +296,26 @@ export class JobRunner {
     this.batchStopped = true;
   }
 
+  /** 问页面里的主世界钩子要一份运行统计；拿不到就按「没在运行」处理。 */
+  private async hookStats(tabId: number): Promise<HookStats> {
+    const response = await this.ask(tabId, { type: 'list.hookStats' }).catch(() => undefined);
+    if (response?.ok) {
+      try {
+        return payloadOf(response, 'hook');
+      } catch {
+        // 页面里还是旧版内容脚本，答不上这个字段。
+      }
+    }
+    return {
+      installed: false,
+      observed: 0,
+      jsonResponses: 0,
+      withTopicId: 0,
+      publishedRecords: 0,
+      recent: [],
+    };
+  }
+
   /**
    * 单条帖子的「为什么没对上号」证据包（页面文本 vs 接口原文）。
    * 整页诊断回答不了「这一条差在哪」，跳过的条目必须能单独取证。
@@ -496,12 +519,22 @@ export class JobRunner {
     if (progress.phase === 'skipped_all') {
       // 区分两种「全部跳过」：还没截到接口响应（用户能自己解决），
       // 还是截到了但对不上号（需要我改适配）。
-      progress.error = captured === 0
-        ? '一条帖子号都没截到，所以每条帖子的地址都拿不到。帖子号只出现在站点自己的接口响应里：'
-          + '本页如果是在扩展安装/更新之前就打开的，那次响应已经错过了，光重试没用。'
-          + '请把分类切走再切回来（会重新请求一次，且不会离开精华页），或滚动加载出新帖子，然后重试。'
-        : `已获取 ${captured} 条帖子号，但和页面上的帖子对不上号。请复制诊断信息发给开发者。`;
-      progress.code = captured === 0 ? 'TOPIC_INDEX_EMPTY' : 'TOPIC_INDEX_MISMATCH';
+      if (captured === 0) {
+        // 「一个都没截到」有三种完全不同的成因，直接问钩子要统计，
+        // 把结论说死，而不是丢一段放之四海皆准的建议让用户自己试。
+        const hook = await this.hookStats(tabId);
+        progress.error = explainEmptyIndex(hook);
+        progress.code = 'TOPIC_INDEX_EMPTY';
+        note(
+          `帖子号钩子：${hook.installed ? '在运行' : '未运行'}，`
+          + `旁观请求 ${hook.observed} 次，其中 JSON 响应 ${hook.jsonResponses} 次，`
+          + `含帖子号 ${hook.withTopicId} 次`,
+        );
+      } else {
+        progress.error = `已获取 ${captured} 条帖子号，但和页面上的帖子对不上号。`
+          + '请在「本轮明细」里点这些条目复制证据，或用「复制完整报告」发给开发者。';
+        progress.code = 'TOPIC_INDEX_MISMATCH';
+      }
     }
     report();
     return { ...progress };
@@ -541,4 +574,30 @@ export class JobRunner {
       return 'bridge-down';
     }
   }
+}
+
+/**
+ * 「一个帖子号都没截到」到底是哪种情况——把结论说死。
+ *
+ * 之前只有一句放之四海皆准的「滚一屏或切一次分类」，用户照做也没用，
+ * 因为真正的成因可能根本不是这个。三种成因给三种说法，各自对应能解决它的动作。
+ */
+export function explainEmptyIndex(hook: HookStats): string {
+  if (!hook.installed) {
+    return '页面里的帖子号钩子没有在运行，所以一条帖子号都截不到。'
+      + '这通常发生在扩展刚更新、而本页是更新之前打开的。'
+      + '请在 edge://extensions 确认 Data Collector 已启用，然后**新开一个知识星球标签页**再试'
+      + '（本页不必刷新，刷新会把「精华」退回「最新」）。';
+  }
+  if (hook.observed === 0) {
+    return '钩子在正常运行，但从它装上到现在，页面一个接口请求都没发出过——'
+      + '本页的内容是更早之前加载好的，帖子号在那次响应里，已经错过了。'
+      + '请把分类切走再切回来（会重新请求一次，且不会离开精华页），然后重试。';
+  }
+  if (hook.jsonResponses === 0) {
+    return `钩子旁观到 ${hook.observed} 次请求，但没有一次是 JSON 响应，因而取不到帖子号。`
+      + '请用「复制完整报告」把诊断发给开发者。';
+  }
+  return `钩子旁观到 ${hook.jsonResponses} 次 JSON 响应，但里面都没有帖子号——`
+    + '站点的接口结构很可能变了，需要改适配。请用「复制完整报告」把诊断发给开发者。';
 }

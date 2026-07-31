@@ -8,19 +8,62 @@ import {
   extractList,
   pendingTopicCount,
 } from './extractors/index.js';
-import { TOPIC_MESSAGE, TopicIndex, type TopicRecord } from './topicIndex.js';
+import {
+  TOPIC_MESSAGE,
+  TOPIC_STATS,
+  TOPIC_STATS_REQUEST,
+  TopicIndex,
+  type HookStats,
+  type TopicRecord,
+} from './topicIndex.js';
 
 /**
  * 帖子号索引。帖子号不在 DOM 上，只能从应用自己的接口响应里取（见 inject.ts）。
  * 主世界脚本捕获后 postMessage 过来，这里累积成「正文 → 帖子号」的对照表。
  */
 const topics = new TopicIndex();
+/** 主世界钩子最近一次上报的运行统计（诊断用）。 */
+let hookStats: HookStats | undefined;
 window.addEventListener('message', event => {
   if (event.source !== window) return;
-  const data = event.data as { source?: unknown; records?: unknown };
+  const data = event.data as { source?: unknown; records?: unknown; stats?: unknown };
+  if (data?.source === TOPIC_STATS) {
+    hookStats = data.stats as HookStats;
+    return;
+  }
   if (data?.source !== TOPIC_MESSAGE || !Array.isArray(data.records)) return;
   topics.add(data.records as TopicRecord[]);
 });
+
+/**
+ * 问主世界钩子要一份运行统计。
+ *
+ * 拿不到（超时）本身就是结论：**钩子没在跑**。这是「已捕获 0 个」最重要的一种成因，
+ * 光看帖子号条数分不出来——之前就是因此反复猜。
+ */
+function requestHookStats(timeoutMs = 400): Promise<HookStats> {
+  hookStats = undefined;
+  window.postMessage({ source: TOPIC_STATS_REQUEST }, window.location.origin);
+  return new Promise(resolve => {
+    const started = Date.now();
+    const poll = () => {
+      if (hookStats) return resolve(hookStats);
+      if (Date.now() - started >= timeoutMs) {
+        resolve({
+          installed: false,
+          observed: 0,
+          jsonResponses: 0,
+          withTopicId: 0,
+          publishedRecords: 0,
+          recent: [],
+        });
+        return;
+      }
+      setTimeout(poll, 40);
+    };
+    poll();
+  });
+}
 
 interface ExtractMessage {
   type:
@@ -30,7 +73,8 @@ interface ExtractMessage {
     | 'list.diagnose'
     | 'list.restore'
     | 'list.highlight'
-    | 'list.itemDiagnose';
+    | 'list.itemDiagnose'
+    | 'list.hookStats';
   /** list.highlight：要滚过去并高亮的那一条。 */
   key?: string;
   overrides?: {
@@ -184,12 +228,13 @@ async function advanceList(): Promise<{ collapsed: number; loaded: number }> {
  * 整页诊断给的是页面结构，回答不了「这一条到底差在哪」。用户点某条跳过的帖子时
  * 复制这份，把页面文本和接口原文摆在一起——不猜，看证据。
  */
-function itemDiagnostics(key: string): string {
+async function itemDiagnostics(key: string): Promise<string> {
+  const hook = await requestHookStats();
   const container = [...document.querySelectorAll(`[${KEY_ATTRIBUTE}]`)]
     .find(node => node.getAttribute(KEY_ATTRIBUTE) === key);
   if (!container) {
     return JSON.stringify(
-      { note: '这一条已经不在页面上了（站点可能已回收该节点）', key, url: location.href },
+      { note: '这一条已经不在页面上了（站点可能已回收该节点）', key, url: location.href, hook },
       null,
       2,
     );
@@ -197,7 +242,8 @@ function itemDiagnostics(key: string): string {
   const body = listBodyText(container);
   return JSON.stringify(
     {
-      diagnosticsVersion: 4,
+      hook,
+      diagnosticsVersion: 5,
       kind: 'item',
       // 构建版本随证据一起走：不然还得先花一轮确认用户跑的是哪一版。
       build: typeof __BUILD_ID__ === 'string' ? __BUILD_ID__ : '开发构建',
@@ -222,7 +268,8 @@ function itemDiagnostics(key: string): string {
  * 取样必须挑**没被处理过**的帖子：站点可能已经回收了旧节点里的内容，
  * 拿它取样会得出「页面里什么都没有」的错误结论。
  */
-function listDiagnostics(): string {
+async function listDiagnostics(): Promise<string> {
+  const hook = await requestHookStats();
   const all = [...document.querySelectorAll('.topic-container')];
   const container =
     all.find(node => !node.hasAttribute(COLLECTED_ATTRIBUTE) && node.textContent?.trim())
@@ -230,7 +277,7 @@ function listDiagnostics(): string {
     ?? all[0];
   if (!container) {
     return JSON.stringify(
-      { url: location.href, note: '本页没有找到 .topic-container' },
+      { url: location.href, note: '本页没有找到 .topic-container', hook },
       null,
       2,
     );
@@ -261,7 +308,12 @@ function listDiagnostics(): string {
   return JSON.stringify(
     {
       // 版本号：贴回来的样本能一眼看出跑的是哪一版插件，不用靠字段有无去猜。
-      diagnosticsVersion: 3,
+      diagnosticsVersion: 5,
+      build: typeof __BUILD_ID__ === 'string' ? __BUILD_ID__ : '开发构建',
+      // 主世界钩子的运行统计。「已捕获 0 个」时**先看这一栏**：
+      // installed=false → 钩子没跑；observed=0 → 页面这段时间没发请求；
+      // jsonResponses>0 而 withTopicId=0 → 接口结构变了。
+      hook,
       url: location.href,
       topicCount: all.length,
       // 为 0 说明一次接口响应都没捕获到——帖子号无从谈起，先滚动一屏或切一次分类。
@@ -313,19 +365,27 @@ if (!alreadyRegistered) chrome.runtime.onMessage.addListener((message: unknown, 
     request.type !== 'list.diagnose' &&
     request.type !== 'list.restore' &&
     request.type !== 'list.highlight' &&
-    request.type !== 'list.itemDiagnose'
+    request.type !== 'list.itemDiagnose' &&
+    request.type !== 'list.hookStats'
   ) {
     return false;
   }
 
+  if (request.type === 'list.hookStats') {
+    void requestHookStats().then(hook => sendResponse({ ok: true, hook }));
+    return true;
+  }
+
   if (request.type === 'list.itemDiagnose') {
-    sendResponse({ ok: true, diagnostics: itemDiagnostics(String(request.key ?? '')) });
-    return false;
+    void itemDiagnostics(String(request.key ?? '')).then(diagnostics =>
+      sendResponse({ ok: true, diagnostics }),
+    );
+    return true;
   }
 
   if (request.type === 'list.diagnose') {
-    sendResponse({ ok: true, diagnostics: listDiagnostics() });
-    return false;
+    void listDiagnostics().then(diagnostics => sendResponse({ ok: true, diagnostics }));
+    return true;
   }
 
   if (request.type === 'list.restore') {

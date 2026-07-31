@@ -218,6 +218,29 @@ chrome.runtime.onMessage.addListener((message: unknown, _sender, sendResponse) =
           : {}),
       });
     }
+    if (request.type === 'batch.report') {
+      // 一份全量报告：批量记录 + 逐条结果 + 页面诊断（含主世界钩子统计）。
+      // 用户要的是「一次性把问题解决」，那就让一次复制带走全部上下文。
+      const values = await chrome.storage.local.get(['batch', 'batchItems']);
+      const diagnostics = await runner
+        .diagnoseList()
+        .catch(error => `（页面诊断取不到：${error instanceof Error ? error.message : error}）`);
+      return {
+        report: [
+          `构建版本：${chrome.runtime.getManifest().version}`,
+          `时间：${new Date().toISOString()}`,
+          '',
+          '== 本轮批量 ==',
+          JSON.stringify(values.batch ?? null, null, 2),
+          '',
+          '== 逐条结果 ==',
+          JSON.stringify(values.batchItems ?? [], null, 2),
+          '',
+          '== 页面诊断 ==',
+          diagnostics,
+        ].join('\n'),
+      };
+    }
     if (request.type === 'list.itemDiagnose' && typeof (request as { key?: unknown }).key === 'string') {
       return { diagnostics: await runner.itemDiagnostics((request as { key: string }).key) };
     }

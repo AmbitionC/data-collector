@@ -128,7 +128,7 @@ export interface SidePanelActions {
    * 「为什么这条被跳过」必须能一键取证，否则只能靠来回猜。
    */
   locateItem(key: string, status: BatchItem['status']): Promise<void>;
-  /** 复制运行记录，便于排查。 */
+  /** 复制整轮的完整报告（运行记录 + 逐条结果 + 页面与钩子诊断），便于排查。 */
   copyLog(log: string[]): Promise<void>;
   /** 顶部页面切换。 */
   openPage(page: 'collect' | 'library'): void;

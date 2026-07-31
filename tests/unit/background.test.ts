@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { TRUSTED_EXTENSION_ID, type CollectedDocument } from '@data-collector/shared';
 import {
   JobRunner,
+  explainEmptyIndex,
   type BatchProgress,
   type BridgeClient,
   type BrowserTab,
@@ -645,5 +646,44 @@ describe('background bootstrap', () => {
     await Promise.resolve();
     await Promise.resolve();
     expect(response).toHaveBeenCalledWith({ ok: false, error: '不支持的扩展操作' });
+  });
+});
+
+describe('「一个帖子号都没截到」的三种成因', () => {
+  it('钩子没在运行：指向新开标签页，而不是让用户白滚一屏', () => {
+    const message = explainEmptyIndex({
+      installed: false, observed: 0, jsonResponses: 0, withTopicId: 0, publishedRecords: 0, recent: [],
+    });
+    expect(message).toContain('没有在运行');
+    expect(message).toContain('新开一个知识星球标签页');
+    // 绝不建议刷新：刷新会把「精华」退回「最新」。
+    expect(message).toContain('刷新会把');
+  });
+
+  it('钩子在跑但页面没发过请求：指向切换分类', () => {
+    const message = explainEmptyIndex({
+      installed: true, observed: 0, jsonResponses: 0, withTopicId: 0, publishedRecords: 0, recent: [],
+    });
+    expect(message).toContain('一个接口请求都没发出过');
+    expect(message).toContain('分类切走再切回来');
+  });
+
+  it('有 JSON 响应但没有帖子号：接口结构变了，该找开发者', () => {
+    const message = explainEmptyIndex({
+      installed: true, observed: 9, jsonResponses: 4, withTopicId: 0, publishedRecords: 0, recent: [],
+    });
+    expect(message).toContain('接口结构');
+    expect(message).toContain('复制完整报告');
+  });
+
+  it('三种说法互不相同——否则等于没区分', () => {
+    const base = { publishedRecords: 0, recent: [] };
+    const messages = new Set([
+      explainEmptyIndex({ ...base, installed: false, observed: 0, jsonResponses: 0, withTopicId: 0 }),
+      explainEmptyIndex({ ...base, installed: true, observed: 0, jsonResponses: 0, withTopicId: 0 }),
+      explainEmptyIndex({ ...base, installed: true, observed: 5, jsonResponses: 0, withTopicId: 0 }),
+      explainEmptyIndex({ ...base, installed: true, observed: 5, jsonResponses: 5, withTopicId: 0 }),
+    ]);
+    expect(messages.size).toBe(4);
   });
 });

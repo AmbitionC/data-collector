@@ -404,11 +404,21 @@ const actions: SidePanelActions = {
   },
   async copyLog(log) {
     const button = document.querySelector<HTMLButtonElement>('#items-log-button');
+    if (button) button.textContent = '正在收集…';
     try {
-      await navigator.clipboard.writeText(log.join('\n') || '（本轮没有记录）');
-      if (button) button.textContent = '记录已复制';
+      // 全量报告：批量记录、逐条结果、页面结构、主世界钩子统计，一次带走。
+      // 只复制那几行日志的话，「已捕获 0 个」这类问题还是只能靠来回猜。
+      const { report } = await message<{ report: string }>({ type: 'batch.report' });
+      await navigator.clipboard.writeText(report);
+      if (button) button.textContent = '完整报告已复制';
     } catch {
-      if (button) button.textContent = '复制失败';
+      // 取不到全量报告时至少把手里的运行记录给出去，不能什么都没有。
+      try {
+        await navigator.clipboard.writeText(log.join('\n') || '（本轮没有记录）');
+        if (button) button.textContent = '仅复制了运行记录';
+      } catch {
+        if (button) button.textContent = '复制失败';
+      }
     }
   },
   async reloadExtension() {

@@ -30,6 +30,44 @@ export const TOPIC_MESSAGE = 'data-collector:topics';
  */
 export const TOPIC_HOOK_FLAG = '__dataCollectorTopicHook';
 
+/** 隔离世界 → 主世界：要一份钩子的运行统计。 */
+export const TOPIC_STATS_REQUEST = 'data-collector:topics:stats?';
+/** 主世界 → 隔离世界：钩子的运行统计。 */
+export const TOPIC_STATS = 'data-collector:topics:stats';
+
+/**
+ * 主世界钩子的运行统计。
+ *
+ * 「已捕获帖子号 0 个」有三种完全不同的成因，光看这一个数字分不出来，
+ * 只能来回猜（已经绕了好几轮）：
+ * - `installed: false` → 钩子压根没跑，是注入的问题；
+ * - `installed: true` 但 `observed: 0` → 钩子在跑，但页面这段时间一个请求都没发
+ *   （列表已经加载完，滚动也带不出新请求）——切一次分类即可；
+ * - `jsonResponses > 0` 但 `withTopicId: 0` → 站点接口结构变了，得改解析。
+ */
+export interface HookStats {
+  installed: boolean;
+  /** 钩子装上的时刻（页面时间轴上的毫秒数）。 */
+  installedAt?: number;
+  /** 旁观到的请求总数。 */
+  observed: number;
+  /** 其中被当作 JSON 解析的响应数。 */
+  jsonResponses: number;
+  /** 其中确实解析出帖子号的响应数。 */
+  withTopicId: number;
+  /** 累计上报的帖子号条数。 */
+  publishedRecords: number;
+  /** 最近若干次响应的概况（**不含查询串**，只留路径与体量）。 */
+  recent: {
+    path: string;
+    contentType: string;
+    bytes: number;
+    topicIds: number;
+    /** 没解析出帖子号时，留一小段响应开头，用于判断接口结构。 */
+    head?: string;
+  }[];
+}
+
 export interface TopicRecord {
   topicId: string;
   /**
