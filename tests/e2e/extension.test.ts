@@ -370,7 +370,8 @@ describe('built Chrome extension', () => {
             categories: ['投资', '认知'],
           },
         },
-        routes: { wechat: ['markdown', 'e2e-inbox'] },
+        // routes 表示「同步去向」：采集一律先落本机库。
+        routes: { wechat: ['e2e-inbox'] },
       }),
       'utf8',
     );
@@ -390,7 +391,8 @@ describe('built Chrome extension', () => {
       '扩展缓存里出现新去向 e2e-inbox',
     );
 
-    // 而且下拉里真的能选到它：换到另一个受支持页面（当前页仍停在「已保存」屏）后重新渲染。
+    // 而且面板真的把它说成「之后要同步到的去向」：换到另一个受支持页面后重新渲染。
+    // 采集本身只落本机库，所以这里不该有去向选择器——有的话就是又把投递提前了。
     const listPage = await browser!.newPage();
     await serveArticleFixture(
       listPage,
@@ -401,10 +403,12 @@ describe('built Chrome extension', () => {
     await listPage.bringToFront();
     await waitForValue(
       sidePanel,
-      `[...document.querySelector('#destination').options].map(option => option.value).join(',')`,
-      value => value.split(',').includes('e2e-inbox'),
+      `(document.querySelector('#route-hint')?.textContent ?? '')
+        + '|' + (document.querySelector('#sync-hint')?.textContent ?? '')
+        + '|' + (document.querySelector('#destination') ? 'has-select' : 'no-select')`,
+      value => value.includes('本机库') && value.endsWith('|no-select'),
       20_000,
-      '「去向」下拉出现 e2e-inbox',
+      '面板说明「采集只落本机库」且没有去向选择器',
     );
     // CLI/Codex 采集路径（扩展自开后台标签页）的浏览器行为在无头环境无法稳定夹具化：
     // 请求拦截晚于标签页导航，后台标签页拿不到夹具页、内容脚本不注入。其逻辑由

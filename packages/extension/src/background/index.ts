@@ -129,6 +129,7 @@ async function status() {
   let routeTargets: string[] = [];
   let destinations: { id: string; label: string; categories: string[] }[] = [];
   let defaultSinkIds: string[] = [];
+  let syncTarget: string | undefined;
   if (tab?.url) {
     try {
       const parsed = parseSupportedUrl(tab.url);
@@ -148,6 +149,8 @@ async function status() {
         routeTargets = defaultSinkIds.map(
           id => destinations.find(sink => sink.id === id)?.label ?? id,
         );
+        // 路由表在新链路里表示「同步去向」：采集只落本机库，同步是之后的显式动作。
+        syncTarget = routeTargets.find(label => label !== '本机库');
       }
     } catch {
       supported = false;
@@ -175,6 +178,7 @@ async function status() {
       routeTargets,
       destinations,
       defaultSinkIds,
+      ...(syncTarget ? { syncTarget } : {}),
     },
   };
 }
@@ -249,6 +253,14 @@ chrome.runtime.onMessage.addListener((message: unknown, _sender, sendResponse) =
     }
     if (request.type === 'library.entry' && typeof (request as { id?: unknown }).id === 'string') {
       return connection.libraryEntry((request as { id: string }).id);
+    }
+    if (request.type === 'library.sync') {
+      return connection.syncLibrary({
+        ...(Array.isArray((request as { ids?: unknown }).ids)
+          ? { ids: (request as { ids: string[] }).ids }
+          : {}),
+        ...((request as { pending?: unknown }).pending === true ? { pending: true } : {}),
+      });
     }
     if (request.type === 'library.delete') {
       const input = request as { ids?: string[]; all?: boolean };

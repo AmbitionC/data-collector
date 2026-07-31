@@ -294,3 +294,91 @@ describe('side panel controller error precedence', () => {
     expect(visible('#job-error-panel')).toBe(false);
   });
 });
+
+describe('已入库 → 同步远程', () => {
+  const ENTRY = {
+    id: 'aaa',
+    source: 'zsxq',
+    title: '创业板跌破 60 日线',
+    url: 'https://wx.zsxq.com/topic/511',
+    category: '投资',
+    updatedAt: '2026-07-31T00:00:00.000Z',
+  };
+
+  function libraryHandler(entries: unknown[], onSync: (payload: unknown) => unknown): Handler {
+    return async message => {
+      if (message.type === 'library.list') return { ok: true, value: { entries } };
+      if (message.type === 'library.sync') return { ok: true, value: onSync(message) };
+      return { ok: true, value: readyStatus() };
+    };
+  }
+
+  it('未同步的条目可以一键同步，结果如实回报', async () => {
+    let synced: unknown;
+    handler = libraryHandler([ENTRY], message => {
+      synced = message;
+      return { synced: 1, failed: 0, entries: [{ title: ENTRY.title, sync: { state: 'synced' } }] };
+    });
+
+    document.querySelector<HTMLButtonElement>('#nav-library')!.click();
+    await vi.waitFor(() => expect(document.querySelectorAll('#library-list li')).toHaveLength(1));
+    const button = document.querySelector<HTMLButtonElement>('#library-sync-button')!;
+    expect(button.textContent).toContain('同步未同步的 1 条');
+
+    button.click();
+    await vi.waitFor(() => expect(synced).toBeDefined());
+    // 「同步全部未同步」由 Bridge 展开成具体 id，绝不把「没传 ids」当成「同步全部」。
+    expect(synced).toMatchObject({ type: 'library.sync', pending: true });
+    await vi.waitFor(() =>
+      expect(document.querySelector('#library-sync-note')?.textContent).toContain('已同步 1 条'),
+    );
+  });
+
+  it('同步失败要点名是哪一条、为什么，不只给个总数', async () => {
+    handler = libraryHandler([ENTRY], () => ({
+      synced: 0,
+      failed: 1,
+      entries: [{ title: ENTRY.title, sync: { state: 'failed', error: '没有为「zsxq」配置同步去向' } }],
+    }));
+
+    document.querySelector<HTMLButtonElement>('#nav-library')!.click();
+    await vi.waitFor(() => expect(document.querySelectorAll('#library-list li')).toHaveLength(1));
+    document.querySelector<HTMLButtonElement>('#library-sync-button')!.click();
+
+    await vi.waitFor(() => {
+      const note = document.querySelector('#library-sync-note')?.textContent ?? '';
+      expect(note).toContain('失败 1 条');
+      expect(note).toContain('创业板跌破 60 日线');
+      expect(note).toContain('没有为「zsxq」配置同步去向');
+    });
+  });
+
+  it('全部已同步时不再提供批量同步（没有可同步的东西）', async () => {
+    handler = libraryHandler(
+      [{ ...ENTRY, sync: { state: 'synced', target: 'life-teachers' } }],
+      () => ({ synced: 0, failed: 0, entries: [] }),
+    );
+
+    document.querySelector<HTMLButtonElement>('#nav-library')!.click();
+    await vi.waitFor(() => expect(document.querySelectorAll('#library-list li')).toHaveLength(1));
+    const button = document.querySelector<HTMLButtonElement>('#library-sync-button')!;
+    await vi.waitFor(() => expect(button.disabled).toBe(true));
+    expect(button.textContent).toBe('全部已同步');
+  });
+
+  it('逐条同步：只把这一条的 id 发出去', async () => {
+    let payload: unknown;
+    handler = libraryHandler([ENTRY], message => {
+      payload = message;
+      return { synced: 1, failed: 0, entries: [{ title: ENTRY.title, sync: { state: 'synced' } }] };
+    });
+
+    document.querySelector<HTMLButtonElement>('#nav-library')!.click();
+    await vi.waitFor(() => expect(document.querySelectorAll('#library-list li')).toHaveLength(1));
+    [...document.querySelectorAll<HTMLButtonElement>('#library-list .item-delete')]
+      .find(button => button.textContent === '同步')!
+      .click();
+
+    await vi.waitFor(() => expect(payload).toMatchObject({ type: 'library.sync', ids: ['aaa'] }));
+  });
+});

@@ -175,6 +175,8 @@ describe('local Bridge', () => {
         version: APP_VERSION,
         trustedExtensionId: TRUSTED_EXTENSION_ID,
         extensionConnected: false,
+        // 没有配置任何仓库去向时同步无处可去，如实给空表——绝不假装能同步。
+        syncTargets: {},
         // 默认无 sinks.json：只有本机库，所有来源都回退到它；分类清单供侧栏下拉。
         routing: {
           sinks: [

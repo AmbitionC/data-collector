@@ -62,8 +62,6 @@ const BUILT_IN_TARGETS = [
     label: 'life-teachers 收件箱',
     categories: ['投资', '财富', '职场', '认知', '教育', '其他'],
     sources: ['wechat', 'zsxq'],
-    /** 本机库同时留底，便于对照与检索。 */
-    alongsideLibrary: true,
   },
   {
     id: 'fe-journey',
@@ -79,7 +77,6 @@ const BUILT_IN_TARGETS = [
       '项目与职业',
     ],
     sources: ['nowcoder'],
-    alongsideLibrary: false,
   },
 ] as const;
 
@@ -98,6 +95,7 @@ async function isDirectory(path: string): Promise<boolean> {
 
 /**
  * 组装内置默认：只启用本机上确实存在的目标仓库。
+ * routes 在新链路里表示「同步去向」，采集一律先落本机库（见 SinkRouter.save）。
  * `exists` 可注入（测试用），缺省按真实文件系统判断。
  */
 export async function builtInSinksConfig(
@@ -114,12 +112,12 @@ export async function builtInSinksConfig(
       repoPath: target.repoPath,
       label: target.label,
       categories: [...target.categories],
+      // 同步是用户显式发起的动作，提交后顺手推一次，好让云端 Agent 拉得到。
+      // 推不上去（没配远端 / 没凭证）只作为告警，不算同步失败。
+      push: true,
     };
-    for (const source of target.sources) {
-      config.routes[source] = target.alongsideLibrary
-        ? ['markdown', target.id]
-        : [target.id];
-    }
+    // 路由表在新链路里只表示「同步去向」：采集一律先落本机库。
+    for (const source of target.sources) config.routes[source] = [target.id];
   }
   return config;
 }

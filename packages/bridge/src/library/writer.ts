@@ -8,6 +8,26 @@ import { downloadAssets } from './assets.js';
 import type { ResolveAddresses } from './assets.js';
 import { assertInsideRoot, assertSafeWritePath, safeSlug } from './paths.js';
 
+/**
+ * 同步状态。本机库是唯一落点与去重依据，投递到仓库收件箱是**之后**的显式动作。
+ * 采集时一律 pending：内容先落本地，由用户核对后再决定同步哪些。
+ */
+export type SyncState = 'pending' | 'synced' | 'failed';
+
+export interface SyncInfo {
+  state: SyncState;
+  /** 同步到了哪个去向（sink id）。 */
+  target?: string;
+  /** 同步完成时刻。 */
+  at?: string;
+  /** 已提交到目标仓库的当前分支。 */
+  committed?: boolean;
+  /** 已推送到远端；未推送不算失败（本机 Agent 直接读工作区就够）。 */
+  pushed?: boolean;
+  /** 失败原因，或推送失败之类的告警，如实展示。 */
+  error?: string;
+}
+
 interface CatalogEntry {
   id: string;
   source: Source;
@@ -16,7 +36,11 @@ interface CatalogEntry {
   category: string;
   relativePath: string;
   updatedAt: string;
+  sync?: SyncInfo;
 }
+
+/** 整理结果的留存文件名：同步到收件箱时原样重放它。 */
+export const SOURCE_FILE = 'source.json';
 
 export interface SavedContent {
   id: string;
@@ -131,6 +155,14 @@ export class MarkdownLibrary {
     const markdown = `${frontMatter(input, id, assets.failed)}# ${input.document.title}\n\n${renderMarkdown(assets.html)}\n`;
     await atomicWriteText(this.root, markdownPath, markdown);
 
+    // 同步到收件箱时要原样重放这份内容，因此把整理结果一并留在条目目录里。
+    // 不留的话就只能从 Markdown 反解，那是有损的。
+    await atomicWriteText(
+      this.root,
+      join(entryDirectory, SOURCE_FILE),
+      `${JSON.stringify(input, null, 2)}\n`,
+    );
+
     const nextEntry: CatalogEntry = {
       id,
       source: input.document.source,
@@ -139,6 +171,8 @@ export class MarkdownLibrary {
       category: input.category,
       relativePath: relative(this.root, markdownPath),
       updatedAt: input.document.collectedAt,
+      // 重新采集同一地址说明内容可能变了，同步状态回到未同步，等用户再确认一次。
+      sync: { state: 'pending' },
     };
     const nextCatalog = catalog
       .filter(entry => entry.id !== id)

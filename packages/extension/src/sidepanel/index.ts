@@ -8,6 +8,7 @@ import {
   type EntryView,
   type ItemFilter,
   type LibraryEntry,
+  type SyncFilter,
   type SidePanelActions,
   type SidePanelState,
 } from './state.js';
@@ -65,6 +66,10 @@ let librarySource = '';
 let libraryLoading = false;
 let libraryPending: Extract<SidePanelState, { phase: 'library' }>['pending'];
 let libraryError: string | undefined;
+let syncFilter: SyncFilter = 'all';
+/** 正在同步中的条目（按钮据此禁用），以及上一轮同步的结果摘要。 */
+let syncing: string[] = [];
+let syncNote: string | undefined;
 /** 正在查看正文的那一条（浮层），只活在侧栏本地。 */
 let viewing: EntryView | undefined;
 
@@ -73,7 +78,10 @@ function libraryState(): SidePanelState {
     phase: 'library',
     entries: library,
     source: librarySource,
+    syncFilter,
     loading: libraryLoading,
+    ...(syncing.length ? { syncing } : {}),
+    ...(syncNote ? { syncNote } : {}),
     ...(libraryPending ? { pending: libraryPending } : {}),
     ...(libraryError ? { error: libraryError } : {}),
     ...(viewing ? { viewing } : {}),
@@ -350,6 +358,7 @@ const actions: SidePanelActions = {
     libraryPending = undefined;
     libraryError = undefined;
     viewing = undefined;
+    syncNote = undefined;
     renderTopNav(document, page, actions);
     if (next === 'library') void loadLibrary();
     else void refresh();
@@ -362,6 +371,41 @@ const actions: SidePanelActions = {
   filterLibrary(source) {
     librarySource = source;
     renderSidePanel(document, libraryState(), actions);
+  },
+  filterSync(filter) {
+    syncFilter = filter;
+    renderSidePanel(document, libraryState(), actions);
+  },
+  async syncLibrary(ids) {
+    // 不传 id = 同步全部未同步的；由 Bridge 展开成具体 id，
+    // 这里绝不把「没传」当成「同步全部」（已同步的不该被重复推一遍）。
+    const targets = ids ?? library.filter(entry => (entry.sync?.state ?? 'pending') !== 'synced')
+      .map(entry => entry.id);
+    if (targets.length === 0) return;
+    syncing = targets;
+    syncNote = undefined;
+    renderSidePanel(document, libraryState(), actions);
+    try {
+      const outcome = await message<{
+        synced: number;
+        failed: number;
+        entries: { title: string; sync: { state: string; error?: string } }[];
+      }>(ids ? { type: 'library.sync', ids } : { type: 'library.sync', pending: true });
+      // 失败的必须点名，不能只给个总数——用户要知道是哪一条、为什么。
+      const problems = outcome.entries
+        .filter(item => item.sync.state !== 'synced' || item.sync.error)
+        .map(item => `${item.title}：${item.sync.error ?? '同步失败'}`);
+      syncNote = [
+        `已同步 ${outcome.synced} 条`,
+        outcome.failed > 0 ? `失败 ${outcome.failed} 条` : '',
+        problems.length ? `\n${problems.join('\n')}` : '',
+      ].filter(Boolean).join('，');
+    } catch (error) {
+      syncNote = errorMessage(error, '同步失败，请重试。');
+    } finally {
+      syncing = [];
+      await loadLibrary();
+    }
   },
   openEntry(id, title) {
     void loadEntry(id, title);

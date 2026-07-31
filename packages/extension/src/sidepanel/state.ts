@@ -11,6 +11,13 @@ export interface LibraryEntry {
   url: string;
   category: string;
   updatedAt: string;
+  /** 缺省视为未同步：老条目没有这个字段。 */
+  sync?: SyncInfo;
+}
+
+/** 一条内容当前的同步状态（缺省未同步）。 */
+export function syncStateOf(entry: LibraryEntry): SyncInfo['state'] {
+  return entry.sync?.state ?? 'pending';
 }
 
 /** 打开某条查看正文时的浮层状态。 */
@@ -27,6 +34,32 @@ export interface EntryView {
   absolutePath?: string;
   error?: string;
 }
+
+/** 一条已入库内容的同步状态。 */
+export interface SyncInfo {
+  state: 'pending' | 'synced' | 'failed';
+  target?: string;
+  at?: string;
+  committed?: boolean;
+  pushed?: boolean;
+  error?: string;
+}
+
+/** 「已入库」页按同步状态筛选。 */
+export type SyncFilter = 'all' | 'pending' | 'synced' | 'failed';
+
+const SYNC_FILTER_LABELS: Record<SyncFilter, string> = {
+  all: '全部',
+  pending: '未同步',
+  synced: '已同步',
+  failed: '同步失败',
+};
+
+const SYNC_BADGES: Record<SyncInfo['state'], string> = {
+  pending: '未同步',
+  synced: '已同步',
+  failed: '同步失败',
+};
 
 /** 明细列表的状态筛选。 */
 export type ItemFilter = 'all' | 'saved' | 'skipped' | 'failed';
@@ -60,6 +93,8 @@ export type SidePanelState =
       routeTargets?: string[];
       destinations?: { id: string; label: string; categories: string[] }[];
       defaultSinkIds?: string[];
+      /** 采集后这条内容之后会同步到哪个收件箱（采集本身只落本机库）。 */
+      syncTarget?: string;
     }
   | { phase: 'collecting'; activeStage: number }
   | {
@@ -87,6 +122,14 @@ export type SidePanelState =
       entries: LibraryEntry[];
       /** 按来源筛选；空串表示全部。 */
       source: string;
+      /** 按同步状态筛选。 */
+      syncFilter: SyncFilter;
+      /** 正在同步中的条目 id（按钮据此禁用并显示进行中）。 */
+      syncing?: string[];
+      /** 上一次同步的结果摘要，如实展示成败与原因。 */
+      syncNote?: string;
+      /** 这一条会同步到哪（按来源），供 ready 面板与列表提示。 */
+      syncTargets?: Record<string, string>;
       /** 待确认的破坏性操作（删除不可逆，必须二次确认）。 */
       pending?: { kind: 'one'; id: string; title: string } | { kind: 'all'; count: number };
       loading: boolean;
@@ -136,6 +179,10 @@ export interface SidePanelActions {
   reloadLibrary(): Promise<void>;
   /** 按来源筛选已入库列表。 */
   filterLibrary(source: string): void;
+  /** 按同步状态筛选已入库列表。 */
+  filterSync(filter: SyncFilter): void;
+  /** 同步指定条目；不传 id 表示「同步全部未同步的」。 */
+  syncLibrary(ids?: string[]): Promise<void>;
   /** 打开某条的正文浮层。 */
   openEntry(id: string, title: string): void;
   /** 关掉正文浮层。 */
@@ -190,6 +237,8 @@ export interface BackgroundStatus {
     routeTargets?: string[];
     destinations?: { id: string; label: string; categories: string[] }[];
     defaultSinkIds?: string[];
+    /** 本页来源之后会同步到哪个收件箱（采集本身只落本机库）。 */
+    syncTarget?: string;
   };
 }
 
@@ -277,6 +326,7 @@ export function sidePanelStateFromStatus(
     ...(status.page.routeTargets?.length ? { routeTargets: status.page.routeTargets } : {}),
     ...(status.page.destinations?.length ? { destinations: status.page.destinations } : {}),
     ...(status.page.defaultSinkIds?.length ? { defaultSinkIds: status.page.defaultSinkIds } : {}),
+    ...(status.page.syncTarget ? { syncTarget: status.page.syncTarget } : {}),
   };
 }
 
@@ -303,7 +353,6 @@ function show(document: Document, selector: string): HTMLElement {
  */
 function collectOverrides(document: Document): CaptureOverrides {
   const category = required<HTMLSelectElement>(document, '#category').value.trim();
-  const destination = required<HTMLSelectElement>(document, '#destination').value;
   const tags = required<HTMLInputElement>(document, '#tags').value
     .split(/[,，]/)
     .map(tag => tag.trim())
@@ -313,7 +362,6 @@ function collectOverrides(document: Document): CaptureOverrides {
   return {
     ...(category ? { userCategory: category } : {}),
     ...(tags.length ? { userTags: tags } : {}),
-    ...(destination ? { sinks: [destination] } : {}),
     ...(Number.isFinite(target) && target > 0 ? { maxItems: Math.min(60, Math.round(target)) } : {}),
   };
 }
@@ -351,12 +399,13 @@ const BATCH_COPY: Record<BatchPhase, { heading: string; note: string; tone: 'ok'
   },
   done: {
     heading: '本轮批量归档完成',
-    note: '本页已经没有新的帖子了。',
+    note: '内容已落到本机库。去「已入库」核对后同步到收件箱，再让 Agent 拉去归档。',
     tone: 'ok',
   },
   capped: {
     heading: '已采够本次目标',
-    note: '本页可能还有更多帖子。点「继续采下一批」接着采，已入库的不会重复。',
+    note: '内容已落到本机库；本页可能还有更多帖子。'
+      + '点「继续采下一批」接着采（已入库的不会重复），或去「已入库」核对后同步。',
     tone: 'ok',
   },
   stopped: {
@@ -535,18 +584,30 @@ function renderItems(
  */
 function renderEntryOverlay(
   document: Document,
-  view: EntryView | undefined,
+  state: Extract<SidePanelState, { phase: 'library' }>,
   actions: SidePanelActions,
 ): void {
+  const view = state.viewing;
   const overlay = document.querySelector<HTMLElement>('#entry-overlay');
   if (!overlay) return;
   overlay.hidden = !view;
   if (!view) return;
+  const entry = state.entries.find(candidate => candidate.id === view.id);
+  const syncState = entry ? syncStateOf(entry) : 'pending';
+  const busy = (state.syncing ?? []).includes(view.id);
+  const syncButton = required<HTMLButtonElement>(document, '#entry-sync');
+  // 逐条核对完就地同步：这正是「逐个验证后同步远程」那一步。
+  syncButton.disabled = busy || !entry;
+  syncButton.textContent = busy
+    ? '正在同步…'
+    : syncState === 'synced' ? '重新同步这一条' : '同步这一条';
+  syncButton.onclick = () => { void actions.syncLibrary([view.id]); };
 
   required(document, '#entry-title').textContent = view.title || '（无标题）';
   const meta = [
     view.source ? sourceLabel(view.source) : '',
     view.category ?? '',
+    SYNC_BADGES[syncState] + (entry?.sync?.error ? `（${entry.sync.error}）` : ''),
     view.absolutePath ?? '',
   ].filter(Boolean);
   required(document, '#entry-meta').textContent = meta.join(' · ');
@@ -582,11 +643,12 @@ function renderLibrary(
   actions: SidePanelActions,
 ): void {
   show(document, '#library-panel');
-  renderEntryOverlay(document, state.viewing, actions);
+  renderEntryOverlay(document, state, actions);
   const sources = [...new Set(state.entries.map(entry => entry.source))].sort();
-  const visible = state.source
-    ? state.entries.filter(entry => entry.source === state.source)
-    : state.entries;
+  const visible = state.entries
+    .filter(entry => !state.source || entry.source === state.source)
+    .filter(entry => state.syncFilter === 'all' || syncStateOf(entry) === state.syncFilter);
+  const pendingCount = state.entries.filter(entry => syncStateOf(entry) !== 'synced').length;
 
   required(document, '#library-heading').textContent = state.loading
     ? '正在读取…'
@@ -628,9 +690,23 @@ function renderLibrary(
     tag.textContent = sourceLabel(entry.source);
     const when = document.createElement('span');
     when.textContent = `${entry.category} · ${entry.updatedAt.slice(0, 10)}`;
-    meta.append(tag, when);
+    // 同步状态必须在列表上一眼可见：这是「该同步哪些」的唯一依据。
+    const sync = document.createElement('span');
+    const syncState = syncStateOf(entry);
+    sync.className = 'item-sync';
+    sync.dataset.sync = syncState;
+    sync.textContent = SYNC_BADGES[syncState];
+    meta.append(tag, when, sync);
     open.append(label, meta);
     open.onclick = () => actions.openEntry(entry.id, entry.title);
+
+    const syncOne = document.createElement('button');
+    syncOne.type = 'button';
+    syncOne.className = 'item-delete';
+    const busy = (state.syncing ?? []).includes(entry.id);
+    syncOne.disabled = busy;
+    syncOne.textContent = busy ? '同步中' : syncState === 'synced' ? '重新同步' : '同步';
+    syncOne.onclick = () => { void actions.syncLibrary([entry.id]); };
 
     const remove = document.createElement('button');
     remove.type = 'button';
@@ -639,11 +715,39 @@ function renderLibrary(
     remove.onclick = () => actions.askDelete({ kind: 'one', id: entry.id, title: entry.title });
     const actionsRow = document.createElement('span');
     actionsRow.className = 'item-actions';
-    actionsRow.append(remove);
+    actionsRow.append(syncOne, remove);
     row.append(open, actionsRow);
     list.append(row);
   }
+  // 同步状态筛选：核对时最常用的就是「只看未同步的」。
+  const syncFilters = required<HTMLElement>(document, '#library-sync-filters');
+  syncFilters.replaceChildren();
+  for (const filter of ['all', 'pending', 'synced', 'failed'] as const) {
+    const count = filter === 'all'
+      ? state.entries.length
+      : state.entries.filter(entry => syncStateOf(entry) === filter).length;
+    const chip = document.createElement('button');
+    chip.type = 'button';
+    chip.textContent = `${SYNC_FILTER_LABELS[filter]} ${count}`;
+    chip.setAttribute('aria-pressed', String(state.syncFilter === filter));
+    chip.onclick = () => actions.filterSync(filter);
+    syncFilters.append(chip);
+  }
+
   required<HTMLElement>(document, '#library-empty').hidden = visible.length > 0 || state.loading;
+
+  // 上一轮同步的结果：成败与原因都如实说出来，不静默。
+  const syncNote = required<HTMLElement>(document, '#library-sync-note');
+  syncNote.hidden = !state.syncNote;
+  syncNote.textContent = state.syncNote ?? '';
+
+  const syncButton = required<HTMLButtonElement>(document, '#library-sync-button');
+  const syncing = (state.syncing ?? []).length > 0;
+  syncButton.disabled = syncing || pendingCount === 0;
+  syncButton.textContent = syncing
+    ? '正在同步…'
+    : pendingCount > 0 ? `同步未同步的 ${pendingCount} 条` : '全部已同步';
+  syncButton.onclick = () => { void actions.syncLibrary(); };
 
   required<HTMLButtonElement>(document, '#library-refresh-button').onclick = () => {
     void actions.reloadLibrary();
@@ -735,83 +839,43 @@ export function renderSidePanel(
     required(document, '#source-label').textContent = state.sourceLabel;
     required(document, '#page-title').textContent = state.title;
     const routeHint = required<HTMLElement>(document, '#route-hint');
-    const destinationSelect = required<HTMLSelectElement>(document, '#destination');
+    const syncHint = required<HTMLElement>(document, '#sync-hint');
     const categorySelect = required<HTMLSelectElement>(document, '#category');
     const destinations = state.destinations ?? [];
-    const defaultIds = state.defaultSinkIds ?? [];
-    const defaultLabels = state.routeTargets ?? [];
 
-    /** 「分类」选项随选定去向联动：列出当前生效的每个去向的分类清单。 */
+    // 采集只落本机库，之后再由用户在「已入库」里显式同步。这里不再让用户选去向——
+    // 选了也不会在采集时生效，摆一个不起作用的控件比没有更糟。
+    routeHint.hidden = false;
+    routeHint.textContent = '保存去向：本机库（采集只落本地）';
+    syncHint.hidden = !state.syncTarget;
+    syncHint.textContent = state.syncTarget
+      ? `核对无误后，可在「已入库」里同步到 ${state.syncTarget}，再让 Agent 拉收件箱归档。`
+      : '';
+
+    /** 「分类」选项：优先用同步去向那套分类体系，它才是内容最终要去的地方。 */
     const applyCategories = (options: { preserve: boolean }): void => {
-      const chosen = destinationSelect.value;
-      // 默认路由可能同时写多处（本机库 + 仓库收件箱），两边的分类体系并不一样。
-      // 只取首个去向的清单，星球帖子看到的会是本机库那套「前端开发 / 人工智能」，
-      // 而它真正要去的 life-teachers 用的是「投资 / 财富 / 职场」——所以全都列出来。
-      const activeIds = chosen ? [chosen] : defaultIds;
-      const groups = activeIds.flatMap(id => {
-        const sink = destinations.find(candidate => candidate.id === id);
-        return sink && sink.categories.length > 0 ? [sink] : [];
-      });
-      const categories = [...new Set(groups.flatMap(sink => sink.categories))];
-      // 切换去向时尽量保留用户已选分类；换页面时按新页面的建议分类重置。
+      const target = destinations.find(sink => sink.label === state.syncTarget);
+      const fallback = destinations.find(sink => sink.categories.length > 0);
+      const categories = [...(target ?? fallback)?.categories ?? []];
+      // 换页面时按新页面的建议分类重置；同一页面刷新时保留用户已选。
       const wanted = options.preserve ? categorySelect.value : state.category;
       categorySelect.replaceChildren();
       categorySelect.append(new Option('自动分类（由内容判定）', ''));
-      if (groups.length > 1) {
-        // 多个去向时按去向分组，一眼看得出这个分类属于哪套体系。
-        for (const sink of groups) {
-          const group = document.createElement('optgroup');
-          group.label = sink.label;
-          for (const category of sink.categories) group.append(new Option(category, category));
-          categorySelect.append(group);
-        }
-      } else {
-        for (const category of categories) categorySelect.append(new Option(category, category));
-      }
+      for (const category of categories) categorySelect.append(new Option(category, category));
       categorySelect.value = categories.includes(wanted) ? wanted : '';
       categorySelect.disabled = categories.length === 0;
-      const labels = chosen
-        ? [destinations.find(sink => sink.id === chosen)?.label ?? chosen]
-        : defaultLabels;
-      routeHint.hidden = labels.length === 0;
-      // 选具体去向是**覆盖**默认路由，不是在默认之外再加一份。默认可能同时写两处
-      // （本机库 + 仓库收件箱），一选就只剩一处 —— 不写出来用户根本看不出区别。
-      const dropped = chosen ? defaultLabels.filter(label => !labels.includes(label)) : [];
-      routeHint.textContent = labels.length
-        ? `保存去向：${labels.join(' + ')}`
-          + (dropped.length ? `（不再写入 ${dropped.join(' · ')}）` : '')
-        : '';
     };
 
     // 重建选项的时机：切换页面，或 Bridge 侧的去向/分类发生变化（改了配置后无需重装扩展）。
     // 其余轮询刷新不动 DOM，避免覆盖用户正在填的内容。
-    const routingSignature = JSON.stringify([destinations, defaultIds]);
-    const routingChanged = panel.dataset.routing !== routingSignature;
-    if (panel.dataset.url !== state.url || routingChanged) {
+    const routingSignature = JSON.stringify([destinations, state.syncTarget]);
+    if (panel.dataset.url !== state.url || panel.dataset.routing !== routingSignature) {
       const sameUrl = panel.dataset.url === state.url;
       panel.dataset.url = state.url;
       panel.dataset.routing = routingSignature;
-      // 仅路由变化（同一页面）时保留用户已选去向，避免打断正在进行的编辑。
-      const keepDestination = sameUrl ? destinationSelect.value : '';
-      destinationSelect.replaceChildren();
-      // 默认 = 同时写这几处；具体去向 = 只写它一处。用「+」和「只存到」把这层语义
-      // 写进选项文字本身，光列名字的话「默认（本机库 · life-teachers 收件箱）」和
-      // 「life-teachers 收件箱」看着像同一回事，实际差着「还留不留本机备份」。
-      const defaultText = defaultLabels.length
-        ? `默认：${defaultLabels.join(' + ')}`
-        : '默认去向';
-      destinationSelect.append(new Option(defaultText, ''));
-      for (const sink of destinations) {
-        destinationSelect.append(new Option(`只存到 ${sink.label}`, sink.id));
-      }
-      destinationSelect.value = destinations.some(sink => sink.id === keepDestination)
-        ? keepDestination
-        : '';
-      destinationSelect.disabled = destinations.length === 0;
       if (!sameUrl) required<HTMLInputElement>(document, '#tags').value = state.tags.join(', ');
       applyCategories({ preserve: sameUrl });
     }
-    destinationSelect.onchange = () => applyCategories({ preserve: true });
 
     // 列表 / 精华页一屏多条，单页保存会把整个信息流糊成一篇，这里改成批量入口。
     required(document, '#ready-copy').textContent = state.list ? '可批量保存' : '可以保存';

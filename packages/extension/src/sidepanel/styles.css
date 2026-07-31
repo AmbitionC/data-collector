@@ -859,3 +859,18 @@ select:focus {
   overflow-wrap: anywhere;
   overflow-y: auto;
 }
+
+/* 同步状态徽标：列表上一眼看出「该同步哪些」。 */
+.collected-list .item-sync {
+  padding: 1px 8px;
+  border-radius: 9999px;
+  border: 1px solid currentColor;
+  flex: none;
+}
+
+.collected-list .item-sync[data-sync="pending"] { color: var(--muted); }
+.collected-list .item-sync[data-sync="synced"] { color: var(--success); }
+.collected-list .item-sync[data-sync="failed"] { color: var(--error); }
+
+/* 同步结果摘要可能有多行（逐条列出失败原因），保留换行。 */
+#library-sync-note { white-space: pre-wrap; }

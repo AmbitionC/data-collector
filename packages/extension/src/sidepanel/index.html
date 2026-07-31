@@ -74,8 +74,6 @@
             这是列表页：会把本页帖子逐条拆开入库，采完自动滚动加载下一批。
           </p>
           <div class="organize-grid">
-            <label for="destination">去向 <span>保存到哪个知识库</span></label>
-            <select id="destination"></select>
             <label for="category">分类</label>
             <select id="category"></select>
             <label for="tags">标签 <span>用逗号分隔</span></label>
@@ -87,6 +85,7 @@
             <span id="capture-button-label">保存这一页</span><span aria-hidden="true">↘</span>
           </button>
           <p id="route-hint" class="route-hint" hidden></p>
+          <p id="sync-hint" class="support compact" hidden></p>
         </section>
 
         <section id="collecting-panel" class="state-panel" hidden>
@@ -127,9 +126,12 @@
           <p class="section-kicker">本机知识库</p>
           <h2 id="library-heading">已入库内容</h2>
           <div id="library-filters" class="filter-chips" role="group" aria-label="按来源筛选"></div>
+          <div id="library-sync-filters" class="filter-chips" role="group" aria-label="按同步状态筛选"></div>
           <ul id="library-list" class="collected-list"></ul>
           <p id="library-empty" class="support compact" hidden>还没有已入库的内容。</p>
+          <p id="library-sync-note" class="support compact" hidden></p>
           <div class="result-actions">
+            <button id="library-sync-button" type="button" class="primary-button">同步未同步的</button>
             <button id="library-refresh-button" type="button" class="secondary-button">刷新</button>
             <button id="library-clear-button" type="button" class="secondary-button danger">清空全部</button>
           </div>
@@ -147,6 +149,7 @@
           <p id="entry-status" class="support compact" hidden></p>
           <pre id="entry-body" class="entry-body"></pre>
           <div class="result-actions">
+            <button id="entry-sync" type="button" class="primary-button">同步这一条</button>
             <button id="entry-open-source" type="button" class="secondary-button">打开原文</button>
             <button id="entry-reveal" type="button" class="secondary-button">在文件夹中查看</button>
           </div>

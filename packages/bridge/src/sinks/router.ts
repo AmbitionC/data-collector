@@ -101,6 +101,33 @@ export class SinkRouter {
     return [...new Set([...this.sinks.values()].map(sink => sink.root).filter(Boolean))];
   }
 
+  /**
+   * 某来源的**同步去向**（本机库之外的那些）。
+   *
+   * 采集只落本机库，投递到仓库收件箱是之后的显式动作，因此这里刻意排除 markdown：
+   * 它是起点，不是同步目标。没有配置任何仓库去向时返回 undefined，
+   * 同步会如实报「没有为该来源配置同步去向」，而不是假装成功。
+   */
+  syncTarget(source: string): ContentSink | undefined {
+    const ids = this.routes[source] ?? [];
+    for (const id of ids) {
+      if (id === FALLBACK_SINK_ID) continue;
+      const sink = this.sinks.get(id);
+      if (sink) return sink;
+    }
+    return undefined;
+  }
+
+  /** 可选的同步去向说明（供侧栏展示「这一条会同步到哪」）。 */
+  describeSyncTargets(): Record<string, { id: string; label: string }> {
+    const targets: Record<string, { id: string; label: string }> = {};
+    for (const source of SOURCES) {
+      const sink = this.syncTarget(source);
+      if (sink) targets[source] = { id: sink.id, label: sink.label };
+    }
+    return targets;
+  }
+
   /** 解析某来源要用的 sink id 列表（去重、剔除未定义项，空则回退 markdown）。 */
   resolveSinkIds(source: Source, override?: readonly string[]): string[] {
     const requested = override ?? this.routes[source] ?? [FALLBACK_SINK_ID];
@@ -117,11 +144,16 @@ export class SinkRouter {
   }
 
   /**
-   * 把内容落到该来源路由到的每个 sink。单个 sink 抛错不影响其他 sink；
-   * 结果数组按 sink 顺序返回，调用方据 `ok` 判断整体成败。
+   * 采集落地：**只写本机库**。
+   *
+   * 本机库是唯一落点，也是去重与「已入库」列表的唯一依据；投递到仓库收件箱改由
+   * 用户在「已入库」页显式发起（见 library/sync.ts）。采集时就直接投递会让用户
+   * 失去中间那道核对，出问题也分不清是采错了还是投错了。
    */
   async save(input: OrganizedDocument, override?: readonly string[]): Promise<SinkResult[]> {
-    const ids = this.resolveSinkIds(input.document.source, override);
+    const ids = override && override.length > 0
+      ? this.resolveSinkIds(input.document.source, override)
+      : [FALLBACK_SINK_ID];
     const results: SinkResult[] = [];
     for (const id of ids) {
       const sink = this.sinks.get(id);

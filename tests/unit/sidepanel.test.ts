@@ -46,6 +46,8 @@ beforeEach(async () => {
     askDelete: vi.fn(),
     confirmDelete: vi.fn(async () => undefined),
     cancelDelete: vi.fn(),
+    filterSync: vi.fn(),
+    syncLibrary: vi.fn(async () => undefined),
     openEntry: vi.fn(),
     closeEntry: vi.fn(),
     openSource: vi.fn(),
@@ -289,7 +291,10 @@ describe('side panel state mapping', () => {
 });
 
 describe('side panel DOM behavior', () => {
-  it('offers destination and category as bound選項 and submits the chosen ones', async () => {
+  it('采集只落本机库；面板说明之后同步到哪，分类跟随同步去向', async () => {
+    // 新链路：采集 → 本机库 → 人工核对 → 显式同步 → Agent 归档。
+    // 因此这里不再有「去向」选择器——选了也不会在采集时生效，
+    // 摆一个不起作用的控件比没有更糟。
     renderSidePanel(document, {
       phase: 'ready',
       url: 'https://mp.weixin.qq.com/s/current',
@@ -298,8 +303,7 @@ describe('side panel DOM behavior', () => {
       category: '',
       tags: ['通胀', '投资'],
       list: false,
-      routeTargets: ['本机库'],
-      defaultSinkIds: ['markdown'],
+      syncTarget: 'life-teachers 收件箱',
       destinations: [
         { id: 'markdown', label: '本机库', categories: ['商业与投资', '认知'] },
         { id: 'life-teachers', label: 'life-teachers 收件箱', categories: ['投资', '财富', '认知'] },
@@ -308,40 +312,29 @@ describe('side panel DOM behavior', () => {
 
     expect(document.querySelector<HTMLElement>('#ready-panel')?.hidden).toBe(false);
     expect(document.querySelector('#page-title')?.textContent).toContain('一夜之间');
+    expect(document.querySelector('#destination')).toBeNull();
 
-    // 一级「去向」：默认项 + 每个可选目标（不是自由输入）。
-    const destination = document.querySelector<HTMLSelectElement>('#destination')!;
-    expect([...destination.options].map(option => option.value))
-      .toEqual(['', 'markdown', 'life-teachers']);
-    // 选项文字必须自带语义：默认是「同时写这几处」，选具体去向是「只写它一处」。
-    expect(destination.options[0]?.textContent).toBe('默认：本机库');
-    expect(destination.options[2]?.textContent).toBe('只存到 life-teachers 收件箱');
+    // 采集去向说死：只落本机库。
+    expect(document.querySelector('#route-hint')?.textContent).toBe('保存去向：本机库（采集只落本地）');
+    // 并说明下一步：核对后同步到哪，再由 Agent 归档。
+    const syncHint = document.querySelector('#sync-hint');
+    expect(syncHint?.textContent).toContain('life-teachers 收件箱');
+    expect(syncHint?.textContent).toContain('已入库');
 
-    // 二级「分类」：跟随默认去向（本机库）的分类清单。
+    // 分类用**同步去向**那套体系：内容最终要去那儿，不该给本机库那套。
     const category = document.querySelector<HTMLSelectElement>('#category')!;
     expect([...category.options].map(option => option.value))
-      .toEqual(['', '商业与投资', '认知']);
-
-    // 切到 life-teachers 后，分类清单联动为该库的主分类，去向提示同步。
-    destination.value = 'life-teachers';
-    destination.dispatchEvent(new window.Event('change'));
-    expect([...category.options].map(option => option.value))
       .toEqual(['', '投资', '财富', '认知']);
-    expect(document.querySelector('#route-hint')?.textContent)
-      .toContain('life-teachers 收件箱');
-    // 选了单一去向就等于放弃默认里的其它去向，提示必须写出来。
-    expect(document.querySelector('#route-hint')?.textContent)
-      .toContain('不再写入 本机库');
 
     category.value = '投资';
     document.querySelector<HTMLInputElement>('#tags')!.value = '宏观, 利率';
     document.querySelector<HTMLButtonElement>('#capture-button')!.click();
     await Promise.resolve();
 
+    // 不再下发 sinks：采集阶段没有去向可选。
     expect(actions.capture).toHaveBeenCalledWith({
       userCategory: '投资',
       userTags: ['宏观', '利率'],
-      sinks: ['life-teachers'],
       maxItems: 20,
     });
   });
@@ -657,7 +650,7 @@ describe('side panel DOM behavior', () => {
       { id: 'a', source: '知识星球', title: '第一条', url: 'https://x/a', category: '投资', updatedAt: '2026-07-25T00:00:00.000Z' },
       { id: 'b', source: '微信公众号', title: '第二条', url: 'https://x/b', category: '认知', updatedAt: '2026-07-24T00:00:00.000Z' },
     ];
-    renderSidePanel(document, { phase: 'library', entries, source: '', loading: false }, actions);
+    renderSidePanel(document, { phase: 'library', entries, source: '', syncFilter: 'all', loading: false }, actions);
 
     expect(visible('#library-panel')).toBe(true);
     expect(document.querySelector('#library-heading')?.textContent).toBe('已入库 2 条');
@@ -669,7 +662,9 @@ describe('side panel DOM behavior', () => {
     expect(actions.filterLibrary).toHaveBeenCalledWith('微信公众号');
 
     // 点删除只进入确认态，绝不直接删。
-    document.querySelector<HTMLButtonElement>('.item-delete')!.click();
+    [...document.querySelectorAll<HTMLButtonElement>('#library-list .item-delete')]
+      .find(button => button.textContent === '删除')!
+      .click();
     expect(actions.askDelete).toHaveBeenCalledWith({ kind: 'one', id: 'a', title: '第一条' });
     expect(actions.confirmDelete).not.toHaveBeenCalled();
   });
@@ -682,6 +677,7 @@ describe('side panel DOM behavior', () => {
       document,
       {
         phase: 'library',
+        syncFilter: 'all',
         entries,
         source: '',
         loading: false,
@@ -704,7 +700,7 @@ describe('side panel DOM behavior', () => {
   });
 
   it('disables 清空 when the library is already empty', () => {
-    renderSidePanel(document, { phase: 'library', entries: [], source: '', loading: false }, actions);
+    renderSidePanel(document, { phase: 'library', entries: [], source: '', syncFilter: 'all', loading: false }, actions);
 
     expect(document.querySelector<HTMLButtonElement>('#library-clear-button')?.disabled).toBe(true);
     expect(visible('#library-empty')).toBe(true);
@@ -764,7 +760,7 @@ describe('已入库页面', () => {
   ];
 
   it('来源显示成人话，不把内部标识摆给用户看', () => {
-    renderSidePanel(document, { phase: 'library', entries: ENTRIES, source: '', loading: false }, actions);
+    renderSidePanel(document, { phase: 'library', entries: ENTRIES, source: '', syncFilter: 'all', loading: false }, actions);
 
     expect(document.querySelector('#library-list .item-status')?.textContent).toBe('知识星球');
     expect(document.querySelector('#library-list')?.textContent).not.toContain('zsxq');
@@ -777,7 +773,7 @@ describe('已入库页面', () => {
 
   it('整行可点，点了就去读这一条的正文', () => {
     // 早先这里是个 <span>，压根点不动——用户看不到自己采到了什么。
-    renderSidePanel(document, { phase: 'library', entries: ENTRIES, source: '', loading: false }, actions);
+    renderSidePanel(document, { phase: 'library', entries: ENTRIES, source: '', syncFilter: 'all', loading: false }, actions);
 
     const row = document.querySelector<HTMLButtonElement>('#library-list .item-open');
     expect(row).not.toBeNull();
@@ -788,11 +784,13 @@ describe('已入库页面', () => {
   it('删除按钮和整行按钮是两颗按钮，删除不会被撑成整行宽', () => {
     // 回归：样式写成 `.collected-list button` 时，display:grid + width:100%
     // 漏给了「删除」，那颗小圆角按钮被撑满整行。类名分开是这条的前提。
-    renderSidePanel(document, { phase: 'library', entries: ENTRIES, source: '', loading: false }, actions);
+    renderSidePanel(document, { phase: 'library', entries: ENTRIES, source: '', syncFilter: 'all', loading: false }, actions);
 
-    const remove = document.querySelector<HTMLButtonElement>('#library-list .item-delete');
-    expect(remove?.textContent).toBe('删除');
-    expect(remove?.classList.contains('item-open')).toBe(false);
+    const buttons = [...document.querySelectorAll<HTMLButtonElement>('#library-list .item-delete')];
+    // 行内两颗小按钮：同步、删除。都不该是整行那颗（否则会被撑满整行宽）。
+    expect(buttons.map(button => button.textContent)).toEqual(['同步', '删除']);
+    expect(buttons.every(button => !button.classList.contains('item-open'))).toBe(true);
+    const remove = buttons.find(button => button.textContent === '删除');
     remove!.click();
     expect(actions.askDelete).toHaveBeenCalledWith({
       kind: 'one', id: 'aaa', title: '创业板跌破 60 日线',
@@ -800,7 +798,7 @@ describe('已入库页面', () => {
   });
 
   it('正文浮层：读取中说在读、读到了显示正文、失败说清原因', () => {
-    const base = { phase: 'library' as const, entries: ENTRIES, source: '', loading: false };
+    const base = { phase: 'library' as const, entries: ENTRIES, source: '', syncFilter: 'all' as const, loading: false };
 
     renderSidePanel(document, {
       ...base,
@@ -837,7 +835,7 @@ describe('已入库页面', () => {
   });
 
   it('没在看任何一条时浮层是收起的', () => {
-    renderSidePanel(document, { phase: 'library', entries: ENTRIES, source: '', loading: false }, actions);
+    renderSidePanel(document, { phase: 'library', entries: ENTRIES, source: '', syncFilter: 'all', loading: false }, actions);
 
     expect(document.querySelector<HTMLElement>('#entry-overlay')?.hidden).toBe(true);
   });

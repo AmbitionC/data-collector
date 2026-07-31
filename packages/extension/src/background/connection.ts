@@ -362,6 +362,19 @@ export class BridgeConnection {
     return response.json();
   }
 
+  /** 把已入库条目同步到目标仓库收件箱；pending 表示「全部未同步的」。 */
+  async syncLibrary(input: { ids?: string[]; pending?: boolean }): Promise<unknown> {
+    const { baseUrl, token } = await this.authorized();
+    const fetcher = this.dependencies.fetch;
+    const response = await fetcher(`${baseUrl}/v1/library/sync`, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+      body: JSON.stringify(input),
+    });
+    if (!response.ok) throw new Error(`同步失败：HTTP ${response.status}`);
+    return response.json();
+  }
+
   /** 删除已入库条目；all 为 true 表示清空（必须由调用方显式指定）。 */
   async deleteLibrary(input: { ids?: string[]; all?: boolean }): Promise<{ deleted: number }> {
     const { baseUrl, token } = await this.authorized();

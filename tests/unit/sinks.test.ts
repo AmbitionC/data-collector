@@ -162,7 +162,9 @@ describe('SinkRouter', () => {
     expect(results[0]!.outputRef).toContain(libraryRoot);
   });
 
-  it('routes a configured source to a repo inbox and leaves others on markdown', async () => {
+  it('采集一律只落本机库；仓库收件箱是「同步去向」，不在采集时写', async () => {
+    // 产品链路：采集 → 本机库（唯一落点、唯一去重依据）→ 人工核对 → 显式同步 → Agent 归档。
+    // 采集时就直接投递会让用户失去中间那道审阅，出问题也分不清是采错了还是投错了。
     const libraryRoot = await temporaryDirectory();
     const repo = await temporaryDirectory();
     const config: SinksConfig = {
@@ -179,12 +181,17 @@ describe('SinkRouter', () => {
     });
 
     const nowcoder = await router.save(organize(nowcoderDoc({ images: [] })));
-    expect(nowcoder.map(result => result.sinkId)).toEqual(['fe-inbox']);
-    expect(nowcoder[0]!.outputRef).toContain(repo);
+    expect(nowcoder.map(result => result.sinkId)).toEqual(['markdown']);
+    expect(nowcoder[0]!.outputRef).toContain(libraryRoot);
 
     const wechat = await router.save(organize(wechatDoc()));
     expect(wechat.map(result => result.sinkId)).toEqual(['markdown']);
     expect(wechat[0]!.outputRef).toContain(libraryRoot);
+
+    // 但同步去向要说得出来，否则「同步」这一步无处可去。
+    expect(router.syncTarget('nowcoder')?.id).toBe('fe-inbox');
+    // 没配仓库去向的来源如实返回 undefined，同步时会明确报错而不是假装成功。
+    expect(router.syncTarget('wechat')).toBeUndefined();
   });
 
   it('skips undefined sinks with a warning and falls back to markdown', () => {
@@ -267,13 +274,15 @@ describe('loadSinksConfig', () => {
   });
 
   it('enables a built-in target only when its repository exists（存在才启用）', async () => {
-    // 只有 life-teachers 存在时：公众号/星球 双写本机库 + 收件箱，牛客仍只落本机库。
+    // routes 表示「同步去向」——采集一律先落本机库，这里不再出现 markdown。
     const onlyLifeTeachers = await builtInSinksConfig(async path =>
       path.endsWith('/life-teachers'),
     );
     expect(Object.keys(onlyLifeTeachers.sinks).sort()).toEqual(['life-teachers', 'markdown']);
-    expect(onlyLifeTeachers.routes.wechat).toEqual(['markdown', 'life-teachers']);
-    expect(onlyLifeTeachers.routes.zsxq).toEqual(['markdown', 'life-teachers']);
+    expect(onlyLifeTeachers.routes.wechat).toEqual(['life-teachers']);
+    expect(onlyLifeTeachers.routes.zsxq).toEqual(['life-teachers']);
+    // 同步是显式动作，提交后顺手推一次，好让云端 Agent 拉得到。
+    expect(onlyLifeTeachers.sinks['life-teachers']).toMatchObject({ push: true });
     expect(onlyLifeTeachers.routes.nowcoder).toBeUndefined();
     expect(onlyLifeTeachers.sinks['life-teachers']).toMatchObject({
       type: 'repo-inbox',

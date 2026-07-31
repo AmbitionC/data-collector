@@ -31,7 +31,14 @@ import { existsSync } from 'node:fs';
 import { join, resolve as resolvePath } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
-import { clearLibrary, deleteEntries, listLibrary, readEntry } from '../library/index.js';
+import {
+  clearLibrary,
+  deleteEntries,
+  listLibrary,
+  pendingIds,
+  readEntry,
+  syncEntries,
+} from '../library/index.js';
 import { updateWorkspace, type UpdateOutcome } from '../autoUpdate.js';
 
 /** 删除请求：要么给明确的 id 列表，要么显式 all:true —— 不接受隐式全删。 */
@@ -56,6 +63,11 @@ const errorSchema = z.object({
   needsAttention: z.boolean().optional(),
 });
 const revealSchema = z.object({ path: z.string().trim().min(1).max(4096) });
+const syncLibrarySchema = z.object({
+  ids: z.array(z.string().trim().min(1).max(200)).max(500).optional(),
+  /** 同步全部未同步的条目；必须显式请求，绝不把「没传 ids」理解成「同步全部」。 */
+  pending: z.boolean().optional(),
+});
 
 export interface StartBridgeOptions extends ConfigOverrides {
   fetch?: typeof fetch;
@@ -294,6 +306,8 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
         trustedExtensionId: TRUSTED_EXTENSION_ID,
         extensionConnected: extensionReady && extensionSocket?.readyState === WebSocket.OPEN,
         routing: router.describeRouting(),
+        // 同步去向：采集只落本机库，这里说明「之后会同步到哪」。
+        syncTargets: router.describeSyncTargets(),
         // 扩展据此判断「我加载的是不是当前这一版」，是就不打扰，不是就提示重新加载。
         ...(update ? { update } : {}),
       });
@@ -332,6 +346,16 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
       // 索引里有、文件没了也算「找不到」——绝不返回一片空白让用户以为内容就是空的。
       if (!entry) throw new HttpError(404, 'ENTRY_NOT_FOUND', '这一条已经不在本机知识库里了');
       return sendJson(response, 200, entry);
+    }
+    if (request.method === 'POST' && requestUrl.pathname === '/v1/library/sync') {
+      const input = syncLibrarySchema.parse(await readJson(request));
+      const ids = input.pending ? await pendingIds(config.libraryRoot) : input.ids ?? [];
+      const outcome = await syncEntries(
+        config.libraryRoot,
+        ids,
+        source => router.syncTarget(source),
+      );
+      return sendJson(response, 200, outcome);
     }
     if (request.method === 'POST' && requestUrl.pathname === '/v1/library/delete') {
       const input = deleteLibrarySchema.parse(await readJson(request));
