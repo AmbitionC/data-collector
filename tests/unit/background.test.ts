@@ -51,7 +51,16 @@ class InMemoryTabs implements TabsApi {
   }
   readonly injected: number[] = [];
   readonly restored: number[] = [];
-  listRounds: Array<{ documents: CollectedDocument[]; skipped: number; total: number }> = [];
+  listRounds: Array<{
+    documents: CollectedDocument[];
+    skipped: number;
+    total: number;
+    /** 本轮已截获的帖子号条数；不写就按「截到了」处理（真实页面的常态）。 */
+    captured?: number;
+  }> = [];
+  /** 「切走分类再切回来」被请求了几次，以及页面上有没有这个控件。 */
+  refreshCalls = 0;
+  canRefresh = true;
   /** 把用例里写的 documents 转成内容脚本真正回传的逐条结构。 */
   private toPayload(round: { documents: CollectedDocument[]; skipped: number; total: number }) {
     const items = round.documents.map((document, index) => ({
@@ -66,7 +75,12 @@ class InMemoryTabs implements TabsApi {
         reason: '没能对上帖子号',
       } as never);
     }
-    return { items, skipped: round.skipped, total: round.total };
+    return {
+      items,
+      skipped: round.skipped,
+      total: round.total,
+      captured: round.captured ?? round.total,
+    };
   }
   advances: Array<{ collapsed: number; loaded: number }> = [];
   response: Awaited<ReturnType<TabsApi['sendMessage']>> = { ok: true, document: document() };
@@ -103,6 +117,13 @@ class InMemoryTabs implements TabsApi {
       const round = this.listRounds.shift();
       if (!round) return { ok: false, error: { code: 'COLLECTION_FAILED', message: '没有更多轮次' } };
       return { ok: true, list: this.toPayload(round) };
+    }
+    if (type === 'list.refreshTopics') {
+      this.refreshCalls += 1;
+      return {
+        ok: true,
+        refresh: this.canRefresh ? { toggled: true, category: '精华' } : { toggled: false },
+      };
     }
     if (type === 'list.advance') {
       return { ok: true, advance: this.advances.shift() ?? { collapsed: 0, loaded: 0 } };
@@ -646,6 +667,55 @@ describe('background bootstrap', () => {
     await Promise.resolve();
     await Promise.resolve();
     expect(response).toHaveBeenCalledWith({ ok: false, error: '不支持的扩展操作' });
+  });
+});
+
+describe('一个帖子号都没截到时，先替用户切一次分类', () => {
+  const topicDoc = (id: string) => topic(id);
+
+  it('第一轮没截到帖子号 → 切走分类再切回来 → 重跑这一轮', async () => {
+    // 帖子号只在接口响应里。页面若是更早加载好的，那次响应已经错过，
+    // 光重试永远没用——这正是实测「已捕获 0 个」的成因。
+    const tabs = new InMemoryTabs();
+    tabs.activeTab = { id: 7, url: LIST_URL, status: 'complete' };
+    tabs.listRounds = [
+      // 第一轮：页面上有 2 条，但一个帖子号都没截到。
+      { documents: [], skipped: 2, total: 2, captured: 0 },
+      // 切过分类之后，同一屏这次对上号了。
+      { documents: [topicDoc('511111111111111'), topicDoc('522222222222222')], skipped: 0, total: 2 },
+      { documents: [], skipped: 0, total: 0 },
+    ];
+    const bridge = new InMemoryBridge();
+    const runner = new JobRunner({
+      tabs, bridge, waitForTabComplete: async () => undefined, delay: async () => undefined,
+    });
+
+    const progress = await runner.captureList();
+
+    expect(tabs.refreshCalls).toBe(1);
+    expect(progress.collected).toBe(2);
+    // 切分类只做一次，绝不来回折腾用户的页面。
+    expect(progress.log.some(line => line.includes('切走分类再切回来'))).toBe(true);
+  });
+
+  it('页面上没有分类切换控件时如实记一笔，然后照常往下走', async () => {
+    const tabs = new InMemoryTabs();
+    tabs.activeTab = { id: 7, url: LIST_URL, status: 'complete' };
+    tabs.canRefresh = false;
+    tabs.listRounds = [{ documents: [], skipped: 2, total: 2, captured: 0 }];
+    const runner = new JobRunner({
+      tabs,
+      bridge: new InMemoryBridge(),
+      waitForTabComplete: async () => undefined,
+      delay: async () => undefined,
+    });
+
+    const progress = await runner.captureList();
+
+    expect(tabs.refreshCalls).toBe(1);
+    expect(progress.log.some(line => line.includes('没找到分类切换控件'))).toBe(true);
+    // 这一步只是便利，失败绝不能把整批带下水。
+    expect(progress.phase).toBe('skipped_all');
   });
 });
 

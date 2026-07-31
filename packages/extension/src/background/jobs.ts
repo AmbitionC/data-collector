@@ -42,6 +42,7 @@ export type ExtractionResponse =
   | { ok: true; diagnostics: string }
   | { ok: true; highlight: { found: boolean } }
   | { ok: true; hook: HookStats }
+  | { ok: true; refresh: { toggled: boolean; category?: string } }
   | { ok: false; error: { code: string; message: string } };
 
 export interface TabsApi {
@@ -75,6 +76,7 @@ interface PayloadMap {
   diagnostics: string;
   highlight: { found: boolean };
   hook: HookStats;
+  refresh: { toggled: boolean; category?: string };
 }
 
 /** 按请求类型取出应答载荷；字段对不上说明页面里的内容脚本还是旧版本。 */
@@ -428,6 +430,8 @@ export class JobRunner {
 
     let sawAnyPost = false;
     let captured = 0;
+    /** 是否已经替用户切过一次分类来触发接口请求（最多一次）。 */
+    let refreshedFeed = false;
     for (let round = 0; round < maxRounds; round += 1) {
       let response: ExtractionResponse;
       try {
@@ -450,6 +454,26 @@ export class JobRunner {
         return await fail(response.error.code, response.error.message);
       }
       const list = payloadOf(response, 'list');
+
+      // 一个帖子号都没截到：页面多半是更早之前加载好的，那次接口响应已经错过。
+      // 与其让用户自己去切分类，不如插件代劳一次——这是唯一能不刷新页面就
+      // 让站点重新请求的办法（刷新会把「精华」退回「最新」）。只做一次，避免来回折腾。
+      if (!refreshedFeed && (list.captured ?? 0) === 0 && list.total > 0) {
+        refreshedFeed = true;
+        note('本页一个帖子号都没截到：切走分类再切回来，让站点重新请求一次');
+        // 全程尽力而为：这一步失败（页面里是旧版内容脚本、答不上这个字段等）
+        // 绝不能把整批采集带下水——它只是个「省得用户自己动手」的便利。
+        const refresh = await this.ask(tabId, { type: 'list.refreshTopics' })
+          .then(response => (response.ok ? payloadOf(response, 'refresh') : { toggled: false }))
+          .catch(() => ({ toggled: false as boolean, category: undefined }));
+        if (refresh.toggled) {
+          note(`已切走并切回「${refresh.category ?? '原分类'}」，重新提取本屏`);
+          round -= 1; // 重跑这一轮（refreshedFeed 保证只会发生一次）
+          continue;
+        }
+        note('页面上没找到分类切换控件，这一步跳过');
+      }
+
       progress.rounds = round + 1;
       progress.skipped += list.skipped;
       if (list.total > 0) sawAnyPost = true;

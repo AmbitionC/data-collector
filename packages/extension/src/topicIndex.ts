@@ -47,6 +47,8 @@ export const TOPIC_STATS = 'data-collector:topics:stats';
  */
 export interface HookStats {
   installed: boolean;
+  /** 页面里跑的是更早构建留下的钩子：它在工作，但计数取不到（都是 0，别当真）。 */
+  legacy?: boolean;
   /** 钩子装上的时刻（页面时间轴上的毫秒数）。 */
   installedAt?: number;
   /** 旁观到的请求总数。 */

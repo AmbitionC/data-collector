@@ -74,7 +74,8 @@ interface ExtractMessage {
     | 'list.restore'
     | 'list.highlight'
     | 'list.itemDiagnose'
-    | 'list.hookStats';
+    | 'list.hookStats'
+    | 'list.refreshTopics';
   /** list.highlight：要滚过去并高亮的那一条。 */
   key?: string;
   overrides?: {
@@ -223,6 +224,55 @@ async function advanceList(): Promise<{ collapsed: number; loaded: number }> {
 }
 
 /**
+ * 分类标签栏（最新 / 精华 / 只看星主 / 问答…）。真实结构见诊断样本：
+ * `<app-menu><div class="menu-container"><div class="item ng-star-inserted actived">精华</div>…`
+ */
+const MENU_ITEM = '.menu-container .item';
+const MENU_ACTIVE = 'actived';
+
+function menuLabels(): { labels: string[]; active?: string } {
+  const items = [...document.querySelectorAll<HTMLElement>(MENU_ITEM)];
+  const labels = items.map(item => (item.textContent ?? '').trim()).filter(Boolean);
+  const active = items.find(item => item.classList.contains(MENU_ACTIVE));
+  return { labels, ...(active ? { active: (active.textContent ?? '').trim() } : {}) };
+}
+
+/** 按文案重新查找并点击：Angular 切换分类时会重建这些节点，旧引用点不动。 */
+function clickMenu(label: string): boolean {
+  const target = [...document.querySelectorAll<HTMLElement>(MENU_ITEM)]
+    .find(item => (item.textContent ?? '').trim() === label);
+  if (!target) return false;
+  target.click();
+  return true;
+}
+
+/**
+ * 让站点重新请求一次列表，好让主世界钩子截到帖子号。
+ *
+ * 帖子号只存在于接口响应里。页面若是更早之前加载好的（内容都在，滚动也带不出新请求），
+ * 那次响应早就错过了，光重试永远没用——这正是「已捕获 0 个」最常见的成因。
+ *
+ * 做法是**切走分类再切回来**：这是用户本来就得手动做的那一步，由插件代劳。
+ * 绝不用刷新页面代替：刷新会把「精华」退回「最新」，采到的就不是用户要的内容。
+ * 无论中途出什么岔子，都必须切回原来的分类。
+ */
+async function refreshTopicFeed(): Promise<{ toggled: boolean; category?: string }> {
+  const { labels, active } = menuLabels();
+  if (!active) return { toggled: false };
+  const other = labels.find(label => label !== active);
+  if (!other) return { toggled: false };
+  try {
+    if (!clickMenu(other)) return { toggled: false };
+    await humanPause(700, 1_200);
+    return { toggled: true, category: active };
+  } finally {
+    // 必须回到用户原来所在的分类，否则等于替他换了内容。
+    clickMenu(active);
+    await humanPause(900, 1_500);
+  }
+}
+
+/**
  * 单条帖子的「为什么没对上号」证据包。
  *
  * 整页诊断给的是页面结构，回答不了「这一条到底差在哪」。用户点某条跳过的帖子时
@@ -321,6 +371,8 @@ async function listDiagnostics(): Promise<string> {
       // 成对样本：接口那边归一化后是什么样、页面这边又是什么样。
       // 「对不上号」的排查全靠这两栏摆在一起看，只报一个总数根本定位不了。
       capturedSamples: topics.samples(4),
+      // 分类标签栏：自动「切走再切回」这一步能不能做，取决于这里找不找得到。
+      menu: menuLabels(),
       pageSamples: all.slice(0, 4).map(node => ({
         matched: Boolean(topics.find(listBodyText(node))),
         text: listBodyText(node).replace(/\s+/g, '').slice(0, 60),
@@ -366,9 +418,18 @@ if (!alreadyRegistered) chrome.runtime.onMessage.addListener((message: unknown, 
     request.type !== 'list.restore' &&
     request.type !== 'list.highlight' &&
     request.type !== 'list.itemDiagnose' &&
-    request.type !== 'list.hookStats'
+    request.type !== 'list.hookStats' &&
+    request.type !== 'list.refreshTopics'
   ) {
     return false;
+  }
+
+  if (request.type === 'list.refreshTopics') {
+    void refreshTopicFeed().then(
+      refresh => sendResponse({ ok: true, refresh }),
+      () => sendResponse({ ok: true, refresh: { toggled: false } }),
+    );
+    return true;
   }
 
   if (request.type === 'list.hookStats') {

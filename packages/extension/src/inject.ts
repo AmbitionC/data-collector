@@ -140,18 +140,38 @@ function patchXhr(): void {
   } as typeof open;
 }
 
-// 防重复打补丁，理由见 TOPIC_HOOK_FLAG。
 const store = window as unknown as Record<string, unknown>;
-if (!store[TOPIC_HOOK_FLAG]) {
-  store[TOPIC_HOOK_FLAG] = true;
+const existing = store[TOPIC_HOOK_FLAG];
+
+// 防重复打补丁，理由见 TOPIC_HOOK_FLAG。
+if (!existing) {
   stats.installedAt = Math.round(performance.now());
   patchFetch();
   patchXhr();
-  // 隔离世界随时可以问一句「钩子还在吗、旁观到了什么」。
-  // 没有这条应答，「已捕获 0 个」就分不清是钩子没装上还是页面根本没发请求。
-  window.addEventListener('message', event => {
-    if (event.source !== window) return;
-    if ((event.data as { source?: unknown })?.source !== TOPIC_STATS_REQUEST) return;
-    window.postMessage({ source: TOPIC_STATS, stats }, window.location.origin);
-  });
+}
+
+/**
+ * 把统计对象挂在标记位上（老版本挂的是 `true`）。
+ *
+ * 这样后注入的新版本能接手老版本留下的统计；接不到（老版本没留）就如实标 legacy，
+ * 说明「钩子在跑，但它是旧版构建，计数拿不到」——绝不能因此报成「钩子没在运行」。
+ */
+const shared: HookStats = isHookStats(existing) ? existing : stats;
+if (existing && !isHookStats(existing)) shared.legacy = true;
+store[TOPIC_HOOK_FLAG] = shared;
+
+/**
+ * 应答统计查询。**必须无条件注册**，不能只在「这次真的打了补丁」时才注册——
+ * 扩展更新后页面里留着的是老版本补丁，新注入的这份会跳过补丁流程；
+ * 若连监听也一起跳过，隔离世界就问不到任何东西，于是把「钩子其实在跑」
+ * 误报成「钩子没在运行」，把人引向完全错误的处置方向（实测踩过）。
+ */
+window.addEventListener('message', event => {
+  if (event.source !== window) return;
+  if ((event.data as { source?: unknown })?.source !== TOPIC_STATS_REQUEST) return;
+  window.postMessage({ source: TOPIC_STATS, stats: shared }, window.location.origin);
+});
+
+function isHookStats(value: unknown): value is HookStats {
+  return typeof value === 'object' && value !== null && 'observed' in value;
 }
