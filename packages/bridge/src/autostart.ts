@@ -5,6 +5,8 @@
  * 只能靠系统的登录项：登录时拉起，进程挂了自动重启。
  */
 
+import { SERVICE_PATH } from './git.js';
+
 export const AUTOSTART_LABEL = 'com.data-collector.bridge';
 
 export interface AutostartPlan {
@@ -54,6 +56,11 @@ function macPlan(input: {
     <array>
 ${programArguments}
     </array>
+    <key>EnvironmentVariables</key>
+    <dict>
+      <key>PATH</key>
+      <string>${escapeXml(SERVICE_PATH)}</string>
+    </dict>
     <key>RunAtLoad</key>
     <true/>
     <key>KeepAlive</key>
@@ -88,6 +95,7 @@ function linuxPlan(input: {
 Description=Data Collector Bridge
 
 [Service]
+Environment=PATH=${SERVICE_PATH}
 ExecStart=${input.nodePath} ${input.cliPath} bridge start
 Restart=always
 RestartSec=3

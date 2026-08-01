@@ -327,14 +327,15 @@ describe('loadSinksConfig', () => {
 
 describe('git 报错要翻成人能照做的一句话', () => {
   it('认得出常见成因，并给出可执行的下一步', () => {
-    // 直接把 stderr 摆出来毫无用处：`xcrun: error: invalid active developer path`
-    // 不告诉任何人「装一下命令行工具」。
+    // 直接把 stderr 摆出来毫无用处，但**翻错了比不翻更糟**：这条一度被翻成
+    // 「这台 Mac 的命令行工具坏了，去 xcode-select --install」，而用户终端里的 git 好得很。
+    // 真正的成因是本机服务（登录项）的 PATH 找不到用户那份 git——细节见 tests/unit/git.test.ts。
     const xcrun = explainGitFailure(
       'git add',
       'xcrun: error: invalid active developer path (/Library/Developer/CommandLineTools)',
     );
-    expect(xcrun).toContain('命令行工具');
-    expect(xcrun).toContain('xcode-select --install');
+    expect(xcrun).toContain('本机服务');
+    expect(xcrun).not.toContain('xcode-select --install');
 
     expect(explainGitFailure('git add', 'fatal: not a git repository'))
       .toContain('不是一个 git 仓库');

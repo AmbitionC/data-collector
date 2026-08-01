@@ -188,3 +188,20 @@ describe('bridge install', () => {
     expect(out.join('')).toContain('已取消开机自动运行');
   });
 });
+
+describe('登录项要带一份够用的 PATH', () => {
+  // launchd / systemd 默认只给 /usr/bin:/bin:/usr/sbin:/sbin，看不见 Homebrew，
+  // 服务里 git 就只剩 macOS 那层需要 xcrun 的壳——用户点同步 16 条全失败过一次。
+  it('macOS 的 plist 里写死 EnvironmentVariables，Homebrew 排在系统目录前', () => {
+    const plan = autostartPlan({ platform: 'darwin', ...BASE });
+    expect(plan.contents).toContain('<key>EnvironmentVariables</key>');
+    const path = /<key>PATH<\/key>\s*<string>([^<]+)<\/string>/.exec(plan.contents)?.[1] ?? '';
+    expect(path.split(':').indexOf('/opt/homebrew/bin')).toBeGreaterThanOrEqual(0);
+    expect(path.split(':').indexOf('/opt/homebrew/bin')).toBeLessThan(path.split(':').indexOf('/usr/bin'));
+  });
+
+  it('systemd 的 service 里同样带上 PATH', () => {
+    const plan = autostartPlan({ platform: 'linux', ...BASE });
+    expect(plan.contents).toMatch(/^Environment=PATH=.*\/opt\/homebrew\/bin/m);
+  });
+});

@@ -1,9 +1,9 @@
-import { execFile } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
 import { mkdir, open, readdir, rename } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { descriptorFor, stableContentId } from '@data-collector/shared';
+import { MISSING_GIT_PREFIX, runGit } from '../git.js';
 import type { OrganizedDocument } from '../organize/index.js';
 import { downloadAssets, type ResolveAddresses } from '../library/assets.js';
 import { renderMarkdown } from '../library/markdown.js';
@@ -70,22 +70,8 @@ async function atomicWriteText(root: string, path: string, contents: string): Pr
   await rename(temporary, path);
 }
 
-function defaultRunGit(
-  repoPath: string,
-  args: string[],
-): Promise<{ code: number; stderr: string }> {
-  return new Promise(resolvePromise => {
-    execFile('git', ['-C', repoPath, ...args], { timeout: 30_000 }, (error, _stdout, stderr) => {
-      const code =
-        error && typeof (error as { code?: unknown }).code === 'number'
-          ? ((error as { code: number }).code)
-          : error
-            ? 1
-            : 0;
-      resolvePromise({ code, stderr: stderr ?? '' });
-    });
-  });
-}
+// git 怎么找、跑在什么环境里，见 ../git.ts 顶部那段注释（登录项的 PATH 和终端不是一回事）。
+const defaultRunGit = runGit;
 
 /**
  * 收件箱 sink：把一篇采集内容原样投递为 `<repo>/<inboxDir>/<source>/<date>-<id>-<slug>/`
@@ -272,13 +258,21 @@ export class RepoInboxSink implements ContentSink {
  * 把 git 的原始报错翻成人能照着做的一句话。
  *
  * 直接把 stderr 摆给用户没有意义——`xcrun: error: invalid active developer path`
- * 这种话不告诉任何人「装一下命令行工具」。常见成因就那么几个，认出来就直说。
+ * 这种话不告诉任何人该干什么。常见成因就那么几个，认出来就直说。
+ *
+ * 但**认错了比不认更糟**：上面那条我一度翻成「这台 Mac 的命令行工具坏了，去 xcode-select --install」，
+ * 而用户终端里的 git 好得很。真正的原因是服务这边的 PATH 找不到用户那份 git（见 ../git.ts）。
+ * 翻译要指向真正能动手的地方，不能把锅甩给用户的机器。
  */
 export function explainGitFailure(step: string, stderr: string): string {
   const raw = stderr.trim();
+  // 我们自己写好的说明（带着试过哪些路径），原样透出，别被下面的 xcrun 分支盖掉。
+  if (raw.startsWith(MISSING_GIT_PREFIX)) return `${step} 失败：${raw}`;
   if (/xcrun|CommandLineTools|xcode-select/i.test(raw)) {
-    return `${step} 失败：这台 Mac 的命令行工具坏了或没装，git 根本跑不起来。`
-      + '在终端执行 `xcode-select --install` 装好后重试。';
+    return `${step} 失败：本机服务跑不起来 git——它以登录项常驻，拿到的 PATH 比你终端里的窄，`
+      + '只找到了 macOS 自带的那层 git 壳（那东西得先经 xcrun 才能干活）。'
+      + '你终端里的 git 是好的，这是服务这边的环境问题：'
+      + '重启本机服务（`npm run collector -- bridge install`）后会重新去 Homebrew 等位置找 git。';
   }
   if (/not a git repository/i.test(raw)) {
     return `${step} 失败：目标目录不是一个 git 仓库。请确认同步去向指向的是克隆下来的仓库。`;
