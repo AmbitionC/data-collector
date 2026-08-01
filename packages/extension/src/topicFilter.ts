@@ -56,16 +56,17 @@ export const REAL_ESTATE_RULE: ExcludeRule = {
     '限购',
     '房产税',
     '土拍',
-    '成交量',
+    // 「成交量」「挂牌」都拿掉了：股市帖里它们是高频词（成交量放大、新三板挂牌），
+    // 拿它们当楼市的佐证，等于给每一篇股市帖都递了半个信号。
     '新房',
     '开发商',
-    '中介',
-    '挂牌',
     '首付',
     '房贷利率',
     '公摊',
     '交房',
     '楼盘',
+    '房产中介',
+    '土地出让',
   ],
 };
 
@@ -79,6 +80,8 @@ export const DATING_RULE: ExcludeRule = {
   label: '相亲情感内容',
   strong: ['相亲', '婚恋', '找对象', '择偶'],
   supporting: [
+    '情感课',
+    '相亲对象',
     '介绍对象',
     '男方',
     '女方',
@@ -91,8 +94,8 @@ export const DATING_RULE: ExcludeRule = {
     '见面聊',
     '单身',
     '脱单',
-    '年龄',
-    '身高',
+    // 「年龄」「身高」拿掉了：养老保险、寿险测算这类帖子满篇都是年龄，
+    // 给它们递一个佐证信号，只要正文里出现一次比喻性的「相亲」就会被误杀。
   ],
 };
 
@@ -114,19 +117,40 @@ export interface ExcludeMatch extends ExcludeRule {
 }
 
 /**
+ * 「主线」的判定窗口：正文开头这么多字。
+ *
+ * 星球的帖子基本都在开头就把话题立起来（首句往往就是标题：「本周楼市分析…」）。
+ * 而一篇三千字的投资长文，正文深处顺口提一句「房价」「首付」再正常不过——
+ * 只看「出现过没有」，这类帖子就会被整篇扔掉。实测误伤三条：
+ *   香港保险（命中 房价、首付）、沪深300 薪酬统计（命中 楼市）、
+ *   问减仓计划（命中 打新、北交所）——三条的信号全在正文深处。
+ */
+const LEAD_WINDOW = 150;
+
+/**
  * 判断一段正文是否命中排除规则；命中返回规则（含命中的信号词），否则 undefined。
- * 判据：至少一个强信号，且命中的**不同**信号总数 ≥ 2。
+ *
+ * 判据三条，缺一不可：
+ * 1. 至少一个强信号；
+ * 2. 命中的**不同**信号总数 ≥ 2（同一个词出现多次只算一个）；
+ * 3. **强信号必须出现在开头的主线窗口里**——排除的是以该话题为主线的帖子，
+ *    不是提到该词的帖子。
+ *
+ * 第 3 条会带来漏判（开头讲故事、中段才转到楼市的帖子会留下来），这是**有意的**：
+ * 判错会把用户真正想要的内容悄悄扔掉，比多收一条严重得多。
  */
 export function excludedBy(
   text: string,
   rules: readonly ExcludeRule[] = EXCLUDE_RULES,
 ): ExcludeMatch | undefined {
   if (!text) return undefined;
+  const lead = text.slice(0, LEAD_WINDOW);
   for (const rule of rules) {
     const strongHits = rule.strong.filter(marker => text.includes(marker));
     if (strongHits.length === 0) continue;
+    // 主线判定：强信号得在开头露面，否则只是正文里顺口提了一句。
+    if (!rule.strong.some(marker => lead.includes(marker))) continue;
     const supportingHits = rule.supporting.filter(marker => text.includes(marker));
-    // 「不同信号 ≥ 2」：同一个词出现多次不算多个信号。
     if (strongHits.length + supportingHits.length >= 2) {
       return { ...rule, hits: [...strongHits, ...supportingHits] };
     }

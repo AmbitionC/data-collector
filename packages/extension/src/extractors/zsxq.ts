@@ -52,8 +52,34 @@ const CONTENT_SELECTORS = [
   '.content',
 ];
 
-const AUTHOR_SELECTORS = ['.author-name', '.user-name', '.name', '.nickname'];
-const TIME_SELECTORS = ['time', '.create-time', '.time', '[class*="create-time"]'];
+/**
+ * 作者名。**绝不放裸 `.name`**——星球上点赞列表的容器正好是 `div.name`，
+ * 而 `.author-name` / `.user-name` 在这个站点根本不存在，于是每条的作者
+ * 都抓成了「百事可乐、何猪猪、The bright*、…」这串点赞的人名（实测三条全中）。
+ * 归档到 life-teachers 时作者是用来定博主的，抓错会直接串档。
+ *
+ * 真实结构（实机诊断）：
+ *   <div class="author"><img class="avatar">
+ *     <div class="info"><div class="role owner">陈老师</div>
+ *                       <div class="date"> 2026-05-01 22:19 </div></div></div>
+ */
+const AUTHOR_SELECTORS = [
+  '.author .role',
+  '.author .name',
+  '.author .nickname',
+  '.author-name',
+  '.user-name',
+  '.nickname',
+];
+/** 发布时间。`.author .date` 是星球的真实位置，原先一个都没命中（只是被接口时间兜住了）。 */
+const TIME_SELECTORS = [
+  'time',
+  '.create-time',
+  '.author .date',
+  '.date',
+  '.time',
+  '[class*="create-time"]',
+];
 
 function firstWithin(root: ParentNode, selectors: string[]): Element | null {
   for (const selector of selectors) {

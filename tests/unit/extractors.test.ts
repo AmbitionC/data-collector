@@ -91,6 +91,10 @@ describe('ZSXQ extraction（按真实 Angular DOM）', () => {
     const result = extractDocument(await fixture('zsxq-topic.html', DETAIL), DETAIL, NOW);
 
     expect(result).toMatchObject({ source: 'zsxq', kind: 'post', author: '陈老师' });
+    // 作者绝不能抓成点赞的人名列表：归档时作者是用来定博主的，抓错直接串档。
+    expect(result.author).not.toContain('百事可乐');
+    // 发布时间在 .author .date 上，原先的选择器一个都没命中。
+    expect(result.publishedAt).toBe('2026-07-20T01:12:00.000Z');
     // 站点 <title> 恒为「…-知识星球」，标题必须由正文首句派生。
     expect(result.title).toContain('创业板已经跌破 60 日线');
     expect(result.title).not.toContain('知识星球');

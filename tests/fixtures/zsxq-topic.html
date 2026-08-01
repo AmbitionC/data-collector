@@ -6,10 +6,19 @@
       <div class="index-container">
         <div class="main-content-container">
           <div class="topic-container" _ngcontent-abc>
-            <div class="topic-header">
-              <span class="name">陈老师</span>
-              <span class="create-time">2026-07-20 09:12</span>
-            </div>
+            <!-- 真实结构（取自实机诊断）：作者名在 .author > .info > .role，
+                 而点赞区的容器正好也叫 .name —— 裸 .name 会抓成点赞人名列表。 -->
+            <app-topic-header>
+              <div class="header-container">
+                <div class="author">
+                  <img class="avatar" src="https://images.zsxq.com/avatar.jpg">
+                  <div class="info">
+                    <div class="role owner">陈老师</div>
+                    <div class="date"> 2026-07-20 09:12 </div>
+                  </div>
+                </div>
+              </div>
+            </app-topic-header>
             <div class="disabled-copy">
               <div class="talk-content-container">
                 <div class="content">
@@ -18,6 +27,12 @@
                   <img data-src="https://images.zsxq.com/chart.png" alt="趋势图" />
                 </div>
               </div>
+            </div>
+            <!-- 点赞区：容器正好是 div.name，内容是一串人名。
+                 作者选择器一旦退回裸 .name 就会抓中它（实测入库的 author 全是这串）。 -->
+            <div class="like-user">
+              <div class="name">百事可乐、何猪猪、The bright*、周荣海.jo、滕、雾中明眸、柳帆、</div>
+              <span class="count"> 等18人点赞</span>
             </div>
             <div class="comments-container">
               <div class="moreComment ng-star-inserted">查看更多评论</div>
