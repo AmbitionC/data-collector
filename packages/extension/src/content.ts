@@ -102,14 +102,25 @@ interface ExtractMessage {
 const EXPAND_LABELS = new Set(['展开', '展开全文', '展开全部', '全文', '阅读全文', '显示全部']);
 
 /**
+ * 控件文案归一：去掉两端的空白和省略号。
+ *
+ * 站点上折叠处渲染出来的是 `...展开全部`——省略号和文案常常在同一个元素里。
+ * 按原文精确匹配就一个都命中不了，点击逻辑等于从没生效过。
+ * 只剥两端的省略号，正文里带省略号的句子（`仅供参考...`）照样不会被误当成控件。
+ */
+function expandLabelOf(element: Element): string {
+  return (element.textContent ?? '').replace(/^[\s.。·・…]+/u, '').replace(/[\s.。·・…]+$/u, '');
+}
+
+/**
  * 提取前先点开正文的「展开全文」，否则折叠的帖子只能采到截断的正文。
  * 只点文案精确匹配且可见的控件，避免误触评论区/推荐位；列表页一屏 20+ 条，上限放宽。
  * 返回是否点过——点过需要等框架完成重渲染再读 DOM。
  */
 function expandCollapsedContent(limit: number): boolean {
-  const candidates = [...document.querySelectorAll<HTMLElement>('button, a, span, div')].filter(
+  const candidates = [...document.querySelectorAll<HTMLElement>('button, a, span, div, p, em, i')].filter(
     element =>
-      EXPAND_LABELS.has((element.textContent ?? '').trim())
+      EXPAND_LABELS.has(expandLabelOf(element))
       && (element.offsetParent !== null || element.offsetHeight !== 0),
   );
   /*
@@ -433,7 +444,7 @@ async function itemDiagnostics(key: string): Promise<string> {
   return JSON.stringify(
     {
       hook,
-      diagnosticsVersion: 5,
+      diagnosticsVersion: 6,
       kind: 'item',
       // 构建版本随证据一起走：不然还得先花一轮确认用户跑的是哪一版。
       build: typeof __BUILD_ID__ === 'string' ? __BUILD_ID__ : '开发构建',
@@ -461,8 +472,14 @@ async function itemDiagnostics(key: string): Promise<string> {
 async function listDiagnostics(): Promise<string> {
   const hook = await requestHookStats();
   const all = [...document.querySelectorAll('.topic-container')];
+  // 取样必须挑一条**真帖子**：页面上分类标签栏（最新 / 精华 / …）也裹在 .topic-container 里，
+  // 它排在最前面，按「第一个有文字的」去取就永远取到它——导出来的结构样本是那排菜单，
+  // 真正要看的帖子结构一个字都看不到（已经因此空跑过一轮）。
+  const looksLikePost = (node: Element) =>
+    !node.querySelector('app-menu') && listBodyText(node).trim().length >= 20;
   const container =
-    all.find(node => !node.hasAttribute(COLLECTED_ATTRIBUTE) && node.textContent?.trim())
+    all.find(node => !node.hasAttribute(COLLECTED_ATTRIBUTE) && looksLikePost(node))
+    ?? all.find(looksLikePost)
     ?? all.find(node => node.textContent?.trim())
     ?? all[0];
   if (!container) {
@@ -498,7 +515,7 @@ async function listDiagnostics(): Promise<string> {
   return JSON.stringify(
     {
       // 版本号：贴回来的样本能一眼看出跑的是哪一版插件，不用靠字段有无去猜。
-      diagnosticsVersion: 5,
+      diagnosticsVersion: 6,
       build: typeof __BUILD_ID__ === 'string' ? __BUILD_ID__ : '开发构建',
       // 主世界钩子的运行统计。「已捕获 0 个」时**先看这一栏**：
       // installed=false → 钩子没跑；observed=0 → 页面这段时间没发请求；
@@ -518,6 +535,28 @@ async function listDiagnostics(): Promise<string> {
         text: listBodyText(node).replace(/\s+/g, '').slice(0, 60),
       })),
       sampledCollapsed: container.hasAttribute(COLLECTED_ATTRIBUTE),
+      /*
+       * 展开控件长什么样。
+       *
+       * 「采到的还是截断正文」查了两轮都没查准，就是因为看不到这个控件的真实结构：
+       * 文案是不是和省略号连在一起、挂在哪一层、点击响应在哪个元素上。
+       * 这里把页面上所有含「展开」字样的元素原样导出来，一眼就能定位。
+       */
+      expandControls: [...document.querySelectorAll('*')]
+        .filter(element => {
+          const text = element.textContent ?? '';
+          return text.length <= 40 && /展开|全文|显示全部/.test(text);
+        })
+        .filter((element, _index, list) => !list.some(other => other !== element && element.contains(other)))
+        .slice(0, 6)
+        .map(element => ({
+          tag: element.tagName,
+          label: JSON.stringify(element.textContent ?? ''),
+          normalized: expandLabelOf(element),
+          matched: EXPAND_LABELS.has(expandLabelOf(element)),
+          html: element.outerHTML.slice(0, 200),
+          parent: element.parentElement?.outerHTML.slice(0, 200) ?? '',
+        })),
       textSample: (container.textContent ?? '').replace(/\s+/g, ' ').trim().slice(0, 80),
       anchors: [...container.querySelectorAll('a')]
         .map(anchor => anchor.getAttribute('href'))

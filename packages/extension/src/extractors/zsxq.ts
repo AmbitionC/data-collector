@@ -1,5 +1,5 @@
 import { isListPage } from '@data-collector/shared';
-import type { TopicIndex } from '../topicIndex.js';
+import { inlineMarkupToHtml, stripInlineMarkup, type TopicIndex } from '../topicIndex.js';
 import { excludedBy } from '../topicFilter.js';
 import { buildDocument, cleanText, elementText, parsePublishedAt } from './common.js';
 import { ExtractionError, type Clock } from './types.js';
@@ -91,6 +91,32 @@ function contentRoot(document: Document, blocks: Element[], container: Element):
   if (blocks.length === 1) return blocks[0]!;
   const merged = document.createElement('div');
   for (const block of blocks) merged.append(block.cloneNode(true));
+  return merged;
+}
+
+/**
+ * 归档用的正文：页面那份被折叠截断时，用接口那份补齐。
+ *
+ * 判据是长度——接口正文明显更长，就说明页面上还是折叠态。留一点余量（15% 且至少 120 字），
+ * 免得因为页面多了「赞」「评论」这类零星文案就误判。
+ *
+ * 补齐时图片要从页面那份搬过来：接口正文里图片只是占位标记，真地址在 DOM 上。
+ * 全程只操作**克隆**，绝不改动页面本身——用户正在肉眼核对。
+ */
+export function completeContent(
+  document: Document,
+  domContent: Element,
+  apiText: string | undefined,
+): Element {
+  const domText = elementText(domContent);
+  if (!apiText) return domContent;
+  const apiLength = stripInlineMarkup(apiText).replace(/\s+/g, '').length;
+  const domLength = domText.replace(/\s+/g, '').length;
+  if (apiLength < domLength * 1.15 || apiLength < domLength + 120) return domContent;
+
+  const merged = document.createElement('div');
+  merged.innerHTML = inlineMarkupToHtml(apiText);
+  for (const image of domContent.querySelectorAll('img')) merged.append(image.cloneNode(true));
   return merged;
 }
 
@@ -284,6 +310,14 @@ export function extractZsxqList(
     const publishedAt =
       (topicId ? topics?.publishedAtOf(topicId) : undefined)
       ?? parsePublishedAt(elementText(time), time?.getAttribute('datetime'));
+    // 页面上的正文可能还是折叠的（「展开全部」没点开、或点了没生效）。
+    // 接口那份从来不折叠——既然已经靠它对上了帖子号，正文不全时就用它补齐，
+    // 绝不把半篇当完整内容存下去（实测：入库正文末尾还挂着「展开全部」四个字）。
+    const archived = completeContent(
+      document,
+      content,
+      topicId ? topics?.fullTextOf(topicId) : undefined,
+    );
     entries.push({
       container,
       key,
@@ -292,7 +326,7 @@ export function extractZsxqList(
         source: 'zsxq',
         kind: 'post',
         title,
-        content,
+        content: archived,
         url: topicUrl,
         now,
         ...(author ? { author } : {}),

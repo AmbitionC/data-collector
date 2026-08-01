@@ -11,6 +11,7 @@ import {
 } from '../../packages/extension/src/extractors/index.js';
 import { TopicIndex } from '../../packages/extension/src/topicIndex.js';
 import { parsePublishedAt } from '../../packages/extension/src/extractors/common.js';
+import { completeContent } from '../../packages/extension/src/extractors/zsxq.js';
 
 /** 接口响应里拿到的帖子号（DOM 上没有），前两条能对上号，第三条对不上。 */
 function topicIndex(): TopicIndex {
@@ -293,5 +294,47 @@ describe('发布时间：宁可说不知道，也不猜一个年份', () => {
     expect(parsePublishedAt('23年6月18日 14:30', null)).toBe('2023-06-18T06:30:00.000Z');
     // 仍然只有两段的，照旧不认。
     expect(parsePublishedAt('06-18', null)).toBeUndefined();
+  });
+});
+
+describe('页面折叠时用接口正文补齐（completeContent）', () => {
+  // 这个文件不跑在 jsdom 环境里，自己造一个 Document。
+  const { document } = new JSDOM('<body></body>').window;
+  const dom = (html: string) => {
+    const host = document.createElement('div');
+    host.innerHTML = html;
+    return host;
+  };
+
+  it('页面只有半篇时换成接口那份完整正文', () => {
+    // 真实症状：入库正文末尾还挂着「展开全部」，后半段根本没采到。
+    const collapsed = dom('<div>先跟新粉解释下，老粉可以跳过下述说明：历史上主要的房地产泡沫…<span>...展开全部</span></div>');
+    const apiText = `先跟新粉解释下，老粉可以跳过下述说明：\n${'历史上主要的房地产泡沫，都是在居民杠杆率下降的过程中实现触底的。'.repeat(12)}`;
+
+    const result = completeContent(document, collapsed, apiText);
+
+    expect(result).not.toBe(collapsed);
+    expect(result.textContent).toContain('居民杠杆率下降');
+    expect(result.textContent?.length).toBeGreaterThan((collapsed.textContent ?? '').length);
+    expect(result.textContent).not.toContain('展开全部');
+  });
+
+  it('页面那份已经完整时原样用它——DOM 有排版和链接，比接口纯文本好', () => {
+    const full = dom('<div><p>一段完整的正文，页面上没有折叠，长度和接口那边相当。</p></div>');
+    expect(completeContent(document, full, '一段完整的正文，页面上没有折叠，长度和接口那边相当。')).toBe(full);
+    expect(completeContent(document, full, undefined)).toBe(full);
+  });
+
+  it('补齐时把页面上的图片一并搬过来（接口正文里只有占位标记）', () => {
+    const collapsed = dom('<div>导语一句话<img src="https://images.zsxq.com/a.jpg"><span>...展开全部</span></div>');
+    const result = completeContent(document, collapsed, `导语一句话\n${'后面还有很多内容。'.repeat(30)}`);
+    expect(result.querySelector('img')?.getAttribute('src')).toBe('https://images.zsxq.com/a.jpg');
+  });
+
+  it('绝不改动页面本身——用户正在肉眼核对', () => {
+    const collapsed = dom('<div>导语一句话<span>...展开全部</span></div>');
+    const before = collapsed.innerHTML;
+    completeContent(document, collapsed, `导语一句话\n${'后面还有很多内容。'.repeat(30)}`);
+    expect(collapsed.innerHTML).toBe(before);
   });
 });

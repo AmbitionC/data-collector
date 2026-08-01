@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  inlineMarkupToHtml,
   TopicIndex,
   harvestTopics,
   normalizeForMatch,
@@ -287,5 +288,32 @@ describe('发布时间来自接口，而不是页面上那行字', () => {
     });
     expect(records[0]?.createTime).toBeUndefined();
     expect(records[1]?.createTime).toBeUndefined();
+  });
+});
+
+describe('正文被折叠时用接口那份补齐', () => {
+  it('留下接口的完整正文，且只在它确实更长时才留', () => {
+    const long = '这是一篇很长的帖子。'.repeat(300);
+    const [record] = harvestTopics({ topics: [{ topic_id: '901', talk: { text: long } }] });
+    // 对号用的 text 截到 2000 字，归档用的 fullText 保住全文。
+    expect(record?.text.length).toBe(2_000);
+    expect(record?.fullText?.length).toBeGreaterThan(2_000);
+
+    const [short] = harvestTopics({ topics: [{ topic_id: '902', talk: { text: '短帖不必重复留一份。' } }] });
+    expect(short?.fullText).toBeUndefined();
+  });
+
+  it('渲染接口正文时保住外链——星球长文帖的正文就是一个外链', () => {
+    const html = inlineMarkupToHtml(
+      '先跟新粉解释下：\n<e type="web" href="https%3A%2F%2Farticles.zsxq.com%2Fid_x.html" title="%E5%B1%85%E6%B0%91%E5%80%BA%E5%8A%A1" />',
+    );
+    expect(html).toContain('<a href="https://articles.zsxq.com/id_x.html">居民债务</a>');
+    expect(html).toContain('<p>先跟新粉解释下：</p>');
+  });
+
+  it('正文里本来就有的尖括号要转义，不能当成标记', () => {
+    expect(inlineMarkupToHtml('if a < b && b > c 则成立')).toBe(
+      '<p>if a &lt; b &amp;&amp; b &gt; c 则成立</p>',
+    );
   });
 });

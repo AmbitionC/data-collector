@@ -115,6 +115,14 @@ export interface TopicRecord {
    * 对上号之后直接用它，不必再去解析页面上的字。
    */
   createTime?: string;
+  /**
+   * 接口给的**完整**正文（未按对号需要截断，仅有一个防爆上限）。
+   *
+   * 页面上的正文可能是折叠的——站点的「展开全部」没点开、或点了没生效，
+   * 采到的就是半篇。接口这份从来不折叠，是补齐正文的兜底来源。
+   * 只有当它确实比 `text` 长时才留，短帖不重复占内存。
+   */
+  fullText?: string;
   /** 该帖对象的顶层字段名，诊断时用来看接口结构（不含字段值）。 */
   keys?: string[];
 }
@@ -146,6 +154,54 @@ export function stripInlineMarkup(value: string): string {
     .replace(/<[^>]*\btitle="([^"]*)"[^>]*>/g, (_match, title: string) => decodePercent(title))
     // 其余标记整块丢掉（表情、图片占位之类，页面上不是文字）。
     .replace(/<[^>]*>/g, ' ');
+}
+
+function escapeHtml(value: string): string {
+  return value
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;');
+}
+
+/**
+ * 把接口正文渲染成可归档的 HTML。
+ *
+ * 和 stripInlineMarkup 的分工：那个是给「对号」用的，只要能比对的纯文本；
+ * 这里是正文要落盘，**外链必须留住**——星球的长文帖正文里就是一个
+ * `<e type="web" href="…" title="…"/>` 指向 articles.zsxq.com，
+ * 丢了它归档出来就只剩一句导语，读的人再也找不到原文。
+ */
+export function inlineMarkupToHtml(value: string): string {
+  const attributeOf = (raw: string, name: string): string | undefined => {
+    const match = new RegExp(`\\b${name}="([^"]*)"`).exec(raw);
+    return match ? decodePercent(match[1] ?? '') : undefined;
+  };
+  /**
+   * 逐段扫描：标记之外的文本转义，标记本身换成真标签。
+   * 不能「先整体转义再还原」——那样正文里本来就有的 `<` 也会被一起还原成标签边界。
+   */
+  const inline = (segment: string): string => {
+    let out = '';
+    let cursor = 0;
+    // 紧跟 `<` 的必须是字母，否则 `if a < b && b > c` 里的 `< b && b >`
+    // 会被当成一个标记整段吞掉，正文平白少一截。
+    for (const match of segment.matchAll(/<\/?[a-zA-Z][^>]*>/g)) {
+      out += escapeHtml(segment.slice(cursor, match.index));
+      const tag = match[0];
+      const href = attributeOf(tag, 'href');
+      const title = attributeOf(tag, 'title') ?? '';
+      out += href ? `<a href="${escapeHtml(href)}">${escapeHtml(title || href)}</a>` : escapeHtml(title);
+      cursor = match.index + tag.length;
+    }
+    return out + escapeHtml(segment.slice(cursor));
+  };
+  return value
+    .split(/\n+/)
+    .map(line => line.trim())
+    .filter(Boolean)
+    .map(line => `<p>${inline(line)}</p>`)
+    .join('');
 }
 
 function decodePercent(value: string): string {
@@ -186,6 +242,13 @@ const MATCH_TEXT_LIMIT = 240;
 const HAYSTACK_LIMIT = 2_000;
 /** 保留的接口原文长度上限；诊断展示时再截短。 */
 const RAW_TEXT_LIMIT = HAYSTACK_LIMIT;
+/**
+ * 归档用全文的长度上限。
+ *
+ * 和对号用的 RAW_TEXT_LIMIT 是两回事：那个只要够定位，这个是真要落盘的正文。
+ * 留个上限纯粹是防爆——页面上可能留存上百条，每条都不设限会把内存吃掉。
+ */
+const FULL_TEXT_LIMIT = 20_000;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null;
@@ -238,8 +301,11 @@ export function harvestTopics(payload: unknown, limit = 400): TopicRecord[] {
     if (typeof rawId === 'number' || (typeof rawId === 'string' && /^\d+$/.test(rawId))) {
       // 必须留足长度：接口正文和页面文本常常**开头就不一样**，
       // 截太短等于把「整段包含」这条退路也砍掉了。
-      const parts = partsOf(node).map(part => part.slice(0, RAW_TEXT_LIMIT));
+      const rawParts = partsOf(node);
+      const parts = rawParts.map(part => part.slice(0, RAW_TEXT_LIMIT));
       const text = parts.join(' ').slice(0, RAW_TEXT_LIMIT);
+      // 对号只需要前若干字，归档要的是全文，两者分开留。
+      const fullText = rawParts.join('\n\n').slice(0, FULL_TEXT_LIMIT);
       if (normalizeForMatch(text)) {
         const createTime = createTimeOf(node);
         found.push({
@@ -247,6 +313,7 @@ export function harvestTopics(payload: unknown, limit = 400): TopicRecord[] {
           text,
           parts,
           ...(createTime ? { createTime } : {}),
+          ...(fullText.length > text.length ? { fullText } : {}),
           keys: Object.keys(node).slice(0, 24),
         });
       }
@@ -310,6 +377,11 @@ export class TopicIndex {
    */
   publishedAtOf(topicId: string): string | undefined {
     return this.raw.get(topicId)?.createTime;
+  }
+
+  /** 接口给的完整正文；页面那份被折叠截断时用它补齐。 */
+  fullTextOf(topicId: string): string | undefined {
+    return this.raw.get(topicId)?.fullText;
   }
 
   add(records: readonly TopicRecord[]): void {
