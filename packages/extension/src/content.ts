@@ -17,6 +17,7 @@ import {
   type HookStats,
   type TopicRecord,
 } from './topicIndex.js';
+import { commercialSignals } from './adFilter.js';
 
 /**
  * 帖子号索引。帖子号不在 DOM 上，只能从应用自己的接口响应里取（见 inject.ts）。
@@ -444,7 +445,7 @@ async function itemDiagnostics(key: string): Promise<string> {
   return JSON.stringify(
     {
       hook,
-      diagnosticsVersion: 7,
+      diagnosticsVersion: 8,
       kind: 'item',
       // 构建版本随证据一起走：不然还得先花一轮确认用户跑的是哪一版。
       build: typeof __BUILD_ID__ === 'string' ? __BUILD_ID__ : '开发构建',
@@ -515,7 +516,7 @@ async function listDiagnostics(): Promise<string> {
   return JSON.stringify(
     {
       // 版本号：贴回来的样本能一眼看出跑的是哪一版插件，不用靠字段有无去猜。
-      diagnosticsVersion: 7,
+      diagnosticsVersion: 8,
       build: typeof __BUILD_ID__ === 'string' ? __BUILD_ID__ : '开发构建',
       // 主世界钩子的运行统计。「已捕获 0 个」时**先看这一栏**：
       // installed=false → 钩子没跑；observed=0 → 页面这段时间没发请求；
@@ -535,6 +536,40 @@ async function listDiagnostics(): Promise<string> {
         text: listBodyText(node).replace(/\s+/g, '').slice(0, 60),
       })),
       sampledCollapsed: container.hasAttribute(COLLECTED_ATTRIBUTE),
+      /*
+       * 全页外链普查：「精华里到底有多少广告」这个问题，一份报告就能答完。
+       *
+       * 按域名归并、标出哪些带带货信号（CPS 分销路径 / 电商商品页 / 分销参数）。
+       * 只看被跳过的那几条不够——没被跳过的帖子里挂了什么链接，同样要看得见。
+       */
+      outboundHosts: (() => {
+        const census = new Map<string, { count: number; signals: string[]; sample: string }>();
+        for (const node of all) {
+          for (const anchor of node.querySelectorAll('a[href]')) {
+            const href = anchor.getAttribute('href') ?? '';
+            if (!/^https?:/i.test(href)) continue;
+            let host: string;
+            try {
+              host = new URL(href).hostname;
+            } catch {
+              continue;
+            }
+            const entry = census.get(host)
+              ?? { count: 0, signals: commercialSignals(href), sample: href.slice(0, 120) };
+            entry.count += 1;
+            census.set(host, entry);
+          }
+        }
+        return [...census.entries()]
+          .sort((a, b) => b[1].count - a[1].count)
+          .slice(0, 12)
+          .map(([host, info]) => ({
+            host,
+            count: info.count,
+            commercial: info.signals.length > 0,
+            ...(info.signals.length > 0 ? { signals: info.signals, sample: info.sample } : {}),
+          }));
+      })(),
       /*
        * 作者名到底挂在哪个元素上。
        *

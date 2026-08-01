@@ -342,3 +342,44 @@ describe('页面折叠时用接口正文补齐（completeContent）', () => {
     expect(collapsed.innerHTML).toBe(before);
   });
 });
+
+describe('带货帖按硬证据跳过，且照样出现在明细里', () => {
+  const LIST = 'https://wx.zsxq.com/group/48844584441158';
+
+  function listWith(linkHtml: string): Document {
+    return new JSDOM(`
+      <div class="main-content-container">
+        <div class="topic-container">
+          <div class="author"><div class="info"><div class="role owner">陈老师</div></div></div>
+          <div class="talk-content-container"><div class="content">
+            第一条帖子的正文内容，足够长以便通过长度校验判断。${linkHtml}
+          </div></div>
+        </div>
+      </div>`, { url: LIST }).window.document;
+  }
+
+  it('挂着 CPS 分销链接的帖子被跳过，原因写明域名和依据', () => {
+    const doc = listWith(
+      '<a class="link-of-topic" href="https://cps.qixin19.com/apps/cps/zyt1106596/product/detail'
+      + '?prodId=105222&planId=130748&tenantId=0">投保入口</a>',
+    );
+
+    const list = extractList(doc, LIST, topicIndex(), NOW);
+
+    expect(list.entries[0]?.document).toBeUndefined();
+    // 绝不静默：跳过要说清是什么、依据是什么，用户得能自己复核判得对不对。
+    expect(list.entries[0]?.reason).toContain('推广/带货内容');
+    expect(list.entries[0]?.reason).toContain('cps.qixin19.com');
+    expect(list.skipped).toBe(1);
+  });
+
+  it('长文帖那个 articles.zsxq.com 外链绝不能被判成广告', () => {
+    // 这类帖子的正文主体就是一个指向博主自己长文的链接，判错等于把干货整篇扔掉。
+    const doc = listWith('<a href="https://articles.zsxq.com/id_i9g8xrwktrlb.html">全文</a>');
+
+    const list = extractList(doc, LIST, topicIndex(), NOW);
+
+    expect(list.entries[0]?.document).toBeDefined();
+    expect(list.skipped).toBe(0);
+  });
+});

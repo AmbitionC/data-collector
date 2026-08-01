@@ -1,5 +1,6 @@
 import { isListPage } from '@data-collector/shared';
 import { inlineMarkupToHtml, stripInlineMarkup, type TopicIndex } from '../topicIndex.js';
+import { advertisementIn } from '../adFilter.js';
 import { excludedBy } from '../topicFilter.js';
 import { buildDocument, cleanText, elementText, parsePublishedAt } from './common.js';
 import { ExtractionError, type Clock } from './types.js';
@@ -316,6 +317,21 @@ export function extractZsxqList(
         title,
         // 命中的词一并报出来：误伤时不报就只能靠猜（「香港保险」被判成楼市那次就卡在这）。
         reason: `${excluded.label}（按选题偏好跳过，命中：${excluded.hits.join('、')}）`,
+      });
+      continue;
+    }
+    // 带货帖：精华里混着分销推广（实测抓到过 cps.qixin19.com 的保险分销落地页）。
+    // 只认外链这种硬证据，不按语气判——正经的费率科普和拿返佣的推广用词几乎一样。
+    const advertisement = advertisementIn(
+      [...container.querySelectorAll('a[href]')].map(anchor => anchor.getAttribute('href') ?? ''),
+    );
+    if (advertisement) {
+      skipped += 1;
+      entries.push({
+        container,
+        key,
+        title,
+        reason: `${advertisement.label}（按硬证据跳过，依据：${advertisement.hits.join('；')}）`,
       });
       continue;
     }
