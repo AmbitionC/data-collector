@@ -11,8 +11,20 @@ export interface LibraryEntry {
   url: string;
   category: string;
   updatedAt: string;
+  /** 帖子自己的发布时间；站点没给就没有，界面退回采集时间并标注「录入」。 */
+  publishedAt?: string;
   /** 缺省视为未同步：老条目没有这个字段。 */
   sync?: SyncInfo;
+}
+
+/**
+ * 列表上显示的时间：**优先帖子自己的发布时间**。
+ * 显示采集时间没有意义——用户想知道的是这条内容是什么时候发的。
+ */
+export function entryDate(entry: LibraryEntry): string {
+  return entry.publishedAt
+    ? entry.publishedAt.slice(0, 10)
+    : `${entry.updatedAt.slice(0, 10)}（录入）`;
 }
 
 /** 一条内容当前的同步状态（缺省未同步）。 */
@@ -87,7 +99,6 @@ export type SidePanelState =
       sourceLabel: string;
       title: string;
       category: string;
-      tags: string[];
       /** 列表 / 精华页：一屏多条，保存动作是「批量」而不是「这一页」。 */
       list: boolean;
       routeTargets?: string[];
@@ -321,7 +332,6 @@ export function sidePanelStateFromStatus(
     sourceLabel: descriptorForHost(new URL(status.page.url).hostname)?.label ?? '内容',
     title: status.page.title || '未命名内容',
     category: '',
-    tags: [],
     list: status.page.list === true,
     ...(status.page.routeTargets?.length ? { routeTargets: status.page.routeTargets } : {}),
     ...(status.page.destinations?.length ? { destinations: status.page.destinations } : {}),
@@ -353,15 +363,9 @@ function show(document: Document, selector: string): HTMLElement {
  */
 function collectOverrides(document: Document): CaptureOverrides {
   const category = required<HTMLSelectElement>(document, '#category').value.trim();
-  const tags = required<HTMLInputElement>(document, '#tags').value
-    .split(/[,，]/)
-    .map(tag => tag.trim())
-    .filter(Boolean)
-    .slice(0, 8);
   const target = Number(required<HTMLInputElement>(document, '#target').value);
   return {
     ...(category ? { userCategory: category } : {}),
-    ...(tags.length ? { userTags: tags } : {}),
     ...(Number.isFinite(target) && target > 0 ? { maxItems: Math.min(60, Math.round(target)) } : {}),
   };
 }
@@ -689,7 +693,7 @@ function renderLibrary(
     // 显示来源名而不是内部标识：用户不该在界面上看到 zsxq 这种东西。
     tag.textContent = sourceLabel(entry.source);
     const when = document.createElement('span');
-    when.textContent = `${entry.category} · ${entry.updatedAt.slice(0, 10)}`;
+    when.textContent = `${entry.category} · ${entryDate(entry)}`;
     // 同步状态必须在列表上一眼可见：这是「该同步哪些」的唯一依据。
     const sync = document.createElement('span');
     const syncState = syncStateOf(entry);
@@ -700,17 +704,19 @@ function renderLibrary(
     open.append(label, meta);
     open.onclick = () => actions.openEntry(entry.id, entry.title);
 
+    // 按钮和标签**必须长得不一样**：早先两者都是同一种小药丸，
+    // 来源、同步状态、同步、删除四个东西并排且外观相同，根本看不出哪个能点。
     const syncOne = document.createElement('button');
     syncOne.type = 'button';
-    syncOne.className = 'item-delete';
+    syncOne.className = 'row-button';
     const busy = (state.syncing ?? []).includes(entry.id);
     syncOne.disabled = busy;
-    syncOne.textContent = busy ? '同步中' : syncState === 'synced' ? '重新同步' : '同步';
+    syncOne.textContent = busy ? '同步中…' : syncState === 'synced' ? '重新同步' : '同步';
     syncOne.onclick = () => { void actions.syncLibrary([entry.id]); };
 
     const remove = document.createElement('button');
     remove.type = 'button';
-    remove.className = 'item-delete';
+    remove.className = 'row-button danger';
     remove.textContent = '删除';
     remove.onclick = () => actions.askDelete({ kind: 'one', id: entry.id, title: entry.title });
     const actionsRow = document.createElement('span');
@@ -757,32 +763,49 @@ function renderLibrary(
   clearButton.onclick = () =>
     actions.askDelete({ kind: 'all', count: state.entries.length });
 
-  // 删除不可逆：先说清楚要删什么，再给确认。
-  const confirm = required<HTMLElement>(document, '#library-confirm');
-  confirm.replaceChildren();
-  confirm.hidden = !state.pending && !state.error;
-  if (state.error) {
-    confirm.textContent = state.error;
-    return;
-  }
-  if (!state.pending) return;
-  const question = document.createElement('span');
-  question.textContent = state.pending.kind === 'all'
-    ? `确认删除全部 ${state.pending.count} 条？文件会从本机知识库中移除，不可恢复。`
-    : `确认删除「${state.pending.title}」？文件会从本机知识库中移除，不可恢复。`;
-  const yes = document.createElement('button');
-  yes.type = 'button';
-  yes.id = 'library-confirm-yes';
-  yes.className = 'item-delete';
-  yes.textContent = '确认删除';
+  // 删除失败是状态信息，留在页面上；确认走独立的模态框，两者别混在一起。
+  const error = required<HTMLElement>(document, '#library-error');
+  error.hidden = !state.error;
+  error.textContent = state.error ?? '';
+
+  renderConfirmModal(document, state.pending, actions);
+}
+
+/**
+ * 删除确认框。
+ *
+ * 删除不可逆，因此值得一个**真正的模态对话框**：早先是把问题和两颗行内小药丸按钮
+ * 塞进一行说明文字里，和普通提示长得一模一样、还挤在面板底部，既容易误点也不成体统。
+ *
+ * 三条：焦点默认落在「取消」（危险操作不该是回车就中的那个）、Esc 与点遮罩都等于取消、
+ * 「确认删除」用危险色，不靠用户读文字来分辨。
+ */
+function renderConfirmModal(
+  document: Document,
+  pending: Extract<SidePanelState, { phase: 'library' }>['pending'],
+  actions: SidePanelActions,
+): void {
+  const modal = document.querySelector<HTMLElement>('#confirm-modal');
+  if (!modal) return;
+  const wasOpen = modal.hidden === false;
+  modal.hidden = !pending;
+  if (!pending) return;
+
+  required(document, '#library-confirm').textContent = pending.kind === 'all'
+    ? `即将删除全部 ${pending.count} 条内容，连同它们的正文与图片一起从本机知识库中移除。此操作不可恢复。`
+    : `即将删除「${pending.title}」，连同它的正文与图片一起从本机知识库中移除。此操作不可恢复。`;
+
+  const yes = required<HTMLButtonElement>(document, '#library-confirm-yes');
+  const no = required<HTMLButtonElement>(document, '#library-confirm-no');
+  yes.textContent = pending.kind === 'all' ? `确认删除 ${pending.count} 条` : '确认删除';
   yes.onclick = () => { void actions.confirmDelete(); };
-  const no = document.createElement('button');
-  no.type = 'button';
-  no.id = 'library-confirm-no';
-  no.className = 'item-delete';
-  no.textContent = '取消';
   no.onclick = () => actions.cancelDelete();
-  confirm.append(question, yes, no);
+  required<HTMLElement>(document, '#confirm-scrim').onclick = () => actions.cancelDelete();
+  modal.onkeydown = event => {
+    if ((event as KeyboardEvent).key === 'Escape') actions.cancelDelete();
+  };
+  // 只在刚打开的那一次抢焦点，之后的重渲染不打断用户。
+  if (!wasOpen) no.focus();
 }
 
 /** 顶部页面切换按钮的选中态。 */
@@ -873,7 +896,6 @@ export function renderSidePanel(
       const sameUrl = panel.dataset.url === state.url;
       panel.dataset.url = state.url;
       panel.dataset.routing = routingSignature;
-      if (!sameUrl) required<HTMLInputElement>(document, '#tags').value = state.tags.join(', ');
       applyCategories({ preserve: sameUrl });
     }
 

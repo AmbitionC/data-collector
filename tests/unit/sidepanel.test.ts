@@ -327,48 +327,41 @@ describe('side panel DOM behavior', () => {
       .toEqual(['', '投资', '财富', '认知']);
 
     category.value = '投资';
-    document.querySelector<HTMLInputElement>('#tags')!.value = '宏观, 利率';
     document.querySelector<HTMLButtonElement>('#capture-button')!.click();
     await Promise.resolve();
 
-    // 不再下发 sinks：采集阶段没有去向可选。
-    expect(actions.capture).toHaveBeenCalledWith({
-      userCategory: '投资',
-      userTags: ['宏观', '利率'],
-      maxItems: 20,
-    });
+    // 不再下发 sinks（采集阶段没有去向可选），也不再有标签输入框——
+    // 内容都没看过，凭空填标签没有意义。
+    expect(document.querySelector('#tags')).toBeNull();
+    expect(actions.capture).toHaveBeenCalledWith({ userCategory: '投资', maxItems: 20 });
   });
 
   it('preserves dirty organization fields for the same URL and resets them for a new URL', () => {
     const destinations = [
       { id: 'markdown', label: '本机库', categories: ['前端开发', '商业与投资'] },
     ];
-    const ready = (url: string, title: string, tags: string[]) => ({
+    const ready = (url: string, title: string) => ({
       phase: 'ready' as const,
       url,
       sourceLabel: '微信公众号',
       title,
       category: '',
-      tags,
       list: false,
       destinations,
       defaultSinkIds: ['markdown'],
       routeTargets: ['本机库'],
     });
 
-    renderSidePanel(document, ready('https://mp.weixin.qq.com/s/a', '文章 A', ['初始标签']), actions);
+    renderSidePanel(document, ready('https://mp.weixin.qq.com/s/a', '文章 A'), actions);
     document.querySelector<HTMLSelectElement>('#category')!.value = '商业与投资';
-    document.querySelector<HTMLInputElement>('#tags')!.value = '用户编辑标签';
 
-    // 同一 URL 的轮询刷新不得覆盖用户已选/已填内容。
-    renderSidePanel(document, ready('https://mp.weixin.qq.com/s/a', '文章 A（刷新）', []), actions);
+    // 同一 URL 的轮询刷新不得覆盖用户已选内容。
+    renderSidePanel(document, ready('https://mp.weixin.qq.com/s/a', '文章 A（刷新）'), actions);
     expect(document.querySelector<HTMLSelectElement>('#category')?.value).toBe('商业与投资');
-    expect(document.querySelector<HTMLInputElement>('#tags')?.value).toBe('用户编辑标签');
 
-    // 切换到新页面时重置为默认（自动分类 + 新标签）。
-    renderSidePanel(document, ready('https://mp.weixin.qq.com/s/b', '文章 B', ['新标签']), actions);
+    // 切换到新页面时重置为默认（自动分类）。
+    renderSidePanel(document, ready('https://mp.weixin.qq.com/s/b', '文章 B'), actions);
     expect(document.querySelector<HTMLSelectElement>('#category')?.value).toBe('');
-    expect(document.querySelector<HTMLInputElement>('#tags')?.value).toBe('新标签');
   });
 
   it('turns the save action into batch collection on a list page', async () => {
@@ -662,7 +655,7 @@ describe('side panel DOM behavior', () => {
     expect(actions.filterLibrary).toHaveBeenCalledWith('微信公众号');
 
     // 点删除只进入确认态，绝不直接删。
-    [...document.querySelectorAll<HTMLButtonElement>('#library-list .item-delete')]
+    [...document.querySelectorAll<HTMLButtonElement>('#library-list .row-button')]
       .find(button => button.textContent === '删除')!
       .click();
     expect(actions.askDelete).toHaveBeenCalledWith({ kind: 'one', id: 'a', title: '第一条' });
@@ -686,10 +679,17 @@ describe('side panel DOM behavior', () => {
       actions,
     );
 
+    // 删除不可逆，值得一个真正的模态框——不是混在正文里的一行说明。
+    expect(visible('#confirm-modal')).toBe(true);
     const confirm = document.querySelector('#library-confirm');
-    expect(visible('#library-confirm')).toBe(true);
     expect(confirm?.textContent).toContain('全部 12 条');
     expect(confirm?.textContent).toContain('不可恢复');
+    // 危险按钮要长得不一样，不能靠用户读文字来分辨。
+    const yes = document.querySelector<HTMLButtonElement>('#library-confirm-yes')!;
+    expect(yes.classList.contains('danger-button')).toBe(true);
+    expect(yes.textContent).toBe('确认删除 12 条');
+    // 默认焦点在「取消」：危险操作不该是回车就中的那一个。
+    expect(document.activeElement?.id).toBe('library-confirm-no');
 
     document.querySelector<HTMLButtonElement>('#library-confirm-yes')!.click();
     await Promise.resolve();
@@ -786,10 +786,15 @@ describe('已入库页面', () => {
     // 漏给了「删除」，那颗小圆角按钮被撑满整行。类名分开是这条的前提。
     renderSidePanel(document, { phase: 'library', entries: ENTRIES, source: '', syncFilter: 'all', loading: false }, actions);
 
-    const buttons = [...document.querySelectorAll<HTMLButtonElement>('#library-list .item-delete')];
+    const buttons = [...document.querySelectorAll<HTMLButtonElement>('#library-list .row-button')];
     // 行内两颗小按钮：同步、删除。都不该是整行那颗（否则会被撑满整行宽）。
     expect(buttons.map(button => button.textContent)).toEqual(['同步', '删除']);
     expect(buttons.every(button => !button.classList.contains('item-open'))).toBe(true);
+    // 只读标签绝不能顶着按钮的类名——那正是「四个东西长得一样」的根源。
+    for (const label of document.querySelectorAll('#library-list .item-status, #library-list .item-sync')) {
+      expect(label.classList.contains('row-button')).toBe(false);
+      expect(label.tagName).not.toBe('BUTTON');
+    }
     const remove = buttons.find(button => button.textContent === '删除');
     remove!.click();
     expect(actions.askDelete).toHaveBeenCalledWith({
@@ -838,5 +843,65 @@ describe('已入库页面', () => {
     renderSidePanel(document, { phase: 'library', entries: ENTRIES, source: '', syncFilter: 'all', loading: false }, actions);
 
     expect(document.querySelector<HTMLElement>('#entry-overlay')?.hidden).toBe(true);
+  });
+});
+
+describe('删除确认框', () => {
+  const ENTRY = {
+    id: 'a', source: 'zsxq', title: '第一条', url: 'https://x/a',
+    category: '投资', updatedAt: '2026-07-25T00:00:00.000Z',
+  };
+  const base = { phase: 'library' as const, entries: [ENTRY], source: '', syncFilter: 'all' as const, loading: false };
+
+  it('没有待确认的操作时，模态框是收起的', () => {
+    renderSidePanel(document, base, actions);
+    expect(document.querySelector<HTMLElement>('#confirm-modal')?.hidden).toBe(true);
+  });
+
+  it('点遮罩等于取消', () => {
+    renderSidePanel(document, { ...base, pending: { kind: 'one', id: 'a', title: '第一条' } }, actions);
+
+    document.querySelector<HTMLElement>('#confirm-scrim')!.click();
+
+    expect(actions.cancelDelete).toHaveBeenCalledOnce();
+    expect(actions.confirmDelete).not.toHaveBeenCalled();
+  });
+
+  it('Esc 等于取消，绝不等于确认', () => {
+    renderSidePanel(document, { ...base, pending: { kind: 'one', id: 'a', title: '第一条' } }, actions);
+
+    document.querySelector<HTMLElement>('#confirm-modal')!
+      .dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+
+    expect(actions.cancelDelete).toHaveBeenCalledOnce();
+    expect(actions.confirmDelete).not.toHaveBeenCalled();
+  });
+
+  it('单条删除写清楚删的是哪一条', () => {
+    renderSidePanel(document, { ...base, pending: { kind: 'one', id: 'a', title: '第一条' } }, actions);
+
+    const text = document.querySelector('#library-confirm')?.textContent ?? '';
+    expect(text).toContain('第一条');
+    expect(text).toContain('不可恢复');
+  });
+
+  it('重渲染不会把焦点从用户手里抢走', () => {
+    const pending = { kind: 'one' as const, id: 'a', title: '第一条' };
+    renderSidePanel(document, { ...base, pending }, actions);
+    // 用户主动移到了「确认删除」上。
+    const yes = document.querySelector<HTMLButtonElement>('#library-confirm-yes')!;
+    yes.focus();
+
+    renderSidePanel(document, { ...base, pending }, actions);
+
+    expect(document.activeElement?.id).toBe('library-confirm-yes');
+  });
+
+  it('删除失败的提示留在页面上，不占用模态框', () => {
+    renderSidePanel(document, { ...base, error: '删除失败：文件被占用' }, actions);
+
+    expect(document.querySelector<HTMLElement>('#confirm-modal')?.hidden).toBe(true);
+    expect(document.querySelector<HTMLElement>('#library-error')?.hidden).toBe(false);
+    expect(document.querySelector('#library-error')?.textContent).toContain('文件被占用');
   });
 });

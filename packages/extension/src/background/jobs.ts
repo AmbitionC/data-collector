@@ -38,7 +38,7 @@ export interface BatchItem {
 export type ExtractionResponse =
   | { ok: true; document: CollectedDocument }
   | { ok: true; list: ListPayload }
-  | { ok: true; advance: { collapsed: number; loaded: number } }
+  | { ok: true; advance: { collapsed: number; loaded: number; scroll?: string } }
   | { ok: true; diagnostics: string }
   | { ok: true; highlight: { found: boolean } }
   | { ok: true; hook: HookStats }
@@ -72,7 +72,8 @@ export interface BridgeClient {
 interface PayloadMap {
   document: CollectedDocument;
   list: ListPayload;
-  advance: { collapsed: number; loaded: number };
+  /** scroll：这一轮到底滚了哪个元素、位移多少，写进运行记录用。 */
+  advance: { collapsed: number; loaded: number; scroll?: string };
   diagnostics: string;
   highlight: { found: boolean };
   hook: HookStats;
@@ -414,7 +415,12 @@ export class JobRunner {
       // 否则一上来就是「没有待采内容」。
       note('继续采下一批：先滚动加载下一页');
       const advanced = await this.ask(tabId, { type: 'list.advance' }).catch(() => undefined);
-      const loaded = advanced?.ok ? payloadOf(advanced, 'advance').loaded : 0;
+      const outcome = advanced?.ok
+        ? payloadOf(advanced, 'advance')
+        : { loaded: 0, collapsed: 0, scroll: undefined };
+      const loaded = outcome.loaded;
+      // 滚没滚动必须写下来：只报「新增 0 条」时，分不清是到底了还是压根没滚。
+      if (outcome.scroll) note(outcome.scroll);
       note(`滚动后新加载出 ${loaded} 条待采内容`);
       if (loaded === 0) {
         progress.phase = 'done';
@@ -517,14 +523,24 @@ export class JobRunner {
       }
       if (progress.collected >= maxItems) {
         // 采够目标条数就收工——这是正常完成，不是被截断。
-        note(`已采够目标条数 ${maxItems} 条，收工`);
+        // **必须先把这一屏标记掉**：否则「继续采下一批」上来第一件事是滚动，
+        // 而这一屏还都是「待采」状态，滚完立刻就有「新内容」，于是又把同一屏
+        // 提取一遍——表现就是点了继续毫无进展，永远卡在原地。
+        const marked = await this.ask(tabId, { type: 'list.restore', mark: true })
+          .then(response => (response.ok ? payloadOf(response, 'advance').collapsed : 0))
+          .catch(() => 0);
+        note(`已采够目标条数 ${maxItems} 条，收工（已标记本屏 ${marked} 条，续采从下一屏开始）`);
         progress.phase = 'capped';
         report();
         return { ...progress };
       }
 
       const advanced = await this.ask(tabId, { type: 'list.advance' }).catch(() => undefined);
-      const loaded = advanced?.ok ? payloadOf(advanced, 'advance').loaded : 0;
+      const nextPage = advanced?.ok
+        ? payloadOf(advanced, 'advance')
+        : { loaded: 0, collapsed: 0, scroll: undefined };
+      const loaded = nextPage.loaded;
+      if (nextPage.scroll) note(nextPage.scroll);
       note(`滚动加载下一页：新增待采 ${loaded} 条`);
       if (loaded === 0) break;
       report();

@@ -25,6 +25,7 @@ export interface LibraryCatalogEntry {
   category: string;
   relativePath: string;
   updatedAt: string;
+  publishedAt?: string;
   sync?: SyncInfo;
 }
 

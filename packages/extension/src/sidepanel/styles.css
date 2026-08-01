@@ -261,27 +261,52 @@ button { appearance: none; }
 
 .collected-list .item-actions {
   display: flex;
-  gap: 8px;
+  gap: 6px;
   align-items: center;
-  justify-content: space-between;
+  justify-content: flex-end;
   padding: 0 2px 12px;
 }
 
-.collected-list .item-delete {
-  /* display/width 显式写死，不再指望「上面那条规则不会选中我」。 */
+/*
+ * 行内动作按钮。
+ *
+ * **必须和同一行的标签明显不同**：早先按钮直接套了列表标签那套小药丸样式，
+ * 结果「来源」「同步状态」「同步」「删除」四个东西并排、外观一模一样，
+ * 用户根本看不出哪个能点。按钮给实底、给足点击区、给 hover 反馈；
+ * 标签则去掉边框、降到辅助文字（见 .item-status / .item-sync）。
+ */
+.collected-list .row-button {
   display: inline-flex;
   width: auto;
+  min-height: 28px;
   flex: none;
-  padding: 2px 10px;
+  align-items: center;
+  padding: 0 14px;
   border: 1px solid var(--hairline-strong);
-  border-radius: 9999px;
-  background: none;
-  color: var(--muted);
-  font-size: 11px;
+  border-radius: var(--radius-md);
+  background: var(--surface);
+  color: var(--ink);
+  font-size: 12px;
   cursor: pointer;
+  transition: border-color 140ms ease, color 140ms ease, background 140ms ease;
 }
 
-.collected-list .item-delete:hover { color: var(--error); border-color: var(--error); }
+.collected-list .row-button:hover { border-color: var(--ink); background: var(--canvas-soft); }
+
+.collected-list .row-button:disabled {
+  color: var(--muted-soft);
+  border-color: var(--hairline);
+  background: none;
+  cursor: default;
+}
+
+/* 删除是不可逆操作：默认低调，指上去才变红，避免误点也避免喧宾夺主。 */
+.collected-list .row-button.danger { color: var(--muted); }
+.collected-list .row-button.danger:hover {
+  color: var(--error);
+  border-color: var(--error);
+  background: none;
+}
 
 /* ── 内容区 ─────────────────────────────────────────── */
 .panel-content { flex: 1 0 auto; display: flex; }
@@ -692,11 +717,10 @@ select:focus {
   font-size: 11px;
 }
 
+/* 标签是**只读信息**，不能有边框、不能像按钮。 */
 .collected-list .item-status {
-  padding: 1px 8px;
-  border-radius: 9999px;
-  border: 1px solid currentColor;
   flex: none;
+  color: var(--muted);
 }
 
 .collected-list [data-status="saved"] .item-status { color: var(--success); }
@@ -860,12 +884,21 @@ select:focus {
   overflow-y: auto;
 }
 
-/* 同步状态徽标：列表上一眼看出「该同步哪些」。 */
+/* 同步状态：用一个小圆点带颜色，而不是又一颗看着像按钮的药丸。 */
 .collected-list .item-sync {
-  padding: 1px 8px;
-  border-radius: 9999px;
-  border: 1px solid currentColor;
+  display: inline-flex;
+  gap: 5px;
+  align-items: center;
   flex: none;
+}
+
+.collected-list .item-sync::before {
+  width: 6px;
+  height: 6px;
+  flex: none;
+  border-radius: 50%;
+  background: currentColor;
+  content: "";
 }
 
 .collected-list .item-sync[data-sync="pending"] { color: var(--muted); }
@@ -874,3 +907,74 @@ select:focus {
 
 /* 同步结果摘要可能有多行（逐条列出失败原因），保留换行。 */
 #library-sync-note { white-space: pre-wrap; }
+
+/* ── 模态确认框 ─────────────────────────────────────── */
+.modal {
+  position: fixed;
+  inset: 0;
+  z-index: 20;
+  display: grid;
+  place-items: center;
+  padding: clamp(16px, 6vw, 28px);
+}
+
+.modal-scrim {
+  position: absolute;
+  inset: 0;
+  background: rgb(0 0 0 / 0.42);
+}
+
+.modal-card {
+  position: relative;
+  width: 100%;
+  max-width: 340px;
+  padding: 20px;
+  border: 1px solid var(--hairline-strong);
+  border-radius: var(--radius-lg);
+  background: var(--surface);
+  animation: modal-in 160ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+@keyframes modal-in {
+  from { opacity: 0; transform: translateY(6px) scale(0.98); }
+  to { opacity: 1; transform: none; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .modal-card { animation: none; }
+}
+
+.modal-title {
+  margin: 0 0 8px;
+  color: var(--ink);
+  font-size: 17px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+.modal-body {
+  margin: 0 0 18px;
+  color: var(--body);
+  font-size: 13px;
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+
+.modal-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
+/* 危险操作必须和普通按钮长得不一样，不能靠用户读文字来分辨。 */
+.danger-button {
+  padding: 7px 16px;
+  border: 1px solid var(--error);
+  border-radius: 9999px;
+  background: var(--error);
+  color: #fff;
+  font: inherit;
+  cursor: pointer;
+}
+
+.danger-button:hover { filter: brightness(0.94); }

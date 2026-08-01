@@ -76,8 +76,6 @@
           <div class="organize-grid">
             <label for="category">分类</label>
             <select id="category"></select>
-            <label for="tags">标签 <span>用逗号分隔</span></label>
-            <input id="tags" autocomplete="off" maxlength="300">
             <label id="target-label" for="target" hidden>本次采集条数 <span>采够就自动停</span></label>
             <input id="target" type="number" min="1" max="60" step="1" value="20" hidden>
           </div>
@@ -135,8 +133,23 @@
             <button id="library-refresh-button" type="button" class="secondary-button">刷新</button>
             <button id="library-clear-button" type="button" class="secondary-button danger">清空全部</button>
           </div>
-          <p id="library-confirm" class="support compact" hidden></p>
+          <p id="library-error" class="support compact" hidden></p>
         </section>
+
+        <!-- 删除不可逆：用真正的模态对话框问，别混在正文里当一行说明。
+             默认焦点落在「取消」上——危险操作不该是回车就中的那一个。 -->
+        <div id="confirm-modal" class="modal" hidden>
+          <div id="confirm-scrim" class="modal-scrim"></div>
+          <div class="modal-card" role="alertdialog" aria-modal="true"
+               aria-labelledby="confirm-title" aria-describedby="library-confirm">
+            <h2 id="confirm-title" class="modal-title">确认删除</h2>
+            <p id="library-confirm" class="modal-body"></p>
+            <div class="modal-actions">
+              <button id="library-confirm-no" type="button" class="secondary-button">取消</button>
+              <button id="library-confirm-yes" type="button" class="danger-button">确认删除</button>
+            </div>
+          </div>
+        </div>
 
         <!-- 已入库条目的内容浮层：盖住整个侧栏，看完关掉就回到列表。 -->
         <section id="entry-overlay" class="entry-overlay" role="dialog" aria-modal="true"

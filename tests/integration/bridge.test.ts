@@ -198,13 +198,21 @@ describe('local Bridge', () => {
       body: { url: URL },
     });
     expect(unauthorized.status).toBe(401);
-    const removedPairing = await requestJson(bridge.url, `/v1/${['pa', 'ir'].join('')}`, {
+    // 配对接口早已移除：**没令牌一律 401**（/v1/* 默认受保护，也不泄露有哪些接口）。
+    const pairingWithoutToken = await requestJson(bridge.url, `/v1/${['pa', 'ir'].join('')}`, {
       method: 'POST',
       body: { code: '123456' },
     });
-    expect(removedPairing.status).toBe(404);
+    expect(pairingWithoutToken.status).toBe(401);
 
     const { socket, token } = await authorize(bridge);
+    // 带上令牌才看得出它是真的没了，而不是被鉴权挡住。
+    const removedPairing = await requestJson(bridge.url, `/v1/${['pa', 'ir'].join('')}`, {
+      method: 'POST',
+      token,
+      body: { code: '123456' },
+    });
+    expect(removedPairing.status).toBe(404);
     expect(token.length).toBeGreaterThanOrEqual(32);
     socket.send(envelope('extension.hello', 'extension', { version: '0.1.0' }));
     const dispatchedPromise = nextMessage<{ url: string }>(socket);
@@ -469,6 +477,44 @@ describe('local Bridge', () => {
     expect(accepted.status).toBe(200);
     expect(rejected.status).toBe(400);
     expect(reveal).toHaveBeenCalledExactlyOnceWith(entry);
+  });
+
+  it('已入库的读取与同步接口真的挂上了（不是静静地 404）', async () => {
+    // 回归：这两个接口曾因为漏进「受保护路由白名单」而上线即 404，
+    // 扩展把 404 解读成「这一条已经不在本机知识库里了」，指错了方向。
+    // 单测直接调库函数是测不出这一层的——必须走 HTTP。
+    const root = await temporaryDirectory();
+    const bridge = await startBridge({
+      port: 0,
+      libraryRoot: root,
+      configDir: join(root, '.config'),
+    });
+    handles.push(bridge);
+    const { token } = await authorize(bridge);
+
+    // 空库：列表通、读取返回 404 但**带明确的业务错误码**，同步是空操作。
+    const list = await requestJson<{ entries: unknown[] }>(bridge.url, '/v1/library', { token });
+    expect(list.status).toBe(200);
+
+    const missing = await requestJson<{ error: { code: string } }>(
+      bridge.url,
+      '/v1/library/entry?id=nope',
+      { token },
+    );
+    expect(missing.status).toBe(404);
+    expect(missing.body.error.code).toBe('ENTRY_NOT_FOUND');
+
+    const sync = await requestJson<{ synced: number; failed: number }>(
+      bridge.url,
+      '/v1/library/sync',
+      { method: 'POST', token, body: { ids: [] } },
+    );
+    expect(sync.status).toBe(200);
+    expect(sync.body).toMatchObject({ synced: 0, failed: 0 });
+
+    // 没带令牌一律 401，绝不是 404——「默认受保护」这条不能因为改写而松掉。
+    const unauthorized = await requestJson(bridge.url, '/v1/library/entry?id=nope', {});
+    expect(unauthorized.status).toBe(401);
   });
 
   it('rejects untrusted bootstrap Origins without creating an access token', async () => {

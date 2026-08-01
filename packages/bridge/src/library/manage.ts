@@ -21,6 +21,7 @@ export interface LibraryEntry {
   category: string;
   relativePath: string;
   updatedAt: string;
+  publishedAt?: string;
 }
 
 function catalogPathOf(root: string): string {
@@ -43,8 +44,11 @@ async function writeCatalog(root: string, entries: LibraryEntry[]): Promise<void
 /** 列出已入库内容，最近的排在前面。 */
 export async function listLibrary(root: string): Promise<LibraryEntry[]> {
   const entries = await readCatalog(root);
+  // 按**界面上显示的那个时间**排序（优先发布时间）：显示发布时间却按采集时间排，
+  // 列表看着就是乱的。
+  const when = (entry: LibraryEntry) => entry.publishedAt ?? entry.updatedAt;
   return [...entries].sort(
-    (a, b) => b.updatedAt.localeCompare(a.updatedAt) || a.id.localeCompare(b.id),
+    (a, b) => when(b).localeCompare(when(a)) || a.id.localeCompare(b.id),
   );
 }
 

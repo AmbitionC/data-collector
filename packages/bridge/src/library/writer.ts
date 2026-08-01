@@ -36,6 +36,8 @@ interface CatalogEntry {
   category: string;
   relativePath: string;
   updatedAt: string;
+  /** 帖子自己的发布时间；站点没给就没有这个字段（界面据此标注「录入」）。 */
+  publishedAt?: string;
   sync?: SyncInfo;
 }
 
@@ -171,6 +173,8 @@ export class MarkdownLibrary {
       category: input.category,
       relativePath: relative(this.root, markdownPath),
       updatedAt: input.document.collectedAt,
+      // 列表上要显示的是**帖子的发布时间**，不是我什么时候把它采下来的。
+      ...(input.document.publishedAt ? { publishedAt: input.document.publishedAt } : {}),
       // 重新采集同一地址说明内容可能变了，同步状态回到未同步，等用户再确认一次。
       sync: { state: 'pending' },
     };

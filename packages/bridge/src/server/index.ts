@@ -313,13 +313,17 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
       });
     }
     const jobMatch = requestUrl.pathname.match(/^\/v1\/jobs\/([^/]+)$/);
-    const isProtectedRoute =
-      (request.method === 'POST' && requestUrl.pathname === '/v1/jobs') ||
-      (request.method === 'POST' && requestUrl.pathname === '/v1/reveal') ||
-      (request.method === 'GET' && requestUrl.pathname === '/v1/library') ||
-      (request.method === 'POST' && requestUrl.pathname === '/v1/library/delete') ||
-      (request.method === 'GET' && Boolean(jobMatch?.[1]));
-    if (!isProtectedRoute) throw new HttpError(404, 'NOT_FOUND', '接口不存在');
+    /*
+     * `/v1/*` 一律需要令牌，**绝不用白名单逐条列举受保护路由**。
+     *
+     * 白名单会漂移：新增接口时忘了往名单里加，表现是这个接口上线即 404。
+     * 实测踩过——/v1/library/entry 与 /v1/library/sync 就这样静静地 404 了，
+     * 而扩展把 404 解读成「这一条已经不在本机知识库里了」，
+     * 把人往完全错误的方向指。默认受保护，未知路径照旧落到末尾的 404。
+     */
+    if (!requestUrl.pathname.startsWith('/v1/')) {
+      throw new HttpError(404, 'NOT_FOUND', '接口不存在');
+    }
 
     const token = bearerToken(request) ?? '';
     if (!access.verify(token)) throw new HttpError(401, 'UNAUTHORIZED', '访问令牌无效');

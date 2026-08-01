@@ -375,7 +375,7 @@ describe('已入库 → 同步远程', () => {
 
     document.querySelector<HTMLButtonElement>('#nav-library')!.click();
     await vi.waitFor(() => expect(document.querySelectorAll('#library-list li')).toHaveLength(1));
-    [...document.querySelectorAll<HTMLButtonElement>('#library-list .item-delete')]
+    [...document.querySelectorAll<HTMLButtonElement>('#library-list .row-button')]
       .find(button => button.textContent === '同步')!
       .click();
 

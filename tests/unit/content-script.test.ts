@@ -23,7 +23,7 @@ interface ListResponse {
 
 interface AdvanceResponse {
   ok: true;
-  advance: { collapsed: number; loaded: number };
+  advance: { collapsed: number; loaded: number; scroll?: string };
 }
 
 let listener: Listener;
@@ -152,7 +152,7 @@ describe('content script list collection', () => {
 
     const advance = settle(ask<AdvanceResponse>({ type: 'list.advance' }));
 
-    expect((await advance).advance).toEqual({ collapsed: 3, loaded: 0 });
+    expect((await advance).advance).toMatchObject({ collapsed: 3, loaded: 0 });
     const marked = [...document.querySelectorAll<HTMLElement>('.topic-container')].filter(
       node => node.hasAttribute('data-dc-collected'),
     );
@@ -177,20 +177,42 @@ describe('content script list collection', () => {
 
   it('scrolls in human-sized steps instead of teleporting to the bottom', async () => {
     await ask<ListResponse>({ type: 'extract.list' });
+    // jsdom 没有布局，scrollTop 赋值不会生效——手工造一个「真的能滚」的容器，
+    // 才能走到「找到滚动宿主并逐步推进」这条真实路径。
+    const host = document.querySelector<HTMLElement>('.main-content-container')!;
+    let scrollTop = 0;
     const steps: number[] = [];
-    window.scrollBy = (options?: number | ScrollToOptions) => {
-      steps.push(typeof options === 'object' ? Number(options?.top ?? 0) : 0);
-    };
-    Object.defineProperty(window, 'innerHeight', { value: 800, configurable: true });
+    Object.defineProperty(host, 'scrollHeight', { value: 10_000, configurable: true });
+    Object.defineProperty(host, 'clientHeight', { value: 800, configurable: true });
+    Object.defineProperty(host, 'scrollTop', {
+      configurable: true,
+      get: () => scrollTop,
+      set: (value: number) => { steps.push(value - scrollTop); scrollTop = value; },
+    });
 
     vi.useFakeTimers();
-    await settle(ask<AdvanceResponse>({ type: 'list.advance' }));
+    const advance = await settle(ask<AdvanceResponse>({ type: 'list.advance' }));
 
     // 每次只滚不到一屏、分多次滚——不是「每 500 毫秒瞬移到底」那种机器节奏。
     expect(steps.length).toBeGreaterThan(1);
     expect(steps.every(step => step > 0 && step <= 800)).toBe(true);
     // 步长是随机的，不该每次都一模一样。
     expect(new Set(steps).size).toBeGreaterThan(1);
+    // 滚动实况要能被观测到：只报「新增 0 条」时分不清是到底了还是压根没滚。
+    expect(advance.advance.scroll).toContain('main-content-container');
+    expect(advance.advance.scroll).toMatch(/位移 \d+px/);
+  });
+
+  it('推不动任何元素时如实记下来，而不是假装滚过了', async () => {
+    // 站点换了滚动实现、或候选都挑错时，必须留下证据——
+    // 每一轮都是「新增待采 0 条」却看不出为什么，正是之前排查不动的原因。
+    await ask<ListResponse>({ type: 'extract.list' });
+    vi.useFakeTimers();
+
+    const advance = await settle(ask<AdvanceResponse>({ type: 'list.advance' }));
+
+    expect(advance.advance.scroll).toContain('位移 0px');
+    expect(advance.advance.loaded).toBe(0);
   });
 
   it('skips posts that were handled in an earlier round', async () => {

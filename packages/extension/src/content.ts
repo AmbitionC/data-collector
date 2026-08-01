@@ -166,16 +166,40 @@ function highlightEntry(key: string): { found: boolean } {
   return { found: true };
 }
 
-/** 信息流可能滚动在内部容器上，而不是窗口本身。 */
-function scrollHost(): HTMLElement | undefined {
-  const anchor = document.querySelector(`[${COLLECTED_ATTRIBUTE}]`) ?? document.querySelector('.topic-container');
+/**
+ * 信息流滚动在哪个元素上。
+ *
+ * 不能只认「computed overflow 是 auto/scroll」：站点也可能靠 body / documentElement
+ * 滚动，或者用别的方式撑出滚动区。挑不对就等于没滚，懒加载永远不触发——
+ * 实测每一轮都是「新增待采 0 条」，正是卡在这里。
+ * 因此按可靠性依次收集候选，实际滚动时**验证 scrollTop 真的动了**。
+ */
+function scrollCandidates(): HTMLElement[] {
+  const candidates: HTMLElement[] = [];
+  const push = (element: Element | null | undefined) => {
+    if (!(element instanceof HTMLElement)) return;
+    if (candidates.includes(element)) return;
+    if (element.scrollHeight > element.clientHeight + 40) candidates.push(element);
+  };
+  const anchor = document.querySelector(`[${COLLECTED_ATTRIBUTE}]`)
+    ?? document.querySelector('.topic-container');
+  // 先从帖子往上找带滚动样式的祖先（最可能是那个内部滚动容器）。
   for (let element = anchor?.parentElement; element; element = element.parentElement) {
-    const overflowY = getComputedStyle(element).overflowY;
-    if (/(auto|scroll)/.test(overflowY) && element.scrollHeight > element.clientHeight + 40) {
-      return element;
-    }
+    if (/(auto|scroll)/.test(getComputedStyle(element).overflowY)) push(element);
   }
-  return undefined;
+  // 再退回文档级滚动，以及不看样式、只看「能不能滚」的祖先。
+  push(document.scrollingElement as HTMLElement | null);
+  push(document.documentElement);
+  push(document.body);
+  for (let element = anchor?.parentElement; element; element = element.parentElement) push(element);
+  return candidates;
+}
+
+/** 元素的可读描述，写进运行记录用（不含正文，只有结构信息）。 */
+function describe(element: HTMLElement | undefined): string {
+  if (!element) return '(无)';
+  const className = String(element.className || '').split(/\s+/).filter(Boolean).slice(0, 2).join('.');
+  return className ? `${element.tagName.toLowerCase()}.${className}` : element.tagName.toLowerCase();
 }
 
 /** 人不会一秒滚好几次、也不会瞬移到底：随机化的间隔与步长。 */
@@ -186,41 +210,71 @@ function humanPause(min: number, max: number): Promise<void> {
 /**
  * 像人一样往下滚：分几次、每次滚不到一屏、间隔随机。
  * 早先是「每 500 毫秒瞬移到底」，那个节奏机器味太重，容易触发风控。
+ *
+ * 返回这一轮到底滚动了什么、动没动——**滚没滚动必须能被观测到**，
+ * 否则「新增待采 0 条」既可能是到底了，也可能是压根没滚，根本分不清。
  */
-async function scrollLikeHuman(): Promise<void> {
-  const host = scrollHost();
+async function scrollLikeHuman(): Promise<{ host: string; moved: number }> {
+  const candidates = scrollCandidates();
   const steps = 2 + Math.floor(Math.random() * 3);
+  let host: HTMLElement | undefined;
+  let moved = 0;
+
   for (let step = 0; step < steps; step += 1) {
-    const viewport = host ? host.clientHeight : window.innerHeight;
-    const distance = Math.round(viewport * (0.5 + Math.random() * 0.35));
-    if (host) host.scrollTop += distance;
-    else window.scrollBy({ top: distance, behavior: 'smooth' });
+    // 每一步都重新确认「谁真的能滚」：选错了就换下一个候选，绝不闷头滚一个不动的元素。
+    const targets = host ? [host] : candidates;
+    let stepped = false;
+    for (const target of targets) {
+      const before = target.scrollTop;
+      const distance = Math.round(target.clientHeight * (0.5 + Math.random() * 0.35)) || 400;
+      target.scrollTop = before + distance;
+      if (target.scrollTop !== before) {
+        host ??= target;
+        moved += target.scrollTop - before;
+        stepped = true;
+        break;
+      }
+    }
+    if (!stepped) {
+      // 所有候选都推不动：把最后一条帖子滚进视野，这是最不挑实现的办法。
+      // 整段包起来——翻页只是「尽力而为」，绝不能因为某个滚动原语不可用就把整轮炸掉。
+      try {
+        const posts = document.querySelectorAll('.topic-container');
+        const last = posts[posts.length - 1] as HTMLElement | undefined;
+        last?.scrollIntoView?.({ block: 'end' });
+      } catch {
+        // 环境不支持就算了，下面照常观察帖子数有没有变化。
+      }
+    }
     await humanPause(450, 1_100);
   }
+  return { host: describe(host), moved };
 }
 
 /**
  * 推进到下一批：给已处理的帖子打上不可见标记 → 拟人滚动触发懒加载 → 等新帖子出现。
  * 返回新加载出的待采条数；为 0 表示已经到底（批量采集据此收尾）。
  */
-async function advanceList(): Promise<{ collapsed: number; loaded: number }> {
+async function advanceList(): Promise<{
+  collapsed: number;
+  loaded: number;
+  /** 滚动实况，写进运行记录：到底滚的哪个元素、滚了多少、帖子数变没变。 */
+  scroll?: string;
+}> {
   const collapsed = markProcessed();
   const before = document.querySelectorAll('.topic-container').length;
-  // 最多三轮「滚一段 → 停下来看看」，每轮之间有较长的停顿，节奏接近真人翻页。
+  const trace: string[] = [];
   for (let round = 0; round < 3; round += 1) {
-    await scrollLikeHuman();
+    const { host, moved } = await scrollLikeHuman().catch(
+      () => ({ host: '(滚动失败)', moved: 0 }),
+    );
     await humanPause(900, 1_800);
+    const after = document.querySelectorAll('.topic-container').length;
     const loaded = pendingTopicCount(document);
-    if (loaded > 0) {
-      console.info(
-        `[data-collector] 滚动加载出新内容：本页帖子 ${before} → `
-        + `${document.querySelectorAll('.topic-container').length}，待采 ${loaded}`,
-      );
-      return { collapsed, loaded };
-    }
+    trace.push(`第${round + 1}次滚动：目标 ${host}，位移 ${moved}px，帖子 ${before}→${after}，待采 ${loaded}`);
+    if (loaded > 0) return { collapsed, loaded, scroll: trace.join('；') };
   }
-  console.info(`[data-collector] 滚动多轮仍未加载出新内容，本页帖子仍为 ${before}`);
-  return { collapsed, loaded: 0 };
+  return { collapsed, loaded: 0, scroll: trace.join('；') };
 }
 
 /**
@@ -450,7 +504,10 @@ if (!alreadyRegistered) chrome.runtime.onMessage.addListener((message: unknown, 
   }
 
   if (request.type === 'list.restore') {
-    sendResponse({ ok: true, advance: { collapsed: clearMarks(), loaded: 0 } });
+    // mark=true 是反过来用：把本屏**标记为已处理**（采够目标条数收工时用），
+    // 否则「继续采下一批」上来滚一下就又把同一屏提取一遍，永远原地打转。
+    const marked = (request as { mark?: boolean }).mark === true;
+    sendResponse({ ok: true, advance: { collapsed: marked ? markProcessed() : clearMarks(), loaded: 0 } });
     return false;
   }
 

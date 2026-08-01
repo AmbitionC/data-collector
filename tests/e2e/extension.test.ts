@@ -91,20 +91,22 @@ async function elementText(page: Page, selector: string): Promise<string> {
 
 async function captureCurrentFromSidePanel(
   page: Page,
-  overrides: { userCategory: string; userTags: string[] },
+  overrides: { userCategory: string },
 ): Promise<void> {
   const session = await page.createCDPSession();
   try {
     const { result, exceptionDetails } = await session.send('Runtime.evaluate', {
       expression: `(() => {
         const category = document.querySelector('#category');
-        const tags = document.querySelector('#tags');
         const capture = document.querySelector('#capture-button');
-        // 分类是级联下拉（跟随「去向」联动），不是自由输入框。
+        // 分类是下拉（跟随同步去向的分类体系），不是自由输入框。
+        // 「标签」输入框已经拿掉：内容都没看过，凭空填标签没有意义。
         if (!(category instanceof HTMLSelectElement) ||
-            !(tags instanceof HTMLInputElement) ||
             !(capture instanceof HTMLButtonElement)) {
           throw new Error('Side Panel capture controls are missing');
+        }
+        if (document.querySelector('#tags')) {
+          throw new Error('采集屏不该再有标签输入框');
         }
         const wanted = ${JSON.stringify(overrides.userCategory)};
         if (![...category.options].some(option => option.value === wanted)) {
@@ -112,7 +114,6 @@ async function captureCurrentFromSidePanel(
             [...category.options].map(option => option.value).join('/'));
         }
         category.value = wanted;
-        tags.value = ${JSON.stringify(overrides.userTags.join(', '))};
         capture.click();
         return true;
       })()`,
@@ -328,7 +329,6 @@ describe('built Chrome extension', () => {
     await captureCurrentFromSidePanel(sidePanel, {
       // 只能选下拉里真实存在的分类——这一条同时校验了「去向 → 分类」的联动确实渲染出来了。
       userCategory: '商业与投资',
-      userTags: ['E2E 标签', '当前页面'],
     });
     await waitForVisiblePanel(sidePanel, '#collecting-panel', 10_000);
     await sidePanel.screenshot({ path: join(screenshotDirectory, 'sidepanel-collecting.png') });
@@ -341,8 +341,8 @@ describe('built Chrome extension', () => {
     expect(markdown).toContain('重远投资观');
     expect(markdown).toContain(TARGET_URL);
     expect(markdown).toContain('category: "商业与投资"');
-    expect(markdown).toContain('  - "E2E 标签"');
-    expect(markdown).toContain('  - "当前页面"');
+    // 标签由离线分类器给出，不再由用户在采集前手填。
+    expect(markdown).toContain('tags:');
     expect(openedArticleTargets).toEqual([]);
     expect((await browser.pages()).filter(page => page.url().startsWith(TARGET_URL)))
       .toHaveLength(1);
