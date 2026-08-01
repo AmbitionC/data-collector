@@ -210,6 +210,7 @@ export class RepoInboxSink implements ContentSink {
         committed: git.committed,
         pushed: git.pushed,
         ...(git.commitFailed ? { commitFailed: true } : {}),
+        ...(git.pushFailed ? { pushFailed: true } : {}),
         ...(git.warning ? { gitWarning: git.warning } : {}),
       },
     };
@@ -218,13 +219,19 @@ export class RepoInboxSink implements ContentSink {
   private async commitEntry(
     relativeEntry: string,
     title: string,
-  ): Promise<{ committed: boolean; pushed: boolean; warning?: string; commitFailed?: boolean }> {
+  ): Promise<{
+    committed: boolean;
+    pushed: boolean;
+    warning?: string;
+    commitFailed?: boolean;
+    /** 推送真失败（区别于「没配置要推」，后者 pushed 也是 false）。 */
+    pushFailed?: boolean;
+  }> {
     if (!this.commit) return { committed: false, pushed: false };
     try {
       const add = await this.runGit(this.repoRoot, ['add', '--', relativeEntry]);
       if (add.code !== 0) {
-        // **提交失败和推送失败是两回事**：推不上去只是没同步到远端（文件已经提交了），
-        // 而 add/commit 失败意味着这条根本没进仓库，绝不能算「已同步」。
+        // add/commit 失败意味着这条根本没进仓库，绝不能算「已同步」。
         return {
           committed: false,
           pushed: false,
@@ -257,11 +264,19 @@ export class RepoInboxSink implements ContentSink {
       const committed = commit.code === 0;
       if (!this.push) return { committed, pushed: false };
       const push = await this.runGit(this.repoRoot, ['push']);
-      return {
-        committed,
-        pushed: push.code === 0,
-        ...(push.code === 0 ? {} : { warning: explainGitFailure('git push', push.stderr) }),
-      };
+      // **推不上去就算失败。** 用户的 Agent 是从 GitHub 读收件箱的，
+      // 只提交到本机仓库等于没送到——他真的在 Agent 里问「处理收件箱」，
+      // 得到的是「没有新的」，而侧栏那边二十条全绿。
+      // pushFailed 与 pushed 分开：pushed:false 也可能只是没配置要推。
+      if (push.code !== 0) {
+        return {
+          committed,
+          pushed: false,
+          pushFailed: true,
+          warning: explainGitFailure('git push', push.stderr),
+        };
+      }
+      return { committed, pushed: true };
     } catch (error) {
       return {
         committed: false,
@@ -301,11 +316,18 @@ export function explainGitFailure(step: string, stderr: string): string {
       + '在仓库里执行 `git config user.email 你的邮箱` 和 `git config user.name 你的名字`。';
   }
   if (/could not read Username|Authentication failed|Permission denied \(publickey\)/i.test(raw)) {
-    return `${step} 失败：没有推送权限（凭证缺失或过期）。内容已经提交到本地仓库，`
-      + '你也可以自己 `git push` 一次。';
+    return `${step} 失败：没有推送权限（凭证缺失或过期）。内容已提交到本机仓库但没上远端，`
+      + '你的 Agent 从远端读就看不到它。在仓库里手动 `git push` 一次看看报什么，'
+      + '配好凭证后回来点一次同步即可重试。';
   }
   if (/no upstream|does not appear to be a git repository|couldn't find remote/i.test(raw)) {
-    return `${step} 失败：这个仓库没有配置远端。内容已经提交到本地仓库，本机 Agent 直接读工作区即可。`;
+    return `${step} 失败：这个仓库没有配置远端（或当前分支没有上游）。`
+      + '内容只在本机仓库里。`git remote -v` 看看有没有远端，'
+      + '`git push -u origin <当前分支>` 设一次上游。';
+  }
+  if (/non-fast-forward|rejected|fetch first|behind/i.test(raw)) {
+    return `${step} 失败：远端有你本地还没有的提交，被拒了。`
+      + '在仓库里 `git pull --rebase` 之后再回来点一次同步。';
   }
   return `${step} 失败：${raw || '未知错误'}`;
 }

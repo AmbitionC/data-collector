@@ -110,14 +110,23 @@ export async function syncEntries(
         committed?: boolean;
         pushed?: boolean;
         commitFailed?: boolean;
+        pushFailed?: boolean;
         gitWarning?: string;
       };
-      // **提交失败 ≠ 推送失败。** 推不上去只是没到远端，文件已经提交进仓库了，
-      // 本机 Agent 照样读得到，算同步成功、把告警如实带上。
-      // 但 add/commit 失败意味着这条根本没进仓库——报成「已同步」就是在骗人
-      //（实测：git 本身跑不起来时，16 条全失败却显示「已同步 16 条」）。
+      /*
+       * 「同步成功」= 内容真的到了 Agent 读得到的地方。三种情况都不算成功：
+       *
+       * - sink 自己报失败；
+       * - add / commit 失败——这条根本没进仓库（实测：git 跑不起来时 16 条全失败，
+       *   却显示「已同步 16 条」）；
+       * - **push 失败**——用户的 Agent 是从 GitHub 读收件箱的，只提交到本机仓库
+       *   等于没送到。他真在 Agent 里问「处理收件箱」，得到的是「没有新的」，
+       *   而侧栏那边二十条全绿。这一条按用户明确要求改成失败（原先只当告警）。
+       *
+       * 失败的条目会留在「未同步」里，点一次同步就重试——绝不让人以为已经送到了。
+       */
       const sync: SyncInfo = {
-        state: result.ok && !detail.commitFailed ? 'synced' : 'failed',
+        state: result.ok && !detail.commitFailed && !detail.pushFailed ? 'synced' : 'failed',
         target: sink.id,
         at: now(),
         ...(detail.committed !== undefined ? { committed: detail.committed } : {}),

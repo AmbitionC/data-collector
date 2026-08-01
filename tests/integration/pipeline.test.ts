@@ -71,7 +71,7 @@ async function pipeline(): Promise<{ library: string; repo: string; router: Sink
           type: 'repo-inbox',
           repoPath: repo,
           label: 'life-teachers 收件箱',
-          // 临时仓库没有远端，push 必然失败——正好用来验证「推不上去不算同步失败」。
+          // 这一组不推（本机库 → 仓库工作区就够）；推送失败的语义另有专门用例。
           push: false,
         },
       },
@@ -283,5 +283,45 @@ describe('采集 → 本地 → 同步 → 归档 的完整链路', () => {
     expect(await syncEntries(library, [], source => router.syncTarget(source)))
       .toEqual({ synced: 0, failed: 0, entries: [] });
     expect(await inboxEntries(repo)).toEqual([]);
+  });
+});
+
+describe('推送失败就算同步失败', () => {
+  /**
+   * 用户的 Agent 是从 GitHub 读收件箱的：只提交到本机仓库等于没送到。
+   * 真出过一次——他在 Agent 里问「处理收件箱」得到「没有新的」，
+   * 而侧栏那边二十条全绿。（远端确认：origin 上一条「采集:」提交都没有。）
+   */
+  async function pushingPipeline(): Promise<{ library: string; repo: string; router: SinkRouter }> {
+    const library = await temporaryDirectories.create('sync-library-push-');
+    const repo = await gitRepository();
+    const router = SinkRouter.build(
+      {
+        sinks: {
+          markdown: { type: 'markdown' },
+          // 临时仓库没有远端，push 必然失败——正是要验证的那条路径。
+          'life-teachers': { type: 'repo-inbox', repoPath: repo, push: true },
+        },
+        routes: { zsxq: ['life-teachers'] },
+      },
+      { libraryRoot: library },
+    );
+    return { library, repo, router };
+  }
+
+  it('推不上去的条目算失败，且留在「未同步」里等重试', async () => {
+    const { library, repo, router } = await pushingPipeline();
+    await router.save(organize(post()));
+    const [entry] = await listLibrary(library);
+
+    const outcome = await syncEntries(library, [entry!.id], source => router.syncTarget(source));
+
+    expect(outcome).toMatchObject({ synced: 0, failed: 1 });
+    expect(outcome.entries[0]?.sync.state).toBe('failed');
+    // 提交本身是成功的，得如实说——文件确实在本机仓库里。
+    expect(outcome.entries[0]?.sync.committed).toBe(true);
+    expect(await inboxEntries(repo)).toHaveLength(1);
+    // 关键：它必须回到待同步队列，点一次同步就重试，绝不让人以为已经送到了。
+    expect(await pendingIds(library)).toContain(entry!.id);
   });
 });

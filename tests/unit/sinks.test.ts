@@ -341,9 +341,12 @@ describe('git 报错要翻成人能照做的一句话', () => {
       .toContain('不是一个 git 仓库');
     expect(explainGitFailure('git commit', '*** Please tell me who you are.'))
       .toContain('git config user.email');
-    // 推送失败要说清「内容已经提交到本地」，别让人以为白采了。
-    expect(explainGitFailure('git push', 'fatal: Authentication failed'))
-      .toContain('已经提交到本地仓库');
+    // 推送失败要说清两件事：提交是成功的，但**没上远端**——用户的 Agent 从远端读，
+    // 看不到就等于没送到。原先这里安慰「本机 Agent 直接读工作区即可」，
+    // 而用户的 Agent 在云端，那句话把人引偏了。
+    const push = explainGitFailure('git push', 'fatal: Authentication failed');
+    expect(push).toContain('没上远端');
+    expect(push).toContain('点一次同步即可重试');
   });
 
   it('认不出来的原样带出，绝不吞掉', () => {
@@ -386,5 +389,50 @@ describe('提交失败绝不能报成「已同步」', () => {
         : { code: 0, stderr: '', stdout: '' },
     );
     expect((result.detail as { commitFailed?: boolean }).commitFailed).toBeUndefined();
+  });
+});
+
+describe('推送失败就算同步失败（用户明确要求）', () => {
+  it('push 失败时标 pushFailed，并指向可执行的下一步', async () => {
+    const repo = await temporaryDirectory();
+    const sink = new RepoInboxSink({
+      id: 'lt',
+      repoPath: repo,
+      push: true,
+      fetch: pngFetcher(),
+      resolveAddresses: PUBLIC_DNS,
+      runGit: async (_repo, args) =>
+        args[0] === 'push'
+          ? { code: 128, stderr: 'fatal: could not read Username for https://github.com', stdout: '' }
+          : { code: 0, stderr: '', stdout: '' },
+    });
+
+    const result = await sink.save(organize(nowcoderDoc({ images: [] })));
+    const detail = result.detail as { committed?: boolean; pushed?: boolean; pushFailed?: boolean; gitWarning?: string };
+
+    expect(detail.committed).toBe(true);
+    expect(detail.pushFailed).toBe(true);
+    // 提交是成功的，这一点要如实；但没上远端，Agent 就读不到。
+    expect(detail.gitWarning).toContain('没上远端');
+    expect(detail.gitWarning).not.toContain('本机 Agent 直接读工作区即可');
+  });
+
+  it('没配置要推的 sink 不会被误判成推送失败', async () => {
+    const repo = await temporaryDirectory();
+    const sink = new RepoInboxSink({
+      id: 'lt',
+      repoPath: repo,
+      fetch: pngFetcher(),
+      resolveAddresses: PUBLIC_DNS,
+      runGit: async () => ({ code: 0, stderr: '', stdout: '' }),
+    });
+
+    const result = await sink.save(organize(nowcoderDoc({ images: [] })));
+    expect((result.detail as { pushFailed?: boolean }).pushFailed).toBeUndefined();
+  });
+
+  it('远端领先被拒时说清该 pull --rebase', () => {
+    const message = explainGitFailure('git push', '! [rejected] master -> master (fetch first)');
+    expect(message).toContain('git pull --rebase');
   });
 });
