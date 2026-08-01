@@ -10,6 +10,7 @@ import {
   pendingTopicCount,
 } from '../../packages/extension/src/extractors/index.js';
 import { TopicIndex } from '../../packages/extension/src/topicIndex.js';
+import { parsePublishedAt } from '../../packages/extension/src/extractors/common.js';
 
 /** 接口响应里拿到的帖子号（DOM 上没有），前两条能对上号，第三条对不上。 */
 function topicIndex(): TopicIndex {
@@ -260,5 +261,22 @@ describe('Nowcoder extraction', () => {
     expect(result.title).toBe('美团前端二面面经分享');
     expect(result.text).toContain('最长递增子序列');
     expect(result.text).not.toContain('首页导航');
+  });
+});
+
+describe('发布时间：宁可说不知道，也不猜一个年份', () => {
+  it('只有月日的时间戳一律不解析（否则会被补成 2001 年）', () => {
+    // new Date('03-05') 不会失败，它返回 2001-03-05。牛客「编辑于 03-05」、
+    // 星球「3-5」都长这样。猜错的年份还会以 date_source: published
+    //（「原文给了发布时间，可信」）写进收件箱，下游 Agent 照单全收。
+    for (const raw of ['03-05', '3-5', '05/06', '编辑于 03-05', 'Mar 5']) {
+      expect(parsePublishedAt(raw, null)).toBeUndefined();
+    }
+  });
+
+  it('带年份的照常解析', () => {
+    expect(parsePublishedAt('2026年3月5日', null)).toBe('2026-03-04T16:00:00.000Z');
+    expect(parsePublishedAt('2026-03-05 14:30', null)).toBe('2026-03-05T06:30:00.000Z');
+    expect(parsePublishedAt('', '2026-03-05T06:30:00.000Z')).toBe('2026-03-05T06:30:00.000Z');
   });
 });

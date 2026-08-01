@@ -87,9 +87,26 @@ export function parsePublishedAt(raw: string, datetime?: string | null): string 
   const chinese = candidate.match(
     /^(\d{4})[年/-](\d{1,2})[月/-](\d{1,2})日?(?:\s+(\d{1,2}):(\d{2}))?/,
   );
-  const normalized = chinese
-    ? `${chinese[1]}-${chinese[2]?.padStart(2, '0')}-${chinese[3]?.padStart(2, '0')}T${(chinese[4] ?? '00').padStart(2, '0')}:${chinese[5] ?? '00'}:00+08:00`
-    : candidate;
-  const date = new Date(normalized);
+  if (chinese) {
+    const date = new Date(
+      `${chinese[1]}-${chinese[2]?.padStart(2, '0')}-${chinese[3]?.padStart(2, '0')}`
+      + `T${(chinese[4] ?? '00').padStart(2, '0')}:${chinese[5] ?? '00'}:00+08:00`,
+    );
+    return Number.isNaN(date.getTime()) ? undefined : date.toISOString();
+  }
+
+  /*
+   * 兜底解析**必须先看到年份**。
+   *
+   * 站点上大量时间戳只有月日（牛客「编辑于 03-05」、星球「3-5」）。
+   * 直接 new Date() 不会失败，它会把年份补成 **2001**：
+   *   new Date('03-05') -> 2001-03-05
+   * 于是一篇 2026 年的帖子被当成 2001 年的，还以 date_source: published
+   * （「原文给了发布时间，可信」）写进收件箱，下游 Agent 会照单全收。
+   * 与其猜一个错的年份，不如如实说「不知道发布时间」——上游会退回采集时间
+   * 并标 date_source: collected，那是诚实的。
+   */
+  if (!/(?:19|20)\d{2}/.test(candidate)) return undefined;
+  const date = new Date(candidate);
   return Number.isNaN(date.getTime()) ? undefined : date.toISOString();
 }

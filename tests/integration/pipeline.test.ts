@@ -148,6 +148,32 @@ describe('采集 → 本地 → 同步 → 归档 的完整链路', () => {
     expect(await inboxEntries(repo)).toHaveLength(1);
   });
 
+  it('重采后再同步：收件箱仍是一份，绝不长出第二个目录', async () => {
+    // 收件箱目录名里只有稳定内容 ID 是稳的：没有发布时间时日期退化成采集日期，
+    // 标题取自正文首句（「展开全文」点没点上都会变）。按当次值重算目录名的话，
+    // 重采再同步就会多出一份，而本机库仍是一条——Agent 会把同一篇归档两遍。
+    // 而「重采 → 状态回到未同步 → 再同步」正是产品主动鼓励用户走的路径。
+    const { library, repo, router } = await pipeline();
+    await router.save(organize(post({ collectedAt: '2026-07-30T00:00:00.000Z' })));
+    await syncEntries(library, await pendingIds(library), source => router.syncTarget(source));
+    expect(await inboxEntries(repo)).toHaveLength(1);
+    const [firstName] = await inboxEntries(repo);
+
+    // 隔天重采，标题也变了一个字。
+    await router.save(organize(post({
+      collectedAt: '2026-07-31T00:00:00.000Z',
+      title: '创业板跌破 60 日线（更新）',
+    })));
+    await syncEntries(library, await pendingIds(library), source => router.syncTarget(source));
+
+    const names = await inboxEntries(repo);
+    expect(names).toHaveLength(1);
+    expect(names[0]).toBe(firstName);
+    // 内容是新的：复用目录不等于不更新。
+    expect(await readFile(join(repo, '_inbox', 'zsxq', names[0]!, 'original.md'), 'utf8'))
+      .toContain('创业板跌破 60 日线（更新）');
+  });
+
   it('重新采集同一地址：本地只有一条，且同步状态回到未同步', async () => {
     // 本机库是唯一的去重依据；内容更新了就该让用户重新过一遍同步这一关。
     const { library, router } = await pipeline();

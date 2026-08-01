@@ -3,6 +3,7 @@ import { TRUSTED_EXTENSION_ID, type CollectedDocument } from '@data-collector/sh
 import {
   JobRunner,
   explainEmptyIndex,
+  type BatchItem,
   type BatchProgress,
   type BridgeClient,
   type BrowserTab,
@@ -142,6 +143,8 @@ class InMemoryBridge implements BridgeClient {
   readonly createdFor: string[] = [];
   createdJobId = 'current-job';
   failCreateFor: string | undefined;
+  /** 每条都建任务失败（模拟知识库目录写不动这类「不是服务断了」的失败）。 */
+  failCreate = false;
 
   send(type: string, requestId: string, payload: unknown): void {
     this.sent.push({ type, requestId, payload });
@@ -149,7 +152,9 @@ class InMemoryBridge implements BridgeClient {
 
   async createJob(url: string): Promise<{ id: string }> {
     this.createdFor.push(url);
-    if (this.failCreateFor === url) throw new Error('创建采集任务失败：HTTP 500');
+    if (this.failCreate || this.failCreateFor === url) {
+      throw new Error('创建采集任务失败：HTTP 500');
+    }
     return {
       id: this.createdFor.length === 1
         ? this.createdJobId
@@ -755,5 +760,83 @@ describe('「一个帖子号都没截到」的三种成因', () => {
       explainEmptyIndex({ ...base, installed: true, observed: 5, jsonResponses: 5, withTopicId: 0 }),
     ]);
     expect(messages.size).toBe(4);
+  });
+});
+
+describe('计数与明细必须同源，失败不许伪装成完成', () => {
+  it('采够条数时，本轮的跳过项照样出现在明细里', async () => {
+    // 「已跳过」曾经在逐条循环之前按整屏一次性加上，而解释这些跳过的行只在循环里
+    // push——采够条数时循环从中间断开，计数留着、行没了：面板说「已跳过 2」，
+    // 点进明细却是一行都没有，而用户正是被指引去那里逐条核对的。
+    const tabs = new InMemoryTabs();
+    tabs.activeTab = { id: 7, url: LIST_URL, status: 'complete' };
+    tabs.listRounds = [{
+      documents: [topic('511111111111111'), topic('522222222222222')],
+      skipped: 2,
+      total: 4,
+    }];
+    const collected: BatchItem[] = [];
+    const runner = new JobRunner({
+      tabs,
+      bridge: new InMemoryBridge(),
+      waitForTabComplete: async () => undefined,
+      delay: async () => undefined,
+      reportItems: rows => { collected.splice(0, collected.length, ...rows); },
+    });
+
+    const progress = await runner.captureList({}, { maxItems: 2 });
+
+    expect(progress.phase).toBe('capped');
+    expect(progress.collected).toBe(2);
+    // 计数说几条跳过，明细就得有几行——两者从同一个数组数出来。
+    const items = collected.filter(item => item.status === 'skipped');
+    expect(items).toHaveLength(progress.skipped);
+  });
+
+  it('全部写入失败 → 终态是 failed，不是「完成」', async () => {
+    const tabs = new InMemoryTabs();
+    tabs.activeTab = { id: 7, url: LIST_URL, status: 'complete' };
+    tabs.listRounds = [{
+      documents: [topic('511111111111111'), topic('522222222222222')],
+      skipped: 0,
+      total: 2,
+    }];
+    const bridge = new InMemoryBridge();
+    // 每条都写入失败（如知识库目录写不动），但不是「本机服务断了」。
+    bridge.failCreate = true;
+    const runner = new JobRunner({
+      tabs, bridge, waitForTabComplete: async () => undefined, delay: async () => undefined,
+    });
+
+    const progress = await runner.captureList();
+
+    expect(progress.collected).toBe(0);
+    expect(progress.failed).toBe(2);
+    // 绿色的「本轮批量归档完成」+「内容已落到本机库」是假话。
+    expect(progress.phase).toBe('failed');
+    expect(progress.error).toContain('全部写入失败');
+  });
+
+  it('两条帖子算出同一个地址时，被顶掉的那条如实记一行', async () => {
+    // 静默 continue 会让用户看到「本屏 2 条」但明细只有 1 行，第二条无声消失。
+    const duplicate = topic('511111111111111');
+    const tabs = new InMemoryTabs();
+    tabs.activeTab = { id: 7, url: LIST_URL, status: 'complete' };
+    tabs.listRounds = [{ documents: [duplicate, { ...duplicate }], skipped: 0, total: 2 }];
+    const rows: BatchItem[] = [];
+    const runner = new JobRunner({
+      tabs,
+      bridge: new InMemoryBridge(),
+      waitForTabComplete: async () => undefined,
+      delay: async () => undefined,
+      reportItems: next => { rows.splice(0, rows.length, ...next); },
+    });
+
+    const progress = await runner.captureList();
+
+    expect(progress.collected).toBe(1);
+    expect(rows).toHaveLength(2);
+    expect(rows[1]).toMatchObject({ status: 'skipped' });
+    expect(rows[1]?.reason).toContain('同一个地址');
   });
 });

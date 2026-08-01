@@ -324,9 +324,16 @@ export class TopicIndex {
     const exact = this.byText.get(key);
     if (exact) return exact;
     // 开头一致、一长一短（折叠、尾部多了「展开」之类）——同一条。
+    // **同样要防歧义**：页面正文归一化后不足 24 字时（折叠的帖子很常见），
+    // 它可能是好几条接口记录的公共前缀。早先这里按插入顺序返回第一条，
+    // 于是折叠的帖子会被对到别人的帖子号上，两条内容写进同一个文件——
+    // 正是「绝不猜帖子地址」这条红线。下面的包含分支一直有这道保护，唯独这里漏了。
+    const prefixHits = new Set<string>();
     for (const [candidate, topicId] of this.byText) {
-      if (candidate.startsWith(key) || key.startsWith(candidate)) return topicId;
+      if (candidate.startsWith(key) || key.startsWith(candidate)) prefixHits.add(topicId);
+      if (prefixHits.size > 1) return undefined;
     }
+    if (prefixHits.size === 1) return [...prefixHits][0];
     // 开头对不上：只认「一方的开头整段出现在另一方里」。
     // needle 取 240 字、haystack 留 2000 字，两边都截同一长度是比不出来的（见 HAYSTACK_LIMIT）。
     const needle = haystack.slice(0, MATCH_TEXT_LIMIT);

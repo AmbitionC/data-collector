@@ -408,6 +408,19 @@ export class JobRunner {
     // 同一条在两轮里重复出现（列表刷新、置顶）时不重复建任务。
     const seen = new Set<string>();
     const items: BatchItem[] = [];
+    /**
+     * 计数一律从明细里数出来。
+     *
+     * 早先「已跳过」是在逐条循环**之前**按整屏一次性加上的，而解释这些跳过的行
+     * 只在循环体内 push——采够条数或用户点停止时循环从中间断开，计数留着、行没了：
+     * 面板说「已跳过 2」，点进明细却是「已跳过 0」，一行都没有。
+     * 同源就不可能再漂。
+     */
+    const tally = () => {
+      progress.collected = items.filter(item => item.status === 'saved').length;
+      progress.skipped = items.filter(item => item.status === 'skipped').length;
+      progress.failed = items.filter(item => item.status === 'failed').length;
+    };
     report();
 
     if (limits.continuation) {
@@ -481,7 +494,6 @@ export class JobRunner {
       }
 
       progress.rounds = round + 1;
-      progress.skipped += list.skipped;
       if (list.total > 0) sawAnyPost = true;
       captured = Math.max(captured, list.captured ?? 0);
       note(
@@ -494,22 +506,34 @@ export class JobRunner {
         if (progress.collected >= maxItems) break;
         if (!item.document) {
           items.push({ key: item.key, title: item.title, status: 'skipped', ...(item.reason ? { reason: item.reason } : {}) });
+          tally();
           continue;
         }
         const document = item.document;
-        if (seen.has(document.canonicalUrl)) continue;
+        if (seen.has(document.canonicalUrl)) {
+          // 本轮已经采过同一个地址：如实记一行，**绝不静默丢弃**。
+          // 这种情况多半是有条帖子被对到了别人的帖子号上，正是最该让用户看见的。
+          items.push({
+            key: item.key,
+            title: item.title,
+            status: 'skipped',
+            reason: '和本轮另一条算出了同一个地址，未重复入库',
+          });
+          tally();
+          continue;
+        }
         seen.add(document.canonicalUrl);
         const saved = await this.saveCollected(document, overrides);
         if (saved === 'ok') {
-          progress.collected += 1;
           items.push({ key: item.key, title: item.title, status: 'saved', url: document.canonicalUrl });
+          tally();
         } else if (saved === 'bridge-down') {
           // E5：本机服务断了，后面每条都会失败，立刻收尾而不是刷一屏失败。
           note('本机服务无响应，提前收尾');
           return await fail('BRIDGE_UNAVAILABLE', '本机服务无响应，本批已中断。');
         } else {
-          progress.failed += 1;
           items.push({ key: item.key, title: item.title, status: 'failed', reason: '写入本机失败' });
+          tally();
         }
         report();
         // 条与条之间留一点随机间隔：连续无间隔的请求最像脚本。
@@ -551,11 +575,21 @@ export class JobRunner {
     // E3 / E4：跑完了但没有产出，都不是「完成」。
     progress.phase = !sawAnyPost
       ? 'empty'
-      : progress.collected === 0 && progress.skipped > 0
-        ? 'skipped_all'
-        : progress.rounds >= maxRounds && progress.collected >= maxItems
-          ? 'capped'
-          : 'done';
+      // 一条都没入库、却有写入失败：这是失败，不是「完成」。
+      // 之前 failed 完全没参与终态判定，全军覆没会渲染成绿色的「本轮批量归档完成」，
+      // 说明文字还写着「内容已落到本机库」——那是假的。
+      : progress.collected === 0 && progress.failed > 0
+        ? 'failed'
+        : progress.collected === 0 && progress.skipped > 0
+          ? 'skipped_all'
+          : progress.rounds >= maxRounds && progress.collected >= maxItems
+            ? 'capped'
+            : 'done';
+    if (progress.phase === 'failed') {
+      progress.error = `本轮 ${progress.failed} 条全部写入失败，一条都没入库。`
+        + '多半是本机服务写不了知识库目录（磁盘满、目录被占用或权限变更）。';
+      progress.code = 'ALL_WRITES_FAILED';
+    }
     if (progress.phase === 'skipped_all') {
       // 区分两种「全部跳过」：还没截到接口响应（用户能自己解决），
       // 还是截到了但对不上号（需要我改适配）。

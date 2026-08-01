@@ -1,6 +1,6 @@
 import { execFile } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
-import { mkdir, open, rename } from 'node:fs/promises';
+import { mkdir, open, readdir, rename } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { descriptorFor, stableContentId } from '@data-collector/shared';
@@ -120,6 +120,18 @@ export class RepoInboxSink implements ContentSink {
     this.runGit = options.runGit ?? defaultRunGit;
   }
 
+  /**
+   * 按稳定内容 ID 找回这条内容已有的收件箱目录。
+   * 目录不存在、或读不动，都按「没有」处理——大不了新建一个，绝不因此让同步失败。
+   */
+  private async findEntryById(directory: string, id: string): Promise<string | undefined> {
+    try {
+      return (await readdir(directory)).find(name => name.includes(`-${id}-`));
+    } catch {
+      return undefined;
+    }
+  }
+
   /** 写入根目录：这里投出去的条目也应当能「在文件夹中查看」。 */
   get root(): string {
     return this.repoRoot;
@@ -138,7 +150,14 @@ export class RepoInboxSink implements ContentSink {
     const document = input.document;
     const id = stableContentId(document.canonicalUrl);
     const date = (document.publishedAt ?? document.collectedAt).slice(0, 10);
-    const entryName = `${date}-${id}-${safeSlug(document.title)}`;
+    // 目录名里只有 id 是稳定的：date 在没有发布时间时退化成采集日期，
+    // title 取自正文首句（「展开全文」点没点上都会变）。重采同一条再同步时，
+    // 若按当次的日期和标题重算目录名，收件箱里就会长出第二份，
+    // 而本机库仍是一条——Agent 会把同一篇文章归档两遍。
+    // 所以先按 id 找回既有目录，找到就沿用。
+    const inboxDirectory = join(this.repoRoot, this.inboxDir, document.source);
+    const existing = await this.findEntryById(inboxDirectory, id);
+    const entryName = existing ?? `${date}-${id}-${safeSlug(document.title)}`;
     const relativeEntry = join(this.inboxDir, document.source, entryName);
     const entryDirectory = assertInsideRoot(this.repoRoot, join(this.repoRoot, relativeEntry));
     await assertSafeWritePath(this.repoRoot, entryDirectory);
