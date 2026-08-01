@@ -30,6 +30,24 @@ export const TOPIC_MESSAGE = 'data-collector:topics';
  */
 export const TOPIC_HOOK_FLAG = '__dataCollectorTopicHook';
 
+/**
+ * 留存帖子号的仓库，挂在页面 window 上。
+ *
+ * **必须跨模块实例共享**：扩展更新 / 自愈注入会让页面里同时存在好几份 inject.js
+ * 实例，各存各的就等于没存。挂在 window 上，谁来都接着同一份用。
+ */
+export const TOPIC_STORE_KEY = '__dataCollectorTopicStore';
+
+/**
+ * 隔离世界 → 主世界：把你攒下的帖子号**全部重放一遍**。
+ *
+ * 主世界钩子活在页面里，扩展重载不影响它；但内容脚本会被销毁重注入，
+ * TopicIndex 是它的模块级变量，一重注入就清零。页面上的老帖子还在，
+ * 它们的接口响应却是几小时前的事，不会再来一次——于是「一半能对上、一半对不上」。
+ * 钩子替内容脚本把帖子号留着，重注入后要回来即可。
+ */
+export const TOPIC_REPLAY_REQUEST = 'data-collector:topics:replay?';
+
 /** 隔离世界 → 主世界：要一份钩子的运行统计。 */
 export const TOPIC_STATS_REQUEST = 'data-collector:topics:stats?';
 /** 主世界 → 隔离世界：钩子的运行统计。 */
@@ -47,6 +65,8 @@ export const TOPIC_STATS = 'data-collector:topics:stats';
  */
 export interface HookStats {
   installed: boolean;
+  /** 钩子替内容脚本留存的帖子号条数（重注入后可整批要回来）。 */
+  retained?: number;
   /** 页面里跑的是更早构建留下的钩子：它在工作，但计数取不到（都是 0，别当真）。 */
   legacy?: boolean;
   /** 钩子装上的时刻（页面时间轴上的毫秒数）。 */

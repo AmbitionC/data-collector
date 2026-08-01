@@ -137,7 +137,11 @@ describe('ZSXQ extraction（按真实 Angular DOM）', () => {
     expect(new Set(list.entries.map(entry => entry.key)).size).toBe(3);
     expect(list.entries.every(entry => entry.title.length > 0)).toBe(true);
     // 跳过的那条要带上原因，而不是无声消失。
-    expect(list.entries.find(entry => !entry.document)?.reason).toContain('帖子号');
+    // 跳过原因要说清是什么、为什么、怎么办——只写「没能对上帖子号」用户无从下手。
+    const reason = list.entries.find(entry => !entry.document)?.reason ?? '';
+    expect(reason).toContain('编号');
+    expect(reason).toContain('接口响应');
+    expect(reason).toContain('切走再切回来');
   });
 
   it('问答帖：问和答都归档，且靠任意一段就能对上帖子号', async () => {

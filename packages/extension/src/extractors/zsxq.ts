@@ -263,7 +263,15 @@ export function extractZsxqList(
     }
     if (!topicUrl) {
       skipped += 1;
-      entries.push({ container, key, title, reason: '没能对上帖子号，无法确定它自己的地址' });
+      // 说清是什么、为什么、怎么办——「没能对上帖子号」六个字用户根本无从下手。
+      entries.push({
+        container,
+        key,
+        title,
+        reason: '这条帖子的编号没截到（编号只出现在站点接口响应里，不在页面上），'
+          + '所以无法确定它自己的网址，只能跳过。多半是它在插件启动前就已经加载在页面上了；'
+          + '把分类切走再切回来，让站点重新请求一次即可。',
+      });
       continue;
     }
     const time = firstWithin(container, TIME_SELECTORS);

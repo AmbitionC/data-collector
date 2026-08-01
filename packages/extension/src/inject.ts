@@ -13,8 +13,10 @@
 import {
   TOPIC_HOOK_FLAG,
   TOPIC_MESSAGE,
+  TOPIC_REPLAY_REQUEST,
   TOPIC_STATS,
   TOPIC_STATS_REQUEST,
+  TOPIC_STORE_KEY,
   harvestTopics,
   type HookStats,
   type TopicRecord,
@@ -37,10 +39,45 @@ const stats: HookStats = {
   recent: [],
 };
 
+/**
+ * 钩子替内容脚本留存的帖子号。
+ *
+ * 内容脚本一被重注入（扩展更新、自愈注入）就丢掉全部索引，而页面上的老帖子还在、
+ * 它们的接口响应不会重来——不留一份的话，那些帖子从此永远对不上号。
+ * 按帖子号去重、每条只留最长的一份正文，条数因此天然受限于页面上出现过的帖子数。
+ */
+const store = window as unknown as Record<string, unknown>;
+const retained = (store[TOPIC_STORE_KEY] as Map<string, TopicRecord> | undefined)
+  ?? new Map<string, TopicRecord>();
+store[TOPIC_STORE_KEY] = retained;
+/** 留存上限：够覆盖一次长会话翻过的所有帖子，又不至于把内存吃光。 */
+const RETAIN_LIMIT = 800;
+
+function remember(records: readonly TopicRecord[]): void {
+  for (const record of records) {
+    const previous = retained.get(record.topicId);
+    if (previous && previous.text.length >= record.text.length) continue;
+    if (!previous && retained.size >= RETAIN_LIMIT) return;
+    retained.set(record.topicId, record);
+  }
+}
+
 function publish(records: TopicRecord[]): void {
   if (!records.length) return;
   stats.publishedRecords += records.length;
+  remember(records);
   window.postMessage({ source: TOPIC_MESSAGE, records }, window.location.origin);
+}
+
+/** 把留存的帖子号整批交还给（可能是刚重注入的）内容脚本，分批发避免一条巨型消息。 */
+function replay(): void {
+  const all = [...retained.values()];
+  for (let start = 0; start < all.length; start += 50) {
+    window.postMessage(
+      { source: TOPIC_MESSAGE, records: all.slice(start, start + 50) },
+      window.location.origin,
+    );
+  }
 }
 
 /** 只留来源与路径，**丢掉查询串**——里面可能带着会话相关的参数。 */
@@ -140,7 +177,6 @@ function patchXhr(): void {
   } as typeof open;
 }
 
-const store = window as unknown as Record<string, unknown>;
 const existing = store[TOPIC_HOOK_FLAG];
 
 // 防重复打补丁，理由见 TOPIC_HOOK_FLAG。
@@ -168,7 +204,16 @@ store[TOPIC_HOOK_FLAG] = shared;
  */
 window.addEventListener('message', event => {
   if (event.source !== window) return;
-  if ((event.data as { source?: unknown })?.source !== TOPIC_STATS_REQUEST) return;
+  // 只有**当前生效的那一份**应答。扩展更新后页面里会留着好几份旧实例，
+  // 监听又是无条件注册的；都应答的话同一批帖子号会被重放好几遍。
+  if (store[TOPIC_HOOK_FLAG] !== shared) return;
+  const source = (event.data as { source?: unknown })?.source;
+  if (source === TOPIC_REPLAY_REQUEST) {
+    replay();
+    return;
+  }
+  if (source !== TOPIC_STATS_REQUEST) return;
+  shared.retained = retained.size;
   window.postMessage({ source: TOPIC_STATS, stats: shared }, window.location.origin);
 });
 

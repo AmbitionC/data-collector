@@ -1,7 +1,12 @@
 // @vitest-environment jsdom
 // @vitest-environment-options { "url": "https://wx.zsxq.com/group/48844584441158" }
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { TOPIC_HOOK_FLAG, TOPIC_MESSAGE } from '../../packages/extension/src/topicIndex.js';
+import {
+  TOPIC_HOOK_FLAG,
+  TOPIC_MESSAGE,
+  TOPIC_REPLAY_REQUEST,
+  TOPIC_STORE_KEY,
+} from '../../packages/extension/src/topicIndex.js';
 
 interface Published {
   source: string;
@@ -30,6 +35,8 @@ let collect: (event: MessageEvent) => void;
 async function loadInject(fetchImplementation: typeof fetch): Promise<void> {
   window.fetch = fetchImplementation;
   delete (window as unknown as Record<string, unknown>)[TOPIC_HOOK_FLAG];
+  // 留存集也挂在 window 上、跨实例共享，模拟「全新页面」时要一并清掉。
+  delete (window as unknown as Record<string, unknown>)[TOPIC_STORE_KEY];
   vi.resetModules();
   await import('../../packages/extension/src/inject.js');
 }
@@ -131,5 +138,72 @@ describe('main-world topic capture', () => {
     await window.fetch('https://api.zsxq.com/v2/users/self');
     await new Promise(resolve => setTimeout(resolve, 10));
     expect(published).toEqual([]);
+  });
+});
+
+/**
+ * 主世界的监听要求 `event.source === window`（防别的 iframe 伪造）。
+ * jsdom 的 postMessage 不带 source，真实浏览器带——按生产前提派发，
+ * 而不是为了测试放宽生产代码的校验。
+ */
+function requestReplay(): void {
+  window.dispatchEvent(new MessageEvent('message', {
+    source: window,
+    origin: window.location.origin,
+    data: { source: TOPIC_REPLAY_REQUEST },
+  }));
+}
+
+describe('内容脚本被重注入后，帖子号必须还在', () => {
+  it('钩子留存帖子号，收到重放请求时整批交还', async () => {
+    // 实测现场：hook.publishedRecords = 201，而内容脚本里 capturedTopics 只有 20。
+    // 钩子活在页面里、扩展重载不影响它；内容脚本却会被销毁重注入，索引跟着清零。
+    // 页面上的老帖子还在，它们的接口响应不会重来 —— 于是一半对得上、一半对不上。
+    await loadInject(async () =>
+      new Response(JSON.stringify(TOPICS_RESPONSE), {
+        headers: { 'content-type': 'application/json' },
+      }),
+    );
+    await window.fetch('https://api.zsxq.com/v2/groups/1/topics?scope=digests');
+    await vi.waitFor(() => expect(published).toHaveLength(1));
+    const firstBatch = published[0]!.records.map(record => record.topicId);
+    expect(firstBatch).toHaveLength(2);
+
+    // 模拟内容脚本重注入：它把之前收到的都丢了，于是要一次重放。
+    published.length = 0;
+    requestReplay();
+
+    await vi.waitFor(() => expect(published.length).toBeGreaterThan(0));
+    const replayed = published.flatMap(message => message.records.map(record => record.topicId));
+    expect(replayed.sort()).toEqual(firstBatch.sort());
+  });
+
+  it('同一条帖子重复出现时只留最长的那份正文，不会无限堆积', async () => {
+    // 注意不能中途重新赋值 window.fetch——那会把补丁本身覆盖掉。
+    let body: unknown = {
+      resp_data: { topics: [{ topic_id: 511, talk: { text: '短的正文，长度刚好够用来对号。' } }] },
+    };
+    await loadInject(async () =>
+      new Response(JSON.stringify(body), { headers: { 'content-type': 'application/json' } }),
+    );
+    await window.fetch('https://api.zsxq.com/v2/groups/1/topics');
+    await vi.waitFor(() => expect(published).toHaveLength(1));
+
+    // 同一条帖子第二次出现，这次正文更全（页面展开后接口给了完整版）。
+    body = {
+      resp_data: {
+        topics: [{ topic_id: 511, talk: { text: '短的正文，长度刚好够用来对号。后面还有更完整的一大段内容。' } }],
+      },
+    };
+    await window.fetch('https://api.zsxq.com/v2/groups/1/topics');
+    await vi.waitFor(() => expect(published).toHaveLength(2));
+
+    published.length = 0;
+    requestReplay();
+    await vi.waitFor(() => expect(published.length).toBeGreaterThan(0));
+
+    const records = published.flatMap(message => message.records);
+    expect(records).toHaveLength(1);
+    expect(records[0]?.text).toContain('后面还有更完整的一大段内容');
   });
 });

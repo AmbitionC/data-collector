@@ -10,6 +10,7 @@ import {
 } from './extractors/index.js';
 import {
   TOPIC_MESSAGE,
+  TOPIC_REPLAY_REQUEST,
   TOPIC_STATS,
   TOPIC_STATS_REQUEST,
   TopicIndex,
@@ -34,6 +35,18 @@ window.addEventListener('message', event => {
   if (data?.source !== TOPIC_MESSAGE || !Array.isArray(data.records)) return;
   topics.add(data.records as TopicRecord[]);
 });
+
+/**
+ * 向主世界钩子要回它留存的全部帖子号。
+ *
+ * TopicIndex 是模块级变量，内容脚本一被重注入（扩展更新、自愈注入）就清零；
+ * 而页面上的老帖子还在、它们的接口响应不会重来。不要这一次，那些帖子就永远
+ * 对不上号——实测正是「40 条里 20 条对得上、20 条对不上」的成因。
+ * 钩子那边按帖子号去重留着，这里要回来即可；钩子是旧版没有这个能力也不会出错。
+ */
+function requestReplay(): void {
+  window.postMessage({ source: TOPIC_REPLAY_REQUEST }, window.location.origin);
+}
 
 /**
  * 问主世界钩子要一份运行统计。
@@ -457,6 +470,9 @@ async function listDiagnostics(): Promise<string> {
  * 而同一页可能已经声明式注入过一次——注册两个监听会对同一条消息应答两次。
  */
 const READY_FLAG = '__dataCollectorContentReady';
+// 刚（重）注入：先把钩子留存的帖子号要回来，否则页面上的老帖子永远对不上号。
+requestReplay();
+
 const alreadyRegistered = Boolean(
   (globalThis as unknown as Record<string, unknown>)[READY_FLAG],
 );
