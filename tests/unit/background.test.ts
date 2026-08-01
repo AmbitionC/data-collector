@@ -476,6 +476,21 @@ describe('list page batch capture', () => {
     expect(tabs.rhythm[before]).toBe('list.advance');
   });
 
+  it('清空本机库后抹掉页面上的已处理标记', async () => {
+    // 本机库是去重的唯一依据。库清空了、标记还留在那个没刷新过的标签页上，
+    // 用户重采时这些帖子会被整批当成「已采过」跳过，看上去就像采集坏了。
+    const { tabs, runner } = listRunner();
+    tabs.listRounds = [{ documents: [topic('111')], skipped: 0, total: 1 }];
+    tabs.advances = [{ collapsed: 1, loaded: 0 }];
+    await runner.captureList();
+    const before = tabs.restored.length;
+
+    await runner.resetPageMarks();
+
+    expect(tabs.restored.length).toBe(before + 1);
+    expect(tabs.restored.at(-1)).toBe(7);
+  });
+
   it('puts the page back when a batch produced nothing', async () => {
     const { tabs, runner } = listRunner();
     tabs.listRounds = [{ documents: [], skipped: 21, total: 21 }];

@@ -361,6 +361,22 @@ export class JobRunner {
   }
 
   /**
+   * 清空本机库之后，把页面上的「已处理」标记一并抹掉。
+   *
+   * 本机库是去重的唯一依据，页面标记只是「这一轮采过了，下一轮别重复」的临时状态。
+   * 库都清空了，标记就是脏的：不抹掉，用户在同一个没刷新过的标签页里重采，
+   * 这些帖子会被整批当成已采过跳过——看上去就像采集坏了。
+   *
+   * 失败不吭声是安全的：找不到页面、内容脚本不在，都意味着那份 DOM 早就没了，
+   * 标记跟着一起没了，本来就无事可做。
+   */
+  async resetPageMarks(): Promise<void> {
+    const [tab] = await this.options.tabs.query({ active: true, lastFocusedWindow: true });
+    if (tab?.id === undefined) return;
+    await this.restorePage(tab.id);
+  }
+
+  /**
    * 把页面还原成用户原本看到的样子（撤销所有折叠）。
    * 失败静默：还原只是善后，不该让它盖过真正的失败原因。
    */

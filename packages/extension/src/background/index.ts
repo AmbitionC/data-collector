@@ -264,10 +264,18 @@ chrome.runtime.onMessage.addListener((message: unknown, _sender, sendResponse) =
     }
     if (request.type === 'library.delete') {
       const input = request as { ids?: string[]; all?: boolean };
-      return connection.deleteLibrary({
+      const outcome = await connection.deleteLibrary({
         ...(input.ids ? { ids: input.ids } : {}),
         ...(input.all ? { all: true } : {}),
       });
+      // 清空只删得掉本机库里的文件，可「采过没有」的判断还挂在另外两处，
+      // 库一空它们就是脏的：页面上的已处理标记会让重采整批跳过，
+      // 上一轮的采集明细说的则是一批已经不存在的东西。一起清掉。
+      if (input.all) {
+        await chrome.storage.local.remove(['batch', 'batchItems']);
+        await runner.resetPageMarks();
+      }
+      return outcome;
     }
     if (request.type === 'list.locate') {
       return { found: await runner.highlight(String((request as { key?: unknown }).key ?? '')) };
