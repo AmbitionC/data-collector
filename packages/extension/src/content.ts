@@ -88,7 +88,8 @@ interface ExtractMessage {
     | 'list.highlight'
     | 'list.itemDiagnose'
     | 'list.hookStats'
-    | 'list.refreshTopics';
+    | 'list.refreshTopics'
+    | 'list.focusLast';
   /** list.highlight：要滚过去并高亮的那一条。 */
   key?: string;
   overrides?: {
@@ -208,6 +209,32 @@ function scrollCandidates(): HTMLElement[] {
   return candidates;
 }
 
+/** 已经滚到底了吗（留 4px 容差，避免亚像素误差把「到底」判成「还没到」）。 */
+function atBottom(element: HTMLElement): boolean {
+  return element.scrollTop + element.clientHeight >= element.scrollHeight - 4;
+}
+
+/**
+ * 把视口移到「已处理区域的末尾」——也就是上一批采到的最后一条。
+ *
+ * 两个作用：
+ * - 批量结束后用户一眼看到采到哪儿了，不用自己找；
+ * - 「继续采下一批」时从这里往下滚，而不是从视口当前所在的位置。
+ *   页面很长（40 条帖子几万像素），从头滚几千像素根本到不了底，
+ *   懒加载自然永远不触发——实测每轮都是「新增待采 0 条」，正是这个原因。
+ */
+function scrollToFrontier(): boolean {
+  const processed = [...document.querySelectorAll<HTMLElement>(`[${COLLECTED_ATTRIBUTE}]`)];
+  const last = processed[processed.length - 1] ?? lastListContainers[lastListContainers.length - 1];
+  if (!(last instanceof HTMLElement)) return false;
+  try {
+    last.scrollIntoView({ block: 'end' });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 /** 元素的可读描述，写进运行记录用（不含正文，只有结构信息）。 */
 function describe(element: HTMLElement | undefined): string {
   if (!element) return '(无)';
@@ -227,41 +254,49 @@ function humanPause(min: number, max: number): Promise<void> {
  * 返回这一轮到底滚动了什么、动没动——**滚没滚动必须能被观测到**，
  * 否则「新增待采 0 条」既可能是到底了，也可能是压根没滚，根本分不清。
  */
-async function scrollLikeHuman(): Promise<{ host: string; moved: number }> {
-  const candidates = scrollCandidates();
-  const steps = 2 + Math.floor(Math.random() * 3);
-  let host: HTMLElement | undefined;
-  let moved = 0;
+/** 把已加载内容的最后一条送进视野——这是「翻到末尾」最不挑实现的办法。 */
+function jumpToLastPost(): void {
+  try {
+    const posts = document.querySelectorAll('.topic-container');
+    (posts[posts.length - 1] as HTMLElement | undefined)?.scrollIntoView?.({ block: 'end' });
+  } catch {
+    // 环境不支持就算了，调用方照常观察帖子数有没有变化。
+  }
+}
 
-  for (let step = 0; step < steps; step += 1) {
-    // 每一步都重新确认「谁真的能滚」：选错了就换下一个候选，绝不闷头滚一个不动的元素。
-    const targets = host ? [host] : candidates;
-    let stepped = false;
-    for (const target of targets) {
-      const before = target.scrollTop;
-      const distance = Math.round(target.clientHeight * (0.5 + Math.random() * 0.35)) || 400;
-      target.scrollTop = before + distance;
-      if (target.scrollTop !== before) {
-        host ??= target;
-        moved += target.scrollTop - before;
-        stepped = true;
-        break;
-      }
-    }
-    if (!stepped) {
-      // 所有候选都推不动：把最后一条帖子滚进视野，这是最不挑实现的办法。
-      // 整段包起来——翻页只是「尽力而为」，绝不能因为某个滚动原语不可用就把整轮炸掉。
-      try {
-        const posts = document.querySelectorAll('.topic-container');
-        const last = posts[posts.length - 1] as HTMLElement | undefined;
-        last?.scrollIntoView?.({ block: 'end' });
-      } catch {
-        // 环境不支持就算了，下面照常观察帖子数有没有变化。
-      }
-    }
+/**
+ * 往下翻到已加载内容的末尾。
+ *
+ * **不「爬」页面**：40 条帖子的信息流有几万像素高，按每次半屏小步滚要几十步、几十秒，
+ * 实际结果是滚了一万多像素就收手，离底还远，懒加载自然不触发（实测就是这样）。
+ * 真人也不会一格一格挪——他直接甩到末尾。所以先把最后一条送进视野（一步到位），
+ * 再在底部附近做几次小幅滚动把懒加载顶出来。
+ *
+ * 「拟人」真正要防的是**请求节奏**：随机停顿、不连续猛刷，这两点都保留着；
+ * 滚动本身在触底之前不产生任何请求。
+ */
+async function scrollLikeHuman(
+  nudges = 3,
+): Promise<{ host: string; moved: number; bottom: boolean }> {
+  const candidates = scrollCandidates();
+  const host = candidates[0];
+  const before = host?.scrollTop ?? 0;
+
+  jumpToLastPost();
+  await humanPause(450, 900);
+
+  // 到不了底就自己补到底：有的实现里 scrollIntoView 只把元素带到视口内。
+  for (let nudge = 0; nudge < nudges; nudge += 1) {
+    if (!host || atBottom(host)) break;
+    const step = Math.max(host.clientHeight, 400);
+    const previous = host.scrollTop;
+    host.scrollTop = previous + step;
+    if (host.scrollTop === previous) break;
     await humanPause(450, 1_100);
   }
-  return { host: describe(host), moved };
+
+  const moved = host ? host.scrollTop - before : 0;
+  return { host: describe(host), moved, bottom: Boolean(host && atBottom(host)) };
 }
 
 /**
@@ -277,15 +312,40 @@ async function advanceList(): Promise<{
   const collapsed = markProcessed();
   const before = document.querySelectorAll('.topic-container').length;
   const trace: string[] = [];
-  for (let round = 0; round < 3; round += 1) {
-    const { host, moved } = await scrollLikeHuman().catch(
-      () => ({ host: '(滚动失败)', moved: 0 }),
+  // **先回到上一批的末尾**再往下滚。页面很长（40 条帖子几万像素），
+  // 从视口当前位置滚几千像素根本到不了底，懒加载永远不触发。
+  if (scrollToFrontier()) trace.push('先回到上一批采到的最后一条');
+  await humanPause(400, 800);
+
+  // 「到底」才是懒加载真正会触发的地方，所以判停条件是**滚到底且没有新内容**，
+  // 而不是「滚了固定几下」。步数上限只是防死循环。
+  for (let round = 0; round < 6; round += 1) {
+    const { host, moved, bottom } = await scrollLikeHuman().catch(
+      () => ({ host: '(滚动失败)', moved: 0, bottom: false }),
     );
     await humanPause(900, 1_800);
     const after = document.querySelectorAll('.topic-container').length;
     const loaded = pendingTopicCount(document);
-    trace.push(`第${round + 1}次滚动：目标 ${host}，位移 ${moved}px，帖子 ${before}→${after}，待采 ${loaded}`);
+    trace.push(
+      `第${round + 1}次滚动：目标 ${host}，位移 ${moved}px，`
+      + `${bottom ? '已到底' : '未到底'}，帖子 ${before}→${after}，待采 ${loaded}`,
+    );
     if (loaded > 0) return { collapsed, loaded, scroll: trace.join('；') };
+    // 到底了还等不到新内容，再多给一次机会（懒加载有网络往返），仍然没有就收工。
+    if (bottom) {
+      await humanPause(1_200, 2_000);
+      const settled = pendingTopicCount(document);
+      if (settled > 0) {
+        trace.push(`到底后等到新内容：待采 ${settled}`);
+        return { collapsed, loaded: settled, scroll: trace.join('；') };
+      }
+      trace.push('已到底且等不到新内容，本页采完');
+      break;
+    }
+    if (moved === 0) {
+      trace.push('推不动任何元素，停止翻页');
+      break;
+    }
   }
   return { collapsed, loaded: 0, scroll: trace.join('；') };
 }
@@ -489,7 +549,8 @@ if (!alreadyRegistered) chrome.runtime.onMessage.addListener((message: unknown, 
     request.type !== 'list.highlight' &&
     request.type !== 'list.itemDiagnose' &&
     request.type !== 'list.hookStats' &&
-    request.type !== 'list.refreshTopics'
+    request.type !== 'list.refreshTopics' &&
+    request.type !== 'list.focusLast'
   ) {
     return false;
   }
@@ -517,6 +578,12 @@ if (!alreadyRegistered) chrome.runtime.onMessage.addListener((message: unknown, 
   if (request.type === 'list.diagnose') {
     void listDiagnostics().then(diagnostics => sendResponse({ ok: true, diagnostics }));
     return true;
+  }
+
+  if (request.type === 'list.focusLast') {
+    // 批量结束后把视口停在采到的最后一条上，用户一眼看到进度到哪儿了。
+    sendResponse({ ok: true, highlight: { found: scrollToFrontier() } });
+    return false;
   }
 
   if (request.type === 'list.restore') {

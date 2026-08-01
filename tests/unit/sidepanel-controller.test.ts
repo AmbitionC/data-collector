@@ -334,6 +334,28 @@ describe('已入库 → 同步远程', () => {
     );
   });
 
+  it('多条因为同一个原因失败时，只说一次原因加条数', async () => {
+    // 实测：16 条因为同一个 git 报错失败，面板把同一句话重复贴了 16 遍，
+    // 既看不出该干什么，也完全没法读。
+    const many = Array.from({ length: 16 }, (_, index) => ({
+      title: `第 ${index + 1} 条内容的标题`,
+      sync: { state: 'failed', error: 'git add 失败：这台 Mac 的命令行工具坏了或没装。' },
+    }));
+    handler = libraryHandler([ENTRY], () => ({ synced: 0, failed: 16, entries: many }));
+
+    document.querySelector<HTMLButtonElement>('#nav-library')!.click();
+    await vi.waitFor(() => expect(document.querySelectorAll('#library-list li')).toHaveLength(1));
+    document.querySelector<HTMLButtonElement>('#library-sync-button')!.click();
+
+    await vi.waitFor(() => {
+      const note = document.querySelector('#library-sync-note')?.textContent ?? '';
+      expect(note).toContain('失败 16 条');
+      // 原因只出现一次，并带上条数。
+      expect(note.split('命令行工具坏了').length - 1).toBe(1);
+      expect(note).toContain('16 条，例如');
+    });
+  });
+
   it('同步失败要点名是哪一条、为什么，不只给个总数', async () => {
     handler = libraryHandler([ENTRY], () => ({
       synced: 0,

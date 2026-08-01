@@ -175,10 +175,10 @@ describe('content script list collection', () => {
     expect((await settle(advance)).advance).toMatchObject({ loaded: 1 });
   });
 
-  it('scrolls in human-sized steps instead of teleporting to the bottom', async () => {
+  it('scrollIntoView 不生效时靠一屏一屏的补滚推进，不瞬移', async () => {
+    // 有的环境里 scrollIntoView 只是把元素带进视口、甚至完全不动，
+    // 这时靠补滚推进——但每次只补一屏，不一把跳到底。
     await ask<ListResponse>({ type: 'extract.list' });
-    // jsdom 没有布局，scrollTop 赋值不会生效——手工造一个「真的能滚」的容器，
-    // 才能走到「找到滚动宿主并逐步推进」这条真实路径。
     const host = document.querySelector<HTMLElement>('.main-content-container')!;
     let scrollTop = 0;
     const steps: number[] = [];
@@ -193,14 +193,67 @@ describe('content script list collection', () => {
     vi.useFakeTimers();
     const advance = await settle(ask<AdvanceResponse>({ type: 'list.advance' }));
 
-    // 每次只滚不到一屏、分多次滚——不是「每 500 毫秒瞬移到底」那种机器节奏。
     expect(steps.length).toBeGreaterThan(1);
+    // 每次补滚不超过一屏——不是「一步瞬移到底」那种机器动作。
     expect(steps.every(step => step > 0 && step <= 800)).toBe(true);
-    // 步长是随机的，不该每次都一模一样。
-    expect(new Set(steps).size).toBeGreaterThan(1);
     // 滚动实况要能被观测到：只报「新增 0 条」时分不清是到底了还是压根没滚。
     expect(advance.advance.scroll).toContain('main-content-container');
     expect(advance.advance.scroll).toMatch(/位移 \d+px/);
+  });
+
+  it('几万像素高的页面也能到底：甩到末尾，而不是一格一格爬', async () => {
+    // 40 条帖子的信息流有几万像素高。按半屏小步滚要几十步几十秒，
+    // 实测只滚了一万多像素就收手，离底还远，懒加载自然不触发——
+    // 用户看到「滚动到底也没有加载新内容」，而页面其实压根没到底。
+    await ask<ListResponse>({ type: 'extract.list' });
+    const host = document.querySelector<HTMLElement>('.main-content-container')!;
+    let scrollTop = 0;
+    const HEIGHT = 40_000;
+    const VIEWPORT = 800;
+    Object.defineProperty(host, 'scrollHeight', { value: HEIGHT, configurable: true });
+    Object.defineProperty(host, 'clientHeight', { value: VIEWPORT, configurable: true });
+    Object.defineProperty(host, 'scrollTop', {
+      configurable: true,
+      get: () => scrollTop,
+      set: (value: number) => { scrollTop = Math.max(0, Math.min(value, HEIGHT - VIEWPORT)); },
+    });
+    // 真实浏览器里，把最后一条送进视野就等于滚到了内容末尾。
+    const posts = [...document.querySelectorAll<HTMLElement>('.topic-container')];
+    const focused: number[] = [];
+    posts.forEach((node, index) => {
+      node.scrollIntoView = () => {
+        focused.push(index);
+        if (index === posts.length - 1) scrollTop = HEIGHT - VIEWPORT;
+      };
+    });
+
+    vi.useFakeTimers();
+    const advance = await settle(ask<AdvanceResponse>({ type: 'list.advance' }));
+
+    // 先回到上一批采到的最后一条（用户据此看到进度），再甩到内容末尾。
+    expect(advance.advance.scroll).toContain('先回到上一批采到的最后一条');
+    expect(focused).toContain(posts.length - 1);
+    expect(scrollTop).toBe(HEIGHT - VIEWPORT);
+    expect(advance.advance.scroll).toContain('已到底');
+  });
+
+  it('停在最后一条上，好让用户看到采到哪儿了', async () => {
+    await ask<ListResponse>({ type: 'extract.list' });
+    vi.useFakeTimers();
+    await settle(ask<AdvanceResponse>({ type: 'list.advance' }));
+    vi.useRealTimers();
+
+    const marked = [...document.querySelectorAll<HTMLElement>('[data-dc-collected]')];
+    const last = marked[marked.length - 1]!;
+    let focused = false;
+    last.scrollIntoView = () => { focused = true; };
+
+    const response = await ask<{ ok: true; highlight: { found: boolean } }>({
+      type: 'list.focusLast',
+    });
+
+    expect(response.highlight.found).toBe(true);
+    expect(focused).toBe(true);
   });
 
   it('推不动任何元素时如实记下来，而不是假装滚过了', async () => {

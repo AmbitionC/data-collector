@@ -246,6 +246,36 @@ describe('采集 → 本地 → 同步 → 归档 的完整链路', () => {
     expect(outcome.entries[0]?.sync.error).toContain('重新采集');
   });
 
+  it('git 提交失败时绝不算「已同步」，并把报错翻成人能照做的一句话', async () => {
+    // 实测：这台 Mac 的命令行工具坏了，16 条的 git add 全失败，
+    // 面板却显示「已同步 16 条」外加 16 行一模一样的 xcrun 报错。
+    const library = await temporaryDirectories.create('sync-library-');
+    const repo = await temporaryDirectories.create('sync-broken-repo-');
+    const router = SinkRouter.build(
+      {
+        sinks: {
+          markdown: { type: 'markdown' },
+          // 不是 git 仓库 → git add 必然失败。
+          'life-teachers': { type: 'repo-inbox', repoPath: repo, label: 'life-teachers 收件箱' },
+        },
+        routes: { zsxq: ['life-teachers'] },
+      },
+      { libraryRoot: library },
+    );
+    await router.save(organize(post()));
+
+    const outcome = await syncEntries(
+      library,
+      await pendingIds(library),
+      source => router.syncTarget(source),
+    );
+
+    // 文件确实写进了 _inbox，但没提交进仓库——这不叫同步成功。
+    expect(outcome).toMatchObject({ synced: 0, failed: 1 });
+    expect(outcome.entries[0]?.sync.state).toBe('failed');
+    expect(outcome.entries[0]?.sync.error).toContain('不是一个 git 仓库');
+  });
+
   it('空 id 列表是安全的空操作，绝不理解成「同步全部」', async () => {
     const { library, repo, router } = await pipeline();
     await router.save(organize(post()));

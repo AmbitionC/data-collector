@@ -294,6 +294,18 @@ export class JobRunner {
    * 处理过的帖子只打一个**不可见**的属性标记（绝不 display:none —— 用户要能肉眼核对
    * 采到的内容），下一轮靠这个标记跳过，不会把同一条重复提取。
    */
+  /**
+   * 批量收尾时把页面停在采到的最后一条上。
+   *
+   * 不停在那儿的话，用户看不到进度到哪儿了；更要命的是「继续采下一批」会从视口
+   * 当前位置往下滚——页面有几万像素高，从中间滚几千像素永远到不了底，
+   * 懒加载于是永远不触发，表现就是「滚动到底也没有加载新内容」而页面其实没到底。
+   * 尽力而为，失败不影响任何结论。
+   */
+  private async focusLast(tabId: number): Promise<void> {
+    await this.ask(tabId, { type: 'list.focusLast' }).catch(() => undefined);
+  }
+
   /** 用户点了「停止」：在条与条、轮与轮之间检查，尽快收尾并如实汇报已入库条数。 */
   stopBatch(): void {
     this.batchStopped = true;
@@ -541,6 +553,7 @@ export class JobRunner {
       }
 
       if (this.batchStopped) {
+        await this.focusLast(tabId);
         progress.phase = 'stopped';
         report();
         return { ...progress };
@@ -554,6 +567,7 @@ export class JobRunner {
           .then(response => (response.ok ? payloadOf(response, 'advance').collapsed : 0))
           .catch(() => 0);
         note(`已采够目标条数 ${maxItems} 条，收工（已标记本屏 ${marked} 条，续采从下一屏开始）`);
+        await this.focusLast(tabId);
         progress.phase = 'capped';
         report();
         return { ...progress };
@@ -572,6 +586,7 @@ export class JobRunner {
 
     // 零产出（没找到帖子 / 全部无法定位）同样要把页面还原。
     if (progress.collected === 0) await this.restorePage(tabId);
+    else await this.focusLast(tabId);
     // E3 / E4：跑完了但没有产出，都不是「完成」。
     progress.phase = !sawAnyPost
       ? 'empty'

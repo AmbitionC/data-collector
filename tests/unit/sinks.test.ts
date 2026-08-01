@@ -3,6 +3,7 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { CollectedDocument } from '@data-collector/shared';
 import { organize } from '../../packages/bridge/src/organize/index.js';
+import { explainGitFailure } from '../../packages/bridge/src/sinks/repoInboxSink.js';
 import {
   DEFAULT_SINKS_CONFIG,
   RepoInboxSink,
@@ -321,5 +322,31 @@ describe('loadSinksConfig', () => {
     const path = join(dir, 'bad.json');
     await (await import('node:fs/promises')).writeFile(path, JSON.stringify({ sinks: 'nope' }));
     await expect(loadSinksConfig(path)).rejects.toThrow();
+  });
+});
+
+describe('git 报错要翻成人能照做的一句话', () => {
+  it('认得出常见成因，并给出可执行的下一步', () => {
+    // 直接把 stderr 摆出来毫无用处：`xcrun: error: invalid active developer path`
+    // 不告诉任何人「装一下命令行工具」。
+    const xcrun = explainGitFailure(
+      'git add',
+      'xcrun: error: invalid active developer path (/Library/Developer/CommandLineTools)',
+    );
+    expect(xcrun).toContain('命令行工具');
+    expect(xcrun).toContain('xcode-select --install');
+
+    expect(explainGitFailure('git add', 'fatal: not a git repository'))
+      .toContain('不是一个 git 仓库');
+    expect(explainGitFailure('git commit', '*** Please tell me who you are.'))
+      .toContain('git config user.email');
+    // 推送失败要说清「内容已经提交到本地」，别让人以为白采了。
+    expect(explainGitFailure('git push', 'fatal: Authentication failed'))
+      .toContain('已经提交到本地仓库');
+  });
+
+  it('认不出来的原样带出，绝不吞掉', () => {
+    expect(explainGitFailure('git add', 'some brand new error'))
+      .toBe('git add 失败：some brand new error');
   });
 });

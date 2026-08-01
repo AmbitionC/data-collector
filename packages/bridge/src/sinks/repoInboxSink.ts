@@ -223,6 +223,7 @@ export class RepoInboxSink implements ContentSink {
         failedImages: assets.failed,
         committed: git.committed,
         pushed: git.pushed,
+        ...(git.commitFailed ? { commitFailed: true } : {}),
         ...(git.warning ? { gitWarning: git.warning } : {}),
       },
     };
@@ -231,12 +232,19 @@ export class RepoInboxSink implements ContentSink {
   private async commitEntry(
     relativeEntry: string,
     title: string,
-  ): Promise<{ committed: boolean; pushed: boolean; warning?: string }> {
+  ): Promise<{ committed: boolean; pushed: boolean; warning?: string; commitFailed?: boolean }> {
     if (!this.commit) return { committed: false, pushed: false };
     try {
       const add = await this.runGit(this.repoRoot, ['add', '--', relativeEntry]);
       if (add.code !== 0) {
-        return { committed: false, pushed: false, warning: `git add 失败：${add.stderr.trim()}` };
+        // **提交失败和推送失败是两回事**：推不上去只是没同步到远端（文件已经提交了），
+        // 而 add/commit 失败意味着这条根本没进仓库，绝不能算「已同步」。
+        return {
+          committed: false,
+          pushed: false,
+          commitFailed: true,
+          warning: explainGitFailure('git add', add.stderr),
+        };
       }
       const message = `采集: ${title}`;
       const commit = await this.runGit(this.repoRoot, ['commit', '-m', message, '--', relativeEntry]);
@@ -247,14 +255,44 @@ export class RepoInboxSink implements ContentSink {
       return {
         committed,
         pushed: push.code === 0,
-        ...(push.code === 0 ? {} : { warning: `git push 失败：${push.stderr.trim()}` }),
+        ...(push.code === 0 ? {} : { warning: explainGitFailure('git push', push.stderr) }),
       };
     } catch (error) {
       return {
         committed: false,
         pushed: false,
-        warning: `git 操作异常：${error instanceof Error ? error.message : String(error)}`,
+        commitFailed: true,
+        warning: explainGitFailure('git', error instanceof Error ? error.message : String(error)),
       };
     }
   }
+}
+
+/**
+ * 把 git 的原始报错翻成人能照着做的一句话。
+ *
+ * 直接把 stderr 摆给用户没有意义——`xcrun: error: invalid active developer path`
+ * 这种话不告诉任何人「装一下命令行工具」。常见成因就那么几个，认出来就直说。
+ */
+export function explainGitFailure(step: string, stderr: string): string {
+  const raw = stderr.trim();
+  if (/xcrun|CommandLineTools|xcode-select/i.test(raw)) {
+    return `${step} 失败：这台 Mac 的命令行工具坏了或没装，git 根本跑不起来。`
+      + '在终端执行 `xcode-select --install` 装好后重试。';
+  }
+  if (/not a git repository/i.test(raw)) {
+    return `${step} 失败：目标目录不是一个 git 仓库。请确认同步去向指向的是克隆下来的仓库。`;
+  }
+  if (/Please tell me who you are|user\.email/i.test(raw)) {
+    return `${step} 失败：这个仓库还没配置提交身份。`
+      + '在仓库里执行 `git config user.email 你的邮箱` 和 `git config user.name 你的名字`。';
+  }
+  if (/could not read Username|Authentication failed|Permission denied \(publickey\)/i.test(raw)) {
+    return `${step} 失败：没有推送权限（凭证缺失或过期）。内容已经提交到本地仓库，`
+      + '你也可以自己 `git push` 一次。';
+  }
+  if (/no upstream|does not appear to be a git repository|couldn't find remote/i.test(raw)) {
+    return `${step} 失败：这个仓库没有配置远端。内容已经提交到本地仓库，本机 Agent 直接读工作区即可。`;
+  }
+  return `${step} 失败：${raw || '未知错误'}`;
 }

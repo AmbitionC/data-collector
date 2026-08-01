@@ -228,6 +228,38 @@ function isTransportError(error: unknown): boolean {
     .test(text);
 }
 
+/**
+ * 把同步结果说成人话。
+ *
+ * **按原因归并，不是逐条罗列**：16 条因为同一个原因失败时，把同一句报错重复 16 遍
+ * 拼成一坨文本毫无用处（实测就是这样，还看不出该干什么）。
+ * 同一个原因只说一次，带上条数和其中一条的标题作为例子。
+ */
+export function summarizeSync(outcome: {
+  synced: number;
+  failed: number;
+  entries: { title: string; sync: { state: string; error?: string } }[];
+}): string {
+  const head = outcome.failed > 0
+    ? `已同步 ${outcome.synced} 条，失败 ${outcome.failed} 条。`
+    : `已同步 ${outcome.synced} 条。`;
+  const grouped = new Map<string, string[]>();
+  for (const item of outcome.entries) {
+    if (item.sync.state === 'synced' && !item.sync.error) continue;
+    const reason = item.sync.error ?? '同步失败';
+    grouped.set(reason, [...(grouped.get(reason) ?? []), item.title]);
+  }
+  if (grouped.size === 0) return head;
+  const lines = [...grouped].map(([reason, titles]) => {
+    const example = titles[0] ?? '';
+    const short = example.length > 24 ? `${example.slice(0, 24)}…` : example;
+    return titles.length > 1
+      ? `· ${reason}（${titles.length} 条，例如「${short}」）`
+      : `· ${reason}（「${short}」）`;
+  });
+  return [head, ...lines].join('\n');
+}
+
 /** 后台是否已经为本页建起批量记录（建起来了就由它呈现终态，而不是原始报错）。 */
 async function batchRecorded(): Promise<boolean> {
   try {
@@ -391,15 +423,7 @@ const actions: SidePanelActions = {
         failed: number;
         entries: { title: string; sync: { state: string; error?: string } }[];
       }>(ids ? { type: 'library.sync', ids } : { type: 'library.sync', pending: true });
-      // 失败的必须点名，不能只给个总数——用户要知道是哪一条、为什么。
-      const problems = outcome.entries
-        .filter(item => item.sync.state !== 'synced' || item.sync.error)
-        .map(item => `${item.title}：${item.sync.error ?? '同步失败'}`);
-      syncNote = [
-        `已同步 ${outcome.synced} 条`,
-        outcome.failed > 0 ? `失败 ${outcome.failed} 条` : '',
-        problems.length ? `\n${problems.join('\n')}` : '',
-      ].filter(Boolean).join('，');
+      syncNote = summarizeSync(outcome);
     } catch (error) {
       syncNote = errorMessage(error, '同步失败，请重试。');
     } finally {

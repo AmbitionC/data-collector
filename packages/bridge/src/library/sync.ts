@@ -109,15 +109,19 @@ export async function syncEntries(
       const detail = (result.detail ?? {}) as {
         committed?: boolean;
         pushed?: boolean;
+        commitFailed?: boolean;
         gitWarning?: string;
       };
+      // **提交失败 ≠ 推送失败。** 推不上去只是没到远端，文件已经提交进仓库了，
+      // 本机 Agent 照样读得到，算同步成功、把告警如实带上。
+      // 但 add/commit 失败意味着这条根本没进仓库——报成「已同步」就是在骗人
+      //（实测：git 本身跑不起来时，16 条全失败却显示「已同步 16 条」）。
       const sync: SyncInfo = {
-        state: result.ok ? 'synced' : 'failed',
+        state: result.ok && !detail.commitFailed ? 'synced' : 'failed',
         target: sink.id,
         at: now(),
         ...(detail.committed !== undefined ? { committed: detail.committed } : {}),
         ...(detail.pushed !== undefined ? { pushed: detail.pushed } : {}),
-        // 推送失败只是告警：条目已经写进仓库了，别把它报成同步失败。
         ...(detail.gitWarning ? { error: detail.gitWarning } : {}),
       };
       entry.sync = sync;
