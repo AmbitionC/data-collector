@@ -56,7 +56,18 @@ async function readOrganized(root: string, entry: LibraryCatalogEntry): Promise<
   // relativePath 来自目录索引，是外部数据，必须过越界校验后再拼路径。
   const markdownPath = assertInsideRoot(root, join(root, entry.relativePath));
   const sourcePath = assertInsideRoot(root, join(dirname(markdownPath), SOURCE_FILE));
-  return JSON.parse(await readFile(sourcePath, 'utf8')) as OrganizedDocument;
+  let raw: string;
+  try {
+    raw = await readFile(sourcePath, 'utf8');
+  } catch (error) {
+    // 0.3.0 之前采集的条目没有留这份文件（当时不需要）。甩一个 ENOENT 给用户毫无意义，
+    // 直接说清是什么情况、该怎么办。
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      throw new Error('这一条是旧版本采集的，缺少同步所需的原始数据；请重新采集这一条，或删掉它');
+    }
+    throw error;
+  }
+  return JSON.parse(raw) as OrganizedDocument;
 }
 
 function messageOf(error: unknown): string {

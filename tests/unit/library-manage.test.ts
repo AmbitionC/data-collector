@@ -171,6 +171,43 @@ describe('已入库内容管理', () => {
     expect(await readEntry(root, 'evil')).toBeUndefined();
   });
 
+  it('清空之后不留空目录壳子', async () => {
+    // 库的结构是 <来源>/<分类>/<年份>/<条目>/，只删条目目录会留下一串空壳，
+    // 清空完目录树看着还是满的——用户说的「脏数据」正是这些。
+    const root = await seedLibrary(SEEDS);
+
+    await clearLibrary(root);
+
+    expect(existsSync(join(root, '知识星球'))).toBe(false);
+    expect(existsSync(join(root, '微信公众号'))).toBe(false);
+    // 索引目录本身要留着（里面还有 index.json）。
+    expect(existsSync(join(root, '_catalog', 'index.json'))).toBe(true);
+  });
+
+  it('删单条只收走因此变空的目录，不碰还有内容的同级目录', async () => {
+    const root = await seedLibrary([
+      ...SEEDS,
+      {
+        id: 'ccc',
+        source: '知识星球',
+        title: '同年同分类的另一条',
+        relativePath: join('知识星球', '投资', '2026', 'ccc-third', 'index.md'),
+        updatedAt: '2026-07-26T00:00:00.000Z',
+      },
+    ]);
+
+    await deleteEntries(root, ['aaa']);
+
+    // 同一个 2026/ 下还有别的条目，这层目录必须留着。
+    expect(existsSync(join(root, '知识星球', '投资', '2026', 'ccc-third'))).toBe(true);
+    expect(existsSync(join(root, '知识星球', '投资', '2026', 'aaa-first'))).toBe(false);
+
+    await deleteEntries(root, ['ccc']);
+    // 最后一条也删掉之后，整条空掉的路径才收走。
+    expect(existsSync(join(root, '知识星球'))).toBe(false);
+    expect(existsSync(join(root, '微信公众号', '投资', '2026', 'bbb-second'))).toBe(true);
+  });
+
   it('没有索引文件时列表为空、清空是空操作', async () => {
     const root = await temporaryDirectories.create('empty-library-');
 

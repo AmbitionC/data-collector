@@ -1,4 +1,4 @@
-import { readFile, rm } from 'node:fs/promises';
+import { readdir, readFile, rm, rmdir } from 'node:fs/promises';
 import { dirname, join, relative } from 'node:path';
 import { atomicWriteText } from './writer.js';
 import { assertInsideRoot } from './paths.js';
@@ -129,6 +129,7 @@ export async function deleteEntries(root: string, ids: readonly string[]): Promi
     }
     try {
       await rm(directory, { recursive: true, force: true });
+      await pruneEmptyParents(root, dirname(directory));
       deleted += 1;
     } catch {
       missing += 1;
@@ -137,6 +138,27 @@ export async function deleteEntries(root: string, ids: readonly string[]): Promi
 
   await writeCatalog(root, entries.filter(entry => !wanted.has(entry.id)));
   return { deleted, missing };
+}
+
+/**
+ * 条目删掉之后，把因此变空的上级目录一并收走。
+ *
+ * 库的结构是 `<来源>/<分类>/<年份>/<条目>/`，只删条目目录会留下一串空壳，
+ * 「清空全部」之后目录树看着还是满的——用户说的「脏数据」正是这些。
+ * 只往上走到库根为止，且**只删空目录**（rmdir 遇到非空会失败，正好当作天然的保险）。
+ */
+async function pruneEmptyParents(root: string, from: string): Promise<void> {
+  let directory = from;
+  while (relative(root, directory) !== '' && !relative(root, directory).startsWith('..')) {
+    try {
+      if ((await readdir(directory)).length > 0) return;
+      await rmdir(directory);
+    } catch {
+      // 目录不存在、非空、或没权限：到此为止，不是错误。
+      return;
+    }
+    directory = dirname(directory);
+  }
 }
 
 /** 一键清空：删掉索引里的每一条。空库时是安全的空操作。 */

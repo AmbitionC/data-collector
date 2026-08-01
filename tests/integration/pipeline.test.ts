@@ -1,6 +1,6 @@
 import { execFile } from 'node:child_process';
 import { existsSync } from 'node:fs';
-import { mkdir, readFile, readdir, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -204,6 +204,20 @@ describe('采集 → 本地 → 同步 → 归档 的完整链路', () => {
     expect(outcome.synced).toBe(1);
     expect(outcome.failed).toBe(1);
     expect(await inboxEntries(repo)).toHaveLength(1);
+  });
+
+  it('旧版本采集的条目：说清是什么情况该怎么办，而不是甩一个 ENOENT', async () => {
+    // 0.3.0 之前的条目没有留 source.json（当时不需要）。用户要能一眼知道该重采还是该删。
+    const { library, router } = await pipeline();
+    await router.save(organize(post()));
+    const [entry] = await listLibrary(library);
+    await rm(join(library, entry!.relativePath.replace(/index\.md$/, 'source.json')));
+
+    const outcome = await syncEntries(library, [entry!.id], source => router.syncTarget(source));
+
+    expect(outcome).toMatchObject({ synced: 0, failed: 1 });
+    expect(outcome.entries[0]?.sync.error).toContain('旧版本采集的');
+    expect(outcome.entries[0]?.sync.error).toContain('重新采集');
   });
 
   it('空 id 列表是安全的空操作，绝不理解成「同步全部」', async () => {
