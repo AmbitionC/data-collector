@@ -27,9 +27,29 @@ export function entryDate(entry: LibraryEntry): string {
     : `${entry.updatedAt.slice(0, 10)}（录入）`;
 }
 
-/** 一条内容当前的同步状态（缺省未同步）。 */
+/**
+ * 一条内容当前的同步状态（缺省未同步）。
+ *
+ * **「已提交但没推上去」一律按未完成算。** 用户的 Agent 是从远端读收件箱的，
+ * 没推上去就等于没送到——这是他明确定下的口径：全部推送上去才算同步完成。
+ *
+ * 这里做归一而不是只信 `state` 字段，还因为库里存着 0.3.14 之前写下的旧记录：
+ * 那时推送失败只算告警，条目被记成 `synced` + `pushed: false`。不归一的话，
+ * 二十条全是「已同步·未推送」，底下按钮却显示「全部已同步」且不可点——
+ * 想补推都没有入口。
+ */
 export function syncStateOf(entry: LibraryEntry): SyncInfo['state'] {
-  return entry.sync?.state ?? 'pending';
+  const sync = entry.sync;
+  if (!sync) return 'pending';
+  if (isUnpushed(sync)) return 'failed';
+  return sync.state;
+}
+
+/** 这一条是不是「已提交进仓库、只差推送」——按钮文案据此说「推送」而不是「同步」。 */
+export function isUnpushed(sync: SyncInfo | undefined): boolean {
+  if (sync?.state !== 'synced' || sync.pushed !== false) return false;
+  // 没配置要推的去向也是 pushed:false，但那是有意为之，不该报成「未推送」。
+  return Boolean(sync.pushFailed || sync.error);
 }
 
 /** 打开某条查看正文时的浮层状态。 */
@@ -54,6 +74,8 @@ export interface SyncInfo {
   at?: string;
   committed?: boolean;
   pushed?: boolean;
+  /** 推送真失败（区别于「没配置要推」）。 */
+  pushFailed?: boolean;
   error?: string;
 }
 
@@ -81,9 +103,8 @@ const SYNC_BADGES: Record<SyncInfo['state'], string> = {
  * 而侧栏这边二十条全绿。真踩过一次。
  */
 function syncBadgeOf(sync: SyncInfo | undefined): string {
-  const state = sync?.state ?? 'pending';
-  if (state === 'synced' && sync?.pushed === false) return '已同步·未推送';
-  return SYNC_BADGES[state];
+  if (isUnpushed(sync)) return '已同步·未推送';
+  return SYNC_BADGES[sync?.state ?? 'pending'];
 }
 
 /** 明细列表的状态筛选。 */
@@ -711,7 +732,7 @@ function renderLibrary(
     const sync = document.createElement('span');
     const syncState = syncStateOf(entry);
     sync.className = 'item-sync';
-    sync.dataset.sync = syncState === 'synced' && entry.sync?.pushed === false ? 'unpushed' : syncState;
+    sync.dataset.sync = isUnpushed(entry.sync) ? 'unpushed' : syncState;
     sync.textContent = syncBadgeOf(entry.sync);
     meta.append(tag, when, sync);
     open.append(label, meta);
@@ -724,7 +745,9 @@ function renderLibrary(
     syncOne.className = 'row-button';
     const busy = (state.syncing ?? []).includes(entry.id);
     syncOne.disabled = busy;
-    syncOne.textContent = busy ? '同步中…' : syncState === 'synced' ? '重新同步' : '同步';
+    syncOne.textContent = busy
+      ? '同步中…'
+      : isUnpushed(entry.sync) ? '推送' : syncState === 'synced' ? '重新同步' : '同步';
     syncOne.onclick = () => { void actions.syncLibrary([entry.id]); };
 
     const remove = document.createElement('button');
@@ -763,9 +786,16 @@ function renderLibrary(
   const syncButton = required<HTMLButtonElement>(document, '#library-sync-button');
   const syncing = (state.syncing ?? []).length > 0;
   syncButton.disabled = syncing || pendingCount === 0;
+  // 待办全是「已提交只差推送」时，按钮就该直说是推送——否则用户看着一排
+  // 「已同步·未推送」，却只有一个写着「同步」的按钮，根本不知道该点哪儿。
+  const unpushedOnly =
+    pendingCount > 0 && state.entries.filter(entry => syncStateOf(entry) !== 'synced')
+      .every(entry => isUnpushed(entry.sync));
   syncButton.textContent = syncing
     ? '正在同步…'
-    : pendingCount > 0 ? `同步未同步的 ${pendingCount} 条` : '全部已同步';
+    : pendingCount === 0
+      ? '全部已同步'
+      : unpushedOnly ? `推送 ${pendingCount} 条到远端` : `同步未同步的 ${pendingCount} 条`;
   syncButton.onclick = () => { void actions.syncLibrary(); };
 
   required<HTMLButtonElement>(document, '#library-refresh-button').onclick = () => {

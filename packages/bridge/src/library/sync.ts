@@ -131,6 +131,7 @@ export async function syncEntries(
         at: now(),
         ...(detail.committed !== undefined ? { committed: detail.committed } : {}),
         ...(detail.pushed !== undefined ? { pushed: detail.pushed } : {}),
+        ...(detail.pushFailed ? { pushFailed: true } : {}),
         ...(detail.gitWarning ? { error: detail.gitWarning } : {}),
       };
       entry.sync = sync;
@@ -152,9 +153,27 @@ export async function syncEntries(
   };
 }
 
-/** 尚未同步（含上次失败）的条目 id，供「同步全部未同步」展开使用。 */
+/**
+ * 这一条真的送到 Agent 读得到的地方了吗。
+ *
+ * **「已提交但没推上去」不算送到。** 用户的 Agent 从远端读收件箱，只提交到本机
+ * 仓库等于没送到——这是他定下的口径：全部推送上去才算同步完成。
+ *
+ * 还要顾及 0.3.14 之前写下的旧记录：那时推送失败只算告警，条目被记成
+ * `synced` + `pushed: false`。不在这里归一的话，那批条目既不算已完成也不进
+ * 待办队列，「同步未同步的」一条都展开不出来，用户想补推却没有入口。
+ */
+export function isDelivered(sync: SyncInfo | undefined): boolean {
+  if (sync?.state !== 'synced') return false;
+  // `pushed: false` 有两种含义，**绝不能一概当没送到**：
+  // 推了但失败（有 pushFailed 或错误说明）；以及压根没配置要推（什么都没有）。
+  // 后者是有意为之的配置，条目就在本机仓库工作区，算送到了。
+  return !sync.pushFailed && !(sync.pushed === false && Boolean(sync.error));
+}
+
+/** 尚未送达（未同步、失败、以及已提交但没推上去）的条目 id，供「同步全部未同步」展开使用。 */
 export async function pendingIds(root: string): Promise<string[]> {
   return (await readCatalog(root))
-    .filter(entry => (entry.sync?.state ?? 'pending') !== 'synced')
+    .filter(entry => !isDelivered(entry.sync))
     .map(entry => entry.id);
 }

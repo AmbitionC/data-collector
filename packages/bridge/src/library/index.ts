@@ -1,6 +1,6 @@
 export { MarkdownLibrary, type MarkdownLibraryOptions, type SavedContent } from './writer.js';
 export { assertInsideRoot, assertSafeWritePath, safeSlug } from './paths.js';
-export { pendingIds, syncEntries, type SyncOutcome } from './sync.js';
+export { isDelivered, pendingIds, syncEntries, type SyncOutcome } from './sync.js';
 export type { SyncInfo, SyncState } from './writer.js';
 export {
   clearLibrary,

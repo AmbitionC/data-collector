@@ -22,8 +22,13 @@ export interface SyncInfo {
   at?: string;
   /** 已提交到目标仓库的当前分支。 */
   committed?: boolean;
-  /** 已推送到远端；未推送不算失败（本机 Agent 直接读工作区就够）。 */
+  /** 已推送到远端。 */
   pushed?: boolean;
+  /**
+   * 推送真失败——**算同步失败**（0.3.14 起）。
+   * 和「没配置要推」区分开：后者 pushed 也是 false，但那是有意为之，不是问题。
+   */
+  pushFailed?: boolean;
   /** 失败原因，或推送失败之类的告警，如实展示。 */
   error?: string;
 }

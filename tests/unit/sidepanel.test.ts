@@ -638,6 +638,41 @@ describe('side panel DOM behavior', () => {
     expect(document.querySelector<HTMLElement>('#update-banner')?.hidden).toBe(true);
   });
 
+  it('全是「已同步·未推送」时，按钮必须能点，而且直说是推送', () => {
+    // 用户原话：「现在全部都是已同步未推送的话，下面按钮还显示全部已同步，真奇怪」。
+    // 成因：0.3.14 之前推送失败只算告警，条目被记成 synced + pushed:false，
+    // 而「待办」的判据只看 state !== 'synced'，于是它们既不算完成也进不了待办队列。
+    const unpushed = [
+      { id: 'a', source: '知识星球', title: '第一条', url: 'https://x/a', category: '投资', updatedAt: '2026-07-25T00:00:00.000Z',
+        sync: { state: 'synced' as const, pushed: false, pushFailed: true, error: 'git push 失败：没有推送权限' } },
+      { id: 'b', source: '知识星球', title: '第二条', url: 'https://x/b', category: '投资', updatedAt: '2026-07-24T00:00:00.000Z',
+        sync: { state: 'synced' as const, pushed: false, pushFailed: true, error: 'git push 失败：没有推送权限' } },
+    ];
+
+    renderSidePanel(document, { phase: 'library', entries: unpushed, source: '', syncFilter: 'all', loading: false }, actions);
+
+    const button = document.querySelector<HTMLButtonElement>('#library-sync-button')!;
+    expect(button.disabled).toBe(false);
+    expect(button.textContent).toBe('推送 2 条到远端');
+    // 行内徽标仍然说得更细：提交是成功的，只差推送。
+    expect([...document.querySelectorAll('#library-list .item-sync')].map(node => node.textContent))
+      .toEqual(['已同步·未推送', '已同步·未推送']);
+    // 行内按钮也该说「推送」，而不是让人以为要重采重传一遍。
+    expect([...document.querySelectorAll<HTMLButtonElement>('#library-list .row-button')]
+      .some(node => node.textContent === '推送')).toBe(true);
+  });
+
+  it('没配置要推的去向不算未推送，照旧显示已同步', () => {
+    const entries = [
+      { id: 'a', source: '知识星球', title: '第一条', url: 'https://x/a', category: '投资', updatedAt: '2026-07-25T00:00:00.000Z',
+        sync: { state: 'synced' as const, pushed: false } },
+    ];
+    renderSidePanel(document, { phase: 'library', entries, source: '', syncFilter: 'all', loading: false }, actions);
+
+    expect(document.querySelector('#library-list .item-sync')?.textContent).toBe('已同步');
+    expect(document.querySelector<HTMLButtonElement>('#library-sync-button')?.textContent).toBe('全部已同步');
+  });
+
   it('lists library entries, filters by source, and never deletes without confirmation', async () => {
     const entries = [
       { id: 'a', source: '知识星球', title: '第一条', url: 'https://x/a', category: '投资', updatedAt: '2026-07-25T00:00:00.000Z' },

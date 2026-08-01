@@ -1,10 +1,11 @@
-import { mkdir, readFile, readdir, symlink } from 'node:fs/promises';
+import { mkdir, readFile, readdir, symlink, writeFile } from 'node:fs/promises';
 import { isAbsolute, join, relative } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { CollectedDocument } from '@data-collector/shared';
 import { organize } from '../../packages/bridge/src/organize/index.js';
 import {
   MarkdownLibrary,
+  pendingIds,
   safeSlug,
 } from '../../packages/bridge/src/library/index.js';
 import { readResponseBytes } from '../../packages/bridge/src/library/assets.js';
@@ -236,5 +237,37 @@ describe('Markdown library', () => {
       library.save(organize(collected({ html: '<p>正文</p>', images: [] }))),
     ).rejects.toThrow(/符号链接/);
     expect(await readdir(outside)).toEqual([]);
+  });
+});
+
+describe('「已提交但没推上去」不算送到', () => {
+  it('pendingIds 要把它捞出来，否则用户没有补推的入口', async () => {
+    // 0.3.14 之前推送失败只算告警，条目被记成 synced + pushed:false。
+    // 那批条目既不算已完成、也不进待办——侧栏二十条全是「已同步·未推送」，
+    // 按钮却写着「全部已同步」还不可点。用户原话：真奇怪。
+    const root = await temporaryDirectory();
+    await mkdir(join(root, '_catalog'), { recursive: true });
+    await writeFile(
+      join(root, '_catalog', 'index.json'),
+      JSON.stringify([
+        { id: 'a', source: 'zsxq', title: '推上去了', url: 'u1', category: 'x', relativePath: 'a/index.md', updatedAt: '2026-08-01T00:00:00.000Z', sync: { state: 'synced', pushed: true } },
+        { id: 'b', source: 'zsxq', title: '只提交没推送', url: 'u2', category: 'x', relativePath: 'b/index.md', updatedAt: '2026-08-01T00:00:00.000Z', sync: { state: 'synced', pushed: false, pushFailed: true, error: 'git push 失败：没有推送权限' } },
+        { id: 'c', source: 'zsxq', title: '从没同步过', url: 'u3', category: 'x', relativePath: 'c/index.md', updatedAt: '2026-08-01T00:00:00.000Z' },
+      ]),
+    );
+
+    expect((await pendingIds(root)).sort()).toEqual(['b', 'c']);
+  });
+
+  it('没配置要推的去向（pushed:false 但没有失败原因）算送到了', async () => {
+    const root = await temporaryDirectory();
+    await mkdir(join(root, '_catalog'), { recursive: true });
+    await writeFile(
+      join(root, '_catalog', 'index.json'),
+      JSON.stringify([
+        { id: 'a', source: 'zsxq', title: 't', url: 'u', category: 'x', relativePath: 'a/index.md', updatedAt: '2026-08-01T00:00:00.000Z', sync: { state: 'synced', pushed: false } },
+      ]),
+    );
+    expect(await pendingIds(root)).toEqual([]);
   });
 });
