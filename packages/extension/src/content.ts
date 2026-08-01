@@ -444,7 +444,7 @@ async function itemDiagnostics(key: string): Promise<string> {
   return JSON.stringify(
     {
       hook,
-      diagnosticsVersion: 6,
+      diagnosticsVersion: 7,
       kind: 'item',
       // 构建版本随证据一起走：不然还得先花一轮确认用户跑的是哪一版。
       build: typeof __BUILD_ID__ === 'string' ? __BUILD_ID__ : '开发构建',
@@ -515,7 +515,7 @@ async function listDiagnostics(): Promise<string> {
   return JSON.stringify(
     {
       // 版本号：贴回来的样本能一眼看出跑的是哪一版插件，不用靠字段有无去猜。
-      diagnosticsVersion: 6,
+      diagnosticsVersion: 7,
       build: typeof __BUILD_ID__ === 'string' ? __BUILD_ID__ : '开发构建',
       // 主世界钩子的运行统计。「已捕获 0 个」时**先看这一栏**：
       // installed=false → 钩子没跑；observed=0 → 页面这段时间没发请求；
@@ -535,6 +535,22 @@ async function listDiagnostics(): Promise<string> {
         text: listBodyText(node).replace(/\s+/g, '').slice(0, 60),
       })),
       sampledCollapsed: container.hasAttribute(COLLECTED_ATTRIBUTE),
+      /*
+       * 作者名到底挂在哪个元素上。
+       *
+       * 入库的 author 一直是「Simon、Todd、Fisheep…」这串点赞/已读的人名，
+       * 而 htmlHead 被帖子上那张 base64 水印图整段吃掉，看不到作者那块的结构。
+       * 这里把所有像作者名的元素连同它在容器里的位置摆出来，直接定位该用哪个选择器。
+       */
+      authorCandidates: [...container.querySelectorAll('[class*="name"],[class*="author"],[class*="nick"],[class*="user"]')]
+        .slice(0, 10)
+        .map(element => ({
+          tag: element.tagName,
+          class: String(element.className).slice(0, 60),
+          text: (element.textContent ?? '').replace(/\s+/g, ' ').trim().slice(0, 60),
+          /** 在容器全文里的起始位置：作者名应当靠最前面，点赞列表在很后面。 */
+          at: (container.textContent ?? '').indexOf((element.textContent ?? '').trim().slice(0, 12)),
+        })),
       /*
        * 展开控件长什么样。
        *
@@ -570,7 +586,12 @@ async function listDiagnostics(): Promise<string> {
       longNumbers: longNumbers.slice(0, 20),
       descendantCount: descendants.length,
       // 结构本身最能说明问题；截断避免把整页正文倒出来。
-      htmlHead: container.outerHTML.slice(0, 1200),
+      // 内联的 base64 图片要先剔掉再截断：帖子上那张水印图是 data:image/png;base64,
+      // 一张就好几 KB，1200 字的预算全被它吃光，真正要看的结构一个字都露不出来。
+      htmlHead: container.outerHTML
+        .replace(/data:[^"')\s]{40,}/g, 'data:…(已省略)')
+        .replace(/\s(style|srcset)="[^"]{120,}"/g, ' $1="…(已省略)"')
+        .slice(0, 1200),
     },
     null,
     2,

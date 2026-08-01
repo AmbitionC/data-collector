@@ -284,7 +284,13 @@ export function extractZsxqList(
     const excluded = excludedBy(text);
     if (excluded) {
       skipped += 1;
-      entries.push({ container, key, title, reason: `${excluded.label}（按选题偏好跳过）` });
+      entries.push({
+        container,
+        key,
+        title,
+        // 命中的词一并报出来：误伤时不报就只能靠猜（「香港保险」被判成楼市那次就卡在这）。
+        reason: `${excluded.label}（按选题偏好跳过，命中：${excluded.hits.join('、')}）`,
+      });
       continue;
     }
     if (!topicUrl) {

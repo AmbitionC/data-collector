@@ -102,21 +102,34 @@ export const EXCLUDE_RULES: readonly ExcludeRule[] = [
   DATING_RULE,
 ];
 
+export interface ExcludeMatch extends ExcludeRule {
+  /**
+   * 到底是哪几个词让它被判成这一类。
+   *
+   * 必须报出来：明细里只写「楼市内容」，误伤时根本无从下手——
+   * 「香港保险」被判成楼市、「沪深300 中证500 数据统计」也被判成楼市，
+   * 光看标签只能干瞪眼。把命中的词摆出来，一眼就知道该收紧哪一条。
+   */
+  hits: string[];
+}
+
 /**
- * 判断一段正文是否命中排除规则；命中返回规则，否则 undefined。
+ * 判断一段正文是否命中排除规则；命中返回规则（含命中的信号词），否则 undefined。
  * 判据：至少一个强信号，且命中的**不同**信号总数 ≥ 2。
  */
 export function excludedBy(
   text: string,
   rules: readonly ExcludeRule[] = EXCLUDE_RULES,
-): ExcludeRule | undefined {
+): ExcludeMatch | undefined {
   if (!text) return undefined;
   for (const rule of rules) {
     const strongHits = rule.strong.filter(marker => text.includes(marker));
     if (strongHits.length === 0) continue;
     const supportingHits = rule.supporting.filter(marker => text.includes(marker));
     // 「不同信号 ≥ 2」：同一个词出现多次不算多个信号。
-    if (strongHits.length + supportingHits.length >= 2) return rule;
+    if (strongHits.length + supportingHits.length >= 2) {
+      return { ...rule, hits: [...strongHits, ...supportingHits] };
+    }
   }
   return undefined;
 }

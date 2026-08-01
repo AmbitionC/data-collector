@@ -118,14 +118,16 @@ describe('content script list collection', () => {
     expect(listeners).toHaveLength(0);
   });
 
-  it('嵌套的「展开全部」只点最内层那个，不会点两次又收回去', async () => {
-    // 站点上的展开控件是包了一层的：<div><span>展开全部</span></div>，
-    // 两层的 textContent 都等于「展开全部」。逐个点等于对同一个开关点了两次，
-    // 第二次把刚展开的又收了回去——入库正文末尾还留着「展开全部」，后半段根本没采到。
+  it('点得开真实站点那个 <p class="showAll"> 展开全部 </p>', async () => {
+    // 站点上的真实结构（取自实机诊断）：控件是 <p class="showAll"> 展开全部 </p>，
+    // 而 0.3.8 的候选选择器只有 button/a/span/div —— **p 不在里面**，
+    // 点击逻辑压根没执行过，采到的一直是折叠的半篇。
     document.body.innerHTML = `
       <div class="topic-container">
-        <div class="content">第一条帖子的正文内容，足够长以便通过长度校验判断。</div>
-        <div class="expand-wrap"><span class="expand">展开全部</span></div>
+        <div class="talk-content-container">
+          <div class="content">第一条帖子的正文内容，足够长以便通过长度校验判断。</div>
+          <p class="showAll"> 展开全部 </p>
+        </div>
       </div>`;
     // jsdom 里 offsetParent 恒为 null、offsetHeight 恒为 0，可见性判断会把所有元素都跳过；
     // 真实浏览器里它们是可见的。不补这一步，测的就不是同一件事（这里真踩过一次）。
@@ -134,7 +136,7 @@ describe('content script list collection', () => {
     }
     const content = document.querySelector('.content') as HTMLElement;
     let expanded = false;
-    (document.querySelector('.expand-wrap') as HTMLElement).addEventListener('click', () => {
+    (document.querySelector('.showAll') as HTMLElement).addEventListener('click', () => {
       expanded = !expanded;
       content.textContent = expanded
         ? '第一条帖子的正文内容，足够长以便通过长度校验判断。后半段在这里，只有展开后才看得到。'
