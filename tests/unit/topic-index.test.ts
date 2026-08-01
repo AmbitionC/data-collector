@@ -257,3 +257,35 @@ describe('取证：这一条为什么没对上', () => {
     expect(harvested[0]?.keys).toContain('topic_id');
   });
 });
+
+describe('发布时间来自接口，而不是页面上那行字', () => {
+  it('抓下 create_time，对上号后就能直接用', () => {
+    // 页面上渲染的是「23年06月18日」这类写法，甚至「3天前」；接口里是完整时间戳。
+    // 既然已经靠接口响应对上了帖子号，同一条记录里的发布时间当然也该用上。
+    const records = harvestTopics({
+      topics: [
+        {
+          topic_id: '814421825485112',
+          create_time: '2023-06-18T20:14:55.123+0800',
+          talk: { text: '这个是前面《小学鸡娃路线规划》这篇文章里提到的小学奥数的思维导图。' },
+        },
+      ],
+    });
+    expect(records[0]?.createTime).toBe('2023-06-18T12:14:55.123Z');
+
+    const index = new TopicIndex();
+    index.add(records);
+    expect(index.publishedAtOf('814421825485112')).toBe('2023-06-18T12:14:55.123Z');
+  });
+
+  it('接口没给时间、或时间残缺时如实返回 undefined（绝不补出 2001 年）', () => {
+    const records = harvestTopics({
+      topics: [
+        { topic_id: '111111111111111', create_time: '03-05', talk: { text: '缺年份的时间戳应当被拒掉。' } },
+        { topic_id: '222222222222222', talk: { text: '这一条接口压根没给发布时间字段。' } },
+      ],
+    });
+    expect(records[0]?.createTime).toBeUndefined();
+    expect(records[1]?.createTime).toBeUndefined();
+  });
+});

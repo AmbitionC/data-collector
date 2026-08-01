@@ -107,8 +107,29 @@ export interface TopicRecord {
    * 两边就都不是对方的连续子串了。分段索引后，任意一段能对上即可。
    */
   parts?: string[];
+  /**
+   * 接口给的发布时间（已转成 ISO）。
+   *
+   * 这是发布时间**唯一可靠的来源**：页面上那行字是渲染出来的，老帖写成
+   * 「23年06月18日」这种两位数年份，甚至「3天前」；而接口里是完整时间戳。
+   * 对上号之后直接用它，不必再去解析页面上的字。
+   */
+  createTime?: string;
   /** 该帖对象的顶层字段名，诊断时用来看接口结构（不含字段值）。 */
   keys?: string[];
+}
+
+/**
+ * 从接口节点里取发布时间。
+ *
+ * 必须自带 4 位年份才认：`new Date` 对残缺输入不会失败，只会悄悄补出 2001 年
+ *（见 extractors/common.ts 里那段）。这里宁可返回 undefined 让上游退回采集时间。
+ */
+export function createTimeOf(node: Record<string, unknown>): string | undefined {
+  const raw = node.create_time ?? node.createTime;
+  if (typeof raw !== 'string' || !/(?:19|20)\d{2}/.test(raw)) return undefined;
+  const parsed = new Date(raw);
+  return Number.isNaN(parsed.getTime()) ? undefined : parsed.toISOString();
 }
 
 /**
@@ -220,10 +241,12 @@ export function harvestTopics(payload: unknown, limit = 400): TopicRecord[] {
       const parts = partsOf(node).map(part => part.slice(0, RAW_TEXT_LIMIT));
       const text = parts.join(' ').slice(0, RAW_TEXT_LIMIT);
       if (normalizeForMatch(text)) {
+        const createTime = createTimeOf(node);
         found.push({
           topicId: String(rawId),
           text,
           parts,
+          ...(createTime ? { createTime } : {}),
           keys: Object.keys(node).slice(0, 24),
         });
       }
@@ -279,6 +302,14 @@ export class TopicIndex {
       out.push({ topicId, normalized });
     }
     return out;
+  }
+
+  /**
+   * 对上号之后取这条帖子的发布时间（接口给的完整时间戳）。
+   * 接口没给就返回 undefined，由调用方退回解析页面上那行字。
+   */
+  publishedAtOf(topicId: string): string | undefined {
+    return this.raw.get(topicId)?.createTime;
   }
 
   add(records: readonly TopicRecord[]): void {

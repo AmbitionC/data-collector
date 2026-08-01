@@ -118,6 +118,38 @@ describe('content script list collection', () => {
     expect(listeners).toHaveLength(0);
   });
 
+  it('嵌套的「展开全部」只点最内层那个，不会点两次又收回去', async () => {
+    // 站点上的展开控件是包了一层的：<div><span>展开全部</span></div>，
+    // 两层的 textContent 都等于「展开全部」。逐个点等于对同一个开关点了两次，
+    // 第二次把刚展开的又收了回去——入库正文末尾还留着「展开全部」，后半段根本没采到。
+    document.body.innerHTML = `
+      <div class="topic-container">
+        <div class="content">第一条帖子的正文内容，足够长以便通过长度校验判断。</div>
+        <div class="expand-wrap"><span class="expand">展开全部</span></div>
+      </div>`;
+    // jsdom 里 offsetParent 恒为 null、offsetHeight 恒为 0，可见性判断会把所有元素都跳过；
+    // 真实浏览器里它们是可见的。不补这一步，测的就不是同一件事（这里真踩过一次）。
+    for (const element of document.querySelectorAll('*')) {
+      Object.defineProperty(element, 'offsetHeight', { value: 20, configurable: true });
+    }
+    const content = document.querySelector('.content') as HTMLElement;
+    let expanded = false;
+    (document.querySelector('.expand-wrap') as HTMLElement).addEventListener('click', () => {
+      expanded = !expanded;
+      content.textContent = expanded
+        ? '第一条帖子的正文内容，足够长以便通过长度校验判断。后半段在这里，只有展开后才看得到。'
+        : '第一条帖子的正文内容，足够长以便通过长度校验判断。';
+    });
+
+    await feedTopics();
+    // 展开后要等框架重渲染（内容脚本里是 600ms），用假时钟推过去。
+    vi.useFakeTimers();
+    await settle(ask<ListResponse>({ type: 'extract.list' }));
+
+    expect(expanded).toBe(true);
+    expect(content.textContent).toContain('只有展开后才看得到');
+  });
+
   it('returns one document per post and keeps DOM nodes on this side of the message boundary', async () => {
     await feedTopics();
 

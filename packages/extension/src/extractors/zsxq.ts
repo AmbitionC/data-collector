@@ -276,7 +276,14 @@ export function extractZsxqList(
     }
     const time = firstWithin(container, TIME_SELECTORS);
     const author = elementText(firstWithin(container, AUTHOR_SELECTORS));
-    const publishedAt = parsePublishedAt(elementText(time), time?.getAttribute('datetime'));
+    // 发布时间优先用接口给的完整时间戳：页面上那行字是渲染结果，老帖写成
+    // 「23年06月18日」甚至「3天前」，解析不出来就只能退回采集时间——
+    // 实测一篇 2023-06-18 的帖子被记成了采集当天的 2026-08-01。
+    // 既然已经靠接口响应对上了帖子号，同一条记录里的发布时间当然也该用上。
+    const topicId = topicUrl.pathname.match(/\/topic\/(\d+)/)?.[1];
+    const publishedAt =
+      (topicId ? topics?.publishedAtOf(topicId) : undefined)
+      ?? parsePublishedAt(elementText(time), time?.getAttribute('datetime'));
     entries.push({
       container,
       key,

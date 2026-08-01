@@ -96,6 +96,25 @@ export function parsePublishedAt(raw: string, datetime?: string | null): string 
   }
 
   /*
+   * 两位数年份：`23年06月18日`、`23-06-18`。
+   *
+   * 这和下面被挡掉的 `03-05` 有本质区别：**年份是站点写出来的，不是我们补的**。
+   * 星球上超过一年的老帖恰恰都是这种写法，一律按「必须 4 位年份」拒掉的话，
+   * 它们会全部退回采集时间——实测一篇 23年06月18日 的帖子被记成了 2026-08-01。
+   * 三段才认（`03-05` 只有两段，补出来的年份纯属虚构，仍然拒掉）。
+   */
+  const shortYear = candidate.match(
+    /^(\d{2})[年/-](\d{1,2})[月/-](\d{1,2})日?(?:\s+(\d{1,2}):(\d{2}))?/,
+  );
+  if (shortYear) {
+    const date = new Date(
+      `20${shortYear[1]}-${shortYear[2]?.padStart(2, '0')}-${shortYear[3]?.padStart(2, '0')}`
+      + `T${(shortYear[4] ?? '00').padStart(2, '0')}:${shortYear[5] ?? '00'}:00+08:00`,
+    );
+    return Number.isNaN(date.getTime()) ? undefined : date.toISOString();
+  }
+
+  /*
    * 兜底解析**必须先看到年份**。
    *
    * 站点上大量时间戳只有月日（牛客「编辑于 03-05」、星球「3-5」）。

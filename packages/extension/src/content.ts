@@ -107,12 +107,25 @@ const EXPAND_LABELS = new Set(['展开', '展开全文', '展开全部', '全文
  * 返回是否点过——点过需要等框架完成重渲染再读 DOM。
  */
 function expandCollapsedContent(limit: number): boolean {
+  const candidates = [...document.querySelectorAll<HTMLElement>('button, a, span, div')].filter(
+    element =>
+      EXPAND_LABELS.has((element.textContent ?? '').trim())
+      && (element.offsetParent !== null || element.offsetHeight !== 0),
+  );
+  /*
+   * 每处只点**最内层**那一个。
+   *
+   * 展开控件在站点上是包了一层的（`<div><span>展开全部</span></div>`），
+   * 两层的 textContent 都等于「展开全部」，逐个点等于对同一个开关点了两次——
+   * 第二次把刚展开的又收了回去，采到的还是截断正文。
+   * 实测就是这个症状：入库正文末尾还留着「展开全部」四个字，用户要的后半段根本没采到。
+   */
+  const targets = candidates.filter(
+    element => !candidates.some(other => other !== element && element.contains(other)),
+  );
   let clicked = 0;
-  for (const element of document.querySelectorAll<HTMLElement>('button, a, span, div')) {
+  for (const element of targets) {
     if (clicked >= limit) break;
-    const label = (element.textContent ?? '').trim();
-    if (!EXPAND_LABELS.has(label)) continue;
-    if (!element.offsetParent && element.offsetHeight === 0) continue;
     try {
       element.click();
       clicked += 1;
