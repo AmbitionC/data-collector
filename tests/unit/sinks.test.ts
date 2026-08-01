@@ -351,3 +351,40 @@ describe('git 报错要翻成人能照做的一句话', () => {
       .toBe('git add 失败：some brand new error');
   });
 });
+
+describe('提交失败绝不能报成「已同步」', () => {
+  /** 真实链路里 git commit 会因为没配 user.email、被钩子拒等原因失败。 */
+  async function saveWith(runGit: (repo: string, args: string[]) => Promise<{ code: number; stderr: string; stdout?: string }>) {
+    const repo = await temporaryDirectory();
+    const sink = new RepoInboxSink({
+      id: 'x',
+      repoPath: repo,
+      runGit,
+      fetch: pngFetcher(),
+      resolveAddresses: PUBLIC_DNS,
+    });
+    return sink.save(organize(nowcoderDoc({ images: [] })));
+  }
+
+  it('commit 真失败时算失败，并说清原因', async () => {
+    const result = await saveWith(async (_repo, args) =>
+      args[0] === 'commit'
+        ? { code: 1, stderr: '*** Please tell me who you are.', stdout: '' }
+        : { code: 0, stderr: '', stdout: '' },
+    );
+    const detail = result.detail as { commitFailed?: boolean; gitWarning?: string };
+    // 原先这里只把 committed 记成 false，既不报警也不算失败——
+    // 侧栏照样绿着「已同步」，而仓库里一个提交都没有。
+    expect(detail.commitFailed).toBe(true);
+    expect(detail.gitWarning).toContain('git config user.email');
+  });
+
+  it('「没有改动可提交」是幂等成功，不能误报成失败', async () => {
+    const result = await saveWith(async (_repo, args) =>
+      args[0] === 'commit'
+        ? { code: 1, stderr: '', stdout: 'nothing to commit, working tree clean' }
+        : { code: 0, stderr: '', stdout: '' },
+    );
+    expect((result.detail as { commitFailed?: boolean }).commitFailed).toBeUndefined();
+  });
+});

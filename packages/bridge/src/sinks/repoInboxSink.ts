@@ -3,7 +3,7 @@ import { mkdir, open, readdir, rename } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { descriptorFor, stableContentId } from '@data-collector/shared';
-import { MISSING_GIT_PREFIX, runGit } from '../git.js';
+import { MISSING_GIT_PREFIX, runGit, type GitRunResult } from '../git.js';
 import type { OrganizedDocument } from '../organize/index.js';
 import { downloadAssets, type ResolveAddresses } from '../library/assets.js';
 import { renderMarkdown } from '../library/markdown.js';
@@ -28,7 +28,7 @@ export interface RepoInboxSinkOptions {
   fetch?: typeof fetch;
   resolveAddresses?: ResolveAddresses;
   /** 可注入的 git 执行器（测试用）。 */
-  runGit?: (repoPath: string, args: string[]) => Promise<{ code: number; stderr: string }>;
+  runGit?: (repoPath: string, args: string[]) => Promise<GitRunResult>;
 }
 
 function expandPath(value: string): string {
@@ -90,7 +90,7 @@ export class RepoInboxSink implements ContentSink {
   private readonly push: boolean;
   private readonly fetcher: typeof fetch;
   private readonly resolveAddresses: ResolveAddresses | undefined;
-  private readonly runGit: (repoPath: string, args: string[]) => Promise<{ code: number; stderr: string }>;
+  private readonly runGit: (repoPath: string, args: string[]) => Promise<GitRunResult>;
   private saveQueue: Promise<void> = Promise.resolve();
 
   constructor(options: RepoInboxSinkOptions) {
@@ -234,7 +234,26 @@ export class RepoInboxSink implements ContentSink {
       }
       const message = `采集: ${title}`;
       const commit = await this.runGit(this.repoRoot, ['commit', '-m', message, '--', relativeEntry]);
-      // 无改动可提交时 git commit 返回非 0；视为幂等成功（内容已在库中）。
+      /*
+       * `git commit` 返回非 0 有两种完全不同的情况，**绝不能一律当成功**：
+       *
+       * - 「没有改动可提交」——重复同步同一条时的正常结果，内容已经在仓库里了，幂等成功；
+       * - 真失败——没配 user.email、被 pre-commit 钩子拒了、仓库处于 merge 中间态……
+       *   这一类原先被静默吞掉：committed 记成 false，却既不报警也不算失败，
+       *   侧栏照样显示「已同步」，而仓库里一个提交都没有。这是「绝不静默失败」的红线。
+       *
+       * 「nothing to commit」走的是 stdout 而不是 stderr，所以两边都要看。
+       */
+      const commitOutput = `${commit.stdout ?? ''}\n${commit.stderr}`;
+      const nothingToCommit = /nothing to commit|no changes added|working tree clean/i.test(commitOutput);
+      if (commit.code !== 0 && !nothingToCommit) {
+        return {
+          committed: false,
+          pushed: false,
+          commitFailed: true,
+          warning: explainGitFailure('git commit', commit.stderr || commit.stdout || ''),
+        };
+      }
       const committed = commit.code === 0;
       if (!this.push) return { committed, pushed: false };
       const push = await this.runGit(this.repoRoot, ['push']);

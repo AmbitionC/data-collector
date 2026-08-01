@@ -73,6 +73,19 @@ const SYNC_BADGES: Record<SyncInfo['state'], string> = {
   failed: '同步失败',
 };
 
+/**
+ * 行内徽标。已提交但**没推上去**必须一眼看得出来。
+ *
+ * 原先一律显示「已同步」：条目确实写进了本机仓库，可用户的 Agent 是从 GitHub 读的，
+ * 推不上去就等于没送到——他在 Agent 里问「处理收件箱」，得到的是「没有新的」，
+ * 而侧栏这边二十条全绿。真踩过一次。
+ */
+function syncBadgeOf(sync: SyncInfo | undefined): string {
+  const state = sync?.state ?? 'pending';
+  if (state === 'synced' && sync?.pushed === false) return '已同步·未推送';
+  return SYNC_BADGES[state];
+}
+
 /** 明细列表的状态筛选。 */
 export type ItemFilter = 'all' | 'saved' | 'skipped' | 'failed';
 
@@ -611,7 +624,7 @@ function renderEntryOverlay(
   const meta = [
     view.source ? sourceLabel(view.source) : '',
     view.category ?? '',
-    SYNC_BADGES[syncState] + (entry?.sync?.error ? `（${entry.sync.error}）` : ''),
+    syncBadgeOf(entry?.sync) + (entry?.sync?.error ? `（${entry.sync.error}）` : ''),
     view.absolutePath ?? '',
   ].filter(Boolean);
   required(document, '#entry-meta').textContent = meta.join(' · ');
@@ -698,8 +711,8 @@ function renderLibrary(
     const sync = document.createElement('span');
     const syncState = syncStateOf(entry);
     sync.className = 'item-sync';
-    sync.dataset.sync = syncState;
-    sync.textContent = SYNC_BADGES[syncState];
+    sync.dataset.sync = syncState === 'synced' && entry.sync?.pushed === false ? 'unpushed' : syncState;
+    sync.textContent = syncBadgeOf(entry.sync);
     meta.append(tag, when, sync);
     open.append(label, meta);
     open.onclick = () => actions.openEntry(entry.id, entry.title);

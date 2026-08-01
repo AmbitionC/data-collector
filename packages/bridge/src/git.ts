@@ -125,11 +125,15 @@ export function resetGitResolution(): void {
   cached = undefined;
 }
 
+export interface GitRunResult {
+  code: number;
+  stderr: string;
+  /** 标准输出。`git commit` 的「nothing to commit」走的是这里，不是 stderr。 */
+  stdout?: string;
+}
+
 /** 在仓库里跑一条 git 命令。用探好的绝对路径，并带上补齐过的 PATH。 */
-export async function runGit(
-  repoPath: string,
-  args: string[],
-): Promise<{ code: number; stderr: string }> {
+export async function runGit(repoPath: string, args: string[]): Promise<GitRunResult> {
   const { command, tried } = await resolveGitOnce();
   // 探不到就直说，别让 execFile 甩一个 ENOENT 或 xcrun 的英文报错出去。
   if (!command) return { code: 127, stderr: explainMissingGit(tried) };
@@ -138,14 +142,14 @@ export async function runGit(
       command,
       ['-C', repoPath, ...args],
       { env: gitEnvironment(), timeout: 30_000 },
-      (error, _stdout, stderr) => {
+      (error, stdout, stderr) => {
         const code =
           error && typeof (error as { code?: unknown }).code === 'number'
             ? (error as { code: number }).code
             : error
               ? 1
               : 0;
-        resolveRun({ code, stderr: stderr ?? '' });
+        resolveRun({ code, stderr: stderr ?? '', stdout: stdout ?? '' });
       },
     );
   });

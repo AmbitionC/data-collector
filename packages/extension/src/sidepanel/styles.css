@@ -978,3 +978,7 @@ select:focus {
 }
 
 .danger-button:hover { filter: brightness(0.94); }
+
+/* 已提交但没推上去：条目在本机仓库里，却没到远端。
+   用户的 Agent 若从 GitHub 读收件箱，这等于没送到，得和「已同步」区分开。 */
+.collected-list .item-sync[data-sync="unpushed"] { color: var(--warning, #b26a00); }
