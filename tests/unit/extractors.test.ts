@@ -11,7 +11,13 @@ import {
 } from '../../packages/extension/src/extractors/index.js';
 import { TopicIndex } from '../../packages/extension/src/topicIndex.js';
 import { parsePublishedAt } from '../../packages/extension/src/extractors/common.js';
-import { completeContent } from '../../packages/extension/src/extractors/zsxq.js';
+import {
+  completeContent,
+  isZsxqArticle,
+  linkedArticleUrl,
+  stripUiNoise,
+  titleFromText,
+} from '../../packages/extension/src/extractors/zsxq.js';
 
 /** 接口响应里拿到的帖子号（DOM 上没有），前两条能对上号，第三条对不上。 */
 function topicIndex(): TopicIndex {
@@ -381,5 +387,85 @@ describe('带货帖按硬证据跳过，且照样出现在明细里', () => {
 
     expect(list.entries[0]?.document).toBeDefined();
     expect(list.skipped).toBe(0);
+  });
+});
+
+/**
+ * 以下四组全部对应 life-teachers/collector-issues 的实测工单（77 条投递）。
+ */
+describe('工单 D1/D6：标题不能吞进 --- 分隔线，也不能是半句话', () => {
+  it('分隔线绝不进标题——它会把下游的 frontmatter 切错位置', () => {
+    // 实测唯一样本，但后果最重：下游 split('---') 会切错，date/source_url 全落进正文。
+    const title = titleFromText('2024春节后，中产即将遭遇一场全面的返贫危机 本文做一个备份\n------------------\n正文开始');
+    expect(title).not.toContain('---');
+    expect(title).toContain('2024春节后');
+  });
+
+  it('宁可短，也不留半个词组（53/77 是断句标题）', () => {
+    const title = titleFromText(
+      '匿名用户 提问：陈老师好，关于7月4日18：41星友的问题，星友100万本金亏损25%，问是应该割肉等下轮牛市来临买宽基还是继续持有等回本',
+    );
+    // 原先硬截 60 字得到「…问是应该割肉等下轮牛市来临买宽」这种断句。
+    expect(title.endsWith('买宽')).toBe(false);
+    expect(title.length).toBeLessThanOrEqual(48);
+  });
+
+  it('行首的 Markdown 结构字符也剥掉', () => {
+    expect(titleFromText('# 标题在这里\n正文')).toBe('标题在这里');
+    expect(titleFromText('> 引用开头的帖子正文内容')).toBe('引用开头的帖子正文内容');
+  });
+});
+
+describe('工单 D7：正文里不该留「展开全部」这类控件文案', () => {
+  it('整行的 UI 文案去掉，正文里正常出现的同名词不动', () => {
+    expect(stripUiNoise('正文第一段\n展开全部\n')).toBe('正文第一段');
+    const cleaned = stripUiNoise('正文\n收起\n更多正文');
+    expect(cleaned).not.toContain('收起');
+    expect(cleaned).toContain('正文');
+    expect(cleaned).toContain('更多正文');
+    // 「他把全文都读完了」里的「全文」是内容，不能删。
+    expect(stripUiNoise('他把全文都读完了')).toBe('他把全文都读完了');
+  });
+});
+
+describe('工单 D2：长文正文在 articles.zsxq.com 上', () => {
+  it('认得出长文地址', () => {
+    expect(isZsxqArticle(new URL('https://articles.zsxq.com/id_g5tujomiabtu.html'))).toBe(true);
+    expect(isZsxqArticle(new URL('https://wx.zsxq.com/group/123/topic/456'))).toBe(false);
+  });
+
+  it('从帖子正文里找出它引用的长文链接', () => {
+    const html = '<p>先跟新粉解释下</p><a href="https://articles.zsxq.com/id_i9g8xrwktrlb.html">全文</a>';
+    expect(linkedArticleUrl(html)).toBe('https://articles.zsxq.com/id_i9g8xrwktrlb.html');
+    expect(linkedArticleUrl('<p>没有外链的帖子</p>')).toBeUndefined();
+  });
+
+  it('长文页按正文提取，选择器落空时退回文字最多的块', () => {
+    const url = 'https://articles.zsxq.com/id_g5tujomiabtu.html';
+    // 长文页是 Angular 单页应用，类名随时可能变——所以要有密度兜底。
+    const body = '这是长文的正文内容，讲居民杠杆率与房地产周期的关系。'.repeat(12);
+    const doc = new JSDOM(
+      `<div class="nav">导航</div><div class="mystery-container"><p>${body}</p></div>`,
+      { url },
+    ).window.document;
+
+    const result = extractDocument(doc, url, NOW);
+
+    expect(result.kind).toBe('article');
+    expect(result.text).toContain('居民杠杆率');
+    expect(result.text.length).toBeGreaterThan(200);
+  });
+
+  it('正文没渲染出来时如实报错，绝不落一条空壳', () => {
+    const url = 'https://articles.zsxq.com/id_empty.html';
+    // curl 拿到的就是这个：单页应用的壳，一个字都没有。
+    const doc = new JSDOM('<app-root></app-root>', { url }).window.document;
+    let thrown: unknown;
+    try {
+      extractDocument(doc, url, NOW);
+    } catch (error) {
+      thrown = error;
+    }
+    expect((thrown as ExtractionError).code).toBe('CONTENT_EMPTY');
   });
 });

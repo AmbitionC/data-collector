@@ -322,6 +322,75 @@ describe('list page batch capture', () => {
     return { tabs, bridge, runner, progress };
   }
 
+  describe('工单 D2：帖子只是导语时，把长文正文取回来接上', () => {
+    /**
+     * 星球长文帖在信息流里只有一段引子加一个 articles.zsxq.com 链接——
+     * 实测 77 条投递里 54 条（70%）是这形态，43 条正文不足 400 字。
+     * 长文页是单页应用、接口要登录态，只能开后台标签页让内容脚本去读。
+     */
+    function withArticle(articleText: string | undefined) {
+      const { tabs, bridge, runner } = listRunner();
+      tabs.listRounds = [{
+        documents: [{
+          ...topic('111'),
+          html: '<p>先跟新粉解释下</p><a href="https://articles.zsxq.com/id_abc.html">全文</a>',
+          text: '先跟新粉解释下',
+        }],
+        skipped: 0,
+        total: 1,
+      }];
+      tabs.advances = [{ collapsed: 1, loaded: 0 }];
+      const original = tabs.sendMessage.bind(tabs);
+      tabs.sendMessage = async (id, message) => {
+        const type = (message as { type?: string }).type;
+        // 长文页那个标签页只会收到 extract.document。
+        if (type === 'extract.document') {
+          if (articleText === undefined) {
+            return { ok: false as const, error: { code: 'CONTENT_EMPTY', message: '还没渲染出来' } };
+          }
+          return {
+            ok: true as const,
+            document: {
+              schemaVersion: 1, source: 'zsxq', kind: 'article',
+              url: 'https://articles.zsxq.com/id_abc.html',
+              canonicalUrl: 'https://articles.zsxq.com/id_abc.html',
+              title: '长文', collectedAt: '2026-08-02T00:00:00.000Z',
+              html: `<p>${articleText}</p>`, text: articleText, images: [],
+            },
+          };
+        }
+        return original(id, message);
+      };
+      return { tabs, bridge, runner };
+    }
+
+    it('长文正文接在导语后面，一并入库', async () => {
+      const body = '这里是长文的完整正文，讲居民杠杆率与房地产周期。'.repeat(10);
+      const { tabs, bridge, runner } = withArticle(body);
+
+      await runner.captureList();
+
+      // 开过一个后台标签页去取长文，取完关掉，不留残余。
+      expect(tabs.created.map(item => item.url)).toContain('https://articles.zsxq.com/id_abc.html');
+      expect(tabs.removed.length).toBeGreaterThan(0);
+      const sent = bridge.sent.find(item => item.type === 'job.result');
+      const document = (sent?.payload as { document?: { text?: string } })?.document;
+      expect(document?.text).toContain('先跟新粉解释下');
+      expect(document?.text).toContain('居民杠杆率');
+    });
+
+    it('长文取不到时原样保留导语，绝不让整条采集失败', async () => {
+      const { bridge, runner } = withArticle(undefined);
+
+      const summary = await runner.captureList();
+
+      expect(summary.collected).toBe(1);
+      const sent = bridge.sent.find(item => item.type === 'job.result');
+      expect((sent?.payload as { document?: { text?: string } })?.document?.text)
+        .toBe('先跟新粉解释下');
+    });
+  });
+
 describe('本机库已有的不再重复采', () => {
   /**
    * 用户实测：刷新页面 / 重载扩展后再采，整屏旧帖子又采了一遍——

@@ -8,10 +8,23 @@ import type { TopicIndex } from '../topicIndex.js';
 import { ExtractionError, type Clock } from './types.js';
 import { extractNowcoder } from './nowcoder.js';
 import { extractWechat } from './wechat.js';
-import { extractZsxq, extractZsxqList, type ListExtraction } from './zsxq.js';
+import {
+  extractZsxq,
+  extractZsxqArticle,
+  extractZsxqList,
+  isZsxqArticle,
+  type ListExtraction,
+} from './zsxq.js';
 
 export { ExtractionError } from './types.js';
-export { COLLECTED_ATTRIBUTE, KEY_ATTRIBUTE, listBodyText, pendingTopicCount } from './zsxq.js';
+export {
+  COLLECTED_ATTRIBUTE,
+  KEY_ATTRIBUTE,
+  isZsxqArticle,
+  linkedArticleUrl,
+  listBodyText,
+  pendingTopicCount,
+} from './zsxq.js';
 export type { ListEntry, ListExtraction } from './zsxq.js';
 
 /** 列表页批量提取（当前仅知识星球有列表形态）。 */
@@ -56,7 +69,10 @@ export function extractDocument(
     case 'wechat':
       return extractWechat(document, url, now);
     case 'zsxq':
-      return extractZsxq(document, url, now);
+      // 长文页是独立形态：帖子在信息流里只有导语，正文在 articles.zsxq.com 上。
+      return isZsxqArticle(url)
+        ? extractZsxqArticle(document, url, now)
+        : extractZsxq(document, url, now);
     case 'nowcoder':
       return extractNowcoder(document, url, now);
   }

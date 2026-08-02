@@ -79,6 +79,10 @@
             <label id="target-label" for="target" hidden>本次采集条数 <span>采够就自动停</span></label>
             <input id="target" type="number" min="1" max="60" step="1" value="20" hidden>
           </div>
+          <label id="refresh-label" class="refresh-toggle" hidden>
+            <input id="refresh" type="checkbox">
+            <span>连已入库的一起重采<em>采集器修好后整体刷新用；平时关着</em></span>
+          </label>
           <button id="capture-button" type="button" class="primary-button capture-button">
             <span id="capture-button-label">保存这一页</span><span aria-hidden="true">↘</span>
           </button>

@@ -982,3 +982,9 @@ select:focus {
 /* 已提交但没推上去：条目在本机仓库里，却没到远端。
    用户的 Agent 若从 GitHub 读收件箱，这等于没送到，得和「已同步」区分开。 */
 .collected-list .item-sync[data-sync="unpushed"] { color: var(--warning, #b26a00); }
+
+/* 「连已入库的一起重采」：默认关着的重活开关，说明写在旁边，别让人猜。 */
+.refresh-toggle { display: flex; gap: 8px; align-items: flex-start; margin: 10px 0 2px; cursor: pointer; }
+.refresh-toggle input { margin-top: 3px; flex: none; }
+.refresh-toggle span { font-size: 12px; line-height: 1.5; }
+.refresh-toggle em { display: block; font-style: normal; color: var(--muted); font-size: 11px; }

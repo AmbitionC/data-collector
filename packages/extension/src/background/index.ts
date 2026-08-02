@@ -217,10 +217,13 @@ chrome.runtime.onMessage.addListener((message: unknown, _sender, sendResponse) =
         userTags?: string[];
         sinks?: string[];
         maxItems?: number;
+        refresh?: boolean;
       };
       return runner.captureList(overrides, {
         // 采够目标条数就自动停，用户不必盯着手动停。
         ...(overrides.maxItems ? { maxItems: overrides.maxItems } : {}),
+        // 「连已入库的一起重采」：采集器修好后整体刷新用，平时关着。
+        ...(overrides.refresh ? { refresh: true } : {}),
         // 「继续采下一批」是续采，保留上一批的处理标记；重新发起则先把页面还原。
         ...((request as { continuation?: boolean }).continuation === true
           ? { continuation: true }

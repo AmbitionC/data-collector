@@ -147,6 +147,29 @@ export function completeContent(
   return merged;
 }
 
+/**
+ * 页面上的交互文案，绝不该进归档正文。
+ *
+ * 实测 77 条里 64 条（83%）末尾挂着「展开全部」「收起」。它们是控件的字，
+ * 不是作者写的内容，下游还得再洗一遍。
+ */
+const UI_NOISE = /(^|\n)\s*(展开全部|展开全文|收起|阅读全文|显示全部|全文)\s*(?=\n|$)/g;
+
+/** 归档正文里剔掉 UI 文案；只去整行，正文里正常出现的这些词不动。 */
+export function stripUiNoise(value: string): string {
+  return value.replace(UI_NOISE, '$1').replace(/\n{3,}/g, '\n\n').trim();
+}
+
+/** 这是不是一篇知识星球长文（帖子正文常常只是导语 + 指向它的链接）。 */
+export function isZsxqArticle(url: URL): boolean {
+  return url.hostname === 'articles.zsxq.com' && /\/id_[A-Za-z0-9]+/.test(url.pathname);
+}
+
+/** 从帖子正文里找出它引用的长文地址；没有就返回 undefined。 */
+export function linkedArticleUrl(html: string): string | undefined {
+  return /https:\/\/articles\.zsxq\.com\/id_[A-Za-z0-9]+\.html/.exec(html)?.[0];
+}
+
 /** 详情页地址形如 /group/<群号>/topic/<帖子号>；列表/分类/精华页没有 /topic/ 段。 */
 export function isTopicDetail(url: URL): boolean {
   return !isListPage(url);
@@ -156,18 +179,44 @@ export function isTopicDetail(url: URL): boolean {
  * 星球动态多数没有标题。用正文首句兜底，保证归档条目有可读标题
  * （站点 <title> 恒为「<星球名>-知识星球」，不能当文章标题用）。
  */
+/**
+ * 从一段正文里取一个能用的标题。
+ *
+ * 两个实测缺陷都出在这儿：
+ * - **`---` 被吞进标题**（1/77）。原帖正文里有 `------------------` 分隔线，
+ *   截前 N 字就把它带进了标题；下游按 `split('---')` 切 frontmatter 会切错位置，
+ *   整条元信息落进正文——归档侧真踩到过，那条的 date 直接读不出来。
+ * - **标题是半句话**（53/77）。按 `。！？` 切完还硬截 60 字，
+ *   得到「…问是应该割肉等下轮牛市来临买宽」这种断句。
+ *
+ * 所以：先剥掉 Markdown 结构字符，再按句子边界取，宁可短也不留半个词。
+ */
+export function titleFromText(body: string): string {
+  const stripped = body
+    // 分隔线整行去掉（--- === ___ ***），它们不是标题的一部分。
+    .replace(/(^|\n)\s*[-=_*]{3,}\s*(?=\n|$)/g, '$1')
+    // 行首的 Markdown 结构字符也剥掉。
+    .replace(/(^|\n)\s*[#>|]+\s*/g, '$1');
+  // **先按行 / 句切，再归一空白。** 反过来的话换行先被压成空格，
+  // 整段就变成了一句，标题会把正文第二段也吞进来。
+  const sentence = stripped
+    .split(/[。！？!?\n]/)
+    .map(part => cleanText(part))
+    .find(part => part.length >= 4);
+  const candidate = sentence ?? cleanText(stripped);
+  if (!candidate) return '';
+  if (candidate.length <= 48) return candidate;
+  // 超长再截，但**切在标点上**，不留半个词组；实在找不到才硬截。
+  const head = candidate.slice(0, 48);
+  const cut = Math.max(head.lastIndexOf('，'), head.lastIndexOf('、'), head.lastIndexOf('；'), head.lastIndexOf(' '));
+  return cut >= 16 ? head.slice(0, cut) : head;
+}
+
 function deriveTitle(content: Element, document: Document): string {
   const explicit = elementText(firstWithin(content, ['h1', 'h2', '.title', '[class*="title"]']));
-  if (explicit) return explicit.slice(0, 80);
-  const body = elementText(content);
-  if (body) {
-    const firstSentence = body
-      .split(/[。！？!?\n]/)
-      .map(part => cleanText(part))
-      .find(part => part.length >= 4);
-    return (firstSentence ?? body).slice(0, 60);
-  }
-  return cleanText(document.title);
+  if (explicit) return titleFromText(explicit);
+  const body = stripUiNoise(elementText(content));
+  return titleFromText(body) || cleanText(document.title);
 }
 
 /**
@@ -383,6 +432,79 @@ export function extractZsxqList(
     });
   }
   return { entries, skipped, total: containers.length };
+}
+
+/** 长文页的正文容器候选（Angular 应用，类名可能变，所以还留了兜底）。 */
+const ARTICLE_SELECTORS = [
+  '.article-content',
+  '.article-container .content',
+  'app-article .content',
+  '.rich_media_content',
+  'article',
+  '.content',
+];
+
+/**
+ * 正文密度兜底：选择器全落空时，挑文字最多的那个块。
+ *
+ * 长文页是个 Angular 单页应用，类名随时可能变。与其某天悄悄采到空正文，
+ * 不如按「谁的字最多」兜住——排除 body/html 本身，避免把整页导航也算进来。
+ */
+function densestBlock(document: Document): Element | undefined {
+  let best: Element | undefined;
+  let bestLength = 0;
+  for (const element of document.querySelectorAll('div, section, article, main')) {
+    // 只看直接文字量，套娃的外层容器不会因为包着正文就胜出。
+    const length = elementText(element).length;
+    if (length > bestLength && length >= 200) {
+      // 已有更内层的候选就不要外层了（外层必然更长）。
+      if (best && element.contains(best)) continue;
+      best = element;
+      bestLength = length;
+    }
+  }
+  return best;
+}
+
+/**
+ * 知识星球长文页（`articles.zsxq.com/id_xxx.html`）。
+ *
+ * **这是正文的真正所在。** 星球的长文帖在信息流里只有一段导语加一个链接，
+ * 实测 77 条投递里 54 条（70%）是这种形态，其中 43 条正文不足 400 字——
+ * 归档侧拿到的基本是个空壳。
+ *
+ * 页面本身是 Angular 单页应用：直接 curl 只能拿到 `<app-root></app-root>`，
+ * 它的接口 `api.zsxq.com/v2/articles/<id>` 又要登录态（401）。
+ * 所以只能在**浏览器里**取——用户的会话在那儿。
+ */
+export function extractZsxqArticle(document: Document, url: URL, now: Clock) {
+  if (LOGIN_SELECTORS.some(selector => document.querySelector(selector))) {
+    throw new ExtractionError('AUTH_REQUIRED', '请先登录知识星球，再采集这篇长文');
+  }
+  const content = firstWithin(document, ARTICLE_SELECTORS) ?? densestBlock(document);
+  if (!content) {
+    throw new ExtractionError(
+      'CONTENT_EMPTY',
+      '长文正文还没渲染出来（这一页是单页应用，内容要等接口返回）。稍等片刻再试。',
+    );
+  }
+  const text = stripUiNoise(elementText(content));
+  if (text.length < 100) {
+    throw new ExtractionError('CONTENT_EMPTY', '长文正文过短，多半是还没加载完');
+  }
+  const time = firstWithin(document, TIME_SELECTORS);
+  const author = elementText(firstWithin(document, AUTHOR_SELECTORS));
+  const publishedAt = parsePublishedAt(elementText(time), time?.getAttribute('datetime'));
+  return buildDocument({
+    source: 'zsxq',
+    kind: 'article',
+    title: titleFromText(elementText(firstWithin(document, ['h1', 'h2', '.title'])) || text),
+    content,
+    url,
+    now,
+    ...(author ? { author } : {}),
+    ...(publishedAt ? { publishedAt } : {}),
+  });
 }
 
 export function extractZsxq(document: Document, url: URL, now: Clock) {

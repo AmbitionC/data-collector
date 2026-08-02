@@ -195,6 +195,8 @@ export interface CaptureOverrides {
   sinks?: string[];
   /** 批量：本次要采够多少条，采够自动停（用户不必盯着手动停）。 */
   maxItems?: number;
+  /** 连已入库的一起重采（采集器修好后整体刷新用）。 */
+  refresh?: boolean;
 }
 
 export interface SidePanelActions {
@@ -398,9 +400,12 @@ function show(document: Document, selector: string): HTMLElement {
 function collectOverrides(document: Document): CaptureOverrides {
   const category = required<HTMLSelectElement>(document, '#category').value.trim();
   const target = Number(required<HTMLInputElement>(document, '#target').value);
+  // 「连已入库的一起重采」默认关着：平时本机库是去重依据，重复采只是浪费。
+  const refresh = document.querySelector<HTMLInputElement>('#refresh')?.checked === true;
   return {
     ...(category ? { userCategory: category } : {}),
     ...(Number.isFinite(target) && target > 0 ? { maxItems: Math.min(60, Math.round(target)) } : {}),
+    ...(refresh ? { refresh: true } : {}),
   };
 }
 
@@ -951,6 +956,8 @@ export function renderSidePanel(
     listHint.hidden = !state.list;
     // 目标条数只对批量有意义。
     required<HTMLElement>(document, '#target-label').hidden = !state.list;
+    // 「连已入库的一起重采」只在列表页有意义（单页保存本来就是重采）。
+    required<HTMLElement>(document, '#refresh-label').hidden = !state.list;
     required<HTMLElement>(document, '#target').hidden = !state.list;
 
     required<HTMLButtonElement>(document, '#capture-button').onclick = () => {

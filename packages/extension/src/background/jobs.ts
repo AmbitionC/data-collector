@@ -1,4 +1,5 @@
 import { parseSupportedUrl, type CollectedDocument } from '@data-collector/shared';
+import { linkedArticleUrl } from '../extractors/index.js';
 import type { HookStats } from '../topicIndex.js';
 
 export interface BrowserTab {
@@ -209,6 +210,44 @@ export class JobRunner {
     });
   }
 
+  /**
+   * 帖子只是导语时，把它引用的长文正文取回来接上。
+   *
+   * 星球的长文帖在信息流里只有一段引子加一个 `articles.zsxq.com` 链接——实测 77 条
+   * 投递里 54 条（70%）是这形态，其中 43 条正文不足 400 字，归档侧拿到的基本是空壳。
+   * 长文页是单页应用，接口还要登录态，所以只能开一个后台标签页让内容脚本去读。
+   *
+   * 取不到就**原样保留导语**：长文没抓到不该让整条采集失败。
+   */
+  private async withLinkedArticle(document: CollectedDocument): Promise<CollectedDocument> {
+    const articleUrl = linkedArticleUrl(document.html);
+    if (!articleUrl) return document;
+    let tabId: number | undefined;
+    try {
+      const tab = await this.options.tabs.create({ url: articleUrl, active: false });
+      if (tab.id === undefined) return document;
+      tabId = tab.id;
+      await this.options.waitForTabComplete(tabId, 30_000);
+      // 单页应用要等接口回来才渲染，给它一点时间再读。
+      await this.wait(1_200);
+      const response = await this.ask(tabId, { type: 'extract.document' });
+      if (!response.ok) return document;
+      const article = payloadOf(response, 'document');
+      if (article.text.length <= document.text.length) return document;
+      return {
+        ...document,
+        // 导语留着（有时交代了背景），长文正文接在后面。
+        html: `${document.html}\n<hr />\n${article.html}`,
+        text: `${document.text}\n\n${article.text}`,
+        images: [...document.images, ...article.images],
+      };
+    } catch {
+      return document;
+    } finally {
+      if (tabId !== undefined) await this.options.tabs.remove(tabId).catch(() => undefined);
+    }
+  }
+
   async runRemoteJob(requestId: string, rawUrl: string): Promise<void> {
     const result = this.remoteQueue.then(() => this.runRemoteJobNow(requestId, rawUrl));
     this.remoteQueue = result.catch(() => undefined);
@@ -405,6 +444,15 @@ export class JobRunner {
       maxRounds?: number;
       /** 本次要采够多少条；采够即停，不需要用户盯着手动停。 */
       maxItems?: number;
+      /**
+       * 「连已入库的一起重采」。
+       *
+       * 平时本机库是去重依据，库里有的直接跳过。但采集器修好之后（比如补上了长文正文），
+       * 库里那批是用旧逻辑采的，需要整体刷新一遍——这时才打开它。
+       * 重采同一地址仍然只有一条（稳定内容 ID 幂等覆盖），但同步状态会回到未同步，
+       * 于是只有**内容真的变了**的条目需要再推一次，不做重复动作。
+       */
+      refresh?: boolean;
       continuation?: boolean;
     } = {},
   ): Promise<BatchProgress> {
@@ -575,7 +623,7 @@ export class JobRunner {
         seen.add(document.canonicalUrl);
         // 本机库里已经有了就跳过，让目标条数只数**新内容**——
         // 否则刷新一次页面，整屏旧帖子又会把这一批吃满。
-        if (known.has(document.canonicalUrl)) {
+        if (!limits.refresh && known.has(document.canonicalUrl)) {
           items.push({
             key: item.key,
             title: item.title,
@@ -586,7 +634,7 @@ export class JobRunner {
           tally();
           continue;
         }
-        const saved = await this.saveCollected(document, overrides);
+        const saved = await this.saveCollected(await this.withLinkedArticle(document), overrides);
         if (saved === 'ok') {
           items.push({ key: item.key, title: item.title, status: 'saved', url: document.canonicalUrl });
           tally();
