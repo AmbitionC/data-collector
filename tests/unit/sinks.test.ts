@@ -436,3 +436,66 @@ describe('推送失败就算同步失败（用户明确要求）', () => {
     expect(message).toContain('git pull --rebase');
   });
 });
+
+describe('远端领先时自己 rebase 一次再推', () => {
+  /**
+   * 这是链路的常态：云端 Agent 归档完收件箱把远端推前，本机仓库随即落后，
+   * 下一次同步必然 non-fast-forward。要求用户每次采集前手动 pull 太蠢。
+   */
+  function sinkWith(steps: Record<string, { code: number; stderr?: string; stdout?: string }[]>) {
+    const calls: string[][] = [];
+    const runGit = async (_repo: string, args: string[]) => {
+      calls.push(args);
+      const key = args.slice(0, 2).join(' ');
+      const queue = steps[key] ?? steps[args[0]!] ?? [{ code: 0 }];
+      const next = queue.length > 1 ? queue.shift()! : queue[0]!;
+      return { code: next.code, stderr: next.stderr ?? '', stdout: next.stdout ?? '' };
+    };
+    return { calls, runGit };
+  }
+
+  it('推被拒 → pull --rebase → 重推成功，用户无感', async () => {
+    const repo = await temporaryDirectory();
+    const { calls, runGit } = sinkWith({
+      push: [
+        { code: 1, stderr: '! [rejected] master -> master (non-fast-forward)' },
+        { code: 0 },
+      ],
+      'pull --rebase': [{ code: 0 }],
+    });
+    const sink = new RepoInboxSink({ id: 'lt', repoPath: repo, push: true, fetch: pngFetcher(), resolveAddresses: PUBLIC_DNS, runGit });
+
+    const result = await sink.save(organize(nowcoderDoc({ images: [] })));
+
+    expect(result.detail).toMatchObject({ committed: true, pushed: true });
+    expect(calls.some(args => args.join(' ') === 'pull --rebase')).toBe(true);
+    expect(calls.filter(args => args[0] === 'push')).toHaveLength(2);
+  });
+
+  it('rebase 失败要 --abort，绝不把仓库留在中间态', async () => {
+    const repo = await temporaryDirectory();
+    const { calls, runGit } = sinkWith({
+      push: [{ code: 1, stderr: '! [rejected] master -> master (fetch first)' }],
+      'pull --rebase': [{ code: 1, stderr: 'CONFLICT (content): Merge conflict in _inbox/x/meta.json' }],
+    });
+    const sink = new RepoInboxSink({ id: 'lt', repoPath: repo, push: true, fetch: pngFetcher(), resolveAddresses: PUBLIC_DNS, runGit });
+
+    const result = await sink.save(organize(nowcoderDoc({ images: [] })));
+    const detail = result.detail as { pushFailed?: boolean; gitWarning?: string };
+
+    expect(calls.some(args => args.join(' ') === 'rebase --abort')).toBe(true);
+    expect(detail.pushFailed).toBe(true);
+    expect(detail.gitWarning).toContain('已还原');
+  });
+
+  it('推被拒但不是因为落后（比如没权限）时不乱 rebase', async () => {
+    const repo = await temporaryDirectory();
+    const { calls, runGit } = sinkWith({
+      push: [{ code: 128, stderr: 'fatal: Authentication failed' }],
+    });
+    const sink = new RepoInboxSink({ id: 'lt', repoPath: repo, push: true, fetch: pngFetcher(), resolveAddresses: PUBLIC_DNS, runGit });
+
+    await sink.save(organize(nowcoderDoc({ images: [] })));
+    expect(calls.some(args => args[0] === 'pull')).toBe(false);
+  });
+});

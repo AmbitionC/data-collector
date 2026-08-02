@@ -268,15 +268,43 @@ export class RepoInboxSink implements ContentSink {
       // 只提交到本机仓库等于没送到——他真的在 Agent 里问「处理收件箱」，
       // 得到的是「没有新的」，而侧栏那边二十条全绿。
       // pushFailed 与 pushed 分开：pushed:false 也可能只是没配置要推。
-      if (push.code !== 0) {
+      if (push.code === 0) return { committed, pushed: true };
+      /*
+       * 远端领先是这个链路的**常态**，不是异常：云端 Agent 归档完收件箱就把远端推前了，
+       * 本机仓库随即落后，下一次同步必然撞上 non-fast-forward。
+       * 要求用户每次采集前先手动 pull 一次太蠢，这里自己 rebase 一次再推。
+       *
+       * 出了岔子一定要把仓库还原：rebase 失败就 --abort，绝不把用户的仓库
+       * 留在 rebase 中间态（那会让他下一步干什么都报错）。
+       */
+      if (/non-fast-forward|rejected|fetch first|behind/i.test(push.stderr)) {
+        const rebase = await this.runGit(this.repoRoot, ['pull', '--rebase']);
+        if (rebase.code === 0) {
+          const retry = await this.runGit(this.repoRoot, ['push']);
+          if (retry.code === 0) return { committed, pushed: true };
+          return {
+            committed,
+            pushed: false,
+            pushFailed: true,
+            warning: explainGitFailure('git push', retry.stderr),
+          };
+        }
+        await this.runGit(this.repoRoot, ['rebase', '--abort']);
         return {
           committed,
           pushed: false,
           pushFailed: true,
-          warning: explainGitFailure('git push', push.stderr),
+          warning: `远端有本机没有的提交，自动 rebase 没能完成（已还原，仓库没有停在中间态）：`
+            + `${(rebase.stderr || rebase.stdout || '').trim().split('\n')[0] ?? ''}。`
+            + '请在仓库里手动 `git pull --rebase` 处理完冲突，再回来点一次同步。',
         };
       }
-      return { committed, pushed: true };
+      return {
+        committed,
+        pushed: false,
+        pushFailed: true,
+        warning: explainGitFailure('git push', push.stderr),
+      };
     } catch (error) {
       return {
         committed: false,
