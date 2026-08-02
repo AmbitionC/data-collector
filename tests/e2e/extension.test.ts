@@ -556,4 +556,42 @@ describe('built Chrome extension', () => {
     expect(await elementText(sidePanel, '#batch-heading')).toBe(heading);
     expect(await elementText(sidePanel, '#batch-collected')).toBe('0');
   });
+
+  it('面板上的控件尺寸正常——勾选框不能被全局 input 规则撑成大方块', async () => {
+    // 真踩过：styles.css 里 `input { width:100%; height:44px }` 是全局的，
+    // 新加的「连已入库的一起重采」勾选框直接继承，渲染成一个 100% 宽的巨块。
+    // 纯看代码看不出来，必须真渲染一遍量尺寸。
+    const executablePath = await preferredChrome();
+    if (!executablePath) {
+      console.warn('未找到可用的 Chrome/Chromium，跳过这条 UI 尺寸检查');
+      return;
+    }
+    browser = await puppeteer.launch({
+      headless: true,
+      executablePath,
+      args: ['--no-sandbox', '--disable-dev-shm-usage'],
+    });
+    const page = await browser.newPage();
+    await page.goto(`file://${join(EXTENSION_PATH, 'sidepanel', 'index.html')}`);
+    await page.evaluate(() => {
+      for (const id of ['#ready-panel', '#target-label', '#target', '#refresh-label']) {
+        document.querySelector<HTMLElement>(id)!.hidden = false;
+      }
+    });
+
+    const sizes = await page.evaluate(() => {
+      const measure = (selector: string) => {
+        const rect = document.querySelector(selector)!.getBoundingClientRect();
+        return { width: Math.round(rect.width), height: Math.round(rect.height) };
+      };
+      return { checkbox: measure('#refresh'), target: measure('#target') };
+    });
+
+    // 勾选框就该是勾选框大小。
+    expect(sizes.checkbox.width).toBeLessThanOrEqual(24);
+    expect(sizes.checkbox.height).toBeLessThanOrEqual(24);
+    // 数字输入框仍然是整行的输入框——别把全局规则一刀切掉。
+    expect(sizes.target.width).toBeGreaterThan(200);
+    expect(sizes.target.height).toBeGreaterThan(32);
+  });
 });

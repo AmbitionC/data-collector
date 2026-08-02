@@ -377,7 +377,9 @@ label {
 
 label span { color: var(--muted); font-weight: 400; }
 
-input,
+/* 勾选框排除在外：它不该是 100% 宽、44px 高的输入框。
+   不排的话，任何新加的 checkbox 都会变成一个巨大的方块（真踩过一次）。 */
+input:not([type="checkbox"]):not([type="radio"]),
 select {
   width: 100%;
   height: 44px;
@@ -984,7 +986,22 @@ select:focus {
 .collected-list .item-sync[data-sync="unpushed"] { color: var(--warning, #b26a00); }
 
 /* 「连已入库的一起重采」：默认关着的重活开关，说明写在旁边，别让人猜。 */
-.refresh-toggle { display: flex; gap: 8px; align-items: flex-start; margin: 10px 0 2px; cursor: pointer; }
-.refresh-toggle input { margin-top: 3px; flex: none; }
-.refresh-toggle span { font-size: 12px; line-height: 1.5; }
+.refresh-toggle {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+  margin: 10px 0 2px;
+  cursor: pointer;
+  font-weight: 400;
+}
+.refresh-toggle input[type="checkbox"] {
+  width: 15px;
+  height: 15px;
+  min-width: 15px;
+  margin: 2px 0 0;
+  padding: 0;
+  flex: none;
+  accent-color: var(--accent, #f54e00);
+}
+.refresh-toggle span { font-size: 12px; line-height: 1.5; color: var(--ink); }
 .refresh-toggle em { display: block; font-style: normal; color: var(--muted); font-size: 11px; }
