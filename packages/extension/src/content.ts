@@ -304,24 +304,41 @@ async function scrollLikeHuman(
   nudges = 3,
 ): Promise<{ host: string; moved: number; bottom: boolean }> {
   const candidates = scrollCandidates();
-  const host = candidates[0];
-  const before = host?.scrollTop ?? 0;
+  // 每个候选滚动前的位置：位移要把 jumpToLastPost 那一下也算进去。
+  const startTops = candidates.map(candidate => candidate.scrollTop);
 
   jumpToLastPost();
   await humanPause(450, 900);
 
-  // 到不了底就自己补到底：有的实现里 scrollIntoView 只把元素带到视口内。
-  for (let nudge = 0; nudge < nudges; nudge += 1) {
-    if (!host || atBottom(host)) break;
-    const step = Math.max(host.clientHeight, 400);
-    const previous = host.scrollTop;
-    host.scrollTop = previous + step;
-    if (host.scrollTop === previous) break;
-    await humanPause(450, 1_100);
+  /*
+   * **逐个候选试，直到真有一个动了。**
+   *
+   * 原先只认 `candidates[0]`，而 `body` 常常满足「scrollHeight > clientHeight」
+   * 却根本推不动（真正的滚动容器在内层）。于是每一轮都是
+   * 「目标 body，位移 0px，推不动任何元素」，翻页彻底停摆——实测踩到过：
+   * 采完一屏就收工，后面的帖子永远够不着。
+   * scrollCandidates 本来就按可靠性收集了一串候选，这里必须把它们用上。
+   */
+  const tried: string[] = [];
+  for (const [index, host] of candidates.entries()) {
+    // 到不了底就自己补到底：有的实现里 scrollIntoView 只把元素带到视口内。
+    for (let nudge = 0; nudge < nudges; nudge += 1) {
+      if (atBottom(host)) break;
+      const previous = host.scrollTop;
+      host.scrollTop = previous + Math.max(host.clientHeight, 400);
+      if (host.scrollTop === previous) break;
+      await humanPause(450, 1_100);
+    }
+    const moved = host.scrollTop - (startTops[index] ?? 0);
+    // 位移为 0 但已经到底也算数：scrollToFrontier 那一下可能已经把它带到了末尾。
+    if (moved !== 0 || atBottom(host)) {
+      return { host: describe(host), moved, bottom: atBottom(host) };
+    }
+    tried.push(describe(host));
   }
 
-  const moved = host ? host.scrollTop - before : 0;
-  return { host: describe(host), moved, bottom: Boolean(host && atBottom(host)) };
+  // 一个都推不动：把试过哪些如实带回去，否则只剩「推不动任何元素」六个字没法排查。
+  return { host: tried.length > 0 ? `试过 ${tried.join('、')}` : '(无候选)', moved: 0, bottom: false };
 }
 
 /**

@@ -85,6 +85,13 @@ beforeEach(async () => {
 afterEach(() => {
   vi.useRealTimers();
   vi.unstubAllGlobals();
+  // document.body 这个元素**跨用例复用**（beforeEach 只换 innerHTML）。
+  // 谁给它打了滚动相关的桩，不还原就会泄漏到后面的用例里，把别人的候选顺序搅乱。
+  for (const property of ['scrollHeight', 'clientHeight', 'scrollTop']) {
+    if (Object.getOwnPropertyDescriptor(document.body, property)) {
+      delete (document.body as unknown as Record<string, unknown>)[property];
+    }
+  }
 });
 
 /**
@@ -194,6 +201,33 @@ describe('content script list collection', () => {
     // 用户正在肉眼核对采到的内容对不对，把帖子藏起来是硬伤。
     expect(marked).toHaveLength(3);
     expect(marked.every(node => node.style.display === '')).toBe(true);
+  });
+
+  it('第一个候选推不动时换下一个，不是直接放弃翻页', async () => {
+    // 实测症状：「目标 body，位移 0px，未到底，推不动任何元素，停止翻页」——
+    // body 满足 scrollHeight > clientHeight 所以进了候选，却根本推不动
+    //（真正的滚动容器在内层）。原先只认 candidates[0]，于是翻页彻底停摆。
+    const flow = document.querySelector('.main-content-container') as HTMLElement;
+    // body 是个「看着能滚、其实推不动」的假候选。
+    Object.defineProperty(document.body, 'scrollHeight', { value: 9000, configurable: true });
+    Object.defineProperty(document.body, 'clientHeight', { value: 800, configurable: true });
+    Object.defineProperty(document.body, 'scrollTop', {
+      get: () => 0, set: () => undefined, configurable: true,
+    });
+    // 内层容器才是真的滚动容器。
+    let inner = 0;
+    Object.defineProperty(flow, 'scrollHeight', { value: 9000, configurable: true });
+    Object.defineProperty(flow, 'clientHeight', { value: 800, configurable: true });
+    Object.defineProperty(flow, 'scrollTop', {
+      get: () => inner, set: (value: number) => { inner = value; }, configurable: true,
+    });
+
+    await ask<ListResponse>({ type: 'extract.list' });
+    vi.useFakeTimers();
+    const advance = await settle(ask<AdvanceResponse>({ type: 'list.advance' }));
+
+    expect(advance.advance.scroll).not.toContain('推不动任何元素');
+    expect(inner).toBeGreaterThan(0);
   });
 
   it('reports newly loaded posts so the batch keeps going', async () => {
