@@ -499,3 +499,15 @@ describe('远端领先时自己 rebase 一次再推', () => {
     expect(calls.some(args => args[0] === 'pull')).toBe(false);
   });
 });
+
+describe('仓库卡在没解决完的合并里', () => {
+  it('说清是合并没收尾，而不是甩一句 unmerged files', () => {
+    // 用户那边真出过：pull 冲突没处理完就接着采集，此后每次同步的 commit 都失败。
+    const message = explainGitFailure(
+      'git commit',
+      'error: Committing is not possible because you have unmerged files.',
+    );
+    expect(message).toContain('没解决完的合并');
+    expect(message).toContain('git merge --abort');
+  });
+});

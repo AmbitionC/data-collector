@@ -336,6 +336,13 @@ export function explainGitFailure(step: string, stderr: string): string {
       + '你终端里的 git 是好的，这是服务这边的环境问题：'
       + '重启本机服务（`npm run collector -- bridge install`）后会重新去 Homebrew 等位置找 git。';
   }
+  // 仓库卡在没解决完的 merge / rebase 里：这时 git commit 一定失败，
+  // 而且往后每一次同步都会失败。原样甩「unmerged files」没人看得懂该干什么。
+  if (/unmerged files|MERGE_HEAD|you have not concluded your merge|unresolved conflict/i.test(raw)) {
+    return `${step} 失败：目标仓库还停在一次没解决完的合并里，这时任何提交都做不了。`
+      + '先去仓库里把冲突处理掉（`git status` 看还剩哪些，处理完 `git add` + `git commit`；'
+      + '或者 `git merge --abort` 放弃这次合并），再回来点一次同步。';
+  }
   if (/not a git repository/i.test(raw)) {
     return `${step} 失败：目标目录不是一个 git 仓库。请确认同步去向指向的是克隆下来的仓库。`;
   }
