@@ -95,6 +95,11 @@ const runner = new JobRunner({
   reportBatch: progress => { void chrome.storage.local.set({ batch: progress }); },
   // 逐条结果单独存：明细列表要用，也方便出问题时直接看每条的判定。
   reportItems: items => { void chrome.storage.local.set({ batchItems: items }); },
+  // 本机库是唯一的去重依据：采之前先问一遍库里有什么，已有的不再重复采。
+  knownUrls: async () => {
+    const entries = (await connection.library()) as { url?: unknown }[];
+    return new Set(entries.map(entry => String(entry.url ?? '')).filter(Boolean));
+  },
 });
 connection.onCollect((requestId, url) => runner.runRemoteJob(requestId, url));
 

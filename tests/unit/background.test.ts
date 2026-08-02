@@ -304,7 +304,9 @@ describe('extension job runner', () => {
 });
 
 describe('list page batch capture', () => {
-  function listRunner(): { tabs: InMemoryTabs; bridge: InMemoryBridge; runner: JobRunner; progress: BatchProgress[] } {
+  function listRunner(
+    extra: { knownUrls?: () => Promise<ReadonlySet<string>> } = {},
+  ): { tabs: InMemoryTabs; bridge: InMemoryBridge; runner: JobRunner; progress: BatchProgress[] } {
     const tabs = new InMemoryTabs();
     tabs.activeTab = { id: 7, url: LIST_URL, status: 'complete' };
     const bridge = new InMemoryBridge();
@@ -315,9 +317,50 @@ describe('list page batch capture', () => {
       waitForTabComplete: async () => undefined,
       delay: async () => undefined,
       reportBatch: snapshot => progress.push(snapshot),
+      ...extra,
     });
     return { tabs, bridge, runner, progress };
   }
+
+describe('本机库已有的不再重复采', () => {
+  /**
+   * 用户实测：刷新页面 / 重载扩展后再采，整屏旧帖子又采了一遍——
+   * 同一批 topic id 连采四轮，目标条数全被旧内容吃满，永远推进不到新帖子。
+   * 页面上的「已处理」标记只活在那一个没刷新过的标签页里，扛不住刷新。
+   */
+  it('库里已有的计入「已跳过」并写明原因，不占目标条数', async () => {
+    const { tabs, bridge, runner } = listRunner({
+      knownUrls: async () =>
+        new Set(['https://wx.zsxq.com/group/48844584441158/topic/111']),
+    });
+    tabs.listRounds = [
+      { documents: [topic('111'), topic('222')], skipped: 0, total: 2 },
+    ];
+    tabs.advances = [{ collapsed: 2, loaded: 0 }];
+
+    const summary = await runner.captureList();
+
+    // 只有没入过库的那条真的建了任务。
+    expect(bridge.createdFor).toEqual([
+      'https://wx.zsxq.com/group/48844584441158/topic/222',
+    ]);
+    expect(summary.collected).toBe(1);
+    expect(summary.skipped).toBe(1);
+  });
+
+  it('查库失败时照常采，绝不因此把整批拦下', async () => {
+    const { bridge, tabs, runner } = listRunner({
+      knownUrls: async () => { throw new Error('本机服务无响应'); },
+    });
+    tabs.listRounds = [{ documents: [topic('111')], skipped: 0, total: 1 }];
+    tabs.advances = [{ collapsed: 1, loaded: 0 }];
+
+    const summary = await runner.captureList();
+
+    expect(summary.collected).toBe(1);
+    expect(bridge.createdFor).toHaveLength(1);
+  });
+});
 
   it('creates one job per post, each keyed by its own topic URL', async () => {
     const { tabs, bridge, runner } = listRunner();

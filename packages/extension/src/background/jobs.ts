@@ -135,6 +135,17 @@ export interface JobRunnerOptions {
   reportBatch?: (progress: BatchProgress) => void;
   /** 逐条结果回调（写入 storage 供侧栏的「本轮明细」列表使用）。 */
   reportItems?: (items: BatchItem[]) => void;
+  /**
+   * 本机库里已有内容的规范地址。
+   *
+   * **本机库是唯一的去重依据**，可采集端原先根本不知道库里有什么——
+   * 页面上的「已处理」标记只活在那一个没刷新过的标签页里，刷新一次、
+   * 扩展重载一次就清零，于是整屏又从头采一遍（实测：同一批 topic id 采了四轮）。
+   * 目标条数也因此被旧内容吃满，永远推进不到新帖子。
+   *
+   * 取不到时按空集合处理：宁可重复采一遍，也不能因为查不到库就不采。
+   */
+  knownUrls?: () => Promise<ReadonlySet<string>>;
 }
 
 /** 内容脚本在标签页 complete 后可能仍未注册消息监听，这类错误可短暂重试。 */
@@ -435,6 +446,17 @@ export class JobRunner {
     };
     // 同一条在两轮里重复出现（列表刷新、置顶）时不重复建任务。
     const seen = new Set<string>();
+    /*
+     * 本机库里已经有的地址。取一次就够——一轮批量之内库不会被别人改。
+     * 查不到（服务断了、接口变了）一律按空集合处理：宁可重复采一遍，
+     * 也绝不能因为查库失败就把整批拦下。
+     */
+    let known: ReadonlySet<string> = new Set();
+    try {
+      known = (await this.options.knownUrls?.()) ?? new Set();
+    } catch {
+      known = new Set();
+    }
     const items: BatchItem[] = [];
     /**
      * 计数一律从明细里数出来。
@@ -551,6 +573,19 @@ export class JobRunner {
           continue;
         }
         seen.add(document.canonicalUrl);
+        // 本机库里已经有了就跳过，让目标条数只数**新内容**——
+        // 否则刷新一次页面，整屏旧帖子又会把这一批吃满。
+        if (known.has(document.canonicalUrl)) {
+          items.push({
+            key: item.key,
+            title: item.title,
+            status: 'skipped',
+            reason: '已在本机库，未重复采集',
+            url: document.canonicalUrl,
+          });
+          tally();
+          continue;
+        }
         const saved = await this.saveCollected(document, overrides);
         if (saved === 'ok') {
           items.push({ key: item.key, title: item.title, status: 'saved', url: document.canonicalUrl });
