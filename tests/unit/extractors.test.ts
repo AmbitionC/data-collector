@@ -469,3 +469,51 @@ describe('工单 D2：长文正文在 articles.zsxq.com 上', () => {
     expect((thrown as ExtractionError).code).toBe('CONTENT_EMPTY');
   });
 });
+
+describe('单条采集也要给 truncated / questioner（两条路径必须一致）', () => {
+  const DETAIL = 'https://wx.zsxq.com/group/48844584441158/topic/55522452154844124';
+
+  it('正文里还挂着「展开全部」就标 truncated', () => {
+    // 实测：按 URL 重采出来的 48 条 truncated 全是 0——我只把它加在了批量路径上，
+    // 归档侧只能退回去靠字数猜（误报率 78%）。
+    const doc = new JSDOM(`
+      <div class="topic-container">
+        <div class="author"><div class="info"><div class="role owner">陈老师</div></div></div>
+        <div class="talk-content-container"><div class="content">
+          导语一段，正文主体在长文里。<a href="https://articles.zsxq.com/id_x.html">全文</a>
+          <p>展开全部</p>
+        </div></div>
+      </div>`, { url: DETAIL }).window.document;
+
+    expect(extractDocument(doc, DETAIL, NOW).truncated).toBe(true);
+  });
+
+  it('问答帖带上提问者', () => {
+    const doc = new JSDOM(`
+      <div class="topic-container">
+        <div class="author"><div class="info"><div class="role owner">陈老师</div></div></div>
+        <div class="q-content-container"><div class="content">
+          <div class="question-owner"><span>City 躺平大叔</span> 提问：</div>
+          陈老师好，我就是你公众号里提到的牛市亏大钱的人，想请教几个问题。
+        </div></div>
+      </div>`, { url: DETAIL }).window.document;
+
+    const result = extractDocument(doc, DETAIL, NOW);
+    expect(result.questioner).toBe('City 躺平大叔');
+    expect(result.author).toBe('陈老师');
+  });
+
+  it('正常帖子两个字段都不带', () => {
+    const doc = new JSDOM(`
+      <div class="topic-container">
+        <div class="author"><div class="info"><div class="role owner">陈老师</div></div></div>
+        <div class="talk-content-container"><div class="content">
+          ${'这是一篇完整的帖子，正文就在这里，没有折叠也没有外链。'.repeat(4)}
+        </div></div>
+      </div>`, { url: DETAIL }).window.document;
+
+    const result = extractDocument(doc, DETAIL, NOW);
+    expect(result.truncated).toBeUndefined();
+    expect(result.questioner).toBeUndefined();
+  });
+});

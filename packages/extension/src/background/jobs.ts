@@ -254,8 +254,13 @@ export class JobRunner {
        * 返回的是和成功那些**一模一样的 1437 字节壳**：不是页面形态不同、更不是权限，
        * 就是那一刻还没渲染完。它们在信息流里相邻，所以看着像「成对失败」。
        */
-      for (let attempt = 0; attempt < 4; attempt += 1) {
-        await this.wait(900 + attempt * 800);
+      /*
+       * 等的总时长要够。实测按 URL 重采 42 条，仍有 9 条（21%）没能拿到长文——
+       * 时间点散落在整轮里，不是集中在某一刻，是典型的「渲染没赶上」而非页面形态问题。
+       * 原先 4 轮共约 8.4 秒偏紧（同一时间还有别的标签页在churn），放宽到 6 轮约 24 秒。
+       */
+      for (let attempt = 0; attempt < 6; attempt += 1) {
+        await this.wait(1_000 + attempt * 1_200);
         const response = await this.ask(tabId, { type: 'extract.document' });
         if (!response.ok) continue;
         const article = payloadOf(response, 'document');
@@ -270,7 +275,8 @@ export class JobRunner {
           truncated: false,
         };
       }
-      return document;
+      // 试满还是没拿到长文：如实标成截断，归档侧才知道这条不完整。
+      return { ...document, truncated: true };
     } catch {
       return document;
     } finally {

@@ -545,6 +545,10 @@ export function extractZsxq(document: Document, url: URL, now: Clock) {
   const time = firstWithin(container, TIME_SELECTORS);
   const author = elementText(firstWithin(container, AUTHOR_SELECTORS));
   const publishedAt = parsePublishedAt(elementText(time), time?.getAttribute('datetime'));
+  // 截断标志和提问者：**单条采集这条路原先没设**，于是按 URL 重采出来的 48 条
+  // 一个 truncated 都没有，归档侧只能回去靠字数猜。两条路径必须给同样的字段。
+  const truncated = /展开全部|展开全文|阅读全文/.test(text);
+  const questioner = elementText(container.querySelector('.question-owner span'));
   return buildDocument({
     source: 'zsxq',
     kind: 'post',
@@ -554,5 +558,7 @@ export function extractZsxq(document: Document, url: URL, now: Clock) {
     now,
     ...(author ? { author } : {}),
     ...(publishedAt ? { publishedAt } : {}),
+    ...(truncated ? { truncated: true } : {}),
+    ...(questioner ? { questioner } : {}),
   });
 }
