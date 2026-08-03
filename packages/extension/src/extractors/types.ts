@@ -27,5 +27,9 @@ export interface BuildDocumentInput {
   now: Clock;
   author?: string;
   publishedAt?: string;
+  /** 正文确定是截断的（页面还挂着「展开全部」而全文没补上）。 */
+  truncated?: boolean;
+  /** 问答帖的提问者（author 是归属博主，两者不是一回事）。 */
+  questioner?: string;
   sourceMetadata?: CollectedDocument['sourceMetadata'];
 }

@@ -228,19 +228,31 @@ export class JobRunner {
       if (tab.id === undefined) return document;
       tabId = tab.id;
       await this.options.waitForTabComplete(tabId, 30_000);
-      // 单页应用要等接口回来才渲染，给它一点时间再读。
-      await this.wait(1_200);
-      const response = await this.ask(tabId, { type: 'extract.document' });
-      if (!response.ok) return document;
-      const article = payloadOf(response, 'document');
-      if (article.text.length <= document.text.length) return document;
-      return {
-        ...document,
-        // 导语留着（有时交代了背景），长文正文接在后面。
-        html: `${document.html}\n<hr />\n${article.html}`,
-        text: `${document.text}\n\n${article.text}`,
-        images: [...document.images, ...article.images],
-      };
+      /*
+       * **轮询重试，别只等一次。**
+       *
+       * 长文页是单页应用，正文要等接口回来才渲染。原先固定等 1200ms 读一次，
+       * 没渲染完就放弃——实测 121 条里有 6 条这么丢了。而拿那 6 个 URL 手动 curl，
+       * 返回的是和成功那些**一模一样的 1437 字节壳**：不是页面形态不同、更不是权限，
+       * 就是那一刻还没渲染完。它们在信息流里相邻，所以看着像「成对失败」。
+       */
+      for (let attempt = 0; attempt < 4; attempt += 1) {
+        await this.wait(900 + attempt * 800);
+        const response = await this.ask(tabId, { type: 'extract.document' });
+        if (!response.ok) continue;
+        const article = payloadOf(response, 'document');
+        if (article.text.length <= document.text.length) continue;
+        return {
+          ...document,
+          // 导语留着（有时交代了背景），长文正文接在后面。
+          html: `${document.html}\n<hr />\n${article.html}`,
+          text: `${document.text}\n\n${article.text}`,
+          images: [...document.images, ...article.images],
+          // 全文补上了，这条就不再是截断的。
+          truncated: false,
+        };
+      }
+      return document;
     } catch {
       return document;
     } finally {
@@ -275,8 +287,9 @@ export class JobRunner {
         });
         return;
       }
+      // 单条采集同样要补长文：按 URL 定向重采（收件箱那 48 条）走的就是这条路。
       this.options.bridge.send('job.result', requestId, {
-        document: payloadOf(response, 'document'),
+        document: await this.withLinkedArticle(payloadOf(response, 'document')),
       });
     } catch (error) {
       this.options.bridge.send('job.error', requestId, {

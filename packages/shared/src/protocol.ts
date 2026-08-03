@@ -24,6 +24,8 @@ export const collectedDocumentSchema = z.object({
   html: z.string().max(10_000_000),
   text: z.string().max(5_000_000),
   images: z.array(collectedImageSchema).max(30),
+  truncated: z.boolean().optional(),
+  questioner: z.string().trim().max(200).optional(),
   suggestedCategory: z.string().trim().max(100).optional(),
   suggestedTags: z.array(z.string().trim().min(1).max(50)).max(20).optional(),
   userCategory: z.string().trim().max(100).optional(),

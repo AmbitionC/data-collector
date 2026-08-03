@@ -71,6 +71,8 @@ export function buildDocument(input: BuildDocumentInput): CollectedDocument {
     images: normalized.images,
     ...(input.author ? { author: cleanText(input.author) } : {}),
     ...(input.publishedAt ? { publishedAt: input.publishedAt } : {}),
+    ...(input.truncated ? { truncated: true } : {}),
+    ...(input.questioner ? { questioner: cleanText(input.questioner) } : {}),
     ...(input.sourceMetadata ? { sourceMetadata: input.sourceMetadata } : {}),
   };
 }

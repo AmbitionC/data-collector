@@ -511,3 +511,39 @@ describe('仓库卡在没解决完的合并里', () => {
     expect(message).toContain('git merge --abort');
   });
 });
+
+describe('工单 D5/D7：截断标志与提问者要落进 meta', () => {
+  it('truncated / questioner 同时进 meta.json 和 frontmatter', async () => {
+    // 归档侧的验收标准明确要求这两个字段：
+    // 字数启发式误报率 78%，21 条问答帖的提问人全被抹掉。
+    const repo = await temporaryDirectory();
+    const sink = new RepoInboxSink({
+      id: 'lt', repoPath: repo, commit: false,
+      fetch: pngFetcher(), resolveAddresses: PUBLIC_DNS,
+    });
+
+    const result = await sink.save(organize(nowcoderDoc({
+      images: [],
+      truncated: true,
+      questioner: 'City 躺平大叔',
+    })));
+
+    const meta = JSON.parse(await readFile(join(result.outputRef, 'meta.json'), 'utf8'));
+    expect(meta).toMatchObject({ truncated: true, questioner: 'City 躺平大叔' });
+    const original = await readFile(join(result.outputRef, 'original.md'), 'utf8');
+    expect(original).toContain('questioner: "City 躺平大叔"');
+    expect(original).toContain('truncated: true');
+  });
+
+  it('正常条目不带这两个字段，不给下游添噪声', async () => {
+    const repo = await temporaryDirectory();
+    const sink = new RepoInboxSink({
+      id: 'lt', repoPath: repo, commit: false,
+      fetch: pngFetcher(), resolveAddresses: PUBLIC_DNS,
+    });
+    const result = await sink.save(organize(nowcoderDoc({ images: [] })));
+    const meta = JSON.parse(await readFile(join(result.outputRef, 'meta.json'), 'utf8'));
+    expect(meta.truncated).toBeUndefined();
+    expect(meta.questioner).toBeUndefined();
+  });
+});

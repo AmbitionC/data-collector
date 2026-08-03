@@ -415,6 +415,11 @@ export function extractZsxqList(
       content,
       topicId ? topics?.fullTextOf(topicId) : undefined,
     );
+    // 正文里还挂着「展开全部」= 这一条**确定是截断的**。如实标出来，
+    // 让归档侧读字段跳过，而不是靠字数猜（实测字数启发式误报率 78%）。
+    const truncated = /展开全部|展开全文|阅读全文/.test(elementText(archived));
+    // 问答帖的提问者：`<div class="question-owner"><span>依依</span> 提问：</div>`
+    const questioner = elementText(container.querySelector('.question-owner span'));
     entries.push({
       container,
       key,
@@ -428,6 +433,8 @@ export function extractZsxqList(
         now,
         ...(author ? { author } : {}),
         ...(publishedAt ? { publishedAt } : {}),
+        ...(truncated ? { truncated: true } : {}),
+        ...(questioner ? { questioner } : {}),
       }),
     });
   }

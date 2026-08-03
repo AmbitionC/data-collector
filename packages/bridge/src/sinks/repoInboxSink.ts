@@ -163,6 +163,8 @@ export class RepoInboxSink implements ContentSink {
       '---',
       `title: ${yamlString(document.title)}`,
       ...(document.author ? [`author: ${yamlString(document.author)}`] : []),
+      ...(document.questioner ? [`questioner: ${yamlString(document.questioner)}`] : []),
+      ...(document.truncated ? ['truncated: true'] : []),
       `date: ${date}`,
       `date_source: ${dateKnown ? 'published' : 'collected'}`,
       `source: ${yamlString(descriptorFor(document.source).label)}`,
@@ -182,6 +184,10 @@ export class RepoInboxSink implements ContentSink {
       kind: document.kind,
       title: document.title,
       ...(document.author ? { author: document.author } : {}),
+      // 归档侧靠字段判断截断，绝不能靠字数猜：实测 <400 字的 27 条里只有 6 条是真截断。
+      ...(document.truncated ? { truncated: true } : {}),
+      // 提问者和归属博主是两回事，不留下来就被抹掉了（实测 21 条问答帖全丢）。
+      ...(document.questioner ? { questioner: document.questioner } : {}),
       url: document.canonicalUrl,
       ...(document.publishedAt ? { publishedAt: document.publishedAt } : {}),
       collectedAt: document.collectedAt,
