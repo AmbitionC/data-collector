@@ -322,6 +322,62 @@ describe('list page batch capture', () => {
     return { tabs, bridge, runner, progress };
   }
 
+  describe('单页应用还没渲染完时要等，不能一次 CONTENT_EMPTY 就放弃', () => {
+    /**
+     * 实测：按 URL 单条采集第一条就失败在这里。知识星球整站是 SPA，
+     * 标签页 complete 只代表 HTML 到了，正文还要等接口回来。
+     * 批量采集踩不到（那时页面早渲染好了），单条采集必然 100% 撞上。
+     */
+    function renderAfter(failures: number) {
+      const { tabs, bridge, runner } = listRunner();
+      let asked = 0;
+      tabs.sendMessage = async (_id, message) => {
+        if ((message as { type?: string }).type !== 'extract.document') {
+          return { ok: false as const, error: { code: 'X', message: 'x' } };
+        }
+        asked += 1;
+        if (asked <= failures) {
+          return { ok: false as const, error: { code: 'CONTENT_EMPTY', message: '未读到帖子正文' } };
+        }
+        return {
+          ok: true as const,
+          document: {
+            schemaVersion: 1, source: 'zsxq', kind: 'post',
+            url: 'https://wx.zsxq.com/group/1/topic/2',
+            canonicalUrl: 'https://wx.zsxq.com/group/1/topic/2',
+            title: '渲染完了', collectedAt: '2026-08-03T00:00:00.000Z',
+            html: '<p>正文</p>', text: '正文', images: [],
+          },
+        };
+      };
+      return { tabs, bridge, runner, attempts: () => asked };
+    }
+
+    it('前几次没渲染出来就等一等，渲染好了照常入库', async () => {
+      const { bridge, runner, attempts } = renderAfter(3);
+
+      await runner.runRemoteJob('req-1', 'https://wx.zsxq.com/group/1/topic/2');
+
+      expect(attempts()).toBe(4);
+      expect(bridge.sent.some(item => item.type === 'job.result')).toBe(true);
+    });
+
+    it('要登录这种再等也没用的错误，一次就返回', async () => {
+      const { tabs, bridge, runner } = listRunner();
+      let asked = 0;
+      tabs.sendMessage = async () => {
+        asked += 1;
+        return { ok: false as const, error: { code: 'AUTH_REQUIRED', message: '请先登录知识星球' } };
+      };
+
+      await runner.runRemoteJob('req-2', 'https://wx.zsxq.com/group/1/topic/2');
+
+      expect(asked).toBe(1);
+      const error = bridge.sent.find(item => item.type === 'job.error');
+      expect((error?.payload as { code?: string })?.code).toBe('AUTH_REQUIRED');
+    });
+  });
+
   describe('工单 D2：帖子只是导语时，把长文正文取回来接上', () => {
     /**
      * 星球长文帖在信息流里只有一段引子加一个 articles.zsxq.com 链接——

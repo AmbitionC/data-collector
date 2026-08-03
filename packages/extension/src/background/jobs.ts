@@ -200,14 +200,32 @@ export class JobRunner {
     throw lastError;
   }
 
-  private extractWithRetry(
+  /**
+   * 取当前页的正文；**渲染没跟上时要等**。
+   *
+   * 知识星球整站是单页应用：标签页 status 变成 complete 只代表 HTML 到了，
+   * 正文还要等接口回来才渲染。原先一拿到 CONTENT_EMPTY 就当失败返回——
+   * 批量采集不会踩到（那时页面早渲染好了），但**按 URL 单条采集必然 100% 撞上**，
+   * 实测第一条就是这么失败的。
+   *
+   * 只重试 CONTENT_EMPTY：AUTH_REQUIRED（要登录）和 UNSUPPORTED_LAYOUT（页面形态不对）
+   * 再等也不会变，重试只是白白拖时间。
+   */
+  private async extractWithRetry(
     tabId: number,
     overrides?: CaptureOverrides,
   ): Promise<ExtractionResponse> {
-    return this.ask(tabId, {
-      type: 'extract.document',
-      ...(overrides ? { overrides } : {}),
-    });
+    let last: ExtractionResponse | undefined;
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      if (attempt > 0) await this.wait(600 + attempt * 700);
+      const response = await this.ask(tabId, {
+        type: 'extract.document',
+        ...(overrides ? { overrides } : {}),
+      });
+      if (response.ok || response.error.code !== 'CONTENT_EMPTY') return response;
+      last = response;
+    }
+    return last as ExtractionResponse;
   }
 
   /**
