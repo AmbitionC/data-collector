@@ -153,10 +153,17 @@ afterEach(async () => {
 describe('local Bridge', () => {
   it('authenticates, dispatches, saves, and ignores a duplicate result', async () => {
     const root = await temporaryDirectory();
+    const configDir = join(root, '.config');
+    await mkdir(configDir, { recursive: true });
+    await writeFile(
+      join(configDir, 'sinks.json'),
+      `${JSON.stringify({ sinks: { markdown: { type: 'markdown' } }, routes: {} }, null, 2)}\n`,
+      'utf8',
+    );
     const bridge = await startBridge({
       port: 0,
       libraryRoot: root,
-      configDir: join(root, '.config'),
+      configDir,
       fetch: async () => new Response(null, { status: 404 }),
     });
     handles.push(bridge);
