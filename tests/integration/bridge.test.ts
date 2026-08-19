@@ -569,3 +569,109 @@ describe('local Bridge', () => {
     expect(second.readyState).toBe(WebSocket.OPEN);
   });
 });
+
+/**
+ * 「插件是不是最新的」只有一个可靠依据：浏览器真正加载的那份产物里的构建标记。
+ * 拿 git HEAD 去比是不行的——构建失败时 HEAD 已经往前走了而产物没动，
+ * 插件会永远显示「有新版」，自动重载还会因此反复重启。
+ */
+describe('health 里的产物构建标记', () => {
+  async function bridgeWithArtifacts(buildId?: string): Promise<BridgeHandle> {
+    const root = await temporaryDirectory();
+    if (buildId !== undefined) {
+      await mkdir(join(root, 'artifacts', 'data-collector-extension'), { recursive: true });
+      await writeFile(
+        join(root, 'artifacts', 'data-collector-extension', 'build-id.txt'),
+        `${buildId}\n`,
+        'utf8',
+      );
+    }
+    const bridge = await startBridge({
+      port: 0,
+      libraryRoot: join(root, 'library'),
+      configDir: join(root, '.config'),
+      repoRoot: root,
+      // 别在测试里真去拉代码 / 真去构建。
+      runUpdate: async () => ({
+        changed: false,
+        commit: 'abc1234',
+        message: '已是最新。',
+        checkedAt: '2026-08-19T00:00:00.000Z',
+      }),
+    });
+    handles.push(bridge);
+    return bridge;
+  }
+
+  it('把磁盘上那份产物的构建标记原样报出来', async () => {
+    const bridge = await bridgeWithArtifacts('v0.4.6 · 9f3c210');
+    const health = await requestJson<{ buildId?: string }>(bridge.url, '/health');
+    expect(health.body.buildId).toBe('v0.4.6 · 9f3c210');
+  });
+
+  it('还没打包过就不报，绝不编一个', async () => {
+    // 编一个就会让扩展以为「有新版」，自动重载一次又一次，永远对不上。
+    const bridge = await bridgeWithArtifacts();
+    const health = await requestJson<{ buildId?: string }>(bridge.url, '/health');
+    expect(health.body.buildId).toBeUndefined();
+  });
+});
+
+/**
+ * 服务自己也得重启一次，拉下来的服务端代码才作数——进程跑的是内存里那份旧的。
+ * 登录项会立刻把它拉起来，所以「退出」就等于「重启」。
+ */
+describe('自更新后的重启时机', () => {
+  async function bridgeWithUpdate(
+    exit: () => void,
+    outcome: () => { changed: boolean; buildFailed?: boolean },
+  ): Promise<BridgeHandle> {
+    const root = await temporaryDirectory();
+    const bridge = await startBridge({
+      port: 0,
+      libraryRoot: join(root, 'library'),
+      configDir: join(root, '.config'),
+      repoRoot: root,
+      updateIntervalMs: 20,
+      exit,
+      runUpdate: async () => ({
+        commit: 'abc1234',
+        message: '已更新并完成构建。',
+        checkedAt: '2026-08-19T00:00:00.000Z',
+        ...outcome(),
+      }),
+    });
+    handles.push(bridge);
+    return bridge;
+  }
+
+  it('没人连着、也没任务在跑时，构建完就重启', async () => {
+    const exit = vi.fn();
+    await bridgeWithUpdate(exit, () => ({ changed: true }));
+    await vi.waitFor(() => expect(exit).toHaveBeenCalled());
+  });
+
+  it('构建失败时不重启——产物还是旧的，换一次进程毫无意义', async () => {
+    const exit = vi.fn();
+    await bridgeWithUpdate(exit, () => ({ changed: true, buildFailed: true }));
+    await new Promise(resolve => setTimeout(resolve, 120));
+    expect(exit).not.toHaveBeenCalled();
+  });
+
+  it('扩展连着时绝不重启，等它断开再说', async () => {
+    // 采集途中断掉 WebSocket，正在跑的那一批当场失败——绝不为了更新打断用户手头的事。
+    const exit = vi.fn();
+    let changed = false;
+    const bridge = await bridgeWithUpdate(exit, () => ({ changed }));
+    const { socket } = await authorize(bridge);
+    socket.send(envelope('extension.hello', 'extension-a', { version: APP_VERSION }));
+    await waitForExtensionReady(bridge);
+
+    changed = true;
+    await new Promise(resolve => setTimeout(resolve, 120));
+    expect(exit).not.toHaveBeenCalled();
+
+    socket.close();
+    await vi.waitFor(() => expect(exit).toHaveBeenCalled());
+  });
+});

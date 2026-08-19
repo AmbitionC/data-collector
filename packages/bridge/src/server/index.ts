@@ -1,7 +1,7 @@
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
-import { realpath } from 'node:fs/promises';
+import { readFile, realpath } from 'node:fs/promises';
 import type { AddressInfo } from 'node:net';
 import { dirname, isAbsolute, relative, resolve } from 'node:path';
 import { z } from 'zod';
@@ -26,11 +26,9 @@ import { organize } from '../organize/index.js';
 import { loadSinksConfig, SinkRouter } from '../sinks/index.js';
 import { attachExtensionWebSocket } from './websocket.js';
 import { bearerToken, HttpError, isLoopback, readJson, sendJson } from './http.js';
-import { execFile } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { join, resolve as resolvePath } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { promisify } from 'node:util';
 import {
   clearLibrary,
   deleteEntries,
@@ -39,7 +37,8 @@ import {
   readEntry,
   syncEntries,
 } from '../library/index.js';
-import { updateWorkspace, type UpdateOutcome } from '../autoUpdate.js';
+import { buildStampCommit, updateWorkspace, type UpdateOutcome } from '../autoUpdate.js';
+import { runTool } from '../git.js';
 
 /** 删除请求：要么给明确的 id 列表，要么显式 all:true —— 不接受隐式全删。 */
 const deleteLibrarySchema = z.object({
@@ -47,7 +46,6 @@ const deleteLibrarySchema = z.object({
   all: z.boolean().optional(),
 });
 
-const execFileAsync = promisify(execFile);
 
 const createJobSchema = z.object({
   id: z.string().min(1).max(100).optional(),
@@ -85,6 +83,8 @@ export interface StartBridgeOptions extends ConfigOverrides {
   updateIntervalMs?: number;
   /** 可注入的更新实现（测试用）。 */
   runUpdate?: (repoRoot: string) => Promise<UpdateOutcome>;
+  /** 更新完成后怎么退出（默认 process.exit(0)，交给登录项拉起来）。测试用。 */
+  exit?: () => void;
 }
 
 export interface BridgeHandle {
@@ -107,11 +107,33 @@ export function discoverRepoRoot(): string | undefined {
   }
 }
 
+/**
+ * 浏览器实际加载的那份产物的构建标记。
+ *
+ * 「插件是不是最新的」只有这一个可靠依据：这个文件里写的，和扩展打包时烙进
+ * `__BUILD_ID__` 的，是同一份内容的两种读法。拿 git HEAD 去比是不行的——
+ * 构建失败时 HEAD 已经动了而产物没动，插件会永远显示「有新版」。
+ */
+async function readBuildId(repoRoot: string): Promise<string | undefined> {
+  try {
+    const text = await readFile(
+      join(repoRoot, 'artifacts', 'data-collector-extension', 'build-id.txt'),
+      'utf8',
+    );
+    return text.trim() || undefined;
+  } catch {
+    // 还没打包过就是没有，如实返回空，别编。
+    return undefined;
+  }
+}
+
 /** 真正去跑 git / npm；只在这里碰子进程，纯逻辑留在 autoUpdate.ts 里好测。 */
 const processUpdateHost = {
-  run: async (command: string, args: readonly string[], cwd: string): Promise<string> => {
-    const { stdout } = await execFileAsync(command, [...args], { cwd, timeout: 10 * 60_000 });
-    return stdout;
+  run: (command: string, args: readonly string[], cwd: string): Promise<string> =>
+    runTool(command, args, cwd),
+  builtCommit: async (repoRoot: string): Promise<string | undefined> => {
+    const buildId = await readBuildId(repoRoot);
+    return buildId ? buildStampCommit(buildId) : undefined;
   },
   now: () => new Date().toISOString(),
 };
@@ -196,30 +218,55 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
   );
   const reveal = options.reveal ?? defaultReveal;
 
+  // 本次进程内的「任务 → 用户选定去向」覆盖表。Bridge 重启后该覆盖丢失，
+  // 任务回退到来源默认路由（安全的降级，不会写到未选定的目标）。
+  const sinkOverrides = new Map<string, string[]>();
+  let extensionSocket: WebSocket | undefined;
+  let extensionReady = false;
+
   // ── 自更新 ───────────────────────────────────────────────────────────
   // 失败一律只记录、不抛：更新是附加能力，绝不能把采集服务带下水。
   let update: UpdateOutcome | undefined;
+  let restartPending = false;
   const repoRoot = options.repoRoot ?? undefined;
   const runUpdate = options.runUpdate ?? (root => updateWorkspace(root, processUpdateHost));
+  const exit = options.exit ?? ((): void => process.exit(0));
+
+  /**
+   * 服务自己也得重启一次，拉下来的服务端代码才作数——进程跑的是内存里那份旧的。
+   * 登录项（launchd 的 KeepAlive / systemd 的 Restart=always）会立刻把它拉起来，
+   * 用户什么都不用做。
+   *
+   * 只在**没有扩展连着、也没有任务在跑**的时候退出。采集途中退出会把 WebSocket 断掉，
+   * 正在跑的那一批当场失败——绝不能为了更新去打断用户手头的事。浏览器一关就是安全窗口。
+   */
+  const maybeRestart = (): void => {
+    if (!restartPending) return;
+    if (extensionReady && extensionSocket?.readyState === WebSocket.OPEN) return;
+    const inFlight = ['queued', 'dispatched', 'collecting'] as const;
+    if (inFlight.some(status => jobs.list(status).length > 0)) return;
+    restartPending = false;
+    console.warn('[update] 新版本已构建，本机服务重启以生效');
+    exit();
+  };
+
   const checkForUpdate = async (): Promise<void> => {
     if (!repoRoot) return;
     try {
       update = await runUpdate(repoRoot);
       if (update.changed) console.warn(`[update] ${update.message}`);
+      // 构建失败时产物还是旧的，重启只会把好好的服务换成同一份代码——没有意义。
+      if (update.changed && !update.buildFailed) restartPending = true;
     } catch (error) {
       console.warn(`[update] 检查更新失败：${error instanceof Error ? error.message : error}`);
     }
+    maybeRestart();
   };
   const updateTimer = repoRoot
     ? setInterval(() => void checkForUpdate(), options.updateIntervalMs ?? 10 * 60_000)
     : undefined;
   updateTimer?.unref?.();
   void checkForUpdate();
-  // 本次进程内的「任务 → 用户选定去向」覆盖表。Bridge 重启后该覆盖丢失，
-  // 任务回退到来源默认路由（安全的降级，不会写到未选定的目标）。
-  const sinkOverrides = new Map<string, string[]>();
-  let extensionSocket: WebSocket | undefined;
-  let extensionReady = false;
 
   const dispatch = async (job: JobRecord): Promise<void> => {
     if (!extensionReady || extensionSocket?.readyState !== WebSocket.OPEN || job.status !== 'queued') return;
@@ -300,6 +347,8 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
     if (!isLoopback(request)) throw new HttpError(403, 'LOOPBACK_ONLY', '只允许本机访问');
     const requestUrl = new URL(request.url ?? '/', 'http://127.0.0.1');
     if (request.method === 'GET' && requestUrl.pathname === '/health') {
+      // 每次都现读：用户自己跑一次 npm run package 也该立刻算数，不用等下一轮自更新。
+      const buildId = repoRoot ? await readBuildId(repoRoot) : undefined;
       return sendJson(response, 200, {
         ok: true,
         version: APP_VERSION,
@@ -308,7 +357,8 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
         routing: router.describeRouting(),
         // 同步去向：采集只落本机库，这里说明「之后会同步到哪」。
         syncTargets: router.describeSyncTargets(),
-        // 扩展据此判断「我加载的是不是当前这一版」，是就不打扰，不是就提示重新加载。
+        // 扩展据此判断「我加载的是不是当前这一版」，是就不打扰，不是就自己重新加载。
+        ...(buildId ? { buildId } : {}),
         ...(update ? { update } : {}),
       });
     }

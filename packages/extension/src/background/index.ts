@@ -1,4 +1,10 @@
 import { descriptorForHost, isListPage, parseSupportedUrl } from '@data-collector/shared';
+import {
+  isCollecting,
+  shouldAutoReload,
+  updateBanner,
+  type UpdateSignal,
+} from './autoReload.js';
 import { injectionPlan } from './injection.js';
 import {
   BridgeConnection,
@@ -113,6 +119,36 @@ async function configureSidePanel(): Promise<void> {
   await sidePanel.setPanelBehavior({ openPanelOnActionClick: true });
 }
 
+/** 侧栏最后一次来问状态的时刻。它开着时会每秒轮询，关掉就停表。 */
+let lastStatusAt = 0;
+/** 超过这个时长没人来问状态，就认为侧栏关着，可以放心重载。 */
+const PANEL_OPEN_MS = 5_000;
+
+/**
+ * 本扩展这份产物的构建标记，打包时由 esbuild 烙进来。
+ * 直接跑源码（测试、调试）时它不存在——那时一律按「不知道」处理，什么都不做。
+ */
+function runningBuildId(): string | undefined {
+  return typeof __BUILD_ID__ === 'string' ? __BUILD_ID__ : undefined;
+}
+
+/** 把散在 storage 里的几项拼成一次判断所需的全部输入。 */
+function updateSignal(values: Record<string, unknown>): UpdateSignal {
+  const update = values.update as { buildFailed?: boolean; message?: string } | undefined;
+  return {
+    builtBuildId: values.buildId as string | undefined,
+    runningBuildId: runningBuildId(),
+    triedBuildId: values.autoReloadTried as string | undefined,
+    buildFailed: update?.buildFailed === true,
+    updateMessage: update?.message,
+    busy: isCollecting({
+      batch: values.batch as { phase?: string; updatedAt?: number } | undefined,
+      lastJobStatus: values.lastJobStatus as string | undefined,
+      now: Date.now(),
+    }),
+  };
+}
+
 async function status() {
   const values = await chrome.storage.local.get([
     'bridgeStatus',
@@ -125,7 +161,8 @@ async function status() {
     'routing',
     'batch',
     'update',
-    'loadedCommit',
+    'buildId',
+    'autoReloadTried',
     'batchItems',
   ]);
   const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
@@ -161,12 +198,10 @@ async function status() {
       supported = false;
     }
   }
-  // 本机服务构建出的版本和「本扩展加载时的版本」不一致 → 磁盘上已有新版，等一次重新加载。
-  const built = (values.update as { commit?: string } | undefined)?.commit;
-  const loaded = values.loadedCommit as string | undefined;
+  const banner = updateBanner(updateSignal(values));
   return {
     bridgeStatus: values.bridgeStatus ?? 'disconnected',
-    ...(built && loaded && built !== loaded ? { updateAvailable: true } : {}),
+    ...(banner.available ? { updateAvailable: true, updateNote: banner.note } : {}),
     lastJobId: values.lastJobId,
     lastJobStatus: values.lastJobStatus,
     lastJobUrl: values.lastJobUrl,
@@ -191,7 +226,11 @@ async function status() {
 chrome.runtime.onMessage.addListener((message: unknown, _sender, sendResponse) => {
   const request = message as { type?: string; overrides?: unknown };
   const action = async () => {
-    if (request.type === 'status.get') return status();
+    if (request.type === 'status.get') {
+      // 侧栏只在开着的时候轮询（关掉会 pagehide 停表），据此判断「现在能不能重载」。
+      lastStatusAt = Date.now();
+      return status();
+    }
     if (request.type === 'capture.current') {
       // 单页任务与批量记录互斥：同一页不可能两者同时进行，清掉另一边免得状态打架。
       await chrome.storage.local.remove(['batch', 'batchItems']);
@@ -326,26 +365,45 @@ chrome.runtime.onMessage.addListener((message: unknown, _sender, sendResponse) =
 });
 
 /**
- * 记下「本次加载对应的代码版本」。onInstalled 在未打包扩展每次重新加载时都会触发，
- * 所以这就是「我现在跑的是哪一版」。之后本机服务构建出新版本，两者不一致即可提示。
+ * 磁盘上有新产物就自己重新加载，用户不必再去 edge://extensions，也不必等侧栏那个横幅。
+ *
+ * 先把「为哪个构建重载过」写进磁盘再动手——`chrome.runtime.reload()` 之后这段代码
+ * 就不再运行了，写在后面等于没写。加载的目录要是根本不是这份产物（用户从别处加载的），
+ * 重载完版本还是没变，这条记录就是唯一能挡住无限重载的东西。
  */
-async function stampLoadedBuild(): Promise<void> {
-  const { update } = await chrome.storage.local.get(['update']);
-  const commit = (update as { commit?: string } | undefined)?.commit;
-  await chrome.storage.local.set({ loadedCommit: commit ?? '' });
+async function maybeAutoReload(): Promise<void> {
+  const values = await chrome.storage.local.get([
+    'update',
+    'buildId',
+    'autoReloadTried',
+    'batch',
+    'lastJobStatus',
+  ]);
+  const signal: UpdateSignal = {
+    ...updateSignal(values),
+    panelOpen: Date.now() - lastStatusAt < PANEL_OPEN_MS,
+  };
+  if (!shouldAutoReload(signal)) return;
+  await chrome.storage.local.set({ autoReloadTried: signal.builtBuildId });
+  chrome.runtime.reload();
 }
 
 chrome.runtime.onInstalled.addListener(() => {
   void chrome.alarms.create('bridge-reconnect', { periodInMinutes: 1 });
   void configureSidePanel();
-  void connection.start().then(stampLoadedBuild);
+  void connection.start();
 });
 chrome.runtime.onStartup.addListener(() => {
   void configureSidePanel();
   void connection.start();
 });
 chrome.alarms.onAlarm.addListener(alarm => {
-  if (alarm.name === 'bridge-reconnect') void connection.start();
+  if (alarm.name !== 'bridge-reconnect') return;
+  // 连不上也要接着看一眼：产物可能是用户自己构建的，不必等服务活过来。
+  void connection
+    .start()
+    .catch(() => undefined)
+    .then(() => maybeAutoReload());
 });
 void configureSidePanel();
 void connection.start();

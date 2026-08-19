@@ -1,4 +1,6 @@
 import { execFile } from 'node:child_process';
+import { existsSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 
 /**
  * 让本机服务能跑起 git。
@@ -46,10 +48,15 @@ export interface GitResolution {
 
 export type GitProbe = (command: string) => Promise<{ ok: boolean; reason: string }>;
 
+/** 候选路径：Windows 上交给系统解析，其余平台一律给绝对路径，不赌 PATH。 */
+export function toolCandidates(tool: string, platform: NodeJS.Platform): string[] {
+  if (platform === 'win32') return [tool];
+  return [...GIT_SEARCH_DIRS.map(dir => `${dir}/${tool}`), tool];
+}
+
 /** 候选 git：Windows 上交给系统解析，其余平台一律给绝对路径，不赌 PATH。 */
 export function gitCandidates(platform: NodeJS.Platform): string[] {
-  if (platform === 'win32') return ['git'];
-  return [...GIT_SEARCH_DIRS.map(dir => `${dir}/git`), 'git'];
+  return toolCandidates('git', platform);
 }
 
 /** 把常见安装目录前置进 PATH。前置而不是追加：登录项自带的 `/usr/bin` 会抢在前面。 */
@@ -86,12 +93,16 @@ export async function resolveGit(
  * 说的是「服务这边找不到」，不是「你的 git 坏了」——把试过的位置和各自的原因摆出来，
  * 用户拿 `which git` 一比就知道该软链到哪。
  */
-export function explainMissingGit(tried: readonly GitAttempt[]): string {
+export function explainMissingTool(tool: string, tried: readonly GitAttempt[]): string {
   const list = tried.map(item => `${item.command}（${item.reason}）`).join('；');
-  return `${MISSING_GIT_PREFIX}。本机服务是以登录项常驻的，拿到的 PATH 比你终端里的窄，`
-    + '你终端里那个 git 未必在它看得见的位置——终端里能用不代表这里能用。'
+  return `本机服务找不到能用的 ${tool}。本机服务是以登录项常驻的，拿到的 PATH 比你终端里的窄，`
+    + `你终端里那个 ${tool} 未必在它看得见的位置——终端里能用不代表这里能用。`
     + `已经试过：${list || '无候选'}。`
-    + '在终端跑 `which git` 看它在哪，软链一份到 /usr/local/bin/git，然后重启本机服务。';
+    + `在终端跑 \`which ${tool}\` 看它在哪，软链一份到 /usr/local/bin/${tool}，然后重启本机服务。`;
+}
+
+export function explainMissingGit(tried: readonly GitAttempt[]): string {
+  return explainMissingTool('git', tried);
 }
 
 function probeVersion(env: NodeJS.ProcessEnv): GitProbe {
@@ -112,17 +123,25 @@ function probeVersion(env: NodeJS.ProcessEnv): GitProbe {
     });
 }
 
-let cached: Promise<GitResolution> | undefined;
+const cached = new Map<string, Promise<GitResolution>>();
 
 /** 解析一次并缓存：服务是常驻的，没必要每条内容都探一遍。 */
+export function resolveToolOnce(tool: string): Promise<GitResolution> {
+  let pending = cached.get(tool);
+  if (!pending) {
+    pending = resolveGit(toolCandidates(tool, process.platform), probeVersion(gitEnvironment()));
+    cached.set(tool, pending);
+  }
+  return pending;
+}
+
 export function resolveGitOnce(): Promise<GitResolution> {
-  cached ??= resolveGit(gitCandidates(process.platform), probeVersion(gitEnvironment()));
-  return cached;
+  return resolveToolOnce('git');
 }
 
 /** 仅供测试：清掉缓存的解析结果。 */
 export function resetGitResolution(): void {
-  cached = undefined;
+  cached.clear();
 }
 
 export interface GitRunResult {
@@ -150,6 +169,81 @@ export async function runGit(repoPath: string, args: string[]): Promise<GitRunRe
               ? 1
               : 0;
         resolveRun({ code, stderr: stderr ?? '', stdout: stdout ?? '' });
+      },
+    );
+  });
+}
+
+export interface ToolCommand {
+  command: string;
+  args: string[];
+}
+
+/**
+ * npm 藏在哪。
+ *
+ * 它比 git 飘得多：nvm / fnm / Volta 把它装在版本目录里，不在任何固定路径上，
+ * 按目录挨个探根本探不着。但**我们自己就是被 node 跑起来的**——顺着
+ * `process.execPath` 找同一套安装里的 `npm-cli.js`，比猜目录可靠得多，
+ * 而且用的必然是同一个 node。找不到再退回按目录探一个 npm 出来。
+ */
+export function npmCliCandidates(execPath: string): string[] {
+  const dir = dirname(execPath);
+  return [
+    // POSIX 前缀布局：<prefix>/bin/node 与 <prefix>/lib/node_modules/npm
+    join(dir, '..', 'lib', 'node_modules', 'npm', 'bin', 'npm-cli.js'),
+    // Windows 安装布局：node.exe 与 node_modules 同级
+    join(dir, 'node_modules', 'npm', 'bin', 'npm-cli.js'),
+  ];
+}
+
+export async function resolveNpm(
+  execPath: string = process.execPath,
+  exists: (path: string) => boolean = existsSync,
+): Promise<ToolCommand> {
+  const cli = npmCliCandidates(execPath).find(exists);
+  if (cli) return { command: execPath, args: [cli] };
+  const { command, tried } = await resolveToolOnce('npm');
+  if (!command) throw new Error(explainMissingTool('npm', tried));
+  return { command, args: [] };
+}
+
+async function resolveNamed(tool: string): Promise<ToolCommand> {
+  const { command, tried } = await resolveToolOnce(tool);
+  if (!command) throw new Error(explainMissingTool(tool, tried));
+  return { command, args: [] };
+}
+
+/**
+ * 跑一条外部命令（自更新在用）。和 `runGit` 同一个道理：解析到绝对路径 + 补齐 PATH。
+ *
+ * 之前这里是裸 `execFile('git' | 'npm', …)`，继承的正是登录项那份窄 PATH——
+ * 自更新于是在用户机器上一声不响地失败，只往服务日志里写一行 warn，
+ * 界面上永远显示不出「有新版」。
+ */
+export async function runTool(
+  command: string,
+  args: readonly string[],
+  cwd: string,
+): Promise<string> {
+  const resolved = command === 'npm' ? await resolveNpm() : await resolveNamed(command);
+  return new Promise((resolveRun, reject) => {
+    execFile(
+      resolved.command,
+      [...resolved.args, ...args],
+      { cwd, env: gitEnvironment(), timeout: 10 * 60_000, maxBuffer: 8 * 1024 * 1024 },
+      (error, stdout, stderr) => {
+        if (!error) {
+          resolveRun(stdout);
+          return;
+        }
+        // 构建失败时有用的那行经常在 stdout（tsc / vitest 都往那儿写），别只看 stderr。
+        const detail = ((stderr ?? '').trim() || (stdout ?? '').trim())
+          .split('\n')
+          .map(line => line.trim())
+          .filter(Boolean)
+          .pop();
+        reject(new Error(`${command} ${args.join(' ')} 失败：${detail || error.message}`));
       },
     );
   });

@@ -1,4 +1,5 @@
 import { descriptorForHost, sourceLabel } from '@data-collector/shared';
+import { BATCH_STALE_MS } from '../background/autoReload.js';
 import type { BatchItem, BatchPhase } from '../background/jobs.js';
 
 export type { BatchItem, BatchPhase };
@@ -267,6 +268,8 @@ export interface BackgroundStatus {
   bridgeStatus: string;
   /** 本机服务已经拉新并构建出更新的版本，等一次重新加载才会生效。 */
   updateAvailable?: boolean;
+  /** 横幅上具体说什么：构建失败、自动重载没生效，都要如实说出来。 */
+  updateNote?: string;
   lastJobStatus?: string;
   lastJobUrl?: string;
   lastJobError?: string;
@@ -288,9 +291,6 @@ export interface BackgroundStatus {
     syncTarget?: string;
   };
 }
-
-/** Service Worker 被回收时进度会停更；超过这个时长仍标 running 视为已中断。 */
-const BATCH_STALE_MS = 90_000;
 
 export function sidePanelStateFromStatus(
   status: BackgroundStatus,
@@ -543,12 +543,16 @@ function renderBatch(
  */
 export function renderUpdateBanner(
   document: Document,
-  available: boolean,
+  update: { available: boolean; note?: string | undefined },
   actions: SidePanelActions,
 ): void {
   const banner = document.querySelector<HTMLElement>('#update-banner');
   if (!banner) return;
-  banner.hidden = !available;
+  banner.hidden = !update.available;
+  // 横幅上的话由后台给：多数时候是「有新版，点一下加载」，但也可能是
+  // 「构建失败，产物还是旧的」或「自动重载没生效」——不能一句话包打天下。
+  const note = banner.querySelector<HTMLElement>('#update-note');
+  if (note && update.note) note.textContent = update.note;
   const button = banner.querySelector<HTMLButtonElement>('#update-reload-button');
   if (button) button.onclick = () => { void actions.reloadExtension(); };
 }

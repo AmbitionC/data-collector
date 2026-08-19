@@ -206,7 +206,11 @@ async function refresh(): Promise<void> {
       : derived;
     if (derived.phase !== 'batch') itemsOpen = false;
     renderSidePanel(document, state, actions);
-    renderUpdateBanner(document, status.updateAvailable === true, actions);
+    renderUpdateBanner(
+      document,
+      { available: status.updateAvailable === true, note: status.updateNote },
+      actions,
+    );
     scheduleRefresh(state.phase === 'items' ? 'batch' : state.phase);
   } catch {
     renderSidePanel(document, { phase: 'bridge_unavailable' }, actions);

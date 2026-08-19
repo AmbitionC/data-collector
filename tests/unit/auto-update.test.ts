@@ -1,13 +1,21 @@
 import { describe, expect, it } from 'vitest';
-import { updateWorkspace, type UpdateHost } from '../../packages/bridge/src/autoUpdate.js';
+import {
+  buildStampCommit,
+  updateWorkspace,
+  type UpdateHost,
+} from '../../packages/bridge/src/autoUpdate.js';
 
 const REPO = '/Users/chenhao/code/data-collector';
 
-function host(responses: Record<string, string | Error>): UpdateHost & { ran: string[] } {
+function host(
+  responses: Record<string, string | Error>,
+  builtCommit?: string,
+): UpdateHost & { ran: string[] } {
   const ran: string[] = [];
   return {
     ran,
     now: () => '2026-07-25T00:00:00.000Z',
+    ...(builtCommit === undefined ? {} : { builtCommit: async () => builtCommit }),
     async run(command, args) {
       const key = `${command} ${args.join(' ')}`;
       ran.push(key);
@@ -83,6 +91,48 @@ describe('bridge auto update', () => {
     expect(target.ran).not.toContain('npm run package');
   });
 
+  it('rebuilds when the artifacts on disk lag behind the code, even with nothing to pull', async () => {
+    /*
+     * 真实场景：某一轮构建失败了。HEAD 已经往前走了，于是下一轮「已是最新」，
+     * 而磁盘上的产物一直停在旧版——插件那边永远等不到新版本，还没人说得出为什么。
+     * 用户自己 pull 了却没构建也是同一回事。
+     */
+    const target = host(
+      {
+        ...AT_OLD,
+        'git fetch origin master': '',
+        'git rev-parse origin/master': 'aaaaaaaaaaaabbbb\n',
+        'npm run package': '/path/to.zip',
+      },
+      '9999999',
+    );
+
+    const outcome = await updateWorkspace(REPO, target);
+
+    expect(target.ran).toContain('npm run package');
+    // 代码没动，所以不该说「已更新到」；说的是产物落后、已重新构建。
+    expect(target.ran).not.toContain('git merge --ff-only origin/master');
+    expect(outcome.message).toContain('产物落后于代码');
+  });
+
+  it('stays quiet when the artifacts already match HEAD', async () => {
+    const target = host(
+      {
+        ...AT_OLD,
+        'git fetch origin master': '',
+        'git rev-parse origin/master': 'aaaaaaaaaaaabbbb\n',
+      },
+      // build-id.txt 里是 7 位短 sha，HEAD 是 12 位——前缀相同就是同一个提交。
+      'aaaaaaa',
+    );
+
+    const outcome = await updateWorkspace(REPO, target);
+
+    expect(outcome.message).toBe('已是最新。');
+    // 每 10 分钟盲目跑一次 npm run package 是不可接受的。
+    expect(target.ran).not.toContain('npm run package');
+  });
+
   it('reports a build failure honestly instead of claiming the update landed', async () => {
     const target = host({
       ...AT_OLD,
@@ -97,6 +147,8 @@ describe('bridge auto update', () => {
     expect(outcome.changed).toBe(true);
     expect(outcome.message).toContain('构建失败');
     expect(outcome.message).toContain('不在允许清单');
+    // 扩展据此把「点了也没用」说清楚：产物根本没更新，重新加载多少次都是旧版。
+    expect(outcome.buildFailed).toBe(true);
   });
 
   it('survives a missing git or a non-repo directory', async () => {
@@ -128,5 +180,21 @@ describe('bridge auto update', () => {
     expect(outcome.changed).toBe(false);
     expect(outcome.message).toContain('分支名不合法');
     expect(target.ran).toEqual([]);
+  });
+});
+
+describe('从构建标记里认出提交号', () => {
+  it('认出正常的构建标记', () => {
+    expect(buildStampCommit('v0.4.6 · 815a450')).toBe('815a450');
+  });
+
+  it('去掉「本地改动」后缀——那不是提交号的一部分', () => {
+    expect(buildStampCommit('v0.4.6 · 815a450+本地改动')).toBe('815a450');
+  });
+
+  it('拿不到 git 信息时返回 undefined，绝不编一个假的', () => {
+    // 编一个就会被当成「产物落后」，于是每 10 分钟重新构建一次，没完没了。
+    expect(buildStampCommit('v0.4.6 · unknown')).toBeUndefined();
+    expect(buildStampCommit('')).toBeUndefined();
   });
 });

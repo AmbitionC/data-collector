@@ -626,16 +626,29 @@ describe('side panel DOM behavior', () => {
   });
 
   it('offers one-click reload when the local service already built a newer version', async () => {
-    renderUpdateBanner(document, true, actions);
+    renderUpdateBanner(document, { available: true, note: '本机服务已构建新版本 v9.9.9 · abc1234，点一下加载。' }, actions);
 
     // 用户只该做这一件事：点一下。不用去 edge://extensions，也不用开终端。
     expect(document.querySelector<HTMLElement>('#update-banner')?.hidden).toBe(false);
+    expect(document.querySelector<HTMLElement>('#update-note')?.textContent).toContain('v9.9.9');
     document.querySelector<HTMLButtonElement>('#update-reload-button')!.click();
     await Promise.resolve();
     expect(actions.reloadExtension).toHaveBeenCalledOnce();
 
-    renderUpdateBanner(document, false, actions);
+    renderUpdateBanner(document, { available: false }, actions);
     expect(document.querySelector<HTMLElement>('#update-banner')?.hidden).toBe(true);
+  });
+
+  it('横幅要能说出「构建失败」这种点了也没用的情况', () => {
+    // 这时产物根本没更新，点多少次「立即加载」都还是旧版。不说清楚，
+    // 用户只会觉得「这插件又不灵了」，而真正该看的是服务日志。
+    renderUpdateBanner(
+      document,
+      { available: true, note: '本机服务拉到了新代码，但构建失败，产物还是旧的：tsc 报错' },
+      actions,
+    );
+    expect(document.querySelector<HTMLElement>('#update-banner')?.hidden).toBe(false);
+    expect(document.querySelector<HTMLElement>('#update-note')?.textContent).toContain('构建失败');
   });
 
   it('全是「已同步·未推送」时，按钮必须能点，而且直说是推送', () => {

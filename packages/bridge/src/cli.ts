@@ -1,13 +1,14 @@
 #!/usr/bin/env node
 import { execFile } from 'node:child_process';
-import { mkdir, rm, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { dirname, join, resolve } from 'node:path';
 import { promisify } from 'node:util';
 import { AccessTokenManager } from './auth.js';
 import { autostartPlan, UnsupportedPlatformError } from './autostart.js';
-import { updateWorkspace } from './autoUpdate.js';
+import { buildStampCommit, updateWorkspace } from './autoUpdate.js';
+import { runTool } from './git.js';
 import { loadConfig, type ConfigOverrides } from './config.js';
 import { discoverRepoRoot, startBridge } from './server/index.js';
 
@@ -241,6 +242,18 @@ async function bridgeStatus(
   return healthy ? 0 : 1;
 }
 
+async function readBuildId(repoRoot: string): Promise<string | undefined> {
+  try {
+    const text = await readFile(
+      join(repoRoot, 'artifacts', 'data-collector-extension', 'build-id.txt'),
+      'utf8',
+    );
+    return text.trim() || undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 async function bridgeUpdate(io: CliIo): Promise<number> {
   const repoRoot = discoverRepoRoot();
   if (!repoRoot) {
@@ -248,9 +261,11 @@ async function bridgeUpdate(io: CliIo): Promise<number> {
     return 1;
   }
   const outcome = await updateWorkspace(repoRoot, {
-    run: async (command, commandArgs, cwd) => {
-      const { stdout } = await execFileAsync(command, [...commandArgs], { cwd });
-      return stdout;
+    // 和常驻服务走同一条路径解析：手动跑一次和它自己跑一次，结果必须一致。
+    run: (command, commandArgs, cwd) => runTool(command, commandArgs, cwd),
+    builtCommit: async root => {
+      const buildId = await readBuildId(root);
+      return buildId ? buildStampCommit(buildId) : undefined;
     },
     now: () => new Date().toISOString(),
   });

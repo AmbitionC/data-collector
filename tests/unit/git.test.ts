@@ -2,9 +2,13 @@ import { describe, expect, it } from 'vitest';
 import {
   MISSING_GIT_PREFIX,
   explainMissingGit,
+  explainMissingTool,
   gitCandidates,
   gitSearchPath,
+  npmCliCandidates,
   resolveGit,
+  resolveNpm,
+  toolCandidates,
   type GitProbe,
 } from '../../packages/bridge/src/git.js';
 import { explainGitFailure } from '../../packages/bridge/src/sinks/repoInboxSink.js';
@@ -125,5 +129,44 @@ describe('把 git 报错翻给用户看', () => {
 
   it('认不出来的报错原样带上，不吞', () => {
     expect(explainGitFailure('git push', 'fatal: 某种没见过的错')).toContain('某种没见过的错');
+  });
+});
+
+/**
+ * 自更新（拉代码 + 重新构建）跑在同一个窄 PATH 里，踩的是同一个坑：
+ * 裸 `git` / 裸 `npm` 在登录项里解析不到，自更新于是一声不响地不工作，
+ * 只往服务日志写一行 warn，插件那边永远等不到「有新版」。
+ */
+describe('自更新要用的外部命令', () => {
+  it('npm 也按绝对路径探，不赌 PATH', () => {
+    const candidates = toolCandidates('npm', 'darwin');
+    expect(candidates[0]).toBe('/opt/homebrew/bin/npm');
+    expect(candidates.indexOf('/opt/homebrew/bin/npm')).toBeLessThan(
+      candidates.indexOf('/usr/bin/npm'),
+    );
+  });
+
+  it('优先顺着跑着我们的那个 node 去找 npm', async () => {
+    // nvm / fnm / Volta 把 npm 装在版本目录里，任何固定目录都探不着；
+    // 但我们自己就是被那个 node 跑起来的，顺着它找必然对得上。
+    const resolved = await resolveNpm('/Users/me/.nvm/versions/node/v22.3.0/bin/node', path =>
+      path.endsWith('npm-cli.js'),
+    );
+    expect(resolved.command).toBe('/Users/me/.nvm/versions/node/v22.3.0/bin/node');
+    expect(resolved.args[0]).toContain('npm-cli.js');
+    expect(resolved.args[0]).toContain('/Users/me/.nvm/versions/node/v22.3.0/');
+  });
+
+  it('两种安装布局都试', () => {
+    const candidates = npmCliCandidates('/usr/local/bin/node');
+    expect(candidates).toHaveLength(2);
+    expect(candidates[0]).toContain('lib/node_modules/npm');
+  });
+
+  it('找不到 npm 时也说的是「服务这边找不到」，不是「你没装 npm」', () => {
+    const message = explainMissingTool('npm', [{ command: '/usr/bin/npm', reason: 'ENOENT' }]);
+    expect(message).toContain('本机服务找不到能用的 npm');
+    expect(message).toContain('which npm');
+    expect(message).not.toMatch(/没装|你的机器/);
   });
 });

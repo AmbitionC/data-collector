@@ -15,12 +15,22 @@ export interface UpdateOutcome {
   commit: string;
   /** 人话说明，直接给用户看。 */
   message: string;
+  /** 代码是新的但构建没成，磁盘上的产物还是旧的——光重新加载插件没用。 */
+  buildFailed?: boolean;
   checkedAt: string;
 }
 
 export interface UpdateHost {
   /** 执行命令；失败要抛错，stdout 原样返回。 */
   run(command: string, args: readonly string[], cwd: string): Promise<string>;
+  /**
+   * 磁盘上那份产物是从哪个提交构建的（读 build-id.txt）。拿不到就返回 undefined。
+   *
+   * 有它才能回答「该不该重新构建」。只比 HEAD 动没动是不够的：构建失败过一次、
+   * 或者用户自己 pull 了却没构建，HEAD 都没再动，产物却一直是旧的——
+   * 「已是最新」于是成了假话，插件那边永远等不到新版本。
+   */
+  builtCommit?(repoRoot: string): Promise<string | undefined>;
   now(): string;
 }
 
@@ -78,29 +88,46 @@ export async function updateWorkspace(
   }
 
   const target = (await git('rev-parse', `origin/${branch}`)).trim().slice(0, SHORT);
-  if (target === before) {
+  /*
+   * 产物落后于代码也要重新构建，不只是「拉到了新提交」才构建。
+   *
+   * 构建失败过一次，HEAD 就不会再动了，下一轮直接答「已是最新」——而磁盘上的产物
+   * 一直是旧的，插件那边永远等不到新版本，还没人说得出为什么。用户自己 pull 了
+   * 却没构建也是同一回事。
+   * 读不出产物是哪一版时按「不落后」处理：宁可不构建，也不能每 10 分钟盲目跑一次
+   * npm run package。
+   */
+  const built = await host.builtCommit?.(repoRoot);
+  const stale = built !== undefined && !before.startsWith(built);
+  if (target === before && !stale) {
     return { changed: false, commit: before, message: '已是最新。', checkedAt: host.now() };
   }
 
-  try {
-    // 只快进：本地领先或分叉时宁可不动，也不要替用户决定怎么合。
-    await git('merge', '--ff-only', `origin/${branch}`);
-  } catch (error) {
-    return {
-      changed: false,
-      commit: before,
-      message: `本地与远端已分叉，无法快进更新：${message(error)}`,
-      checkedAt: host.now(),
-    };
+  const moved = target !== before;
+  if (moved) {
+    try {
+      // 只快进：本地领先或分叉时宁可不动，也不要替用户决定怎么合。
+      await git('merge', '--ff-only', `origin/${branch}`);
+    } catch (error) {
+      return {
+        changed: false,
+        commit: before,
+        message: `本地与远端已分叉，无法快进更新：${message(error)}`,
+        checkedAt: host.now(),
+      };
+    }
   }
 
   try {
     await host.run('npm', ['run', 'package'], repoRoot);
   } catch (error) {
     return {
-      changed: true,
+      changed: moved,
       commit: target,
-      message: `代码已更新到 ${target}，但构建失败：${message(error)}`,
+      buildFailed: true,
+      message: moved
+        ? `代码已更新到 ${target}，但构建失败：${message(error)}`
+        : `产物落后于代码（${built} → ${target}），重新构建失败：${message(error)}`,
       checkedAt: host.now(),
     };
   }
@@ -108,9 +135,24 @@ export async function updateWorkspace(
   return {
     changed: true,
     commit: target,
-    message: `已更新到 ${target} 并完成构建，重新加载插件即可生效。`,
+    message: moved
+      ? `已更新到 ${target} 并完成构建，重新加载插件即可生效。`
+      : `产物落后于代码，已按 ${target} 重新构建，重新加载插件即可生效。`,
     checkedAt: host.now(),
   };
+}
+
+/**
+ * 从构建标记里取出提交号：`v0.4.6 · abc1234` → `abc1234`。
+ *
+ * 有未提交改动时构建标记会写成 `abc1234+本地改动`，那个后缀不属于提交号。
+ * 拿不到 git 信息时标记是 `unknown`，返回 undefined——**绝不编一个假的**，
+ * 上游据此按「不知道产物是哪一版」处理，而不是按「落后了」去反复重建。
+ */
+export function buildStampCommit(buildId: string): string | undefined {
+  const stamp = buildId.split('·').pop()?.trim() ?? '';
+  const commit = stamp.split('+')[0]?.trim() ?? '';
+  return /^[0-9a-f]{7,40}$/.test(commit) ? commit : undefined;
 }
 
 function message(error: unknown): string {

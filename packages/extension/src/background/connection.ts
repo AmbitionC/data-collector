@@ -99,13 +99,19 @@ export class BridgeConnection {
       const fetcher = this.dependencies.fetch;
       const response = await fetcher(`http://127.0.0.1:${port}/health`);
       if (!response.ok) return;
-      const health = (await response.json()) as { routing?: unknown; update?: unknown };
+      const health = (await response.json()) as {
+        routing?: unknown;
+        update?: unknown;
+        buildId?: unknown;
+      };
       await this.dependencies.storage.set({
         ...(health.routing && typeof health.routing === 'object'
           ? { routing: health.routing }
           : {}),
         // 本机服务会自己拉新代码并重新构建；扩展据此提示「有新版可加载」。
         ...(health.update && typeof health.update === 'object' ? { update: health.update } : {}),
+        // 磁盘上那份产物的构建标记。和本扩展烙进来的一比就知道自己是不是最新的。
+        ...(typeof health.buildId === 'string' ? { buildId: health.buildId } : {}),
       });
     } catch {
       // 忽略。
@@ -136,6 +142,7 @@ export class BridgeConnection {
         const health = (await response.json()) as {
           trustedExtensionId?: unknown;
           routing?: unknown;
+          buildId?: unknown;
         };
         if (typeof health.trustedExtensionId !== 'string') {
           throw new Error('Bridge health response is missing trustedExtensionId');
@@ -144,6 +151,9 @@ export class BridgeConnection {
         // 缓存路由说明（可选去向 + 各自分类 + 来源默认去向），供侧边栏渲染选择器。
         if (health.routing && typeof health.routing === 'object') {
           await this.dependencies.storage.set({ routing: health.routing });
+        }
+        if (typeof health.buildId === 'string') {
+          await this.dependencies.storage.set({ buildId: health.buildId });
         }
       } catch {
         await this.markDisconnected(generation);
