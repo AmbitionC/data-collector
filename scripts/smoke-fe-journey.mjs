@@ -9,6 +9,7 @@ import {
 } from '../packages/bridge/dist/feJourney/index.js';
 import { listLibrary, pendingIds, syncEntries } from '../packages/bridge/dist/library/index.js';
 import { SinkRouter } from '../packages/bridge/dist/sinks/index.js';
+import { duplicateCluster } from './smoke-fe-journey-validation.mjs';
 
 const WORKSPACE = resolve(import.meta.dirname, '..');
 const LIVE = process.env.LIVE === '1';
@@ -132,13 +133,10 @@ async function main() {
     const nowcoderCandidates = sourceDocuments.filter(document => document.source === 'nowcoder');
     const githubCandidate = sourceDocuments.find(document => document.source === 'github');
     if (nowcoderCandidates.length !== 2 || !githubCandidate) throw new Error('候选落盘数量不符');
-    const [first, duplicate] = nowcoderCandidates;
-    if (!first.feJourney || !duplicate.feJourney || !githubCandidate.feJourney) {
+    if (nowcoderCandidates.some(document => !document.feJourney) || !githubCandidate.feJourney) {
       throw new Error('候选评分元数据缺失');
     }
-    if (first.feJourney.clusterId !== duplicate.feJourney.clusterId || !duplicate.feJourney.duplicateOf) {
-      throw new Error('重复面经没有聚合到同一候选簇');
-    }
+    const duplicate = duplicateCluster(nowcoderCandidates);
     if (!githubCandidate.feJourney.candidateKinds.includes('project')) {
       throw new Error('GitHub 文档没有进入项目候选');
     }
@@ -162,7 +160,7 @@ async function main() {
       githubDiscovered: githubDocuments.length,
       candidatesSaved: entries.length,
       candidateClusters: new Set(catalog.entries.map(entry => entry.clusterId)).size,
-      duplicateClusterId: duplicate.feJourney.clusterId,
+      duplicateClusterId: duplicate.clusterId,
       projectScore: githubCandidate.feJourney.projectScore,
       inboxEntries: sync.synced,
       testedAt: collectedAt,
