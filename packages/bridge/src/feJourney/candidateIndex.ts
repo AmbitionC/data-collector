@@ -56,6 +56,7 @@ export class FeJourneyCandidateIndex {
   private readonly catalogPath: string;
   private entries: CandidateIndexEntry[];
   private commitQueue: Promise<void> = Promise.resolve();
+  private candidateSaveQueue: Promise<void> = Promise.resolve();
 
   private constructor(private readonly libraryRoot: string, catalog: CandidateCatalog) {
     this.catalogPath = join(libraryRoot, '_catalog', 'fe-journey.json');
@@ -75,6 +76,19 @@ export class FeJourneyCandidateIndex {
       }
       throw error;
     }
+  }
+
+  /**
+   * prepare 必须和本机落盘、索引 commit 属于同一个临界区。否则两个并行详情
+   * 会同时读取旧 entries，虽然 contentHash 相同，却都缺少 duplicateOf。
+   */
+  runExclusive<T>(operation: () => Promise<T>): Promise<T> {
+    const result = this.candidateSaveQueue.then(operation);
+    this.candidateSaveQueue = result.then(
+      () => undefined,
+      () => undefined,
+    );
+    return result;
   }
 
   prepare(document: CollectedDocument): PreparedFeJourneyCandidate {

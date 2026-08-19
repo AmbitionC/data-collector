@@ -3,7 +3,12 @@ import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { stableContentId, type CollectedDocument } from '@data-collector/shared';
-import { FeJourneyCandidateIndex } from '../../packages/bridge/src/feJourney/index.js';
+import {
+  FeJourneyCandidateIndex,
+  saveCollectedDocument,
+} from '../../packages/bridge/src/feJourney/index.js';
+import { listLibrary } from '../../packages/bridge/src/library/index.js';
+import { SinkRouter } from '../../packages/bridge/src/sinks/index.js';
 import { createTemporaryDirectoryTracker } from '../helpers/temp.js';
 
 const temporaryDirectories = createTemporaryDirectoryTracker();
@@ -88,5 +93,25 @@ describe('FeJourneyCandidateIndex', () => {
     await prepared.commit();
 
     expect(existsSync(join(root, '_catalog', 'fe-journey.json'))).toBe(false);
+  });
+
+  it('clusters duplicate candidates that are saved concurrently', async () => {
+    const root = await temporaryDirectories.create('fe-journey-index-concurrent-');
+    const index = await FeJourneyCandidateIndex.open(root);
+    const router = SinkRouter.build(undefined, { libraryRoot: root });
+    const text = '一面面试官追问 RAG 文档切分、向量召回、重排以及答案评测的实现原理。';
+
+    await Promise.all([
+      saveCollectedDocument(router, index, nowcoderDocument('2001', text)),
+      saveCollectedDocument(router, index, nowcoderDocument('2002', text)),
+    ]);
+
+    const documents = await Promise.all((await listLibrary(root)).map(async entry => {
+      const sourcePath = join(root, entry.relativePath.replace(/index\.md$/, 'source.json'));
+      return (JSON.parse(await readFile(sourcePath, 'utf8')) as { document: CollectedDocument }).document;
+    }));
+    expect(documents).toHaveLength(2);
+    expect(new Set(documents.map(document => document.feJourney?.clusterId)).size).toBe(1);
+    expect(documents.filter(document => document.feJourney?.duplicateOf)).toHaveLength(1);
   });
 });

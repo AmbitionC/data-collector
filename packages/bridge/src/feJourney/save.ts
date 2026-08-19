@@ -14,10 +14,15 @@ export async function saveCollectedDocument(
   document: CollectedDocument,
   override?: readonly string[],
 ): Promise<SinkResult[]> {
-  const prepared = candidateIndex.prepare(document);
-  const results = await router.save(organize(prepared.document), override);
-  if (results.some(result => result.sinkId === 'markdown' && result.ok)) {
-    await prepared.commit();
-  }
-  return results;
+  const save = async (): Promise<SinkResult[]> => {
+    const prepared = candidateIndex.prepare(document);
+    const results = await router.save(organize(prepared.document), override);
+    if (results.some(result => result.sinkId === 'markdown' && result.ok)) {
+      await prepared.commit();
+    }
+    return results;
+  };
+  return document.source === 'nowcoder' || document.source === 'github'
+    ? candidateIndex.runExclusive(save)
+    : save();
 }
