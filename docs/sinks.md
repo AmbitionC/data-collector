@@ -4,7 +4,7 @@
 
 ## 概念
 
-- **来源注册表**（`packages/shared/src/sources.ts`）：一个来源的声明式定义（主机匹配、规范化身份参数、允许的内容类型、展示名）。当前支持 `wechat`、`zsxq`、`nowcoder`。新增来源 = 加一条描述符 + 在扩展侧写一个提取器。
+- **来源注册表**（`packages/shared/src/sources.ts`）：一个来源的声明式定义（主机匹配、规范化身份参数、允许的内容类型、展示名）。当前支持 `wechat`、`zsxq`、`nowcoder`、`github`；GitHub 只由 Bridge 固定任务采集，不提供页面提取器。
 - **ContentSink**（`packages/bridge/src/sinks/`）：内容落地目标抽象。
   - `markdown`：本机 Markdown 知识库（默认、永远可用，行为与 0.2.0 一致）。
   - `repo-inbox`：把内容原样投递到某个 git 仓库的收件箱目录。
@@ -17,7 +17,7 @@
 ```
 <repo>/<inboxDir>/<source>/<YYYY-MM-DD>-<稳定ID>-<标题slug>/
 ├── original.md   # YAML frontmatter(title/author/date/source/source_url/collected_at/archived_at/kind) + 正文
-├── meta.json     # 机器可读元信息：source/kind/url/publishedAt/suggestedCategory/suggestedTags/summary/images/图片下载数
+├── meta.json     # 机器可读元信息；fe-journey 条目另含来源证据、质量分、项目分与聚类字段
 └── assets/       # 随文图片（经与本机库相同的 SSRF 防护管线下载）
 ```
 
@@ -30,9 +30,9 @@
 | 来源 | 同步去向（采集一律先落本机库） | 分类下拉 |
 |---|---|---|
 | 微信公众号 / 知识星球 | `~/code/life-teachers` 收件箱 | 投资 / 财富 / 职场 / 认知 / 教育 / 其他 |
-| 牛客网 | `~/code/front-end-journey-resource` 收件箱 | 面经 + knowledge 各顶层分组 |
+| 牛客网 / GitHub | `~/code/front-end-journey-resource` 本地收件箱 | 面经 + knowledge 各顶层分组 |
 
-仓库**存在才启用**：本机没克隆对应仓库时该去向自动消失、路由降级为只落本机库，不会凭空建目录。改路径/加去向直接改 `BUILT_IN_TARGETS` 即可。
+仓库**存在才启用**：本机没克隆对应仓库时该去向自动消失、路由降级为只落本机库，不会凭空建目录。`life-teachers` 保持 commit + push；`fe-journey` 的原始候选和私有报告显式 `commit:false, push:false`，只留本地，避免把抓取原文提交进公开资源库。改路径/加去向直接改 `BUILT_IN_TARGETS` 即可。
 
 ## 需要偏离默认时：`sinks.json`（可选）
 
@@ -82,8 +82,7 @@
 几条硬约束：
 
 - **一条失败不影响其余**。同步逐条记录成败，绝不因为一条炸掉整批。
-- **推送失败不算同步失败**。条目已经写进仓库并提交，本机 Agent 直接读工作区就够；
-  推不上去（没配远端、没有凭证）只作为告警如实呈现。
+- 需要远端交付的目标中，**推送失败算同步失败**，条目保留待重试；显式 `push:false` 的本地目标不要求推送。
 - **重新采集同一地址** → 本地仍是一条（稳定内容 ID 去重），但同步状态**回到未同步**：
   内容可能变了，该让用户重新过一遍这一关。
 - **`ids` 为空是安全的空操作**，绝不把「没传 ids」理解成「同步全部」。
@@ -101,8 +100,8 @@
 ## 端到端两层管线
 
 1. **采集层（本工具）**：提取 → 整理 → 按路由投递到 sink（本机库 / 目标仓库收件箱）。确定性、离线、本机优先。
-2. **加工层（Agent）**：Claude Code / Codex 定时或手动扫描目标仓库的 `_inbox/`，在仓库内完成归档 / 整理 / 知识点提炼，产出成品并按各仓库既有机制发布：
+2. **加工层（Agent）**：Codex 手动批处理目标仓库的本地 `_inbox/`，在仓库内完成聚合 / 整理 / 知识点提炼。采集器不会启动 Claude Code CLI；两层通过文件契约通信：
    - `life-teachers`：按 `CLAUDE.md` 的归档工作流产出 `authors/…/summary.md` 等。
-   - `front-end-journey-resource`：按 `.codex/skills/` 产出 `interview/` 面经贴与 `knowledge/` 知识点，push 后由仓库 Action 同步。
+   - `front-end-journey-resource`：按 `.codex/skills/curate-fe-journey-inbox/` 聚合候选，产出 `interview/`、`knowledge/` 更新，以及本地运营选题/项目候选/跳过项报告。
 
 完整设计见 [`docs/superpowers/specs/2026-07-24-collection-platform-design.md`](superpowers/specs/2026-07-24-collection-platform-design.md)。
