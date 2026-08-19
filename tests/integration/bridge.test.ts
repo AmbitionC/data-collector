@@ -186,6 +186,43 @@ describe('local Bridge', () => {
     });
   });
 
+  it('keeps the Bridge available when the optional fe-journey candidate index is corrupt', async () => {
+    const root = await temporaryDirectory();
+    const repo = await temporaryDirectory();
+    const configDir = join(root, '.config');
+    await mkdir(join(root, '_catalog'), { recursive: true });
+    await mkdir(configDir, { recursive: true });
+    await writeFile(join(root, '_catalog', 'fe-journey.json'), '{broken-json', 'utf8');
+    await writeFile(
+      join(configDir, 'sinks.json'),
+      JSON.stringify({
+        sinks: {
+          markdown: { type: 'markdown' },
+          'fe-journey': { type: 'repo-inbox', repoPath: repo, commit: false, push: false },
+        },
+        routes: { nowcoder: ['fe-journey'], github: ['fe-journey'] },
+      }),
+    );
+
+    const bridge = await startBridge({ port: 0, libraryRoot: root, configDir });
+    handles.push(bridge);
+    const { token } = await authorize(bridge);
+    const health = await requestJson<{ ok: boolean }>(bridge.url, '/health');
+    expect(health).toMatchObject({ status: 200, body: { ok: true } });
+    const status = await requestJson<{ enabled: boolean; error?: string }>(
+      bridge.url,
+      '/v1/fe-journey/status',
+      { token },
+    );
+    expect(status).toMatchObject({
+      status: 200,
+      body: {
+        enabled: false,
+        error: expect.stringContaining('候选索引'),
+      },
+    });
+  });
+
   it('runs the fixed fe-journey preset and rejects caller-supplied search settings', async () => {
     const root = await temporaryDirectory();
     const repo = await temporaryDirectory();

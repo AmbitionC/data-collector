@@ -89,6 +89,39 @@ describe('fe-journey deterministic candidate scoring', () => {
     expect(JSON.stringify(result)).not.toMatch(/会员|权益/);
   });
 
+  it('does not treat stars or engineering prose as test and CI quality evidence', () => {
+    const base: CollectedDocument = {
+      schemaVersion: 1,
+      source: 'github',
+      kind: 'article',
+      url: 'https://github.com/acme/popular-agent',
+      canonicalUrl: 'https://github.com/acme/popular-agent',
+      title: 'acme/popular-agent',
+      collectedAt: '2026-08-19T00:00:00.000Z',
+      html: '',
+      text: 'AI agent example with architecture, Docker deployment and evaluation. Quick start with npm install.',
+      images: [],
+      sourceMetadata: {
+        stars: 90_000,
+        forks: 9_000,
+        license: 'MIT',
+        updatedAt: '2026-08-10T00:00:00.000Z',
+      },
+    };
+
+    const popularOnly = scoreFeJourneyCandidate(base);
+    const withQualityEvidence = scoreFeJourneyCandidate({
+      ...base,
+      canonicalUrl: 'https://github.com/acme/tested-agent',
+      url: 'https://github.com/acme/tested-agent',
+      text: `${base.text} Run npm test before contributing.`,
+    });
+
+    expect(popularOnly.projectSignals).not.toContain('有代码质量证据');
+    expect(withQualityEvidence.projectSignals).toContain('有代码质量证据');
+    expect(withQualityEvidence.projectScore).toBe((popularOnly.projectScore ?? 0) + 15);
+  });
+
   it('requires repository evidence before treating a Nowcoder post as a project candidate', () => {
     const vocabularyOnly = scoreFeJourneyCandidate(nowcoderDocument(
       'Agent 面经里的项目架构追问',

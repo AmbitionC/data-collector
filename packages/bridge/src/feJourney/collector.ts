@@ -9,6 +9,7 @@ import {
 export interface FeJourneyCollectorDependencies {
   stateFile: string;
   enabled: boolean;
+  disabledError?: string;
   now(): string;
   knownNowcoderUrls(): ReadonlySet<string>;
   discoverNowcoder(knownUrls: ReadonlySet<string>): Promise<string[]>;
@@ -43,6 +44,7 @@ export interface FeJourneyRunReport {
 
 export interface FeJourneyCollectorStatus {
   enabled: boolean;
+  error?: string;
   running: boolean;
   state: FeJourneyState;
   nextDueAt: Record<FeJourneySource, string | null>;
@@ -74,6 +76,7 @@ export class FeJourneyCollector {
     const state = this.state.snapshot();
     return {
       enabled: this.dependencies.enabled,
+      ...(this.dependencies.disabledError ? { error: this.dependencies.disabledError } : {}),
       running: Boolean(this.inFlight),
       state,
       nextDueAt: {
@@ -124,16 +127,38 @@ export class FeJourneyCollector {
       const documents = await this.dependencies.discoverGithub();
       let saved = 0;
       let failed = 0;
+      const failures: string[] = [];
       for (const document of documents) {
         try {
           if (await this.dependencies.saveGithub(document)) saved += 1;
-          else failed += 1;
-        } catch {
+          else {
+            failed += 1;
+            failures.push(`${document.canonicalUrl}: 候选写入失败`);
+          }
+        } catch (error) {
           failed += 1;
+          failures.push(`${document.canonicalUrl}: ${errorMessage(error)}`);
         }
       }
+      if (documents.length > 0 && saved === 0 && failed === documents.length) {
+        const message = `GitHub 候选全部写入失败（${failed}/${documents.length}）：${failures[0] ?? '未知错误'}`;
+        await this.state.record('github', attemptedAt, message);
+        return {
+          status: 'failed',
+          discovered: documents.length,
+          saved,
+          failed,
+          error: message,
+        };
+      }
       await this.state.record('github', attemptedAt);
-      return { status: 'completed', discovered: documents.length, saved, failed };
+      return {
+        status: 'completed',
+        discovered: documents.length,
+        saved,
+        failed,
+        ...(failures[0] ? { error: failures[0] } : {}),
+      };
     } catch (error) {
       const message = errorMessage(error);
       await this.state.record('github', attemptedAt, message);
@@ -152,7 +177,10 @@ export class FeJourneyCollector {
 
     for (const source of ['nowcoder', 'github'] as const) {
       if (!this.dependencies.enabled) {
-        reports[source] = { status: 'disabled' };
+        reports[source] = {
+          status: 'disabled',
+          ...(this.dependencies.disabledError ? { error: this.dependencies.disabledError } : {}),
+        };
       } else if (!requested[source]) {
         reports[source] = { status: 'skipped', reason: 'not_requested' };
       } else if (!this.isDue(source, startedAt, force)) {

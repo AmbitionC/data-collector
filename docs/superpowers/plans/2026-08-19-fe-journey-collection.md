@@ -31,7 +31,7 @@
 
 - [x] **Step 1: Reproduce the failing full suite on a machine containing both built-in target repositories**
 
-Run: `npm test`  
+Run: `npm test`
 Expected before the fixture change: the health assertion receives `life-teachers` and `fe-journey` instead of Markdown-only routing.
 
 - [x] **Step 2: Write an explicit Markdown-only `sinks.json` in the temporary config directory**
@@ -46,7 +46,7 @@ await writeFile(
 
 - [x] **Step 3: Verify focused and full tests**
 
-Run: `npx vitest run tests/integration/bridge.test.ts && npm test`  
+Run: `npx vitest run tests/integration/bridge.test.ts && npm test`
 Expected: 12 focused and 394 total tests pass.
 
 ### Task 2: Add the optional fe-journey candidate contract and GitHub source
@@ -75,7 +75,7 @@ expect(canonicalizeUrl(new URL('https://github.com/acme/agent?tab=readme#x')).hr
 
 - [ ] **Step 2: Run the tests and confirm GitHub and `feJourney` are rejected**
 
-Run: `npx vitest run tests/unit/url.test.ts tests/unit/extractors.test.ts`  
+Run: `npx vitest run tests/unit/url.test.ts tests/unit/extractors.test.ts`
 Expected: FAIL because `github` and `feJourney` are not defined.
 
 - [ ] **Step 3: Implement the optional types/schema and GitHub descriptor**
@@ -91,7 +91,7 @@ case 'github':
 
 - [ ] **Step 5: Run focused tests, typecheck shared/extension, and commit**
 
-Run: `npx vitest run tests/unit/url.test.ts tests/unit/extractors.test.ts && npm run typecheck`  
+Run: `npx vitest run tests/unit/url.test.ts tests/unit/extractors.test.ts && npm run typecheck`
 Expected: PASS.
 
 ### Task 3: Implement deterministic classification, scoring, and similarity fingerprints
@@ -117,7 +117,7 @@ Assert punctuation/case/whitespace variants share a content hash, lightly rewrit
 
 - [ ] **Step 3: Run and verify RED**
 
-Run: `npx vitest run tests/unit/feJourneyQuality.test.ts`  
+Run: `npx vitest run tests/unit/feJourneyQuality.test.ts`
 Expected: FAIL because the modules do not exist.
 
 - [ ] **Step 4: Implement minimal deterministic rules and 64-bit SimHash**
@@ -126,7 +126,7 @@ Use fixed rule tables and no LLM/network calls. Keep all functions pure.
 
 - [ ] **Step 5: Run focused tests and commit**
 
-Run: `npx vitest run tests/unit/feJourneyQuality.test.ts`  
+Run: `npx vitest run tests/unit/feJourneyQuality.test.ts`
 Expected: PASS.
 
 ### Task 4: Persist fe-journey clusters without changing other sources
@@ -154,7 +154,7 @@ Save a ZSXQ document and assert it has no `feJourney` metadata and does not crea
 
 - [ ] **Step 3: Run and verify RED**
 
-Run: `npx vitest run tests/unit/feJourneyIndex.test.ts tests/integration/pipeline.test.ts`  
+Run: `npx vitest run tests/unit/feJourneyIndex.test.ts tests/integration/pipeline.test.ts`
 Expected: FAIL because the index does not exist.
 
 - [ ] **Step 4: Implement serialized atomic index updates and Bridge enrichment**
@@ -167,7 +167,7 @@ Do not change existing keys.
 
 - [ ] **Step 6: Run focused tests and commit**
 
-Run: `npx vitest run tests/unit/feJourneyIndex.test.ts tests/unit/sinks.test.ts tests/integration/pipeline.test.ts`  
+Run: `npx vitest run tests/unit/feJourneyIndex.test.ts tests/unit/sinks.test.ts tests/integration/pipeline.test.ts`
 Expected: PASS.
 
 ### Task 5: Discover Nowcoder detail URLs from fixed public search pages
@@ -190,7 +190,7 @@ Assert only `/discuss/<id>` and `/feed/main/detail/<id>` links survive, tracking
 
 - [ ] **Step 3: Run and verify RED**
 
-Run: `npx vitest run tests/unit/feJourneyNowcoder.test.ts`  
+Run: `npx vitest run tests/unit/feJourneyNowcoder.test.ts`
 Expected: FAIL because discovery is absent.
 
 - [ ] **Step 4: Implement fixed-URL fetch and conservative href extraction**
@@ -199,7 +199,7 @@ Reject non-200 responses and never accept a caller-provided host.
 
 - [ ] **Step 5: Run focused tests and commit**
 
-Run: `npx vitest run tests/unit/feJourneyNowcoder.test.ts`  
+Run: `npx vitest run tests/unit/feJourneyNowcoder.test.ts`
 Expected: PASS.
 
 ### Task 6: Discover and save GitHub project candidates
@@ -216,7 +216,7 @@ Expected: PASS.
 
 - [ ] **Step 2: Run and verify RED**
 
-Run: `npx vitest run tests/unit/feJourneyGithub.test.ts`  
+Run: `npx vitest run tests/unit/feJourneyGithub.test.ts`
 Expected: FAIL because discovery is absent.
 
 - [ ] **Step 3: Implement fixed GitHub searches and document mapping**
@@ -225,7 +225,7 @@ Send an explicit `User-Agent`, request public JSON/raw Markdown, ignore forks an
 
 - [ ] **Step 4: Run focused tests and commit**
 
-Run: `npx vitest run tests/unit/feJourneyGithub.test.ts`  
+Run: `npx vitest run tests/unit/feJourneyGithub.test.ts`
 Expected: PASS.
 
 ### Task 7: Add the fixed scheduler, immediate-run API, and CLI command
@@ -257,7 +257,7 @@ Assert the feature is disabled without the fe-journey sink, enabled with it, end
 
 - [ ] **Step 3: Run and verify RED**
 
-Run: `npx vitest run tests/unit/feJourneyCollector.test.ts tests/integration/bridge.test.ts tests/integration/cli.test.ts`  
+Run: `npx vitest run tests/unit/feJourneyCollector.test.ts tests/integration/bridge.test.ts tests/integration/cli.test.ts`
 Expected: FAIL because collector/endpoints/commands are absent.
 
 - [ ] **Step 4: Implement state, collector orchestration, lifecycle timer, endpoints, and CLI**
@@ -270,7 +270,7 @@ Set `commit:false`, `push:false` only for `fe-journey`; keep `life-teachers` def
 
 - [ ] **Step 6: Run focused tests and commit**
 
-Run: `npx vitest run tests/unit/feJourneyCollector.test.ts tests/integration/bridge.test.ts tests/integration/cli.test.ts tests/unit/sinks.test.ts`  
+Run: `npx vitest run tests/unit/feJourneyCollector.test.ts tests/integration/bridge.test.ts tests/integration/cli.test.ts tests/unit/sinks.test.ts`
 Expected: PASS.
 
 ### Task 8: Add regression smoke coverage and operator documentation
@@ -293,14 +293,14 @@ Assert the script discovers Nowcoder URLs, maps a GitHub project, assigns candid
 
 - [ ] **Step 2: Run and verify RED**
 
-Run: `npm run smoke:fe-journey`  
+Run: `npm run smoke:fe-journey`
 Expected: FAIL because the script is absent.
 
 - [ ] **Step 3: Implement the smoke script and document exact operation/recovery**
 
 - [ ] **Step 4: Run all compatibility gates**
 
-Run: `npm test && npm run typecheck && npm run build && npm run test:e2e && npm run smoke:fe-journey`  
+Run: `npm test && npm run typecheck && npm run build && npm run test:e2e && npm run smoke:fe-journey`
 Expected: every command exits 0, including existing ZSXQ E2E cases.
 
 - [ ] **Step 5: Commit the verified Data Collector implementation**
@@ -331,7 +331,7 @@ Assert invalid metadata fails, clusters are grouped once, excluded items are rep
 
 - [ ] **Step 4: Run resource repository validation and skill smoke**
 
-Run: `npm install && npm run validate:tree && node .codex/skills/curate-fe-journey-inbox/scripts/inbox-inventory.mjs --check-fixture`  
+Run: `npm install && npm run validate:tree && node .codex/skills/curate-fe-journey-inbox/scripts/inbox-inventory.mjs --check-fixture`
 Expected: PASS.
 
 ### Task 10: Review, live collection, content update, and final evidence report
@@ -347,7 +347,7 @@ Expected: PASS.
 
 - [ ] **Step 2: Run fixture smoke, then live public discovery**
 
-Run: `npm run smoke:fe-journey` and `LIVE=1 npm run smoke:fe-journey`  
+Run: `npm run smoke:fe-journey` and `LIVE=1 npm run smoke:fe-journey`
 Expected: both exit 0; live report contains current Nowcoder detail URLs and at least one GitHub project.
 
 - [ ] **Step 3: Collect a real Nowcoder detail through Bridge + Edge and sync it locally**

@@ -95,6 +95,30 @@ describe('FeJourneyCandidateIndex', () => {
     expect(existsSync(join(root, '_catalog', 'fe-journey.json'))).toBe(false);
   });
 
+  it('keeps existing sources writable when the optional candidate index is unavailable', async () => {
+    const root = await temporaryDirectories.create('fe-journey-index-unavailable-');
+    const router = SinkRouter.build(undefined, { libraryRoot: root });
+    const url = 'https://wx.zsxq.com/group/1/topic/522222222222222';
+    const document: CollectedDocument = {
+      schemaVersion: 1,
+      source: 'zsxq',
+      kind: 'post',
+      url,
+      canonicalUrl: url,
+      title: '候选索引损坏时的知识星球帖子',
+      collectedAt: '2026-08-20T00:00:00.000Z',
+      html: '<p>原有知识星球采集链路继续可用。</p>',
+      text: '原有知识星球采集链路继续可用。',
+      images: [],
+    };
+
+    const results = await saveCollectedDocument(router, undefined, document);
+
+    expect(results).toEqual(expect.arrayContaining([expect.objectContaining({ ok: true })]));
+    expect(await listLibrary(root)).toHaveLength(1);
+    expect(existsSync(join(root, '_catalog', 'fe-journey.json'))).toBe(false);
+  });
+
   it('clusters duplicate candidates that are saved concurrently', async () => {
     const root = await temporaryDirectories.create('fe-journey-index-concurrent-');
     const index = await FeJourneyCandidateIndex.open(root);

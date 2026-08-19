@@ -107,4 +107,46 @@ describe('fixed fe-journey GitHub discovery', () => {
     expect(new Set(documents.map(document => document.canonicalUrl)).size).toBe(documents.length);
     expect(fetcher.mock.calls.filter(([input]) => String(input).includes('/readme'))).toHaveLength(12);
   });
+
+  it('surfaces README rate limits instead of reporting an empty successful discovery', async () => {
+    const fetcher = vi.fn<typeof fetch>(async input => {
+      const url = new URL(String(input));
+      if (url.pathname === '/search/repositories') {
+        return Response.json({ items: [repository(900, 'acme/rate-limited-agent')] });
+      }
+      if (url.pathname === '/repos/acme/rate-limited-agent/readme') {
+        return new Response('rate limit exceeded', { status: 429 });
+      }
+      return new Response('unexpected', { status: 500 });
+    });
+
+    await expect(discoverGithubProjects(fetcher, NOW)).rejects.toThrow(
+      /GitHub README 获取失败.*acme\/rate-limited-agent.*HTTP 429/,
+    );
+  });
+
+  it('uses the fixed raw GitHub host when the README API is rate limited', async () => {
+    const fetcher = vi.fn<typeof fetch>(async input => {
+      const url = new URL(String(input));
+      if (url.pathname === '/search/repositories') {
+        return Response.json({ items: [repository(901, 'acme/fallback-agent')] });
+      }
+      if (url.hostname === 'api.github.com' && url.pathname === '/repos/acme/fallback-agent/readme') {
+        return new Response('rate limit exceeded', { status: 403 });
+      }
+      if (url.hostname === 'raw.githubusercontent.com' && url.pathname === '/acme/fallback-agent/main/README.md') {
+        return new Response('# Fallback Agent\nQuick start with npm install. Includes architecture and npm test.');
+      }
+      return new Response('unexpected', { status: 500 });
+    });
+
+    const documents = await discoverGithubProjects(fetcher, NOW);
+
+    expect(documents).toHaveLength(1);
+    expect(documents[0]?.text).toContain('Fallback Agent');
+    expect(fetcher).toHaveBeenCalledWith(
+      'https://raw.githubusercontent.com/acme/fallback-agent/main/README.md',
+      expect.objectContaining({ headers: expect.objectContaining({ 'user-agent': expect.any(String) }) }),
+    );
+  });
 });

@@ -35,12 +35,15 @@ interview / knowledge 更新 + 本地运营/项目/跳过项报告
 
 - `candidateKinds` 可多选：`interview`、`knowledge`、`operation`、`project`。
 - `qualityScore` 是 0–100 的确定性初筛；推广导流、求职闲聊、正文过短和缺少可消费类型都会降分并写入 `exclusionReasons`。
-- GitHub 另有 `projectScore`，只根据学习价值、工程要素、运行说明、测试/CI、Agent 技术证据、维护/许可证和文档证据初筛。
+- GitHub 另有 `projectScore`，只根据学习价值、工程要素、运行说明、明确的测试命令/CI 文件、Agent 技术证据、维护/许可证和文档证据初筛；Star/Fork 只用于发现，不参与质量得分。
 - 同 URL 用稳定 ID 覆盖；同正文用规范化 SHA-256 前 16 位识别；轻度改写用 64 位 SimHash 聚类。公开内容必须按 `clusterId` 聚合，不能一条原文生成一篇内容。
 
 ## 失败与恢复
 
-- 单个 GitHub README 失败只跳过该项目；整个搜索失败记录到状态文件，另一来源继续。
+- GitHub README 明确返回 404 时只跳过该项目；API 限流或服务故障会尝试固定的 `raw.githubusercontent.com` README 后备地址，后备也失败则整轮记为失败，不会伪装成空的成功批次。
+- GitHub 候选部分写入失败会保留首个错误；全部写入失败时整轮记为失败，不更新 `lastSuccessAt`。
 - 牛客详情任务在扩展离线时保持队列，扩展重新连接后派发。
+- 牛客详情任务进入 `failed` 或 `needs_attention` 后，会在下一次固定发现中清除旧错误并重新入队；已经成功和仍在途的任务不重复派发。
 - 状态保存在 `~/.data-collector/fe-journey-state.json`；候选索引在本机库 `_catalog/fe-journey.json`。
+- 候选索引损坏只禁用 fe-journey 并在状态接口暴露错误，Bridge、微信和知识星球采集仍可启动和落盘。
 - 固定资源仓库不存在或自定义 `sinks.json` 没有 `fe-journey` sink 时，周期保持关闭，立即执行接口明确返回禁用。

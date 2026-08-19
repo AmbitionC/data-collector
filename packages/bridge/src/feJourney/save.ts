@@ -10,10 +10,16 @@ import type { FeJourneyCandidateIndex } from './candidateIndex.js';
  */
 export async function saveCollectedDocument(
   router: SinkRouter,
-  candidateIndex: FeJourneyCandidateIndex,
+  candidateIndex: FeJourneyCandidateIndex | undefined,
   document: CollectedDocument,
   override?: readonly string[],
 ): Promise<SinkResult[]> {
+  if (!candidateIndex) {
+    if (document.source === 'nowcoder' || document.source === 'github') {
+      throw new Error('fe-journey 候选索引不可用，已停止候选来源落盘');
+    }
+    return router.save(organize(document), override);
+  }
   const save = async (): Promise<SinkResult[]> => {
     const prepared = candidateIndex.prepare(document);
     const results = await router.save(organize(prepared.document), override);

@@ -106,6 +106,25 @@ describe('FeJourneyCollector schedule orchestration', () => {
     expect(state.sources.github.lastSuccessAt).toBeDefined();
   });
 
+  it('records an all-failed GitHub save batch as failed instead of successful', async () => {
+    const fixture = await collectorFixture({
+      saveGithub: vi.fn(async () => { throw new Error('磁盘已满'); }),
+    });
+
+    const report = await fixture.collector.run({ force: true, nowcoder: false });
+
+    expect(report.sources.github).toMatchObject({
+      status: 'failed',
+      discovered: 1,
+      saved: 0,
+      failed: 1,
+      error: expect.stringContaining('磁盘已满'),
+    });
+    const state = JSON.parse(await readFile(join(fixture.root, 'fe-journey-state.json'), 'utf8'));
+    expect(state.sources.github.lastError).toContain('磁盘已满');
+    expect(state.sources.github.lastSuccessAt).toBeUndefined();
+  });
+
   it('stays disabled and performs no collection without the fixed fe-journey sink', async () => {
     const fixture = await collectorFixture({ enabled: false });
 

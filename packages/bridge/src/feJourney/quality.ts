@@ -93,7 +93,7 @@ function scoreProject(document: CollectedDocument, combined: string): {
     score += 25;
     signals.push('学习主题相关');
   }
-  if (/architecture|架构|Docker|部署|evaluation|评测|test|CI/i.test(combined)) {
+  if (/architecture|架构|Docker|部署|evaluation|评测/i.test(combined)) {
     score += 20;
     signals.push('工程要素完整');
   }
@@ -101,9 +101,7 @@ function scoreProject(document: CollectedDocument, combined: string): {
     score += 15;
     signals.push('有运行说明');
   }
-  const stars = typeof metadata.stars === 'number' ? metadata.stars : 0;
-  const forks = typeof metadata.forks === 'number' ? metadata.forks : 0;
-  if (/\btests?\b|\bCI\b|github\/workflows/i.test(combined) || stars >= 100 || forks >= 10) {
+  if (/(?:npm|pnpm|yarn)\s+(?:run\s+)?test\b|\.github\/workflows\/|(?:^|[\s`/])tests?\//im.test(combined)) {
     score += 15;
     signals.push('有代码质量证据');
   }

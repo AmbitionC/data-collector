@@ -100,7 +100,24 @@ async function fetchReadme(fetcher: typeof fetch, repository: GithubRepository):
       },
     },
   );
-  if (!response.ok) return undefined;
+  if (response.status === 404) return undefined;
+  if (!response.ok) {
+    const canUseRawFallback = response.status === 403 || response.status === 429 || response.status >= 500;
+    if (!canUseRawFallback) {
+      throw new Error(`GitHub README 获取失败（${repository.fullName}）：HTTP ${response.status}`);
+    }
+    const rawUrl = `https://raw.githubusercontent.com/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/${encodeURIComponent(repository.defaultBranch)}/README.md`;
+    const fallback = await fetcher(rawUrl, {
+      headers: { 'user-agent': 'data-collector-fe-journey/1.0' },
+    });
+    if (!fallback.ok) {
+      throw new Error(
+        `GitHub README 获取失败（${repository.fullName}）：HTTP ${response.status}，raw fallback HTTP ${fallback.status}`,
+      );
+    }
+    const fallbackReadme = (await fallback.text()).trim();
+    return fallbackReadme.length > 0 ? fallbackReadme.slice(0, 1_000_000) : undefined;
+  }
   const readme = (await response.text()).trim();
   return readme.length > 0 ? readme.slice(0, 1_000_000) : undefined;
 }
@@ -177,14 +194,10 @@ export async function discoverGithubProjects(
       const repository = parseRepository(item, collectedAt);
       if (!repository || seen.has(repository.id)) continue;
       seen.add(repository.id);
-      try {
-        const readme = await fetchReadme(fetcher, repository);
-        if (!readme) continue;
-        documents.push(toDocument(repository, readme, collectedAt, query));
-      } catch {
-        // 单个仓库无 README、被限流或响应损坏都只跳过该项目，不中断同一批次。
-        continue;
-      }
+      const readme = await fetchReadme(fetcher, repository);
+      // 只有明确的 404 才表示仓库没有 README；限流、服务故障和网络错误必须上报。
+      if (!readme) continue;
+      documents.push(toDocument(repository, readme, collectedAt, query));
       if (documents.length >= FE_JOURNEY_PRESET.github.maxPerRun) return documents;
     }
   }

@@ -210,7 +210,14 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
     },
     message => console.warn(`[sinks] ${message}`),
   );
-  const candidateIndex = await FeJourneyCandidateIndex.open(config.libraryRoot);
+  let candidateIndex: FeJourneyCandidateIndex | undefined;
+  let candidateIndexError: string | undefined;
+  try {
+    candidateIndex = await FeJourneyCandidateIndex.open(config.libraryRoot);
+  } catch (error) {
+    candidateIndexError = `fe-journey 候选索引不可用：${error instanceof Error ? error.message : error}`;
+    console.warn(`[fe-journey] ${candidateIndexError}`);
+  }
   const reveal = options.reveal ?? defaultReveal;
 
   // ── 自更新 ───────────────────────────────────────────────────────────
@@ -248,11 +255,13 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
     for (const job of jobs.list('queued')) await dispatch(job);
   };
 
-  const feJourneyEnabled = sinksConfig.sinks['fe-journey']?.type === 'repo-inbox';
+  const feJourneyConfigured = sinksConfig.sinks['fe-journey']?.type === 'repo-inbox';
+  const feJourneyEnabled = feJourneyConfigured && Boolean(candidateIndex);
   const collectorFetcher = options.fetch ?? fetch;
   const feJourneyCollector = await FeJourneyCollector.open({
     stateFile: join(config.configDir, 'fe-journey-state.json'),
     enabled: feJourneyEnabled,
+    ...(feJourneyConfigured && candidateIndexError ? { disabledError: candidateIndexError } : {}),
     now: () => new Date().toISOString(),
     knownNowcoderUrls: () => new Set(
       jobs.list()
@@ -398,10 +407,11 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
     if (request.method === 'POST' && requestUrl.pathname === '/v1/fe-journey/collect') {
       const input = runFeJourneySchema.parse(await readJson(request));
       if (!feJourneyCollector.status().enabled) {
+        const status = feJourneyCollector.status();
         throw new HttpError(
           409,
           'FE_JOURNEY_DISABLED',
-          '本机未启用固定 fe-journey 收件箱，定时采集保持关闭',
+          status.error ?? '本机未启用固定 fe-journey 收件箱，定时采集保持关闭',
         );
       }
       return sendJson(response, 200, await feJourneyCollector.run(input));
