@@ -247,6 +247,16 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
 
   const dispatch = async (job: JobRecord): Promise<void> => {
     if (!extensionReady || extensionSocket?.readyState !== WebSocket.OPEN || job.status !== 'queued') return;
+    if (
+      !candidateIndex &&
+      (job.url.startsWith('https://www.nowcoder.com/') || job.url.startsWith('https://github.com/'))
+    ) {
+      await jobs.transition(job.id, 'failed', {
+        errorCode: 'FE_JOURNEY_INDEX_UNAVAILABLE',
+        errorMessage: candidateIndexError ?? 'fe-journey 候选索引不可用',
+      });
+      return;
+    }
     await jobs.transition(job.id, 'dispatched');
     extensionSocket.send(JSON.stringify(envelope('job.collect', job.id, { url: job.url })));
   };

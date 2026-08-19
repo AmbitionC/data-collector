@@ -151,7 +151,7 @@ export class FeJourneyCollector {
           error: message,
         };
       }
-      await this.state.record('github', attemptedAt);
+      await this.state.record('github', attemptedAt, undefined, failures[0]);
       return {
         status: 'completed',
         discovered: documents.length,

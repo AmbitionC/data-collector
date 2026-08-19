@@ -125,6 +125,35 @@ describe('FeJourneyCollector schedule orchestration', () => {
     expect(state.sources.github.lastSuccessAt).toBeUndefined();
   });
 
+  it('persists the first warning when a GitHub save batch only partly succeeds', async () => {
+    const second = {
+      ...githubDocument(),
+      url: 'https://github.com/acme/second-agent',
+      canonicalUrl: 'https://github.com/acme/second-agent',
+      title: 'acme/second-agent',
+    };
+    const fixture = await collectorFixture({
+      discoverGithub: vi.fn(async () => [githubDocument(), second]),
+      saveGithub: vi.fn(async document => {
+        if (document.canonicalUrl.endsWith('/second-agent')) throw new Error('第二个项目写入失败');
+        return true;
+      }),
+    });
+
+    const report = await fixture.collector.run({ force: true, nowcoder: false });
+
+    expect(report.sources.github).toMatchObject({
+      status: 'completed',
+      discovered: 2,
+      saved: 1,
+      failed: 1,
+      error: expect.stringContaining('第二个项目写入失败'),
+    });
+    const state = JSON.parse(await readFile(join(fixture.root, 'fe-journey-state.json'), 'utf8'));
+    expect(state.sources.github.lastSuccessAt).toBeDefined();
+    expect(state.sources.github.lastWarning).toContain('第二个项目写入失败');
+  });
+
   it('stays disabled and performs no collection without the fixed fe-journey sink', async () => {
     const fixture = await collectorFixture({ enabled: false });
 

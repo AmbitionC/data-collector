@@ -8,6 +8,7 @@ export interface FeJourneySourceState {
   lastAttemptAt?: string;
   lastSuccessAt?: string;
   lastError?: string;
+  lastWarning?: string;
 }
 
 export interface FeJourneyState {
@@ -69,13 +70,21 @@ export class FeJourneyStateStore {
     return structuredClone(this.state);
   }
 
-  async record(source: FeJourneySource, attemptedAt: string, error?: string): Promise<void> {
+  async record(
+    source: FeJourneySource,
+    attemptedAt: string,
+    error?: string,
+    warning?: string,
+  ): Promise<void> {
     const operation = this.mutationQueue.then(async () => {
       this.state.sources[source] = {
         lastAttemptAt: attemptedAt,
         ...(error
           ? { lastError: error }
-          : { lastSuccessAt: attemptedAt }),
+          : {
+              lastSuccessAt: attemptedAt,
+              ...(warning ? { lastWarning: warning } : {}),
+            }),
       };
       await atomicWrite(this.path, this.state);
     });

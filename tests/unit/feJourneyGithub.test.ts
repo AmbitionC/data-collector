@@ -149,4 +149,32 @@ describe('fixed fe-journey GitHub discovery', () => {
       expect.objectContaining({ headers: expect.objectContaining({ 'user-agent': expect.any(String) }) }),
     );
   });
+
+  it('uses the official GitHub blob page when API and raw README are both rate limited', async () => {
+    const fetcher = vi.fn<typeof fetch>(async input => {
+      const url = new URL(String(input));
+      if (url.pathname === '/search/repositories') {
+        return Response.json({ items: [repository(902, 'acme/html-fallback-agent')] });
+      }
+      if (url.hostname === 'api.github.com') return new Response('limited', { status: 403 });
+      if (url.hostname === 'raw.githubusercontent.com') return new Response('limited', { status: 429 });
+      if (url.hostname === 'github.com' && url.pathname === '/acme/html-fallback-agent/blob/main/README.md') {
+        return new Response([
+          '<html><body>',
+          '<article class="markdown-body entry-content container-lg" itemprop="text">',
+          '<h1>HTML Fallback Agent</h1><p>Quick start: <code>npm install</code>.</p>',
+          '<p>Architecture and <code>npm test</code>.</p>',
+          '</article>',
+          '</body></html>',
+        ].join(''));
+      }
+      return new Response('unexpected', { status: 500 });
+    });
+
+    const documents = await discoverGithubProjects(fetcher, NOW);
+
+    expect(documents).toHaveLength(1);
+    expect(documents[0]?.text).toContain('HTML Fallback Agent');
+    expect(documents[0]?.text).toContain('npm test');
+  });
 });

@@ -203,6 +203,11 @@ describe('local Bridge', () => {
         routes: { nowcoder: ['fe-journey'], github: ['fe-journey'] },
       }),
     );
+    const queued = await (await JobStore.open(join(root, '_catalog', 'jobs.json'))).create({
+      id: 'queued-nowcoder-with-corrupt-index',
+      url: 'https://www.nowcoder.com/discuss/9301',
+      requestedBy: 'codex',
+    });
 
     const bridge = await startBridge({ port: 0, libraryRoot: root, configDir });
     handles.push(bridge);
@@ -221,6 +226,53 @@ describe('local Bridge', () => {
         error: expect.stringContaining('候选索引'),
       },
     });
+
+    const socket = sockets.at(-1)!;
+    socket.send(envelope('extension.hello', 'extension', { version: '0.1.0' }));
+    await vi.waitFor(async () => {
+      const failed = await requestJson<{ status: string; errorCode?: string }>(
+        bridge.url,
+        `/v1/jobs/${queued.id}`,
+        { token },
+      );
+      expect(failed.body).toMatchObject({
+        status: 'failed',
+        errorCode: 'FE_JOURNEY_INDEX_UNAVAILABLE',
+      });
+    });
+    await expectNoMessage(socket);
+
+    const zsxqUrl = 'https://wx.zsxq.com/group/1/topic/533333333333333';
+    const dispatchedPromise = nextMessage<{ url: string }>(socket);
+    const zsxq = await requestJson<{ id: string }>(bridge.url, '/v1/jobs', {
+      method: 'POST',
+      token,
+      body: { url: zsxqUrl, requestedBy: 'codex' },
+    });
+    await expect(dispatchedPromise).resolves.toMatchObject({
+      type: 'job.collect',
+      requestId: zsxq.body.id,
+      payload: { url: zsxqUrl },
+    });
+    socket.send(envelope('job.progress', zsxq.body.id, { stage: 'collecting' }));
+    socket.send(envelope('job.result', zsxq.body.id, {
+      document: document({
+        source: 'zsxq',
+        kind: 'post',
+        url: zsxqUrl,
+        canonicalUrl: zsxqUrl,
+        title: '索引损坏时仍可采集的知识星球帖子',
+      }),
+    }));
+    await vi.waitFor(async () => {
+      const saved = await requestJson<{ status: string }>(
+        bridge.url,
+        `/v1/jobs/${zsxq.body.id}`,
+        { token },
+      );
+      expect(saved.body.status).toBe('saved');
+    });
+    expect(socket.readyState).toBe(WebSocket.OPEN);
   });
 
   it('runs the fixed fe-journey preset and rejects caller-supplied search settings', async () => {

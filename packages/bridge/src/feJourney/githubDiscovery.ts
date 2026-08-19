@@ -1,4 +1,5 @@
 import { canonicalizeUrl, type CollectedDocument } from '@data-collector/shared';
+import TurndownService from 'turndown';
 import { FE_JOURNEY_PRESET } from './preset.js';
 
 type Clock = () => string;
@@ -87,6 +88,17 @@ function escapeHtml(value: string): string {
     .replaceAll('"', '&quot;');
 }
 
+function readmeFromGithubHtml(html: string): string | undefined {
+  const article = html.match(
+    /<article\b[^>]*\bclass=(?:"[^"]*\bmarkdown-body\b[^"]*"|'[^']*\bmarkdown-body\b[^']*')[^>]*>([\s\S]*?)<\/article>/i,
+  )?.[1];
+  if (!article) return undefined;
+  const markdown = new TurndownService({ codeBlockStyle: 'fenced', headingStyle: 'atx' })
+    .turndown(article)
+    .trim();
+  return markdown.length > 0 ? markdown.slice(0, 1_000_000) : undefined;
+}
+
 async function fetchReadme(fetcher: typeof fetch, repository: GithubRepository): Promise<string | undefined> {
   const [owner, repo] = repository.fullName.split('/');
   if (!owner || !repo) return undefined;
@@ -110,13 +122,24 @@ async function fetchReadme(fetcher: typeof fetch, repository: GithubRepository):
     const fallback = await fetcher(rawUrl, {
       headers: { 'user-agent': 'data-collector-fe-journey/1.0' },
     });
-    if (!fallback.ok) {
-      throw new Error(
-        `GitHub README 获取失败（${repository.fullName}）：HTTP ${response.status}，raw fallback HTTP ${fallback.status}`,
-      );
+    if (fallback.ok) {
+      const fallbackReadme = (await fallback.text()).trim();
+      if (fallbackReadme.length > 0) return fallbackReadme.slice(0, 1_000_000);
     }
-    const fallbackReadme = (await fallback.text()).trim();
-    return fallbackReadme.length > 0 ? fallbackReadme.slice(0, 1_000_000) : undefined;
+    const blobUrl = `https://github.com/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/blob/${encodeURIComponent(repository.defaultBranch)}/README.md`;
+    const blob = await fetcher(blobUrl, {
+      headers: {
+        accept: 'text/html',
+        'user-agent': 'data-collector-fe-journey/1.0',
+      },
+    });
+    if (blob.ok) {
+      const htmlReadme = readmeFromGithubHtml(await blob.text());
+      if (htmlReadme) return htmlReadme;
+    }
+    throw new Error(
+      `GitHub README 获取失败（${repository.fullName}）：HTTP ${response.status}，raw fallback HTTP ${fallback.status}，HTML fallback HTTP ${blob.status}`,
+    );
   }
   const readme = (await response.text()).trim();
   return readme.length > 0 ? readme.slice(0, 1_000_000) : undefined;
