@@ -205,7 +205,7 @@ describe('local Bridge', () => {
     );
     const queued = await (await JobStore.open(join(root, '_catalog', 'jobs.json'))).create({
       id: 'queued-nowcoder-with-corrupt-index',
-      url: 'https://www.nowcoder.com/discuss/9301',
+      url: 'https://nowcoder.com/discuss/9301',
       requestedBy: 'codex',
     });
 

@@ -12,6 +12,7 @@ import {
   EXTENSION_REPLACED_CLOSE_REASON,
   TRUSTED_EXTENSION_ID,
   bridgeAuthorizedPayloadSchema,
+  descriptorForHost,
   jobResultPayloadSchema,
   wsEnvelopeSchema,
   stableContentId,
@@ -247,9 +248,10 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
 
   const dispatch = async (job: JobRecord): Promise<void> => {
     if (!extensionReady || extensionSocket?.readyState !== WebSocket.OPEN || job.status !== 'queued') return;
+    const jobSource = descriptorForHost(new URL(job.url).hostname)?.id;
     if (
       !candidateIndex &&
-      (job.url.startsWith('https://www.nowcoder.com/') || job.url.startsWith('https://github.com/'))
+      (jobSource === 'nowcoder' || jobSource === 'github')
     ) {
       await jobs.transition(job.id, 'failed', {
         errorCode: 'FE_JOURNEY_INDEX_UNAVAILABLE',
