@@ -114,11 +114,15 @@ export function scoreFeJourneyCandidate(document: CollectedDocument): Unclustere
   const knowledgeCount = matchCount(combined, KNOWLEDGE_SIGNALS);
   const operationCount = matchCount(combined, OPERATION_SIGNALS);
   const projectCount = matchCount(combined, PROJECT_SIGNALS);
+  const hasRepositoryEvidence = document.source === 'github' ||
+    /https?:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+/i.test(`${combined}\n${document.html}`);
 
   if (interviewCount >= 2) candidateKinds.push('interview');
   if (knowledgeCount >= 2) candidateKinds.push('knowledge');
   if (operationCount >= 2) candidateKinds.push('operation');
-  if (document.source === 'github' || projectCount >= 2) candidateKinds.push('project');
+  if (document.source === 'github' || (projectCount >= 2 && hasRepositoryEvidence)) {
+    candidateKinds.push('project');
+  }
 
   let score = 10;
   if (candidateKinds.includes('interview')) score += 25;

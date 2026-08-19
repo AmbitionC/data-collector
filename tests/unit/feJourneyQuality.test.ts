@@ -89,6 +89,22 @@ describe('fe-journey deterministic candidate scoring', () => {
     expect(JSON.stringify(result)).not.toMatch(/会员|权益/);
   });
 
+  it('requires repository evidence before treating a Nowcoder post as a project candidate', () => {
+    const vocabularyOnly = scoreFeJourneyCandidate(nowcoderDocument(
+      'Agent 面经里的项目架构追问',
+      '面试官围绕项目架构、GitHub 开源生态和 Demo 快速开始连续追问，正文只是复盘题目与回答，并没有提供任何可复核的代码仓库。',
+    ));
+    const linkedRepository = scoreFeJourneyCandidate(nowcoderDocument(
+      'Agent 开源项目复盘',
+      '这是一个开源 Agent Demo，包含项目架构与快速开始。代码仓库：https://github.com/acme/agent-lab 。',
+    ));
+
+    expect(vocabularyOnly.candidateKinds).not.toContain('project');
+    expect(vocabularyOnly.projectScore).toBeUndefined();
+    expect(linkedRepository.candidateKinds).toContain('project');
+    expect(linkedRepository.projectScore).toBeTypeOf('number');
+  });
+
   it('penalizes short job-wish chatter and promotional copy', () => {
     const result = scoreFeJourneyCandidate(nowcoderDocument(
       '许愿 offer，求捞',
