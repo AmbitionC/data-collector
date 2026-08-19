@@ -14,6 +14,7 @@ import {
   startBridge,
   type BridgeHandle,
 } from '../../packages/bridge/src/index.js';
+import { JobStore } from '../../packages/bridge/src/jobs/store.js';
 import { createTemporaryDirectoryTracker } from '../helpers/temp.js';
 
 const URL = 'https://mp.weixin.qq.com/s/integration-test';
@@ -247,6 +248,78 @@ describe('local Bridge', () => {
       status: 'queued',
       requestedBy: 'codex',
     });
+  });
+
+  it('rediscovers and requeues a failed fixed-preset Nowcoder job', async () => {
+    const root = await temporaryDirectory();
+    const repo = await temporaryDirectory();
+    const configDir = join(root, '.config');
+    await mkdir(configDir, { recursive: true });
+    await writeFile(
+      join(configDir, 'sinks.json'),
+      JSON.stringify({
+        sinks: {
+          markdown: { type: 'markdown' },
+          'fe-journey': {
+            type: 'repo-inbox',
+            repoPath: repo,
+            commit: false,
+            push: false,
+          },
+        },
+        routes: { nowcoder: ['fe-journey'], github: ['fe-journey'] },
+      }),
+    );
+    const fetcher = vi.fn<typeof fetch>(async input => {
+      const url = new globalThis.URL(String(input));
+      if (url.hostname === 'www.nowcoder.com') {
+        return new Response('<a href="/discuss/9201?sourceSSR=search">可重试面经</a>');
+      }
+      if (url.pathname === '/search/repositories') return Response.json({ items: [] });
+      return new Response('unexpected', { status: 500 });
+    });
+    const options = { port: 0, libraryRoot: root, configDir, fetch: fetcher };
+    const first = await startBridge(options);
+    handles.push(first);
+    const firstAuth = await authorize(first);
+    const firstRun = await requestJson<{
+      sources: { nowcoder: { enqueued: number } };
+    }>(first.url, '/v1/fe-journey/collect', {
+      method: 'POST',
+      token: firstAuth.token,
+      body: { force: true },
+    });
+    expect(firstRun.body.sources.nowcoder.enqueued).toBe(1);
+    await first.close();
+    handles.splice(handles.indexOf(first), 1);
+
+    const jobsPath = join(root, '_catalog', 'jobs.json');
+    const jobStore = await JobStore.open(jobsPath);
+    const failedId = jobStore.list()[0]?.id;
+    expect(failedId).toBeDefined();
+    await jobStore.transition(failedId!, 'failed', {
+      errorCode: 'EXTRACT_FAILED',
+      errorMessage: 'temporary extraction failure',
+    });
+
+    const restarted = await startBridge(options);
+    handles.push(restarted);
+    const restartedAuth = await authorize(restarted);
+    const retried = await requestJson<{
+      sources: { nowcoder: { status: string; enqueued: number } };
+    }>(restarted.url, '/v1/fe-journey/collect', {
+      method: 'POST',
+      token: restartedAuth.token,
+      body: { force: true },
+    });
+    expect(retried.body.sources.nowcoder).toMatchObject({ status: 'completed', enqueued: 1 });
+    const persisted = JSON.parse(await readFile(jobsPath, 'utf8')) as {
+      jobs: Array<{ status: string; errorCode?: string; errorMessage?: string }>;
+    };
+    expect(persisted.jobs).toHaveLength(1);
+    expect(persisted.jobs[0]).toMatchObject({ status: 'queued' });
+    expect(persisted.jobs[0]).not.toHaveProperty('errorCode');
+    expect(persisted.jobs[0]).not.toHaveProperty('errorMessage');
   });
 
   it('authenticates, dispatches, saves, and ignores a duplicate result', async () => {

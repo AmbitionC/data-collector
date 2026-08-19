@@ -98,6 +98,9 @@ export class FeJourneyCandidateIndex {
 
     const id = stableContentId(document.canonicalUrl);
     const score = scoreFeJourneyCandidate(document);
+    // URL identity is stronger than a changed body: edits and extraction differences must
+    // update the existing candidate instead of silently moving it to a new cluster.
+    const existing = this.entries.find(entry => entry.id === id);
     const candidates = this.entries.filter(entry => entry.id !== id);
     const exact = candidates.find(entry => entry.contentHash === score.contentHash);
     const near = exact
@@ -107,7 +110,7 @@ export class FeJourneyCandidateIndex {
           .filter(item => item.distance <= NEAR_DUPLICATE_DISTANCE)
           .sort((left, right) => left.distance - right.distance || left.entry.id.localeCompare(right.entry.id))[0]
           ?.entry;
-    const duplicate = exact ?? near;
+    const duplicate = existing ?? exact ?? near;
     const representativeId = duplicate?.representativeId ?? id;
     const clusterId = duplicate?.clusterId ?? `cluster-${score.contentHash.slice(0, 12)}`;
     const feJourney: FeJourneyCandidateMetadata = {

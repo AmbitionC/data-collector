@@ -256,13 +256,20 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
     now: () => new Date().toISOString(),
     knownNowcoderUrls: () => new Set(
       jobs.list()
+        .filter(job => job.status !== 'failed' && job.status !== 'needs_attention')
         .map(job => job.url)
         .filter(url => url.startsWith('https://www.nowcoder.com/')),
     ),
     discoverNowcoder: knownUrls => discoverNowcoderUrls(collectorFetcher, knownUrls),
     enqueueNowcoder: async url => {
       const id = `fe-journey-nowcoder-${stableContentId(url)}`;
-      if (jobs.get(id)) return false;
+      const existing = jobs.get(id);
+      if (existing) {
+        if (existing.status !== 'failed' && existing.status !== 'needs_attention') return false;
+        const retried = await jobs.retry(id);
+        await dispatch(retried);
+        return true;
+      }
       const job = await jobs.create({ id, url, requestedBy: 'codex' });
       await dispatch(job);
       return true;

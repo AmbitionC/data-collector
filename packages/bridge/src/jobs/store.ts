@@ -150,6 +150,31 @@ export class JobStore {
     });
   }
 
+  /** Requeue a terminal collection failure without carrying stale output or error data. */
+  async retry(id: string): Promise<JobRecord> {
+    return this.serializeMutation(async () => {
+      const current = this.jobs.get(id);
+      if (!current) throw new JobStateError(`任务不存在：${id}`);
+      if (current.status !== 'failed' && current.status !== 'needs_attention') {
+        throw new JobStateError(`任务状态不可重试：${current.status}`);
+      }
+      const {
+        outputPath: _outputPath,
+        errorCode: _errorCode,
+        errorMessage: _errorMessage,
+        ...retained
+      } = current;
+      const next: JobRecord = {
+        ...retained,
+        status: 'queued',
+        updatedAt: this.dependencies.now(),
+      };
+      this.jobs.set(id, next);
+      await this.persist();
+      return structuredClone(next);
+    });
+  }
+
   async recover(): Promise<void> {
     await this.serializeMutation(async () => {
       let changed = false;

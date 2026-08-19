@@ -114,4 +114,42 @@ describe('FeJourneyCandidateIndex', () => {
     expect(new Set(documents.map(document => document.feJourney?.clusterId)).size).toBe(1);
     expect(documents.filter(document => document.feJourney?.duplicateOf)).toHaveLength(1);
   });
+
+  it('keeps the existing cluster identity when the same URL is collected again', async () => {
+    const root = await temporaryDirectories.create('fe-journey-index-recapture-');
+    const index = await FeJourneyCandidateIndex.open(root);
+    const representativeUrl = 'https://www.nowcoder.com/discuss/3001';
+    const representativeId = stableContentId(representativeUrl);
+    const originalText = '一面重点追问 Agent 规划、工具调用、上下文压缩与长期记忆。';
+    const first = index.prepare(nowcoderDocument('3001', originalText));
+    await first.commit();
+    const originalClusterId = first.document.feJourney?.clusterId;
+
+    const duplicate = index.prepare(nowcoderDocument('3002', originalText));
+    expect(duplicate.document.feJourney?.duplicateOf).toBe(representativeId);
+    await duplicate.commit();
+
+    const recapturedRepresentative = index.prepare(nowcoderDocument(
+      '3001',
+      '帖子后来补充了浏览器渲染、CSS 合成层与动画性能等完全不同的长篇内容。',
+    ));
+    expect(recapturedRepresentative.document.feJourney?.clusterId).toBe(originalClusterId);
+    expect(recapturedRepresentative.document.feJourney?.duplicateOf).toBeUndefined();
+    await recapturedRepresentative.commit();
+
+    const recapturedDuplicate = index.prepare(nowcoderDocument(
+      '3002',
+      '帖子后来改成了数据库索引、事务隔离与分布式锁等完全不同的长篇内容。',
+    ));
+    expect(recapturedDuplicate.document.feJourney?.clusterId).toBe(originalClusterId);
+    expect(recapturedDuplicate.document.feJourney?.duplicateOf).toBe(representativeId);
+    await recapturedDuplicate.commit();
+
+    const catalog = JSON.parse(
+      await readFile(join(root, '_catalog', 'fe-journey.json'), 'utf8'),
+    ) as { entries: Array<{ clusterId: string; representativeId: string }> };
+    expect(catalog.entries).toHaveLength(2);
+    expect(new Set(catalog.entries.map(entry => entry.clusterId))).toEqual(new Set([originalClusterId]));
+    expect(new Set(catalog.entries.map(entry => entry.representativeId))).toEqual(new Set([representativeId]));
+  });
 });

@@ -123,4 +123,53 @@ describe('durable jobs', () => {
     expect(reopened.list()).toHaveLength(ids.length);
     expect(reopened.list().every(job => job.status === 'dispatched')).toBe(true);
   });
+
+  it('retries only failed or attention-needed jobs and clears stale result fields', async () => {
+    const root = await temporaryDirectory();
+    const path = join(root, 'jobs.json');
+    let timestamp = 0;
+    const jobs = await JobStore.open(path, {
+      now: () => `2026-08-20T00:00:0${timestamp++}.000Z`,
+    });
+
+    const failed = await jobs.create({
+      id: 'retry-failed',
+      url: 'https://www.nowcoder.com/discuss/9101',
+      requestedBy: 'codex',
+    });
+    await jobs.transition(failed.id, 'failed', {
+      errorCode: 'EXTRACT_FAILED',
+      errorMessage: 'temporary extraction failure',
+      outputPath: '/tmp/stale.md',
+    });
+    expect(await jobs.retry(failed.id)).toMatchObject({
+      id: failed.id,
+      status: 'queued',
+      createdAt: failed.createdAt,
+    });
+    expect(jobs.get(failed.id)).not.toHaveProperty('errorCode');
+    expect(jobs.get(failed.id)).not.toHaveProperty('errorMessage');
+    expect(jobs.get(failed.id)).not.toHaveProperty('outputPath');
+
+    const attention = await jobs.create({
+      id: 'retry-attention',
+      url: 'https://www.nowcoder.com/discuss/9102',
+      requestedBy: 'codex',
+    });
+    await jobs.transition(attention.id, 'dispatched');
+    await jobs.transition(attention.id, 'needs_attention', {
+      errorCode: 'LOGIN_REQUIRED',
+      errorMessage: 'login expired',
+    });
+    await expect(jobs.retry(attention.id)).resolves.toMatchObject({ status: 'queued' });
+
+    const saved = await jobs.create({
+      id: 'do-not-retry-saved',
+      url: 'https://www.nowcoder.com/discuss/9103',
+      requestedBy: 'codex',
+    });
+    await jobs.transition(saved.id, 'collecting');
+    await jobs.transition(saved.id, 'saved', { outputPath: '/tmp/current.md' });
+    await expect(jobs.retry(saved.id)).rejects.toBeInstanceOf(JobStateError);
+  });
 });
