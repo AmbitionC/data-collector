@@ -43,8 +43,16 @@
   - `{ "type": "repo-inbox", "repoPath": "…", "inboxDir": "_inbox", "label": "…", "categories": [...], "commit": true, "push": false }`
     - `repoPath` 支持 `~` 展开；`inboxDir` 默认 `_inbox`；`label`/`categories` 缺省时分别由目录名派生 / 为空。
     - `commit`（默认 `true`）：写入后 `git add/commit` 到**当前分支**（不切分支）。
-    - `push`（内置去向为 `true`）：同步是用户显式发起的动作，提交后顺手推一次，
-      好让云端 Agent 拉得到；推不上去只作告警，不算同步失败。
+    - `push`（**默认 `true`**）：同步是用户显式发起的动作，提交后必须推一次，
+      好让云端 Agent 拉得到。**推不上去算同步失败**（0.3.14 起；原先只作告警，
+      那条规则假定 Agent 直接读本机工作区，前提早已不成立）。
+      被拒且原因是本地落后时，会自己 `git pull --rebase` 再推一次（0.3.17 起）。
+      确实只想本地提交的，显式写 `"push": false`。
+
+> ⚠️ **`sinks.json` 存在即完全接管，内置默认一条都不生效。** 真踩过：这个文件里写着
+> `"push": false`（建它时的前提是「Agent 读本机工作区」），于是每次同步都只 commit
+> 不 push，界面还显示「已同步」，用户每回都得自己去终端手动 merge + push。
+> 建了这个文件就要自己维护它的每个字段。
 - `routes`：`{ <source>: [sinkId, …] }` —— 在新链路里表示**同步去向**（第一个非 `markdown` 的即目标）。
   采集不看它，一律落本机库；未列出的来源同步时会如实报「没有配置同步去向」。
 

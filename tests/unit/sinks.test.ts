@@ -107,7 +107,10 @@ describe('RepoInboxSink', () => {
 
     expect(runGit).toHaveBeenCalledWith(repo, expect.arrayContaining(['add']));
     expect(runGit).toHaveBeenCalledWith(repo, expect.arrayContaining(['commit', '-m']));
-    expect(runGit).not.toHaveBeenCalledWith(repo, ['push']);
+    // **不写 push 也要推。** 旧默认是 false，前提是「Agent 直接读本机工作区」——
+    // 那个前提早废了。而 sinks.json 一旦存在就完全接管内置默认，漏写 push
+    // 就变成只 commit 不 push，界面还显示「已同步」，用户每次都得自己去终端补推。
+    expect(runGit).toHaveBeenCalledWith(repo, ['push']);
   });
 
   it('marks the date as collected when the source has no publish time', async () => {
@@ -545,5 +548,21 @@ describe('工单 D5/D7：截断标志与提问者要落进 meta', () => {
     const meta = JSON.parse(await readFile(join(result.outputRef, 'meta.json'), 'utf8'));
     expect(meta.truncated).toBeUndefined();
     expect(meta.questioner).toBeUndefined();
+  });
+});
+
+describe('push 默认开着，显式关掉才不推', () => {
+  it('显式 push:false 时确实不推（有人只想本地提交）', async () => {
+    const repo = await temporaryDirectory();
+    const runGit = vi.fn(async () => ({ code: 0, stderr: '' }));
+    const sink = new RepoInboxSink({
+      id: 'lt', repoPath: repo, push: false,
+      fetch: pngFetcher(), resolveAddresses: PUBLIC_DNS, runGit,
+    });
+
+    await sink.save(organize(nowcoderDoc({ images: [] })));
+
+    expect(runGit).toHaveBeenCalledWith(repo, expect.arrayContaining(['commit', '-m']));
+    expect(runGit).not.toHaveBeenCalledWith(repo, ['push']);
   });
 });

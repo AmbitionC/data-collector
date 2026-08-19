@@ -23,7 +23,15 @@ export interface RepoInboxSinkOptions {
   inboxDir?: string;
   /** 写入后是否 git 提交（默认 true）。 */
   commit?: boolean;
-  /** 提交后是否 git push（默认 false；本机 Agent 无需，云端 Routine 需要）。 */
+  /**
+   * 提交后是否 git push（**默认 true**）。
+   *
+   * 这个默认原先是 false，前提是「Agent 跑在本机、直接读仓库工作区」——那个前提早就废了：
+   * 用户在云端 Agent 里归档，只提交到本机仓库等于没送到。而且 sinks.json 一旦存在就
+   * 完全接管内置默认，漏写 push 就变成只 commit 不 push，界面还显示「已同步」，
+   * 用户每次都得自己去终端手动 merge + push——真踩过。
+   * 确实只想本地提交的，显式写 `"push": false`。
+   */
   push?: boolean;
   fetch?: typeof fetch;
   resolveAddresses?: ResolveAddresses;
@@ -100,7 +108,7 @@ export class RepoInboxSink implements ContentSink {
     this.categories = options.categories ?? [];
     this.label = options.label ?? `${this.repoRoot.split(/[\\/]/).filter(Boolean).pop() ?? '仓库'} 收件箱`;
     this.commit = options.commit ?? true;
-    this.push = options.push ?? false;
+    this.push = options.push ?? true;
     this.fetcher = options.fetch ?? fetch;
     this.resolveAddresses = options.resolveAddresses;
     this.runGit = options.runGit ?? defaultRunGit;
