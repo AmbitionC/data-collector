@@ -22,7 +22,6 @@ import { AccessTokenManager } from '../auth.js';
 import { loadConfig, type ConfigOverrides } from '../config.js';
 import { JobStore } from '../jobs/store.js';
 import type { ResolveAddresses } from '../library/assets.js';
-import { organize } from '../organize/index.js';
 import { loadSinksConfig, SinkRouter } from '../sinks/index.js';
 import { attachExtensionWebSocket } from './websocket.js';
 import { bearerToken, HttpError, isLoopback, readJson, sendJson } from './http.js';
@@ -40,6 +39,10 @@ import {
   syncEntries,
 } from '../library/index.js';
 import { updateWorkspace, type UpdateOutcome } from '../autoUpdate.js';
+import {
+  FeJourneyCandidateIndex,
+  saveCollectedDocument,
+} from '../feJourney/index.js';
 
 /** 删除请求：要么给明确的 id 列表，要么显式 all:true —— 不接受隐式全删。 */
 const deleteLibrarySchema = z.object({
@@ -194,6 +197,7 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
     },
     message => console.warn(`[sinks] ${message}`),
   );
+  const candidateIndex = await FeJourneyCandidateIndex.open(config.libraryRoot);
   const reveal = options.reveal ?? defaultReveal;
 
   // ── 自更新 ───────────────────────────────────────────────────────────
@@ -263,8 +267,10 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
       }
       if (job.status === 'dispatched') await jobs.transition(job.id, 'collecting');
       const override = sinkOverrides.get(job.id);
-      const sinkResults = await router.save(
-        organize(result.document as CollectedDocument),
+      const sinkResults = await saveCollectedDocument(
+        router,
+        candidateIndex,
+        result.document as CollectedDocument,
         override,
       );
       sinkOverrides.delete(job.id);

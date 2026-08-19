@@ -133,6 +133,31 @@ describe('RepoInboxSink', () => {
     expect(result.detail).toMatchObject({ committed: false });
   });
 
+  it('preserves fe-journey scoring and primitive source evidence in meta.json', async () => {
+    const repo = await temporaryDirectory();
+    const sink = new RepoInboxSink({ id: 'fe-journey', repoPath: repo, commit: false });
+    const result = await sink.save(organize(nowcoderDoc({
+      images: [],
+      sourceMetadata: { searchQuery: 'Agent 面经', likes: 32, firstParty: true },
+      feJourney: {
+        candidateKinds: ['interview', 'knowledge'],
+        qualityScore: 78,
+        qualitySignals: ['第一手面试经历'],
+        contentHash: '0123456789abcdef',
+        simHash: 'fedcba9876543210',
+        clusterId: 'cluster-0123456789ab',
+      },
+    })));
+
+    const meta = JSON.parse(await readFile(join(result.outputRef, 'meta.json'), 'utf8'));
+    expect(meta.sourceMetadata).toEqual({ searchQuery: 'Agent 面经', likes: 32, firstParty: true });
+    expect(meta.feJourney).toMatchObject({
+      candidateKinds: ['interview', 'knowledge'],
+      qualityScore: 78,
+      clusterId: 'cluster-0123456789ab',
+    });
+  });
+
   it('pushes when configured and records the push result', async () => {
     const repo = await temporaryDirectory();
     const runGit = vi.fn(async () => ({ code: 0, stderr: '' }));

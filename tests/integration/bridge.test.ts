@@ -196,7 +196,12 @@ describe('local Bridge', () => {
               ],
             },
           ],
-          defaults: { wechat: ['markdown'], zsxq: ['markdown'], nowcoder: ['markdown'] },
+          defaults: {
+            wechat: ['markdown'],
+            zsxq: ['markdown'],
+            nowcoder: ['markdown'],
+            github: ['markdown'],
+          },
         },
       },
     });

@@ -6,6 +6,10 @@ import { promisify } from 'node:util';
 import { afterEach, describe, expect, it } from 'vitest';
 import { organize } from '../../packages/bridge/src/organize/index.js';
 import {
+  FeJourneyCandidateIndex,
+  saveCollectedDocument,
+} from '../../packages/bridge/src/feJourney/index.js';
+import {
   listLibrary,
   pendingIds,
   syncEntries,
@@ -88,6 +92,44 @@ async function inboxEntries(repo: string): Promise<string[]> {
 }
 
 describe('采集 → 本地 → 同步 → 归档 的完整链路', () => {
+  it('enriches only fe-journey sources before the existing Markdown pipeline', async () => {
+    const { library, router } = await pipeline();
+    const candidateIndex = await FeJourneyCandidateIndex.open(library);
+    const nowcoderUrl = 'https://www.nowcoder.com/discuss/9001';
+    const nowcoder = post({
+      source: 'nowcoder',
+      kind: 'post',
+      url: nowcoderUrl,
+      canonicalUrl: nowcoderUrl,
+      title: 'Agent 全栈研发一面面经',
+      text: '一面面试官追问 RAG 向量召回、重排、评测和部署的实现原理。',
+      html: '<p>一面面试官追问 RAG 向量召回、重排、评测和部署的实现原理。</p>',
+    });
+    await saveCollectedDocument(router, candidateIndex, nowcoder);
+    await saveCollectedDocument(router, candidateIndex, post());
+
+    const entries = await listLibrary(library);
+    const nowcoderEntry = entries.find(entry => entry.source === 'nowcoder')!;
+    const zsxqEntry = entries.find(entry => entry.source === 'zsxq')!;
+    const nowcoderSource = JSON.parse(await readFile(
+      join(library, nowcoderEntry.relativePath.replace(/index\.md$/, 'source.json')),
+      'utf8',
+    ));
+    const zsxqSource = JSON.parse(await readFile(
+      join(library, zsxqEntry.relativePath.replace(/index\.md$/, 'source.json')),
+      'utf8',
+    ));
+
+    expect(nowcoderSource.document.feJourney).toMatchObject({
+      candidateKinds: ['interview', 'knowledge'],
+      qualityScore: expect.any(Number),
+      clusterId: expect.stringMatching(/^cluster-[a-f0-9]{12}$/),
+    });
+    expect(zsxqSource.document.feJourney).toBeUndefined();
+    const index = JSON.parse(await readFile(join(library, '_catalog', 'fe-journey.json'), 'utf8'));
+    expect(index.entries).toHaveLength(1);
+  });
+
   it('采集只写本机库，绝不提前投递到收件箱', async () => {
     const { library, repo, router } = await pipeline();
 
