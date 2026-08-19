@@ -151,6 +151,104 @@ afterEach(async () => {
 });
 
 describe('local Bridge', () => {
+  it('keeps fe-journey collection disabled without its fixed sink', async () => {
+    const root = await temporaryDirectory();
+    const configDir = join(root, '.config');
+    await mkdir(configDir, { recursive: true });
+    await writeFile(
+      join(configDir, 'sinks.json'),
+      JSON.stringify({ sinks: { markdown: { type: 'markdown' } }, routes: {} }),
+    );
+    const bridge = await startBridge({ port: 0, libraryRoot: root, configDir });
+    handles.push(bridge);
+    const { token } = await authorize(bridge);
+
+    const status = await requestJson<{ enabled: boolean }>(
+      bridge.url,
+      '/v1/fe-journey/status',
+      { token },
+    );
+    expect(status).toMatchObject({ status: 200, body: { enabled: false } });
+    const unauthorized = await requestJson(bridge.url, '/v1/fe-journey/collect', {
+      method: 'POST',
+      body: { force: true },
+    });
+    expect(unauthorized.status).toBe(401);
+    const disabled = await requestJson<{ error: { code: string } }>(
+      bridge.url,
+      '/v1/fe-journey/collect',
+      { method: 'POST', token, body: { force: true } },
+    );
+    expect(disabled).toMatchObject({
+      status: 409,
+      body: { error: { code: 'FE_JOURNEY_DISABLED' } },
+    });
+  });
+
+  it('runs the fixed fe-journey preset and rejects caller-supplied search settings', async () => {
+    const root = await temporaryDirectory();
+    const repo = await temporaryDirectory();
+    const configDir = join(root, '.config');
+    await mkdir(configDir, { recursive: true });
+    await writeFile(
+      join(configDir, 'sinks.json'),
+      JSON.stringify({
+        sinks: {
+          markdown: { type: 'markdown' },
+          'fe-journey': {
+            type: 'repo-inbox',
+            repoPath: repo,
+            commit: false,
+            push: false,
+          },
+        },
+        routes: { nowcoder: ['fe-journey'], github: ['fe-journey'] },
+      }),
+    );
+    const fetcher = vi.fn<typeof fetch>(async input => {
+      const url = new globalThis.URL(String(input));
+      if (url.hostname === 'www.nowcoder.com') {
+        return new Response('<a href="/discuss/9001?sourceSSR=search">真实形态面经</a>');
+      }
+      if (url.pathname === '/search/repositories') return Response.json({ items: [] });
+      return new Response('unexpected', { status: 500 });
+    });
+    const bridge = await startBridge({ port: 0, libraryRoot: root, configDir, fetch: fetcher });
+    handles.push(bridge);
+    const { token } = await authorize(bridge);
+
+    const rejected = await requestJson(bridge.url, '/v1/fe-journey/collect', {
+      method: 'POST',
+      token,
+      body: { force: true, queries: ['自定义搜索'] },
+    });
+    expect(rejected.status).toBe(400);
+
+    const collected = await requestJson<{
+      sources: { nowcoder: { status: string; enqueued: number }; github: { status: string } };
+    }>(bridge.url, '/v1/fe-journey/collect', {
+      method: 'POST',
+      token,
+      body: { force: true },
+    });
+    expect(collected.status).toBe(200);
+    expect(
+      collected.body.sources.nowcoder,
+      JSON.stringify(collected.body.sources),
+    ).toMatchObject({ status: 'completed', enqueued: 1 });
+    expect(
+      collected.body.sources.github,
+      JSON.stringify(collected.body.sources),
+    ).toMatchObject({ status: 'completed' });
+    const jobs = JSON.parse(await readFile(join(root, '_catalog', 'jobs.json'), 'utf8'));
+    expect(jobs.jobs).toHaveLength(1);
+    expect(jobs.jobs[0]).toMatchObject({
+      url: 'https://www.nowcoder.com/discuss/9001',
+      status: 'queued',
+      requestedBy: 'codex',
+    });
+  });
+
   it('authenticates, dispatches, saves, and ignores a duplicate result', async () => {
     const root = await temporaryDirectory();
     const configDir = join(root, '.config');

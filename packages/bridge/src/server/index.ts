@@ -14,6 +14,7 @@ import {
   bridgeAuthorizedPayloadSchema,
   jobResultPayloadSchema,
   wsEnvelopeSchema,
+  stableContentId,
   type CollectedDocument,
   type JobRecord,
   type WsEnvelope,
@@ -40,7 +41,10 @@ import {
 } from '../library/index.js';
 import { updateWorkspace, type UpdateOutcome } from '../autoUpdate.js';
 import {
+  FeJourneyCollector,
   FeJourneyCandidateIndex,
+  discoverGithubProjects,
+  discoverNowcoderUrls,
   saveCollectedDocument,
 } from '../feJourney/index.js';
 
@@ -71,6 +75,11 @@ const syncLibrarySchema = z.object({
   /** 同步全部未同步的条目；必须显式请求，绝不把「没传 ids」理解成「同步全部」。 */
   pending: z.boolean().optional(),
 });
+const runFeJourneySchema = z.object({
+  force: z.boolean().default(false),
+  nowcoder: z.boolean().default(true),
+  github: z.boolean().default(true),
+}).strict();
 
 export interface StartBridgeOptions extends ConfigOverrides {
   fetch?: typeof fetch;
@@ -88,6 +97,10 @@ export interface StartBridgeOptions extends ConfigOverrides {
   updateIntervalMs?: number;
   /** 可注入的更新实现（测试用）。 */
   runUpdate?: (repoRoot: string) => Promise<UpdateOutcome>;
+  /** 只有常驻 CLI 服务显式开启固定周期；嵌入式/测试启动不产生后台网络请求。 */
+  enableFeJourneyScheduler?: boolean;
+  /** 到期检查间隔，默认 15 分钟。 */
+  feJourneyCheckIntervalMs?: number;
 }
 
 export interface BridgeHandle {
@@ -235,6 +248,32 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
     for (const job of jobs.list('queued')) await dispatch(job);
   };
 
+  const feJourneyEnabled = sinksConfig.sinks['fe-journey']?.type === 'repo-inbox';
+  const collectorFetcher = options.fetch ?? fetch;
+  const feJourneyCollector = await FeJourneyCollector.open({
+    stateFile: join(config.configDir, 'fe-journey-state.json'),
+    enabled: feJourneyEnabled,
+    now: () => new Date().toISOString(),
+    knownNowcoderUrls: () => new Set(
+      jobs.list()
+        .map(job => job.url)
+        .filter(url => url.startsWith('https://www.nowcoder.com/')),
+    ),
+    discoverNowcoder: knownUrls => discoverNowcoderUrls(collectorFetcher, knownUrls),
+    enqueueNowcoder: async url => {
+      const id = `fe-journey-nowcoder-${stableContentId(url)}`;
+      if (jobs.get(id)) return false;
+      const job = await jobs.create({ id, url, requestedBy: 'codex' });
+      await dispatch(job);
+      return true;
+    },
+    discoverGithub: () => discoverGithubProjects(collectorFetcher, () => new Date().toISOString()),
+    saveGithub: async document => {
+      const results = await saveCollectedDocument(router, candidateIndex, document);
+      return results.some(result => result.sinkId === 'markdown' && result.ok);
+    },
+  });
+
   const handleSocketMessage = async (socket: WebSocket, data: RawData): Promise<void> => {
     const parsedEnvelope = wsEnvelopeSchema.parse(JSON.parse(messageText(data)));
     if (parsedEnvelope.type === 'extension.hello') {
@@ -346,6 +385,20 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
       if (job.requestedBy !== 'extension') await dispatch(job);
       return;
     }
+    if (request.method === 'GET' && requestUrl.pathname === '/v1/fe-journey/status') {
+      return sendJson(response, 200, feJourneyCollector.status());
+    }
+    if (request.method === 'POST' && requestUrl.pathname === '/v1/fe-journey/collect') {
+      const input = runFeJourneySchema.parse(await readJson(request));
+      if (!feJourneyCollector.status().enabled) {
+        throw new HttpError(
+          409,
+          'FE_JOURNEY_DISABLED',
+          '本机未启用固定 fe-journey 收件箱，定时采集保持关闭',
+        );
+      }
+      return sendJson(response, 200, await feJourneyCollector.run(input));
+    }
     if (request.method === 'GET' && requestUrl.pathname === '/v1/library') {
       return sendJson(response, 200, { entries: await listLibrary(config.libraryRoot) });
     }
@@ -456,6 +509,20 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
 
   server.listen(config.port, config.host);
   await once(server, 'listening');
+  let feJourneyTimer: NodeJS.Timeout | undefined;
+  if (options.enableFeJourneyScheduler && feJourneyEnabled) {
+    const runScheduledCollection = (): void => {
+      void feJourneyCollector.run().catch(error => {
+        console.warn(`[fe-journey] 定时采集失败：${error instanceof Error ? error.message : error}`);
+      });
+    };
+    runScheduledCollection();
+    feJourneyTimer = setInterval(
+      runScheduledCollection,
+      options.feJourneyCheckIntervalMs ?? 15 * 60_000,
+    );
+    feJourneyTimer.unref?.();
+  }
   const address = server.address() as AddressInfo;
   const url = `http://${config.host}:${address.port}`;
   return {
@@ -463,6 +530,7 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
     wsUrl: `ws://${config.host}:${address.port}/v1/extension`,
     async close() {
       if (updateTimer) clearInterval(updateTimer);
+      if (feJourneyTimer) clearInterval(feJourneyTimer);
       extensionSocket?.close(1001, 'server shutdown');
       websocketServer.close();
       server.close();

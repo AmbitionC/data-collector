@@ -319,10 +319,16 @@ describe('loadSinksConfig', () => {
       categories: ['投资', '财富', '职场', '认知', '教育', '其他'],
     });
 
-    // 两个仓库都在：牛客路由到 fe-journey。
+    // 两个仓库都在：牛客和 GitHub 只同步到本机 fe-journey 收件箱。
     const both = await builtInSinksConfig(async () => true);
     expect(both.routes.nowcoder).toEqual(['fe-journey']);
-    expect(both.sinks['fe-journey']).toMatchObject({ label: 'fe-journey 收件箱' });
+    expect(both.routes.github).toEqual(['fe-journey']);
+    expect(both.sinks['fe-journey']).toMatchObject({
+      label: 'fe-journey 收件箱',
+      commit: false,
+      push: false,
+    });
+    expect(both.sinks['life-teachers']).toMatchObject({ push: true });
 
     // 都不在：降级为只有本机库，不会凭空创建目录。
     const none = await builtInSinksConfig(async () => false);
