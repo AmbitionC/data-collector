@@ -48,6 +48,18 @@ const OPERATION_SIGNALS = [
 const PROJECT_SIGNALS = [/开源/u, /GitHub/i, /代码仓库|仓库/u, /\bDemo\b/i, /项目架构/u, /快速开始/u];
 const PROMOTION_SIGNALS = [/加微信/u, /扫码/u, /付费/u, /训练营/u, /课程/u, /咨询/u, /进群/u, /领取资料/u];
 const JOB_CHATTER_SIGNALS = [/求\s*offer/i, /许愿/u, /求捞|捞一下/u, /求内推/u, /蹲一个/u, /简历挂/u];
+const TRUSTED_CONTENT_DOMAINS = [
+  'github.com',
+  'nowcoder.com',
+  'arxiv.org',
+  'huggingface.co',
+  'openai.com',
+  'microsoft.com',
+  'python.org',
+  'redis.io',
+  'docker.com',
+  'npmjs.com',
+];
 
 function matchCount(text: string, patterns: readonly RegExp[]): number {
   return patterns.reduce((count, pattern) => count + (pattern.test(text) ? 1 : 0), 0);
@@ -55,6 +67,18 @@ function matchCount(text: string, patterns: readonly RegExp[]): number {
 
 function clampScore(score: number): number {
   return Math.max(0, Math.min(100, Math.round(score)));
+}
+
+function suspiciousBareDomains(text: string): string[] {
+  const matches = text.matchAll(
+    /\b(?:https?:\/\/)?([a-z0-9][a-z0-9-]{2,}(?:\.[a-z0-9-]+)*\.(?:com\.cn|com|cn|net|top|xyz))\b/gi,
+  );
+  return [...new Set([...matches]
+    .map(match => match[1]?.toLocaleLowerCase('en-US'))
+    .filter((domain): domain is string => Boolean(domain))
+    .filter(domain => !TRUSTED_CONTENT_DOMAINS.some(
+      trusted => domain === trusted || domain.endsWith(`.${trusted}`),
+    )))];
 }
 
 function scoreProject(document: CollectedDocument, combined: string): {
@@ -167,6 +191,10 @@ export function scoreFeJourneyCandidate(document: CollectedDocument): Unclustere
   if (matchCount(combined, JOB_CHATTER_SIGNALS) >= 2) {
     score -= 30;
     exclusionReasons.push('求职闲聊');
+  }
+  if (document.source === 'nowcoder' && suspiciousBareDomains(combined).length >= 2) {
+    score -= 50;
+    exclusionReasons.push('可疑导流链接');
   }
   if (candidateKinds.length === 0) {
     score -= 20;

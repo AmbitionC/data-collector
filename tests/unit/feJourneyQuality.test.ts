@@ -120,6 +120,20 @@ describe('fe-journey deterministic candidate scoring', () => {
       '缺少可消费内容类型',
     ]));
   });
+
+  it('excludes otherwise rich posts that contain multiple suspicious bare domains', () => {
+    const result = scoreFeJourneyCandidate(nowcoderDocument(
+      'Agent 两轮技术面经与系统设计复盘',
+      [
+        '本人参加了一面和二面，面试官追问 Agent 架构、RAG 实现原理、评测、部署与性能优化。',
+        '在缓存设计段落突然插入 7zhf.com，又在推理集群段落插入 4ssf.com，最后还有 mfpf.cn。',
+        '正文其余部分继续讨论工具调用、并发控制、故障恢复和可观测性。',
+      ].join(''),
+    ));
+
+    expect(result.exclusionReasons).toContain('可疑导流链接');
+    expect(result.qualityScore).toBeLessThan(80);
+  });
 });
 
 describe('fe-journey deterministic fingerprints', () => {
