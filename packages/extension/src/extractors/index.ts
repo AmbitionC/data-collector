@@ -75,5 +75,7 @@ export function extractDocument(
         : extractZsxq(document, url, now);
     case 'nowcoder':
       return extractNowcoder(document, url, now);
+    case 'github':
+      throw new ExtractionError('UNSUPPORTED_LAYOUT', 'GitHub 项目由 fe-journey 定时任务采集');
   }
 }

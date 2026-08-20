@@ -1,4 +1,4 @@
-import { access, mkdir, readFile, writeFile } from 'node:fs/promises';
+import { access, cp, mkdir, readFile, writeFile } from 'node:fs/promises';
 import { readdirSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -20,6 +20,7 @@ const LIST_URL = 'https://wx.zsxq.com/group/48844584441158';
 const TOPICS_API = 'https://wx.zsxq.com/v2/groups/48844584441158/topics';
 let browser: Browser | undefined;
 let bridge: BridgeHandle | undefined;
+let bridgePort: number | undefined;
 const temporaryDirectories = createTemporaryDirectoryTracker();
 
 afterEach(async () => {
@@ -27,6 +28,7 @@ afterEach(async () => {
   const activeBridge = bridge;
   browser = undefined;
   bridge = undefined;
+  bridgePort = undefined;
   const closeResults = await Promise.allSettled([
     Promise.resolve().then(() => activeBrowser?.close()),
     Promise.resolve().then(() => activeBridge?.close()),
@@ -119,7 +121,9 @@ async function captureCurrentFromSidePanel(
       })()`,
       returnByValue: true,
     });
-    if (exceptionDetails) throw new Error(exceptionDetails.text);
+    if (exceptionDetails) {
+      throw new Error(exceptionDetails.exception?.description ?? exceptionDetails.text);
+    }
     if (result.value !== true) throw new Error('Side Panel capture click failed');
   } finally {
     await session.detach();
@@ -144,10 +148,14 @@ async function preferredChrome(): Promise<string | undefined> {
     process.env.CHROME_PATH,
     process.env.PUPPETEER_EXECUTABLE_PATH,
     ...playwrightChromiumCandidates(),
+    // 产品浏览器优先；当前官方 Chrome 已忽略 --load-extension，而 Edge 仍支持 E2E 所需的解压扩展。
+    '/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge',
+    '/Applications/Microsoft Edge Beta.app/Contents/MacOS/Microsoft Edge Beta',
     '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
     '/usr/bin/google-chrome',
     '/usr/bin/chromium',
     'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
+    'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe',
   ].filter((candidate): candidate is string => Boolean(candidate));
   for (const candidate of candidates) {
     try {
@@ -249,15 +257,31 @@ async function clickSidePanel(page: Page, selector: string): Promise<void> {
 /** 起本机 Bridge + 装好扩展的浏览器（两个用例共用同一套真实链路）。 */
 async function startStack(): Promise<{ libraryRoot: string }> {
   const libraryRoot = await temporaryDirectories.create('data-collector-e2e-');
+  const configDir = join(libraryRoot, '.config');
+  await mkdir(configDir, { recursive: true });
+  // E2E 必须与开发机上恰好存在的内置仓库解耦，否则分类会被本机 life-teachers 配置改写。
+  await writeFile(
+    join(configDir, 'sinks.json'),
+    JSON.stringify({ sinks: { markdown: { type: 'markdown' } }, routes: {} }),
+    'utf8',
+  );
   bridge = await startBridge({
-    port: 17321,
+    // 不能占用用户常驻 Bridge 的 17321；测试使用系统分配的隔离端口。
+    port: 0,
     libraryRoot,
-    configDir: join(libraryRoot, '.config'),
+    configDir,
     fetch: async () => {
       await new Promise(resolveDelay => setTimeout(resolveDelay, 1_200));
       return new Response(null, { status: 404 });
     },
   });
+  bridgePort = Number(new URL(bridge.url).port);
+  const isolatedExtensionPath = await temporaryDirectories.create('data-collector-e2e-extension-');
+  await cp(EXTENSION_PATH, isolatedExtensionPath, { recursive: true });
+  const backgroundPath = join(isolatedExtensionPath, 'background.js');
+  const background = await readFile(backgroundPath, 'utf8');
+  if (!background.includes('17321')) throw new Error('构建产物中找不到 Bridge 默认端口');
+  await writeFile(backgroundPath, background.replaceAll('17321', String(bridgePort)), 'utf8');
   const executablePath = await preferredChrome();
   if (!executablePath) {
     throw new Error('未找到 Chrome；请设置 PUPPETEER_EXECUTABLE_PATH 后重试');
@@ -272,8 +296,8 @@ async function startStack(): Promise<{ libraryRoot: string }> {
       '--no-sandbox',
       '--disable-setuid-sandbox',
       '--disable-dev-shm-usage',
-      `--disable-extensions-except=${EXTENSION_PATH}`,
-      `--load-extension=${EXTENSION_PATH}`,
+      `--disable-extensions-except=${isolatedExtensionPath}`,
+      `--load-extension=${isolatedExtensionPath}`,
     ],
     // timeout 已经守住「启动卡死」；不要再挂 AbortSignal —— 它会在超时点直接杀掉
     // 浏览器进程，跑得久一点的用例会莫名其妙断在半路（Connection closed）。
@@ -376,7 +400,7 @@ describe('built Chrome extension', () => {
       'utf8',
     );
     bridge = await startBridge({
-      port: 17321,
+      port: bridgePort,
       libraryRoot,
       configDir: join(libraryRoot, '.config'),
       fetch: async () => new Response(null, { status: 404 }),

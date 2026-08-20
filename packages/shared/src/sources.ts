@@ -28,6 +28,7 @@ export interface SourceDescriptor {
 const WECHAT_HOST = 'mp.weixin.qq.com';
 const ZSXQ_HOST = 'wx.zsxq.com';
 const NOWCODER_HOST = 'www.nowcoder.com';
+const GITHUB_HOST = 'github.com';
 
 /**
  * 来源注册表。键必须覆盖 SOURCES 的每一项（编译期强制）。
@@ -58,6 +59,15 @@ export const SOURCE_REGISTRY: Record<Source, SourceDescriptor> = {
     identityParams: [],
     kinds: ['post'],
     defaultKind: 'post',
+  },
+  github: {
+    id: 'github',
+    label: 'GitHub',
+    matchHost: host => host === GITHUB_HOST,
+    // 仓库身份只由 /<owner>/<repo> 路径决定；tab 等查询参数和锚点均丢弃。
+    identityParams: [],
+    kinds: ['article'],
+    defaultKind: 'article',
   },
 };
 

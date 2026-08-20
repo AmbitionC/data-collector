@@ -12,8 +12,10 @@ import {
   EXTENSION_REPLACED_CLOSE_REASON,
   TRUSTED_EXTENSION_ID,
   bridgeAuthorizedPayloadSchema,
+  descriptorForHost,
   jobResultPayloadSchema,
   wsEnvelopeSchema,
+  stableContentId,
   type CollectedDocument,
   type JobRecord,
   type WsEnvelope,
@@ -22,7 +24,6 @@ import { AccessTokenManager } from '../auth.js';
 import { loadConfig, type ConfigOverrides } from '../config.js';
 import { JobStore } from '../jobs/store.js';
 import type { ResolveAddresses } from '../library/assets.js';
-import { organize } from '../organize/index.js';
 import { loadSinksConfig, SinkRouter } from '../sinks/index.js';
 import { attachExtensionWebSocket } from './websocket.js';
 import { bearerToken, HttpError, isLoopback, readJson, sendJson } from './http.js';
@@ -39,6 +40,15 @@ import {
 } from '../library/index.js';
 import { buildStampCommit, updateWorkspace, type UpdateOutcome } from '../autoUpdate.js';
 import { runTool } from '../git.js';
+import {
+  FeJourneyCollector,
+  FeJourneyCandidateIndex,
+  discoverGithubProjects,
+  discoverNowcoderUrls,
+  saveCollectedDocument,
+  type FeJourneyRunOptions,
+  type FeJourneyRunReport,
+} from '../feJourney/index.js';
 
 /** 删除请求：要么给明确的 id 列表，要么显式 all:true —— 不接受隐式全删。 */
 const deleteLibrarySchema = z.object({
@@ -66,6 +76,11 @@ const syncLibrarySchema = z.object({
   /** 同步全部未同步的条目；必须显式请求，绝不把「没传 ids」理解成「同步全部」。 */
   pending: z.boolean().optional(),
 });
+const runFeJourneySchema = z.object({
+  force: z.boolean().default(false),
+  nowcoder: z.boolean().default(true),
+  github: z.boolean().default(true),
+}).strict();
 
 export interface StartBridgeOptions extends ConfigOverrides {
   fetch?: typeof fetch;
@@ -85,6 +100,10 @@ export interface StartBridgeOptions extends ConfigOverrides {
   runUpdate?: (repoRoot: string) => Promise<UpdateOutcome>;
   /** 更新完成后怎么退出（默认 process.exit(0)，交给登录项拉起来）。测试用。 */
   exit?: () => void;
+  /** 只有常驻 CLI 服务显式开启固定周期；嵌入式/测试启动不产生后台网络请求。 */
+  enableFeJourneyScheduler?: boolean;
+  /** 到期检查间隔，默认 15 分钟。 */
+  feJourneyCheckIntervalMs?: number;
 }
 
 export interface BridgeHandle {
@@ -216,6 +235,14 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
     },
     message => console.warn(`[sinks] ${message}`),
   );
+  let candidateIndex: FeJourneyCandidateIndex | undefined;
+  let candidateIndexError: string | undefined;
+  try {
+    candidateIndex = await FeJourneyCandidateIndex.open(config.libraryRoot);
+  } catch (error) {
+    candidateIndexError = `fe-journey 候选索引不可用：${error instanceof Error ? error.message : error}`;
+    console.warn(`[fe-journey] ${candidateIndexError}`);
+  }
   const reveal = options.reveal ?? defaultReveal;
 
   // 本次进程内的「任务 → 用户选定去向」覆盖表。Bridge 重启后该覆盖丢失，
@@ -228,6 +255,7 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
   // 失败一律只记录、不抛：更新是附加能力，绝不能把采集服务带下水。
   let update: UpdateOutcome | undefined;
   let restartPending = false;
+  let feJourneyRuns = 0;
   const repoRoot = options.repoRoot ?? undefined;
   const runUpdate = options.runUpdate ?? (root => updateWorkspace(root, processUpdateHost));
   const exit = options.exit ?? ((): void => process.exit(0));
@@ -245,6 +273,7 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
     if (extensionReady && extensionSocket?.readyState === WebSocket.OPEN) return;
     const inFlight = ['queued', 'dispatched', 'collecting'] as const;
     if (inFlight.some(status => jobs.list(status).length > 0)) return;
+    if (feJourneyRuns > 0) return;
     restartPending = false;
     console.warn('[update] 新版本已构建，本机服务重启以生效');
     exit();
@@ -270,12 +299,70 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
 
   const dispatch = async (job: JobRecord): Promise<void> => {
     if (!extensionReady || extensionSocket?.readyState !== WebSocket.OPEN || job.status !== 'queued') return;
+    const jobSource = descriptorForHost(new URL(job.url).hostname)?.id;
+    if (
+      !candidateIndex &&
+      (jobSource === 'nowcoder' || jobSource === 'github')
+    ) {
+      await jobs.transition(job.id, 'failed', {
+        errorCode: 'FE_JOURNEY_INDEX_UNAVAILABLE',
+        errorMessage: candidateIndexError ?? 'fe-journey 候选索引不可用',
+      });
+      return;
+    }
     await jobs.transition(job.id, 'dispatched');
     extensionSocket.send(JSON.stringify(envelope('job.collect', job.id, { url: job.url })));
   };
 
   const dispatchQueued = async (): Promise<void> => {
     for (const job of jobs.list('queued')) await dispatch(job);
+  };
+
+  const feJourneyConfigured = sinksConfig.sinks['fe-journey']?.type === 'repo-inbox';
+  const feJourneyEnabled = feJourneyConfigured && Boolean(candidateIndex);
+  const collectorFetcher = options.fetch ?? fetch;
+  const feJourneyCollector = await FeJourneyCollector.open({
+    stateFile: join(config.configDir, 'fe-journey-state.json'),
+    enabled: feJourneyEnabled,
+    ...(feJourneyConfigured && candidateIndexError ? { disabledError: candidateIndexError } : {}),
+    now: () => new Date().toISOString(),
+    knownNowcoderUrls: () => new Set(
+      jobs.list()
+        .filter(job => job.status !== 'failed' && job.status !== 'needs_attention')
+        .map(job => job.url)
+        .filter(url => url.startsWith('https://www.nowcoder.com/')),
+    ),
+    discoverNowcoder: knownUrls => discoverNowcoderUrls(collectorFetcher, knownUrls),
+    enqueueNowcoder: async url => {
+      const id = `fe-journey-nowcoder-${stableContentId(url)}`;
+      const existing = jobs.get(id);
+      if (existing) {
+        if (existing.status !== 'failed' && existing.status !== 'needs_attention') return false;
+        const retried = await jobs.retry(id);
+        await dispatch(retried);
+        return true;
+      }
+      const job = await jobs.create({ id, url, requestedBy: 'codex' });
+      await dispatch(job);
+      return true;
+    },
+    discoverGithub: () => discoverGithubProjects(collectorFetcher, () => new Date().toISOString()),
+    saveGithub: async document => {
+      const results = await saveCollectedDocument(router, candidateIndex, document);
+      return results.some(result => result.sinkId === 'markdown' && result.ok);
+    },
+  });
+  const runFeJourney = async (
+    runOptions: FeJourneyRunOptions = {},
+  ): Promise<FeJourneyRunReport> => {
+    feJourneyRuns += 1;
+    try {
+      return await feJourneyCollector.run(runOptions);
+    } finally {
+      feJourneyRuns -= 1;
+      // HTTP 手动触发时先让响应写回；常驻调度同样在本轮事件结束后再重启。
+      setImmediate(maybeRestart);
+    }
   };
 
   const handleSocketMessage = async (socket: WebSocket, data: RawData): Promise<void> => {
@@ -310,8 +397,10 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
       }
       if (job.status === 'dispatched') await jobs.transition(job.id, 'collecting');
       const override = sinkOverrides.get(job.id);
-      const sinkResults = await router.save(
-        organize(result.document as CollectedDocument),
+      const sinkResults = await saveCollectedDocument(
+        router,
+        candidateIndex,
+        result.document as CollectedDocument,
         override,
       );
       sinkOverrides.delete(job.id);
@@ -389,6 +478,21 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
       sendJson(response, 202, job);
       if (job.requestedBy !== 'extension') await dispatch(job);
       return;
+    }
+    if (request.method === 'GET' && requestUrl.pathname === '/v1/fe-journey/status') {
+      return sendJson(response, 200, feJourneyCollector.status());
+    }
+    if (request.method === 'POST' && requestUrl.pathname === '/v1/fe-journey/collect') {
+      const input = runFeJourneySchema.parse(await readJson(request));
+      if (!feJourneyCollector.status().enabled) {
+        const status = feJourneyCollector.status();
+        throw new HttpError(
+          409,
+          'FE_JOURNEY_DISABLED',
+          status.error ?? '本机未启用固定 fe-journey 收件箱，定时采集保持关闭',
+        );
+      }
+      return sendJson(response, 200, await runFeJourney(input));
     }
     if (request.method === 'GET' && requestUrl.pathname === '/v1/library') {
       return sendJson(response, 200, { entries: await listLibrary(config.libraryRoot) });
@@ -500,6 +604,20 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
 
   server.listen(config.port, config.host);
   await once(server, 'listening');
+  let feJourneyTimer: NodeJS.Timeout | undefined;
+  if (options.enableFeJourneyScheduler && feJourneyCollector.status().enabled) {
+    const runScheduledCollection = (): void => {
+      void runFeJourney().catch(error => {
+        console.warn(`[fe-journey] 定时采集失败：${error instanceof Error ? error.message : error}`);
+      });
+    };
+    runScheduledCollection();
+    feJourneyTimer = setInterval(
+      runScheduledCollection,
+      options.feJourneyCheckIntervalMs ?? 15 * 60_000,
+    );
+    feJourneyTimer.unref?.();
+  }
   const address = server.address() as AddressInfo;
   const url = `http://${config.host}:${address.port}`;
   return {
@@ -507,6 +625,7 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
     wsUrl: `ws://${config.host}:${address.port}/v1/extension`,
     async close() {
       if (updateTimer) clearInterval(updateTimer);
+      if (feJourneyTimer) clearInterval(feJourneyTimer);
       extensionSocket?.close(1001, 'server shutdown');
       websocketServer.close();
       server.close();

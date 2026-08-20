@@ -1,3 +1,4 @@
+import { mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import WebSocket from 'ws';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -50,6 +51,102 @@ afterEach(async () => {
 });
 
 describe('Codex CLI', () => {
+  it('runs and reports the fixed fe-journey collection without accepting search configuration', async () => {
+    const root = await temporaryDirectories.create('data-collector-cli-fe-journey-');
+    const repo = await temporaryDirectories.create('data-collector-cli-fe-repo-');
+    const configDir = join(root, '.config');
+    await mkdir(configDir, { recursive: true });
+    await writeFile(join(configDir, 'sinks.json'), JSON.stringify({
+      sinks: {
+        markdown: { type: 'markdown' },
+        'fe-journey': { type: 'repo-inbox', repoPath: repo, commit: false, push: false },
+      },
+      routes: { nowcoder: ['fe-journey'], github: ['fe-journey'] },
+    }));
+    const bridge = await startBridge({
+      port: 0,
+      libraryRoot: root,
+      configDir,
+      fetch: async input => {
+        const url = new URL(String(input));
+        return url.hostname === 'www.nowcoder.com'
+          ? new Response('<html></html>')
+          : Response.json({ items: [] });
+      },
+    });
+    handles.push(bridge);
+    await authorize(bridge);
+    const port = new URL(bridge.url).port;
+    let stdout = '';
+    let stderr = '';
+    const io = {
+      stdout: (value: string) => { stdout += value; },
+      stderr: (value: string) => { stderr += value; },
+    };
+
+    expect(await runCli([
+      'fe-journey', 'collect', '--force', '--port', port, '--library', root, '--config', configDir,
+    ], io)).toBe(0);
+    expect(stderr).toBe('');
+    expect(JSON.parse(stdout)).toMatchObject({
+      enabled: true,
+      forced: true,
+      sources: { nowcoder: { status: 'completed' }, github: { status: 'completed' } },
+    });
+
+    stdout = '';
+    expect(await runCli([
+      'fe-journey', 'status', '--port', port, '--library', root, '--config', configDir,
+    ], io)).toBe(0);
+    expect(JSON.parse(stdout)).toMatchObject({ enabled: true, running: false });
+  });
+
+  it('returns a failing exit code when a forced fe-journey run reports source failures', async () => {
+    const root = await temporaryDirectories.create('data-collector-cli-fe-failed-');
+    const repo = await temporaryDirectories.create('data-collector-cli-fe-failed-repo-');
+    const configDir = join(root, '.config');
+    await mkdir(configDir, { recursive: true });
+    await writeFile(join(configDir, 'sinks.json'), JSON.stringify({
+      sinks: {
+        markdown: { type: 'markdown' },
+        'fe-journey': { type: 'repo-inbox', repoPath: repo, commit: false, push: false },
+      },
+      routes: { nowcoder: ['fe-journey'], github: ['fe-journey'] },
+    }));
+    const bridge = await startBridge({
+      port: 0,
+      libraryRoot: root,
+      configDir,
+      fetch: async input => {
+        const url = new URL(String(input));
+        return url.hostname === 'www.nowcoder.com'
+          ? new Response('temporary outage', { status: 503 })
+          : new Response('rate limited', { status: 429 });
+      },
+    });
+    handles.push(bridge);
+    await authorize(bridge);
+    const port = new URL(bridge.url).port;
+    let stdout = '';
+    let stderr = '';
+
+    const code = await runCli([
+      'fe-journey', 'collect', '--force', '--port', port, '--library', root, '--config', configDir,
+    ], {
+      stdout: value => { stdout += value; },
+      stderr: value => { stderr += value; },
+    });
+
+    expect(code).toBe(1);
+    expect(JSON.parse(stdout)).toMatchObject({
+      sources: {
+        nowcoder: { status: 'failed' },
+        github: { status: 'failed' },
+      },
+    });
+    expect(stderr).toContain('fe-journey 采集失败');
+  });
+
   it('submits a URL, waits for the extension, and prints only the saved path', async () => {
     const root = await temporaryDirectories.create('data-collector-cli-');
     const configDir = join(root, '.config');

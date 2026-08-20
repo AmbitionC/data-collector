@@ -129,6 +129,48 @@ async function health(args: string[], io: CliIo): Promise<number> {
   return 0;
 }
 
+async function feJourney(args: string[], io: CliIo): Promise<number> {
+  const action = args[1];
+  if (action !== 'collect' && action !== 'status') {
+    throw new Error('用法：data-collector fe-journey <collect|status> [--force]');
+  }
+  const { baseUrl, token } = await authenticatedToken(args);
+  const response = await fetch(`${baseUrl}/v1/fe-journey/${action}`, {
+    ...(action === 'collect'
+      ? {
+          method: 'POST',
+          headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+          body: JSON.stringify({ force: args.includes('--force') }),
+        }
+      : { headers: { authorization: `Bearer ${token}` } }),
+  });
+  const body = await response.json() as unknown;
+  if (!response.ok) {
+    const message = typeof body === 'object' && body !== null &&
+      typeof (body as { error?: { message?: unknown } }).error?.message === 'string'
+      ? (body as { error: { message: string } }).error.message
+      : `HTTP ${response.status}`;
+    throw new Error(`fe-journey ${action === 'collect' ? '采集' : '状态读取'}失败：${message}`);
+  }
+  io.stdout(`${JSON.stringify(body)}\n`);
+  if (action === 'collect' && typeof body === 'object' && body !== null) {
+    const sources = (body as { sources?: unknown }).sources;
+    const failedSources = typeof sources === 'object' && sources !== null
+      ? Object.entries(sources)
+          .filter(([, report]) => (
+            typeof report === 'object' && report !== null &&
+            (report as { status?: unknown }).status === 'failed'
+          ))
+          .map(([source]) => source)
+      : [];
+    if (failedSources.length > 0) {
+      io.stderr(`fe-journey 采集失败：${failedSources.join('、')}\n`);
+      return 1;
+    }
+  }
+  return 0;
+}
+
 /** 等服务真的能应答再报成功——登录项加载和端口就绪之间有几百毫秒。 */
 async function waitUntilHealthy(host: AutostartHost, url: string): Promise<boolean> {
   for (let attempt = 0; attempt < 15; attempt += 1) {
@@ -287,6 +329,7 @@ async function bridge(args: string[], io: CliIo): Promise<number> {
   // --no-update 可关掉。
   const handle = await startBridge({
     ...configOverrides(args),
+    enableFeJourneyScheduler: true,
     ...(args.includes('--no-update') ? {} : { repoRoot: discoverRepoRoot() ?? null }),
   });
   io.stderr(`Data Collector Bridge: ${handle.url}\n`);
@@ -305,9 +348,10 @@ export async function runCli(args: string[], io: CliIo = PROCESS_IO): Promise<nu
     const command = args[0];
     if (command === 'collect') return await collect(args, io);
     if (command === 'health') return await health(args, io);
+    if (command === 'fe-journey') return await feJourney(args, io);
     if (command === 'bridge') return await bridge(args, io);
     io.stderr(
-      '用法：data-collector <bridge install|bridge start|bridge status|bridge uninstall|collect URL|health>\n',
+      '用法：data-collector <bridge install|bridge start|bridge status|bridge uninstall|collect URL|fe-journey collect|fe-journey status|health>\n',
     );
     return 2;
   } catch (error) {

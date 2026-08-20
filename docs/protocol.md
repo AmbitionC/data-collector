@@ -34,8 +34,10 @@ WebSocket Origin 校验会阻止普通网页和其他扩展。Origin 与固定 I
 - `POST /v1/jobs`：创建任务。正文 `{ "url": "...", "requestedBy": "codex|cli|extension" }`。Codex/CLI 任务在扩展在线时立即派发；`extension` 表示 Side Panel 当前页采集，由当前 tab runner 直接回传，不立即回派。
 - `GET /v1/jobs/:id`：查询任务状态和最终路径。
 - `POST /v1/reveal`：只允许打开知识库根目录内已存在的文件，供 Side Panel 点击“在文件夹中查看”。
+- `GET /v1/fe-journey/status`：读取固定周期状态、运行中标记和两个来源的下次到期时间。
+- `POST /v1/fe-journey/collect`：立即检查或强制运行固定预设。请求体只接受 `{ "force"?: boolean, "nowcoder"?: boolean, "github"?: boolean }`，未知字段直接 `400`；未启用固定 `fe-journey` sink 时返回 `409 FE_JOURNEY_DISABLED`。
 
-URL 只允许 HTTPS 的 `mp.weixin.qq.com`、`wx.zsxq.com` 与知识星球子域。请求体、字段长度、图片数量和 WebSocket 帧都有上限。
+URL 只允许 HTTPS 的 `mp.weixin.qq.com`、`wx.zsxq.com`/知识星球子域、`www.nowcoder.com` 和 `github.com`。GitHub 文档只由 Bridge provider 生成，扩展若尝试页面提取会明确返回不支持布局。请求体、字段长度、图片数量和 WebSocket 帧都有上限。
 
 任务状态：
 

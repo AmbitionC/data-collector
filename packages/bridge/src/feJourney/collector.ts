@@ -1,0 +1,226 @@
+import type { CollectedDocument } from '@data-collector/shared';
+import { FE_JOURNEY_PRESET } from './preset.js';
+import {
+  FeJourneyStateStore,
+  type FeJourneySource,
+  type FeJourneySourceState,
+  type FeJourneyState,
+} from './state.js';
+
+export interface FeJourneyCollectorDependencies {
+  stateFile: string;
+  enabled: boolean;
+  disabledError?: string;
+  now(): string;
+  knownNowcoderUrls(): ReadonlySet<string>;
+  discoverNowcoder(knownUrls: ReadonlySet<string>): Promise<string[]>;
+  enqueueNowcoder(url: string): Promise<boolean>;
+  discoverGithub(): Promise<CollectedDocument[]>;
+  saveGithub(document: CollectedDocument): Promise<boolean>;
+}
+
+export interface FeJourneyRunOptions {
+  force?: boolean;
+  nowcoder?: boolean;
+  github?: boolean;
+}
+
+export interface FeJourneySourceRunReport {
+  status: 'completed' | 'skipped' | 'failed' | 'disabled';
+  reason?: 'not_due' | 'not_requested';
+  discovered?: number;
+  enqueued?: number;
+  saved?: number;
+  failed?: number;
+  error?: string;
+}
+
+export interface FeJourneyRunReport {
+  enabled: boolean;
+  forced: boolean;
+  startedAt: string;
+  finishedAt: string;
+  sources: Record<FeJourneySource, FeJourneySourceRunReport>;
+}
+
+export interface FeJourneyCollectorStatus {
+  enabled: boolean;
+  error?: string;
+  running: boolean;
+  state: FeJourneyState;
+  nextDueAt: Record<FeJourneySource, string | null>;
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function retryInterval(source: FeJourneySource, state: FeJourneySourceState): number {
+  return state.lastError
+    ? FE_JOURNEY_PRESET[source].failureRetryMs
+    : FE_JOURNEY_PRESET[source].intervalMs;
+}
+
+function nextDue(source: FeJourneySource, state: FeJourneySourceState): string | null {
+  if (!state.lastAttemptAt) return null;
+  const timestamp = Date.parse(state.lastAttemptAt);
+  const intervalMs = retryInterval(source, state);
+  return Number.isFinite(timestamp) ? new Date(timestamp + intervalMs).toISOString() : null;
+}
+
+export class FeJourneyCollector {
+  private inFlight: Promise<FeJourneyRunReport> | undefined;
+
+  private constructor(
+    private readonly dependencies: FeJourneyCollectorDependencies,
+    private readonly state: FeJourneyStateStore,
+  ) {}
+
+  static async open(dependencies: FeJourneyCollectorDependencies): Promise<FeJourneyCollector> {
+    try {
+      return new FeJourneyCollector(dependencies, await FeJourneyStateStore.open(dependencies.stateFile));
+    } catch (error) {
+      const stateError = `fe-journey 采集状态不可用：${errorMessage(error)}`;
+      return new FeJourneyCollector(
+        {
+          ...dependencies,
+          enabled: false,
+          disabledError: dependencies.disabledError
+            ? `${dependencies.disabledError}；${stateError}`
+            : stateError,
+        },
+        FeJourneyStateStore.empty(dependencies.stateFile),
+      );
+    }
+  }
+
+  status(): FeJourneyCollectorStatus {
+    const state = this.state.snapshot();
+    return {
+      enabled: this.dependencies.enabled,
+      ...(this.dependencies.disabledError ? { error: this.dependencies.disabledError } : {}),
+      running: Boolean(this.inFlight),
+      state,
+      nextDueAt: {
+        nowcoder: nextDue('nowcoder', state.sources.nowcoder),
+        github: nextDue('github', state.sources.github),
+      },
+    };
+  }
+
+  run(options: FeJourneyRunOptions = {}): Promise<FeJourneyRunReport> {
+    if (this.inFlight) return this.inFlight;
+    const operation = this.execute(options).finally(() => {
+      if (this.inFlight === operation) this.inFlight = undefined;
+    });
+    this.inFlight = operation;
+    return operation;
+  }
+
+  private isDue(source: FeJourneySource, now: string, force: boolean): boolean {
+    if (force) return true;
+    const sourceState = this.state.snapshot().sources[source];
+    const lastAttemptAt = sourceState.lastAttemptAt;
+    if (!lastAttemptAt) return true;
+    const last = Date.parse(lastAttemptAt);
+    const current = Date.parse(now);
+    const interval = retryInterval(source, sourceState);
+    return !Number.isFinite(last) || !Number.isFinite(current) || current - last >= interval;
+  }
+
+  private async runNowcoder(attemptedAt: string): Promise<FeJourneySourceRunReport> {
+    try {
+      const known = this.dependencies.knownNowcoderUrls();
+      const urls = await this.dependencies.discoverNowcoder(known);
+      let enqueued = 0;
+      for (const url of urls) {
+        if (await this.dependencies.enqueueNowcoder(url)) enqueued += 1;
+      }
+      await this.state.record('nowcoder', attemptedAt);
+      return { status: 'completed', discovered: urls.length, enqueued };
+    } catch (error) {
+      const message = errorMessage(error);
+      await this.state.record('nowcoder', attemptedAt, message);
+      return { status: 'failed', error: message };
+    }
+  }
+
+  private async runGithub(attemptedAt: string): Promise<FeJourneySourceRunReport> {
+    try {
+      const documents = await this.dependencies.discoverGithub();
+      let saved = 0;
+      let failed = 0;
+      const failures: string[] = [];
+      for (const document of documents) {
+        try {
+          if (await this.dependencies.saveGithub(document)) saved += 1;
+          else {
+            failed += 1;
+            failures.push(`${document.canonicalUrl}: 候选写入失败`);
+          }
+        } catch (error) {
+          failed += 1;
+          failures.push(`${document.canonicalUrl}: ${errorMessage(error)}`);
+        }
+      }
+      if (documents.length > 0 && saved === 0 && failed === documents.length) {
+        const message = `GitHub 候选全部写入失败（${failed}/${documents.length}）：${failures[0] ?? '未知错误'}`;
+        await this.state.record('github', attemptedAt, message);
+        return {
+          status: 'failed',
+          discovered: documents.length,
+          saved,
+          failed,
+          error: message,
+        };
+      }
+      await this.state.record('github', attemptedAt, undefined, failures[0]);
+      return {
+        status: 'completed',
+        discovered: documents.length,
+        saved,
+        failed,
+        ...(failures[0] ? { error: failures[0] } : {}),
+      };
+    } catch (error) {
+      const message = errorMessage(error);
+      await this.state.record('github', attemptedAt, message);
+      return { status: 'failed', error: message };
+    }
+  }
+
+  private async execute(options: FeJourneyRunOptions): Promise<FeJourneyRunReport> {
+    const startedAt = this.dependencies.now();
+    const force = options.force ?? false;
+    const requested = {
+      nowcoder: options.nowcoder ?? true,
+      github: options.github ?? true,
+    };
+    const reports = {} as Record<FeJourneySource, FeJourneySourceRunReport>;
+
+    for (const source of ['nowcoder', 'github'] as const) {
+      if (!this.dependencies.enabled) {
+        reports[source] = {
+          status: 'disabled',
+          ...(this.dependencies.disabledError ? { error: this.dependencies.disabledError } : {}),
+        };
+      } else if (!requested[source]) {
+        reports[source] = { status: 'skipped', reason: 'not_requested' };
+      } else if (!this.isDue(source, startedAt, force)) {
+        reports[source] = { status: 'skipped', reason: 'not_due' };
+      } else {
+        reports[source] = source === 'nowcoder'
+          ? await this.runNowcoder(startedAt)
+          : await this.runGithub(startedAt);
+      }
+    }
+
+    return {
+      enabled: this.dependencies.enabled,
+      forced: force,
+      startedAt,
+      finishedAt: this.dependencies.now(),
+      sources: reports,
+    };
+  }
+}

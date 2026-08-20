@@ -12,7 +12,7 @@ export function parseSupportedUrl(raw: string): URL {
     url.hostname = host;
     return url;
   } catch {
-    throw new Error('不支持的采集地址：仅支持微信公众号、知识星球和牛客网 HTTPS 页面');
+    throw new Error('不支持的采集地址：仅支持微信公众号、知识星球、牛客网和 GitHub HTTPS 页面');
   }
 }
 

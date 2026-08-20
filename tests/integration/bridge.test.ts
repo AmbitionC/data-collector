@@ -14,6 +14,7 @@ import {
   startBridge,
   type BridgeHandle,
 } from '../../packages/bridge/src/index.js';
+import { JobStore } from '../../packages/bridge/src/jobs/store.js';
 import { createTemporaryDirectoryTracker } from '../helpers/temp.js';
 
 const URL = 'https://mp.weixin.qq.com/s/integration-test';
@@ -151,12 +152,318 @@ afterEach(async () => {
 });
 
 describe('local Bridge', () => {
+  it('keeps fe-journey collection disabled without its fixed sink', async () => {
+    const root = await temporaryDirectory();
+    const configDir = join(root, '.config');
+    await mkdir(configDir, { recursive: true });
+    await writeFile(
+      join(configDir, 'sinks.json'),
+      JSON.stringify({ sinks: { markdown: { type: 'markdown' } }, routes: {} }),
+    );
+    const bridge = await startBridge({ port: 0, libraryRoot: root, configDir });
+    handles.push(bridge);
+    const { token } = await authorize(bridge);
+
+    const status = await requestJson<{ enabled: boolean }>(
+      bridge.url,
+      '/v1/fe-journey/status',
+      { token },
+    );
+    expect(status).toMatchObject({ status: 200, body: { enabled: false } });
+    const unauthorized = await requestJson(bridge.url, '/v1/fe-journey/collect', {
+      method: 'POST',
+      body: { force: true },
+    });
+    expect(unauthorized.status).toBe(401);
+    const disabled = await requestJson<{ error: { code: string } }>(
+      bridge.url,
+      '/v1/fe-journey/collect',
+      { method: 'POST', token, body: { force: true } },
+    );
+    expect(disabled).toMatchObject({
+      status: 409,
+      body: { error: { code: 'FE_JOURNEY_DISABLED' } },
+    });
+  });
+
+  it('keeps the Bridge available when the optional fe-journey candidate index is corrupt', async () => {
+    const root = await temporaryDirectory();
+    const repo = await temporaryDirectory();
+    const configDir = join(root, '.config');
+    await mkdir(join(root, '_catalog'), { recursive: true });
+    await mkdir(configDir, { recursive: true });
+    await writeFile(join(root, '_catalog', 'fe-journey.json'), '{broken-json', 'utf8');
+    await writeFile(
+      join(configDir, 'sinks.json'),
+      JSON.stringify({
+        sinks: {
+          markdown: { type: 'markdown' },
+          'fe-journey': { type: 'repo-inbox', repoPath: repo, commit: false, push: false },
+        },
+        routes: { nowcoder: ['fe-journey'], github: ['fe-journey'] },
+      }),
+    );
+    const queued = await (await JobStore.open(join(root, '_catalog', 'jobs.json'))).create({
+      id: 'queued-nowcoder-with-corrupt-index',
+      url: 'https://nowcoder.com/discuss/9301',
+      requestedBy: 'codex',
+    });
+
+    const bridge = await startBridge({ port: 0, libraryRoot: root, configDir });
+    handles.push(bridge);
+    const { token } = await authorize(bridge);
+    const health = await requestJson<{ ok: boolean }>(bridge.url, '/health');
+    expect(health).toMatchObject({ status: 200, body: { ok: true } });
+    const status = await requestJson<{ enabled: boolean; error?: string }>(
+      bridge.url,
+      '/v1/fe-journey/status',
+      { token },
+    );
+    expect(status).toMatchObject({
+      status: 200,
+      body: {
+        enabled: false,
+        error: expect.stringContaining('候选索引'),
+      },
+    });
+
+    const socket = sockets.at(-1)!;
+    socket.send(envelope('extension.hello', 'extension', { version: '0.1.0' }));
+    await vi.waitFor(async () => {
+      const failed = await requestJson<{ status: string; errorCode?: string }>(
+        bridge.url,
+        `/v1/jobs/${queued.id}`,
+        { token },
+      );
+      expect(failed.body).toMatchObject({
+        status: 'failed',
+        errorCode: 'FE_JOURNEY_INDEX_UNAVAILABLE',
+      });
+    });
+    await expectNoMessage(socket);
+
+    const zsxqUrl = 'https://wx.zsxq.com/group/1/topic/533333333333333';
+    const dispatchedPromise = nextMessage<{ url: string }>(socket);
+    const zsxq = await requestJson<{ id: string }>(bridge.url, '/v1/jobs', {
+      method: 'POST',
+      token,
+      body: { url: zsxqUrl, requestedBy: 'codex' },
+    });
+    await expect(dispatchedPromise).resolves.toMatchObject({
+      type: 'job.collect',
+      requestId: zsxq.body.id,
+      payload: { url: zsxqUrl },
+    });
+    socket.send(envelope('job.progress', zsxq.body.id, { stage: 'collecting' }));
+    socket.send(envelope('job.result', zsxq.body.id, {
+      document: document({
+        source: 'zsxq',
+        kind: 'post',
+        url: zsxqUrl,
+        canonicalUrl: zsxqUrl,
+        title: '索引损坏时仍可采集的知识星球帖子',
+      }),
+    }));
+    await vi.waitFor(async () => {
+      const saved = await requestJson<{ status: string }>(
+        bridge.url,
+        `/v1/jobs/${zsxq.body.id}`,
+        { token },
+      );
+      expect(saved.body.status).toBe('saved');
+    });
+    expect(socket.readyState).toBe(WebSocket.OPEN);
+  });
+
+  it.each([
+    ['invalid JSON', '{broken-json'],
+    ['invalid source state', JSON.stringify({ version: 1, sources: { nowcoder: null, github: {} } })],
+  ])('keeps the Bridge available when the optional fe-journey schedule state has %s', async (_label, state) => {
+    const root = await temporaryDirectory();
+    const repo = await temporaryDirectory();
+    const configDir = join(root, '.config');
+    await mkdir(configDir, { recursive: true });
+    await writeFile(join(configDir, 'fe-journey-state.json'), state, 'utf8');
+    await writeFile(
+      join(configDir, 'sinks.json'),
+      JSON.stringify({
+        sinks: {
+          markdown: { type: 'markdown' },
+          'fe-journey': { type: 'repo-inbox', repoPath: repo, commit: false, push: false },
+        },
+        routes: { nowcoder: ['fe-journey'], github: ['fe-journey'] },
+      }),
+    );
+
+    const bridge = await startBridge({ port: 0, libraryRoot: root, configDir });
+    handles.push(bridge);
+    const { token } = await authorize(bridge);
+    expect(await requestJson<{ ok: boolean }>(bridge.url, '/health')).toMatchObject({
+      status: 200,
+      body: { ok: true },
+    });
+    expect(await requestJson<{ enabled: boolean; error?: string }>(
+      bridge.url,
+      '/v1/fe-journey/status',
+      { token },
+    )).toMatchObject({
+      status: 200,
+      body: {
+        enabled: false,
+        error: expect.stringContaining('采集状态'),
+      },
+    });
+  });
+
+  it('runs the fixed fe-journey preset and rejects caller-supplied search settings', async () => {
+    const root = await temporaryDirectory();
+    const repo = await temporaryDirectory();
+    const configDir = join(root, '.config');
+    await mkdir(configDir, { recursive: true });
+    await writeFile(
+      join(configDir, 'sinks.json'),
+      JSON.stringify({
+        sinks: {
+          markdown: { type: 'markdown' },
+          'fe-journey': {
+            type: 'repo-inbox',
+            repoPath: repo,
+            commit: false,
+            push: false,
+          },
+        },
+        routes: { nowcoder: ['fe-journey'], github: ['fe-journey'] },
+      }),
+    );
+    const fetcher = vi.fn<typeof fetch>(async input => {
+      const url = new globalThis.URL(String(input));
+      if (url.hostname === 'www.nowcoder.com') {
+        return new Response('<a href="/discuss/9001?sourceSSR=search">真实形态面经</a>');
+      }
+      if (url.pathname === '/search/repositories') return Response.json({ items: [] });
+      return new Response('unexpected', { status: 500 });
+    });
+    const bridge = await startBridge({ port: 0, libraryRoot: root, configDir, fetch: fetcher });
+    handles.push(bridge);
+    const { token } = await authorize(bridge);
+
+    const rejected = await requestJson(bridge.url, '/v1/fe-journey/collect', {
+      method: 'POST',
+      token,
+      body: { force: true, queries: ['自定义搜索'] },
+    });
+    expect(rejected.status).toBe(400);
+
+    const collected = await requestJson<{
+      sources: { nowcoder: { status: string; enqueued: number }; github: { status: string } };
+    }>(bridge.url, '/v1/fe-journey/collect', {
+      method: 'POST',
+      token,
+      body: { force: true },
+    });
+    expect(collected.status).toBe(200);
+    expect(
+      collected.body.sources.nowcoder,
+      JSON.stringify(collected.body.sources),
+    ).toMatchObject({ status: 'completed', enqueued: 1 });
+    expect(
+      collected.body.sources.github,
+      JSON.stringify(collected.body.sources),
+    ).toMatchObject({ status: 'completed' });
+    const jobs = JSON.parse(await readFile(join(root, '_catalog', 'jobs.json'), 'utf8'));
+    expect(jobs.jobs).toHaveLength(1);
+    expect(jobs.jobs[0]).toMatchObject({
+      url: 'https://www.nowcoder.com/discuss/9001',
+      status: 'queued',
+      requestedBy: 'codex',
+    });
+  });
+
+  it('rediscovers and requeues a failed fixed-preset Nowcoder job', async () => {
+    const root = await temporaryDirectory();
+    const repo = await temporaryDirectory();
+    const configDir = join(root, '.config');
+    await mkdir(configDir, { recursive: true });
+    await writeFile(
+      join(configDir, 'sinks.json'),
+      JSON.stringify({
+        sinks: {
+          markdown: { type: 'markdown' },
+          'fe-journey': {
+            type: 'repo-inbox',
+            repoPath: repo,
+            commit: false,
+            push: false,
+          },
+        },
+        routes: { nowcoder: ['fe-journey'], github: ['fe-journey'] },
+      }),
+    );
+    const fetcher = vi.fn<typeof fetch>(async input => {
+      const url = new globalThis.URL(String(input));
+      if (url.hostname === 'www.nowcoder.com') {
+        return new Response('<a href="/discuss/9201?sourceSSR=search">可重试面经</a>');
+      }
+      if (url.pathname === '/search/repositories') return Response.json({ items: [] });
+      return new Response('unexpected', { status: 500 });
+    });
+    const options = { port: 0, libraryRoot: root, configDir, fetch: fetcher };
+    const first = await startBridge(options);
+    handles.push(first);
+    const firstAuth = await authorize(first);
+    const firstRun = await requestJson<{
+      sources: { nowcoder: { enqueued: number } };
+    }>(first.url, '/v1/fe-journey/collect', {
+      method: 'POST',
+      token: firstAuth.token,
+      body: { force: true },
+    });
+    expect(firstRun.body.sources.nowcoder.enqueued).toBe(1);
+    await first.close();
+    handles.splice(handles.indexOf(first), 1);
+
+    const jobsPath = join(root, '_catalog', 'jobs.json');
+    const jobStore = await JobStore.open(jobsPath);
+    const failedId = jobStore.list()[0]?.id;
+    expect(failedId).toBeDefined();
+    await jobStore.transition(failedId!, 'failed', {
+      errorCode: 'EXTRACT_FAILED',
+      errorMessage: 'temporary extraction failure',
+    });
+
+    const restarted = await startBridge(options);
+    handles.push(restarted);
+    const restartedAuth = await authorize(restarted);
+    const retried = await requestJson<{
+      sources: { nowcoder: { status: string; enqueued: number } };
+    }>(restarted.url, '/v1/fe-journey/collect', {
+      method: 'POST',
+      token: restartedAuth.token,
+      body: { force: true },
+    });
+    expect(retried.body.sources.nowcoder).toMatchObject({ status: 'completed', enqueued: 1 });
+    const persisted = JSON.parse(await readFile(jobsPath, 'utf8')) as {
+      jobs: Array<{ status: string; errorCode?: string; errorMessage?: string }>;
+    };
+    expect(persisted.jobs).toHaveLength(1);
+    expect(persisted.jobs[0]).toMatchObject({ status: 'queued' });
+    expect(persisted.jobs[0]).not.toHaveProperty('errorCode');
+    expect(persisted.jobs[0]).not.toHaveProperty('errorMessage');
+  });
+
   it('authenticates, dispatches, saves, and ignores a duplicate result', async () => {
     const root = await temporaryDirectory();
+    const configDir = join(root, '.config');
+    await mkdir(configDir, { recursive: true });
+    await writeFile(
+      join(configDir, 'sinks.json'),
+      `${JSON.stringify({ sinks: { markdown: { type: 'markdown' } }, routes: {} }, null, 2)}\n`,
+      'utf8',
+    );
     const bridge = await startBridge({
       port: 0,
       libraryRoot: root,
-      configDir: join(root, '.config'),
+      configDir,
       fetch: async () => new Response(null, { status: 404 }),
     });
     handles.push(bridge);
@@ -189,7 +496,12 @@ describe('local Bridge', () => {
               ],
             },
           ],
-          defaults: { wechat: ['markdown'], zsxq: ['markdown'], nowcoder: ['markdown'] },
+          defaults: {
+            wechat: ['markdown'],
+            zsxq: ['markdown'],
+            nowcoder: ['markdown'],
+            github: ['markdown'],
+          },
         },
       },
     });
@@ -673,5 +985,70 @@ describe('自更新后的重启时机', () => {
 
     socket.close();
     await vi.waitFor(() => expect(exit).toHaveBeenCalled());
+  });
+
+  it('定时采集运行时不重启，采集完成后再退出', async () => {
+    const root = await temporaryDirectory();
+    const repo = await temporaryDirectory();
+    const configDir = join(root, '.config');
+    await mkdir(configDir, { recursive: true });
+    await writeFile(join(configDir, 'sinks.json'), JSON.stringify({
+      sinks: {
+        markdown: { type: 'markdown' },
+        'fe-journey': { type: 'repo-inbox', repoPath: repo, commit: false, push: false },
+      },
+      routes: { nowcoder: ['fe-journey'], github: ['fe-journey'] },
+    }));
+
+    let releaseCollection!: () => void;
+    const collectionGate = new Promise<void>(resolve => { releaseCollection = resolve; });
+    const fetcher = vi.fn(async (input: string | URL | Request) => {
+      await collectionGate;
+      const url = new URL(String(input));
+      if (url.hostname === 'www.nowcoder.com') return new Response('<html></html>');
+      if (url.hostname === 'api.github.com') {
+        return new Response(JSON.stringify({ items: [] }), {
+          headers: { 'content-type': 'application/json' },
+        });
+      }
+      throw new Error(`unexpected fetch: ${url.href}`);
+    });
+    let releaseUpdate!: () => void;
+    const updateGate = new Promise<void>(resolve => { releaseUpdate = resolve; });
+    const exit = vi.fn();
+    const bridge = await startBridge({
+      port: 0,
+      libraryRoot: join(root, 'library'),
+      configDir,
+      repoRoot: root,
+      enableFeJourneyScheduler: true,
+      updateIntervalMs: 60_000,
+      exit,
+      fetch: fetcher,
+      runUpdate: async () => {
+        await updateGate;
+        return {
+          changed: true,
+          commit: 'abc1234',
+          message: '已更新并完成构建。',
+          checkedAt: '2026-08-19T00:00:00.000Z',
+        };
+      },
+    });
+    handles.push(bridge);
+    await vi.waitFor(() => expect(fetcher).toHaveBeenCalled());
+
+    releaseUpdate();
+    try {
+      await vi.waitFor(async () => {
+        const health = await requestJson<{ update?: { changed: boolean } }>(bridge.url, '/health');
+        expect(health.body.update?.changed).toBe(true);
+      });
+      expect(exit).not.toHaveBeenCalled();
+    } finally {
+      releaseCollection();
+    }
+
+    await vi.waitFor(() => expect(exit).toHaveBeenCalledOnce());
   });
 });

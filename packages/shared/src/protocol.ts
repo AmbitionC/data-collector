@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { CONTENT_KINDS, SOURCES } from './model.js';
+import { CONTENT_KINDS, FE_JOURNEY_CANDIDATE_KINDS, SOURCES } from './model.js';
 import { descriptorForHost } from './sources.js';
 import { canonicalizeUrl, parseSupportedUrl } from './url.js';
 
@@ -9,6 +9,20 @@ export const EXTENSION_REPLACED_CLOSE_REASON = 'replaced';
 export const collectedImageSchema = z.object({
   url: z.string().url().max(4096),
   alt: z.string().trim().max(500).optional(),
+});
+
+const feJourneySignalSchema = z.string().trim().min(1).max(200);
+export const feJourneyCandidateMetadataSchema = z.object({
+  candidateKinds: z.array(z.enum(FE_JOURNEY_CANDIDATE_KINDS)).max(4),
+  qualityScore: z.number().int().min(0).max(100),
+  qualitySignals: z.array(feJourneySignalSchema).max(20),
+  exclusionReasons: z.array(feJourneySignalSchema).max(20).optional(),
+  contentHash: z.string().regex(/^[a-f0-9]{16}$/),
+  simHash: z.string().regex(/^[a-f0-9]{16}$/),
+  clusterId: z.string().trim().min(1).max(100),
+  duplicateOf: z.string().trim().min(1).max(100).optional(),
+  projectScore: z.number().int().min(0).max(100).optional(),
+  projectSignals: z.array(feJourneySignalSchema).max(20).optional(),
 });
 
 export const collectedDocumentSchema = z.object({
@@ -33,6 +47,7 @@ export const collectedDocumentSchema = z.object({
   sourceMetadata: z
     .record(z.string(), z.union([z.string(), z.number(), z.boolean(), z.null()]))
     .optional(),
+  feJourney: feJourneyCandidateMetadataSchema.optional(),
 }).superRefine((document, context) => {
   try {
     const rawUrl = parseSupportedUrl(document.url);

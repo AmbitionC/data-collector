@@ -62,6 +62,8 @@ const BUILT_IN_TARGETS = [
     label: 'life-teachers 收件箱',
     categories: ['投资', '财富', '职场', '认知', '教育', '其他'],
     sources: ['wechat', 'zsxq'],
+    commit: true,
+    push: true,
   },
   {
     id: 'fe-journey',
@@ -76,7 +78,10 @@ const BUILT_IN_TARGETS = [
       '计算机与算法基础',
       '项目与职业',
     ],
-    sources: ['nowcoder'],
+    sources: ['nowcoder', 'github'],
+    // fe-journey 原始候选与私有报告只留本机，人工加工后的公开内容才进入 Git。
+    commit: false,
+    push: false,
   },
 ] as const;
 
@@ -112,9 +117,8 @@ export async function builtInSinksConfig(
       repoPath: target.repoPath,
       label: target.label,
       categories: [...target.categories],
-      // 同步是用户显式发起的动作，提交后顺手推一次，好让云端 Agent 拉得到。
-      // 推不上去（没配远端 / 没凭证）只作为告警，不算同步失败。
-      push: true,
+      commit: target.commit,
+      push: target.push,
     };
     // 路由表在新链路里只表示「同步去向」：采集一律先落本机库。
     for (const source of target.sources) config.routes[source] = [target.id];

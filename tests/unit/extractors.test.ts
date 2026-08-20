@@ -42,6 +42,19 @@ describe('source detection', () => {
     expect(detectSource(new URL('https://mp.weixin.qq.com/s/x'))).toBe('wechat');
     expect(detectSource(new URL('https://wx.zsxq.com/group/123/topic/456'))).toBe('zsxq');
     expect(detectSource(new URL('https://www.nowcoder.com/discuss/123'))).toBe('nowcoder');
+    expect(detectSource(new URL('https://github.com/acme/agent-lab'))).toBe('github');
+  });
+
+  it('keeps GitHub collection in the Bridge provider instead of the page extractor', () => {
+    const url = 'https://github.com/acme/agent-lab';
+    const document = new JSDOM('<main><article>README</article></main>', { url }).window.document;
+
+    expect(() => extractDocument(document, url, NOW)).toThrowError(
+      expect.objectContaining<Partial<ExtractionError>>({
+        code: 'UNSUPPORTED_LAYOUT',
+        message: 'GitHub 项目由 fe-journey 定时任务采集',
+      }),
+    );
   });
 });
 

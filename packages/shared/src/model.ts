@@ -1,4 +1,4 @@
-export const SOURCES = ['wechat', 'zsxq', 'nowcoder'] as const;
+export const SOURCES = ['wechat', 'zsxq', 'nowcoder', 'github'] as const;
 export type Source = (typeof SOURCES)[number];
 
 export const CONTENT_KINDS = ['article', 'post', 'question', 'answer'] as const;
@@ -7,6 +7,32 @@ export type ContentKind = (typeof CONTENT_KINDS)[number];
 export interface CollectedImage {
   url: string;
   alt?: string;
+}
+
+export const FE_JOURNEY_CANDIDATE_KINDS = [
+  'interview',
+  'knowledge',
+  'operation',
+  'project',
+] as const;
+export type FeJourneyCandidateKind = (typeof FE_JOURNEY_CANDIDATE_KINDS)[number];
+
+/**
+ * fe-journey 私有候选库使用的质量与聚合元数据。
+ *
+ * 这些字段只描述「这条内容是否值得消费、与谁相似」；不会进入现有知识星球/微信采集流程。
+ */
+export interface FeJourneyCandidateMetadata {
+  candidateKinds: FeJourneyCandidateKind[];
+  qualityScore: number;
+  qualitySignals: string[];
+  exclusionReasons?: string[];
+  contentHash: string;
+  simHash: string;
+  clusterId: string;
+  duplicateOf?: string;
+  projectScore?: number;
+  projectSignals?: string[];
 }
 
 export interface CollectedDocument {
@@ -41,6 +67,7 @@ export interface CollectedDocument {
   userCategory?: string;
   userTags?: string[];
   sourceMetadata?: Record<string, string | number | boolean | null>;
+  feJourney?: FeJourneyCandidateMetadata;
 }
 
 export const JOB_STATUSES = [

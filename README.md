@@ -1,16 +1,18 @@
 # Data Collector
 
-Data Collector 是一个本机优先的 Microsoft Edge 扩展。它常驻 Side Panel，把微信公众号文章、知识星球的文章/动态/问答，以及牛客网的面经/讨论整理为结构化内容；默认写入本机 Markdown 知识库，也可按来源路由投递到目标仓库的收件箱，供 Claude Code / Codex 等 Agent 后续归档。正文和账号凭证默认不会上传云端。
+Data Collector 是一个本机优先的 Microsoft Edge 扩展与 Bridge。它把微信公众号文章、知识星球内容和牛客讨论整理为结构化内容，也按固定个人预设定时发现 Agent 全栈研发相关的牛客内容与 GitHub 项目候选。内容先进入本机 Markdown 库，再由 Codex 从本地收件箱加工；正文和账号凭证默认不会上传云端。
 
 ## 能做什么
 
 - 在受支持页面点击工具栏图标，一步打开 Side Panel，再点击“保存这一页”。
 - 首次连接由固定扩展身份自动授权，不需要输入任何连接信息。
 - 从 Codex 或终端提交 URL，让扩展打开后台标签页并自动采集。
+- 按写死的个人预设定时发现牛客面经/知识/运营素材和 GitHub 优秀项目候选；不提供订阅或关键词设置页。
+- 对候选内容确定性评分、跨 URL 去重和近似聚类；项目只形成评分候选，不涉及会员权益或产品发布。
 - 提取标题、作者、发布时间、正文与最多 30 张图片。
 - 离线生成摘要、分类和标签；用户指定的分类、标签优先。
 - 原子写入 Markdown；重复采集同一规范 URL 时更新原条目，不制造副本。
-- 采集**只落本机库**；核对后再显式同步到目标仓库收件箱（公众号/星球 → life-teachers，牛客 → fe-journey），供 Agent 后续归档。**零配置**：仓库在本机存在就自动启用，详见 [落地目标与来源路由](docs/sinks.md)。
+- 采集**只落本机库**；核对后再显式同步到目标仓库收件箱（公众号/星球 → life-teachers，牛客/GitHub → fe-journey）。**零配置**：仓库在本机存在就自动启用，详见 [落地目标与来源路由](docs/sinks.md)。
 - 遇到知识星球未登录、页面结构不支持等情况时明确要求人工处理。
 
 ## 架构与信任边界
@@ -18,8 +20,9 @@ Data Collector 是一个本机优先的 Microsoft Edge 扩展。它常驻 Side P
 ```mermaid
 flowchart LR
     C["Codex / CLI"] -->|"HTTP 创建任务"| B["Local Bridge\n127.0.0.1:17321"]
+    S["固定周期\n牛客搜索 / GitHub API"] --> B
     B <-->|"自动授权的 WebSocket"| E["Edge 扩展\n固定 ID"]
-    E -->|"页面内提取"| W["微信公众号 / 知识星球"]
+    E -->|"页面内提取"| W["微信公众号 / 知识星球 / 牛客详情"]
     E -->|"结构化正文"| B
     B --> O["清洗、摘要、分类、图片归档"]
     O --> L["本机 Markdown 知识库"]
@@ -179,8 +182,8 @@ npm run collector -- bridge start       # 前台临时跑一次（调试用）
 
 为什么不在采集时直接投递：那样就失去了中间那道核对，出问题也分不清是采错了还是投错了。
 
-几条硬约束：一条同步失败不影响同批其余；**推送失败不算同步失败**（条目已经提交进仓库，
-本机 Agent 直接读工作区就够，推不上去只作告警）；重新采集同一地址仍只有一条，但同步状态
+几条硬约束：一条同步失败不影响同批其余；需要远端交付的目标中，**推送失败就算同步失败**；
+fe-journey 候选收件箱显式配置为纯本地、不提交也不推送。重新采集同一地址仍只有一条，但同步状态
 **回到未同步**（内容可能变了，该重新过一遍）。完整说明见 [落地目标与来源路由](docs/sinks.md)。
 
 ### 已入库内容管理
@@ -220,6 +223,17 @@ npm run collector -- collect 'https://mp.weixin.qq.com/s/...' --wait 60000
 npm run collector -- health
 ```
 
+### fe-journey 固定候选采集
+
+常驻 Bridge 会自动检查周期；也可以手动触发或查看状态：
+
+```bash
+npm run collector -- fe-journey collect --force
+npm run collector -- fe-journey status
+```
+
+固定预设是牛客每日一次（最多 24 个详情任务）、GitHub 每 7 日一次（最多 12 个项目）。牛客公开搜索页只负责发现 URL，详情正文仍由 Edge 扩展使用现有浏览器会话采集；GitHub 公共仓库由 Bridge 读取 API 与 README。采集阶段不会启动 Claude Code CLI：Agent 只在之后读取本机 `front-end-journey-resource/_inbox`，按资源仓库中的 Codex skill 聚合并更新内容。详见 [fe-journey 采集与消费](docs/fe-journey-collection.md)。
+
 ## 输出结构
 
 ```text
@@ -229,6 +243,7 @@ npm run collector -- health
 ├── .../assets/<内容哈希>.<扩展名>
 └── _catalog/
     ├── index.json
+    ├── fe-journey.json
     └── jobs.json
 ```
 
@@ -259,6 +274,7 @@ npm run package          # 刷新 Edge 实际加载的 artifacts/data-collector-
 npm run typecheck
 npm test
 npm run test:e2e
+npm run smoke:fe-journey
 npm run test:coverage
 npm run package
 ```

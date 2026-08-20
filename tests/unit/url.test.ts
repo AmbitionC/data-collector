@@ -32,6 +32,75 @@ describe('supported URLs', () => {
     );
   });
 
+  it('canonicalizes a GitHub repository and accepts fe-journey candidate metadata', () => {
+    const url = canonicalizeUrl(
+      parseSupportedUrl('https://github.com/acme/agent-lab?tab=readme-ov-file#usage'),
+    );
+
+    expect(url.href).toBe('https://github.com/acme/agent-lab');
+    expect(
+      collectedDocumentSchema.parse({
+        schemaVersion: 1,
+        source: 'github',
+        kind: 'article',
+        url: 'https://github.com/acme/agent-lab?tab=readme-ov-file#usage',
+        canonicalUrl: 'https://github.com/acme/agent-lab',
+        title: 'acme/agent-lab',
+        author: 'acme',
+        collectedAt: '2026-08-19T00:00:00.000Z',
+        html: '<p>Production-ready agent project.</p>',
+        text: 'Production-ready agent project.',
+        images: [],
+        feJourney: {
+          candidateKinds: ['project', 'knowledge'],
+          qualityScore: 82,
+          qualitySignals: ['包含完整 README', '包含部署说明'],
+          contentHash: '0123456789abcdef',
+          simHash: 'fedcba9876543210',
+          clusterId: 'cluster-0123456789ab',
+          projectScore: 86,
+          projectSignals: ['许可证明确'],
+        },
+      }).feJourney,
+    ).toEqual({
+      candidateKinds: ['project', 'knowledge'],
+      qualityScore: 82,
+      qualitySignals: ['包含完整 README', '包含部署说明'],
+      contentHash: '0123456789abcdef',
+      simHash: 'fedcba9876543210',
+      clusterId: 'cluster-0123456789ab',
+      projectScore: 86,
+      projectSignals: ['许可证明确'],
+    });
+  });
+
+  it('rejects out-of-range fe-journey scores and malformed fingerprints', () => {
+    const base = {
+      schemaVersion: 1 as const,
+      source: 'nowcoder' as const,
+      kind: 'post' as const,
+      url: 'https://www.nowcoder.com/discuss/123',
+      canonicalUrl: 'https://www.nowcoder.com/discuss/123',
+      title: 'Agent 面经',
+      collectedAt: '2026-08-19T00:00:00.000Z',
+      html: '<p>正文</p>',
+      text: '正文',
+      images: [],
+    };
+
+    expect(collectedDocumentSchema.safeParse({
+      ...base,
+      feJourney: {
+        candidateKinds: ['interview'],
+        qualityScore: 101,
+        qualitySignals: [],
+        contentHash: 'not-hex',
+        simHash: '1',
+        clusterId: 'x',
+      },
+    }).success).toBe(false);
+  });
+
   it.each([
     'http://mp.weixin.qq.com/s/x',
     'file:///tmp/x',
