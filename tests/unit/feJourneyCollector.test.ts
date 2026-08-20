@@ -106,6 +106,26 @@ describe('FeJourneyCollector schedule orchestration', () => {
     expect(state.sources.github.lastSuccessAt).toBeDefined();
   });
 
+  it('retries a failed source after a short backoff instead of waiting the full normal cadence', async () => {
+    const discoverNowcoder = vi.fn()
+      .mockRejectedValueOnce(new Error('牛客临时不可用'))
+      .mockResolvedValue(['https://www.nowcoder.com/discuss/1001']);
+    const fixture = await collectorFixture({ discoverNowcoder });
+
+    const failed = await fixture.collector.run({ force: true, github: false });
+    expect(failed.sources.nowcoder.status).toBe('failed');
+    expect(fixture.collector.status().nextDueAt.nowcoder).toBe('2026-08-19T01:00:00.000Z');
+
+    fixture.setNow('2026-08-19T00:59:59.999Z');
+    const tooEarly = await fixture.collector.run({ github: false });
+    expect(tooEarly.sources.nowcoder).toMatchObject({ status: 'skipped', reason: 'not_due' });
+
+    fixture.setNow('2026-08-19T01:00:00.000Z');
+    const retried = await fixture.collector.run({ github: false });
+    expect(retried.sources.nowcoder.status).toBe('completed');
+    expect(discoverNowcoder).toHaveBeenCalledTimes(2);
+  });
+
   it('records an all-failed GitHub save batch as failed instead of successful', async () => {
     const fixture = await collectorFixture({
       saveGithub: vi.fn(async () => { throw new Error('磁盘已满'); }),

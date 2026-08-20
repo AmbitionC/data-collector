@@ -42,8 +42,10 @@ interview / knowledge 更新 + 本地运营/项目/跳过项报告
 
 - GitHub README 明确返回 404 时只跳过该项目；API 限流或服务故障依次尝试固定的 `raw.githubusercontent.com` 与官方 GitHub README HTML 后备地址，均失败才把整轮记为失败，不会伪装成空的成功批次。
 - GitHub 候选部分写入失败会把首个警告持久化到状态文件；全部写入失败时整轮记为失败，不更新 `lastSuccessAt`。
+- 任一来源整轮失败后按 1 小时短退避自动重试；成功后恢复牛客 24 小时、GitHub 7 日的正常周期。
 - 牛客详情任务在扩展离线时保持队列，扩展重新连接后派发。
 - 牛客详情任务进入 `failed` 或 `needs_attention` 后，会在下一次固定发现中清除旧错误并重新入队；已经成功和仍在途的任务不重复派发。
 - 状态保存在 `~/.data-collector/fe-journey-state.json`；候选索引在本机库 `_catalog/fe-journey.json`。
+- 采集状态文件损坏时只降级关闭 fe-journey 并在状态接口暴露错误，不覆盖损坏文件，也不阻断 Bridge 启动。
 - 候选索引损坏只禁用 fe-journey 并在状态接口暴露错误，Bridge、微信和知识星球采集仍可启动和落盘。
 - 固定资源仓库不存在或自定义 `sinks.json` 没有 `fe-journey` sink 时，周期保持关闭，立即执行接口明确返回禁用。

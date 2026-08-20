@@ -539,7 +539,7 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
   server.listen(config.port, config.host);
   await once(server, 'listening');
   let feJourneyTimer: NodeJS.Timeout | undefined;
-  if (options.enableFeJourneyScheduler && feJourneyEnabled) {
+  if (options.enableFeJourneyScheduler && feJourneyCollector.status().enabled) {
     const runScheduledCollection = (): void => {
       void feJourneyCollector.run().catch(error => {
         console.warn(`[fe-journey] 定时采集失败：${error instanceof Error ? error.message : error}`);

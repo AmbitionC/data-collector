@@ -275,6 +275,46 @@ describe('local Bridge', () => {
     expect(socket.readyState).toBe(WebSocket.OPEN);
   });
 
+  it.each([
+    ['invalid JSON', '{broken-json'],
+    ['invalid source state', JSON.stringify({ version: 1, sources: { nowcoder: null, github: {} } })],
+  ])('keeps the Bridge available when the optional fe-journey schedule state has %s', async (_label, state) => {
+    const root = await temporaryDirectory();
+    const repo = await temporaryDirectory();
+    const configDir = join(root, '.config');
+    await mkdir(configDir, { recursive: true });
+    await writeFile(join(configDir, 'fe-journey-state.json'), state, 'utf8');
+    await writeFile(
+      join(configDir, 'sinks.json'),
+      JSON.stringify({
+        sinks: {
+          markdown: { type: 'markdown' },
+          'fe-journey': { type: 'repo-inbox', repoPath: repo, commit: false, push: false },
+        },
+        routes: { nowcoder: ['fe-journey'], github: ['fe-journey'] },
+      }),
+    );
+
+    const bridge = await startBridge({ port: 0, libraryRoot: root, configDir });
+    handles.push(bridge);
+    const { token } = await authorize(bridge);
+    expect(await requestJson<{ ok: boolean }>(bridge.url, '/health')).toMatchObject({
+      status: 200,
+      body: { ok: true },
+    });
+    expect(await requestJson<{ enabled: boolean; error?: string }>(
+      bridge.url,
+      '/v1/fe-journey/status',
+      { token },
+    )).toMatchObject({
+      status: 200,
+      body: {
+        enabled: false,
+        error: expect.stringContaining('采集状态'),
+      },
+    });
+  });
+
   it('runs the fixed fe-journey preset and rejects caller-supplied search settings', async () => {
     const root = await temporaryDirectory();
     const repo = await temporaryDirectory();

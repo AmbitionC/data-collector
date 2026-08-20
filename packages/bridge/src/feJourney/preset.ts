@@ -2,6 +2,7 @@ export const FE_JOURNEY_PRESET = Object.freeze({
   timezone: 'Asia/Shanghai',
   nowcoder: Object.freeze({
     intervalMs: 24 * 60 * 60 * 1_000,
+    failureRetryMs: 60 * 60 * 1_000,
     maxPerRun: 24,
     queries: Object.freeze([
       'Agent 面经',
@@ -15,6 +16,7 @@ export const FE_JOURNEY_PRESET = Object.freeze({
   }),
   github: Object.freeze({
     intervalMs: 7 * 24 * 60 * 60 * 1_000,
+    failureRetryMs: 60 * 60 * 1_000,
     maxPerRun: 12,
     queries: Object.freeze([
       'topic:ai-agent stars:>=50 fork:false',

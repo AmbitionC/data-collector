@@ -3,6 +3,7 @@ import { FE_JOURNEY_PRESET } from './preset.js';
 import {
   FeJourneyStateStore,
   type FeJourneySource,
+  type FeJourneySourceState,
   type FeJourneyState,
 } from './state.js';
 
@@ -54,9 +55,16 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-function nextDue(lastAttemptAt: string | undefined, intervalMs: number): string | null {
-  if (!lastAttemptAt) return null;
-  const timestamp = Date.parse(lastAttemptAt);
+function retryInterval(source: FeJourneySource, state: FeJourneySourceState): number {
+  return state.lastError
+    ? FE_JOURNEY_PRESET[source].failureRetryMs
+    : FE_JOURNEY_PRESET[source].intervalMs;
+}
+
+function nextDue(source: FeJourneySource, state: FeJourneySourceState): string | null {
+  if (!state.lastAttemptAt) return null;
+  const timestamp = Date.parse(state.lastAttemptAt);
+  const intervalMs = retryInterval(source, state);
   return Number.isFinite(timestamp) ? new Date(timestamp + intervalMs).toISOString() : null;
 }
 
@@ -69,7 +77,21 @@ export class FeJourneyCollector {
   ) {}
 
   static async open(dependencies: FeJourneyCollectorDependencies): Promise<FeJourneyCollector> {
-    return new FeJourneyCollector(dependencies, await FeJourneyStateStore.open(dependencies.stateFile));
+    try {
+      return new FeJourneyCollector(dependencies, await FeJourneyStateStore.open(dependencies.stateFile));
+    } catch (error) {
+      const stateError = `fe-journey 采集状态不可用：${errorMessage(error)}`;
+      return new FeJourneyCollector(
+        {
+          ...dependencies,
+          enabled: false,
+          disabledError: dependencies.disabledError
+            ? `${dependencies.disabledError}；${stateError}`
+            : stateError,
+        },
+        FeJourneyStateStore.empty(dependencies.stateFile),
+      );
+    }
   }
 
   status(): FeJourneyCollectorStatus {
@@ -80,8 +102,8 @@ export class FeJourneyCollector {
       running: Boolean(this.inFlight),
       state,
       nextDueAt: {
-        nowcoder: nextDue(state.sources.nowcoder.lastAttemptAt, FE_JOURNEY_PRESET.nowcoder.intervalMs),
-        github: nextDue(state.sources.github.lastAttemptAt, FE_JOURNEY_PRESET.github.intervalMs),
+        nowcoder: nextDue('nowcoder', state.sources.nowcoder),
+        github: nextDue('github', state.sources.github),
       },
     };
   }
@@ -97,11 +119,12 @@ export class FeJourneyCollector {
 
   private isDue(source: FeJourneySource, now: string, force: boolean): boolean {
     if (force) return true;
-    const lastAttemptAt = this.state.snapshot().sources[source].lastAttemptAt;
+    const sourceState = this.state.snapshot().sources[source];
+    const lastAttemptAt = sourceState.lastAttemptAt;
     if (!lastAttemptAt) return true;
     const last = Date.parse(lastAttemptAt);
     const current = Date.parse(now);
-    const interval = FE_JOURNEY_PRESET[source].intervalMs;
+    const interval = retryInterval(source, sourceState);
     return !Number.isFinite(last) || !Number.isFinite(current) || current - last >= interval;
   }
 

@@ -152,6 +152,21 @@ async function feJourney(args: string[], io: CliIo): Promise<number> {
     throw new Error(`fe-journey ${action === 'collect' ? '采集' : '状态读取'}失败：${message}`);
   }
   io.stdout(`${JSON.stringify(body)}\n`);
+  if (action === 'collect' && typeof body === 'object' && body !== null) {
+    const sources = (body as { sources?: unknown }).sources;
+    const failedSources = typeof sources === 'object' && sources !== null
+      ? Object.entries(sources)
+          .filter(([, report]) => (
+            typeof report === 'object' && report !== null &&
+            (report as { status?: unknown }).status === 'failed'
+          ))
+          .map(([source]) => source)
+      : [];
+    if (failedSources.length > 0) {
+      io.stderr(`fe-journey 采集失败：${failedSources.join('、')}\n`);
+      return 1;
+    }
+  }
   return 0;
 }
 

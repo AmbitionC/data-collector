@@ -20,21 +20,33 @@ function emptyState(): FeJourneyState {
   return { version: 1, sources: { nowcoder: {}, github: {} } };
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function parseSourceState(value: unknown): FeJourneySourceState {
+  if (!isRecord(value)) throw new Error('fe-journey 采集状态来源格式无效');
+  const state: FeJourneySourceState = {};
+  for (const field of ['lastAttemptAt', 'lastSuccessAt', 'lastError', 'lastWarning'] as const) {
+    const fieldValue = value[field];
+    if (fieldValue === undefined) continue;
+    if (typeof fieldValue !== 'string') throw new Error(`fe-journey 采集状态字段 ${field} 格式无效`);
+    state[field] = fieldValue;
+  }
+  return state;
+}
+
 function parseState(value: unknown): FeJourneyState {
-  if (
-    typeof value !== 'object' ||
-    value === null ||
-    (value as { version?: unknown }).version !== 1 ||
-    typeof (value as { sources?: unknown }).sources !== 'object' ||
-    (value as { sources?: unknown }).sources === null
-  ) {
+  if (!isRecord(value) || value.version !== 1 || !isRecord(value.sources)) {
     throw new Error('fe-journey 采集状态格式无效');
   }
-  const sources = (value as { sources: Record<string, unknown> }).sources;
-  if (typeof sources.nowcoder !== 'object' || typeof sources.github !== 'object') {
-    throw new Error('fe-journey 采集状态缺少来源');
-  }
-  return value as FeJourneyState;
+  return {
+    version: 1,
+    sources: {
+      nowcoder: parseSourceState(value.sources.nowcoder),
+      github: parseSourceState(value.sources.github),
+    },
+  };
 }
 
 async function atomicWrite(path: string, state: FeJourneyState): Promise<void> {
@@ -64,6 +76,10 @@ export class FeJourneyStateStore {
       }
       throw error;
     }
+  }
+
+  static empty(path: string): FeJourneyStateStore {
+    return new FeJourneyStateStore(path, emptyState());
   }
 
   snapshot(): FeJourneyState {
