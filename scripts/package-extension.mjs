@@ -222,11 +222,18 @@ export async function packageExtension(workspaceRoot, dependencies = {}) {
     const versionedArchives = (await readdir(artifactDirectory)).filter(name =>
       /^data-collector-extension-\d+(?:\.\d+){2,3}\.zip$/u.test(name),
     );
-    await Promise.all(
+    const removeObsoleteArchive = dependencies.removeObsoleteArchive
+      ?? (path => rm(path, { force: true }));
+    const cleanupResults = await Promise.allSettled(
       versionedArchives
         .filter(name => name !== archiveName)
-        .map(name => rm(join(artifactDirectory, name), { force: true })),
+        .map(name => removeObsoleteArchive(join(artifactDirectory, name))),
     );
+    const cleanupFailures = cleanupResults.filter(result => result.status === 'rejected');
+    if (cleanupFailures.length > 0) {
+      const warn = dependencies.warn ?? console.warn;
+      warn(`[package] 当前扩展成品已提交；${cleanupFailures.length} 个历史 ZIP 清理失败，将在下次打包重试。`);
+    }
     return archive;
   } finally {
     await rm(stagingRoot, { recursive: true, force: true });

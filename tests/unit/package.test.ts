@@ -14,6 +14,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { MANIFEST_PUBLIC_KEY, TRUSTED_EXTENSION_ID } from '@data-collector/shared';
 import {
   packageExtension,
+  validateExtensionArchive,
   validateExtensionDirectory,
   writeExtensionArchive,
 } from '../../scripts/package-extension.mjs';
@@ -215,6 +216,34 @@ describe('extension package validation', () => {
       .rejects.toMatchObject({ code: 'ENOENT' });
     expect(await readFile(join(workspace, 'artifacts', 'keep-me.zip'), 'utf8'))
       .toBe('unrelated artifact');
+  });
+
+  it('does not turn a committed release into a build failure when old archive cleanup fails', async () => {
+    const workspace = await temporaryDirectories.create('data-collector-workspace-');
+    await writeFixture(join(workspace, 'packages', 'extension', 'dist'));
+    const obsolete = join(workspace, 'artifacts', 'data-collector-extension-0.1.9.zip');
+    await mkdir(join(obsolete, '..'), { recursive: true });
+    await writeFile(obsolete, 'obsolete');
+    let cleanupAttempts = 0;
+
+    const archive = await packageExtension(workspace, {
+      removeObsoleteArchive: async () => {
+        cleanupAttempts += 1;
+        throw new Error('injected cleanup denial');
+      },
+      warn: () => undefined,
+    });
+
+    expect(cleanupAttempts).toBe(1);
+    expect(archive).toBe(join(workspace, 'artifacts', 'data-collector-extension-0.2.0.zip'));
+    expect(await readFile(obsolete, 'utf8')).toBe('obsolete');
+    expect(await validateExtensionDirectory(
+      join(workspace, 'artifacts', 'data-collector-extension'),
+    )).toEqual(REQUIRED_FILES);
+    await expect(validateExtensionArchive(
+      archive,
+      join(workspace, 'artifacts', 'data-collector-extension'),
+    )).resolves.toEqual(REQUIRED_FILES);
   });
 
   it('leaves the previous artifacts untouched when dist validation fails', async () => {
