@@ -94,9 +94,21 @@ function waitForLock(child: ChildProcessWithoutNullStreams): Promise<void> {
   });
 }
 
+function waitForExit(child: ChildProcessWithoutNullStreams): Promise<void> {
+  if (child.exitCode !== null || child.signalCode !== null) return Promise.resolve();
+  return new Promise(resolve => {
+    const onExit = () => resolve();
+    child.once('exit', onExit);
+    if (child.exitCode !== null || child.signalCode !== null) {
+      child.off('exit', onExit);
+      resolve();
+    }
+  });
+}
+
 async function releaseLock(child: ChildProcessWithoutNullStreams): Promise<void> {
   if (child.exitCode !== null || child.signalCode !== null) return;
-  const exited = new Promise<void>(resolve => child.once('exit', () => resolve()));
+  const exited = waitForExit(child);
   child.stdin.end();
   const result = await Promise.race([
     exited.then(() => 'exited' as const),
