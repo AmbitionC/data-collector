@@ -37,6 +37,7 @@ export const BATCH_STALE_MS = 90_000;
 export function isCollecting(input: {
   batch?: { phase?: string; updatedAt?: number } | undefined;
   lastJobStatus?: string | undefined;
+  lastJobUpdatedAt?: number | undefined;
   now: number;
 }): boolean {
   const batch = input.batch;
@@ -44,7 +45,10 @@ export function isCollecting(input: {
   if (batch?.phase === 'running' && input.now - (batch.updatedAt ?? 0) < BATCH_STALE_MS) {
     return true;
   }
-  return ['queued', 'dispatched', 'collecting', 'organizing'].includes(input.lastJobStatus ?? '');
+  const activeJob = ['queued', 'dispatched', 'collecting', 'organizing']
+    .includes(input.lastJobStatus ?? '');
+  if (!activeJob || !Number.isFinite(input.lastJobUpdatedAt)) return false;
+  return input.now - input.lastJobUpdatedAt! < BATCH_STALE_MS;
 }
 
 export function hasNewBuild(signal: UpdateSignal): boolean {

@@ -602,14 +602,17 @@ export class BridgeConnection {
     values: Record<string, unknown>,
   ): Promise<boolean> {
     if (!isCurrent()) return false;
+    // 单页任务也必须有心跳时间：若 Service Worker 中途被回收，旧的 collecting
+    // 不能永远阻止扩展加载新版。每个真实状态跃迁都会刷新这枚时间戳。
+    const stampedValues: Record<string, unknown> = { ...values, lastJobUpdatedAt: Date.now() };
     const previous = this.latestJobTransition?.values;
     const transitionValues =
-      previous?.lastJobId === values.lastJobId
-        ? { ...previous, ...values }
-        : values;
+      previous?.lastJobId === stampedValues.lastJobId
+        ? { ...previous, ...stampedValues }
+        : stampedValues;
     const transition = { generation, values: transitionValues };
     this.latestJobTransition = transition;
-    await this.dependencies.storage.set(values);
+    await this.dependencies.storage.set(stampedValues);
     if (this.latestJobTransition !== transition) {
       let latest = this.latestJobTransition;
       while (latest) {

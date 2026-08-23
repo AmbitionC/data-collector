@@ -167,6 +167,7 @@ function updateSignal(values: Record<string, unknown>): UpdateSignal {
     busy: isCollecting({
       batch: values.batch as { phase?: string; updatedAt?: number } | undefined,
       lastJobStatus: values.lastJobStatus as string | undefined,
+      lastJobUpdatedAt: values.lastJobUpdatedAt as number | undefined,
       now: Date.now(),
     }),
   };
@@ -177,6 +178,7 @@ async function status() {
     'bridgeStatus',
     'lastJobId',
     'lastJobStatus',
+    'lastJobUpdatedAt',
     'lastJobUrl',
     'lastJobError',
     'lastOutputPath',
@@ -411,6 +413,7 @@ async function maybeAutoReload(): Promise<void> {
     'autoReloadTried',
     'batch',
     'lastJobStatus',
+    'lastJobUpdatedAt',
   ]);
   const signal: UpdateSignal = {
     ...updateSignal(values),

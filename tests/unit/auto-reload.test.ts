@@ -93,8 +93,17 @@ describe('「正在采集」怎么判', () => {
   });
 
   it('单页任务跑到一半也算', () => {
-    expect(isCollecting({ lastJobStatus: 'collecting', now })).toBe(true);
+    expect(isCollecting({ lastJobStatus: 'collecting', lastJobUpdatedAt: now - 1_000, now })).toBe(true);
     expect(isCollecting({ lastJobStatus: 'saved', now })).toBe(false);
+  });
+
+  it('单页任务停更太久或旧版本没有时间戳时，不再永久阻塞自动更新', () => {
+    expect(isCollecting({
+      lastJobStatus: 'collecting',
+      lastJobUpdatedAt: now - 120_000,
+      now,
+    })).toBe(false);
+    expect(isCollecting({ lastJobStatus: 'collecting', now })).toBe(false);
   });
 
   it('停更太久的批次不算——service worker 早被回收了，再等也等不到', () => {
