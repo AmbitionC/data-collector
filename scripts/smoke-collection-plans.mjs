@@ -60,6 +60,30 @@ function nowcoderInterview(company, id, contentAccess = 'full') {
   };
 }
 
+/**
+ * 冒烟只验证报告契约：相同标准化问题无论来自几个 URL 都只占一行，
+ * 行内可以保留多个 A/B 来源；C 级来源永远不会被带进建议。
+ */
+function buildQuestionClusterEvidence(documents) {
+  const clusters = new Map();
+  for (const document of documents) {
+    const grade = document.sourceMetadata?.evidenceGrade;
+    if (grade !== 'A' && grade !== 'B') continue;
+    const questions = [...document.text.matchAll(/\d+\.\s*([^?？]{4,180}[?？])/gu)]
+      .map(match => match[1]?.trim())
+      .filter(Boolean);
+    for (const question of questions) {
+      const key = question.normalize('NFKC').toLocaleLowerCase('zh-CN').replace(/[\s\p{P}\p{S}]+/gu, '');
+      const record = clusters.get(key) ?? { key, question, evidence: [] };
+      if (!record.evidence.some(item => item.url === document.canonicalUrl)) {
+        record.evidence.push({ grade, url: document.canonicalUrl });
+      }
+      clusters.set(key, record);
+    }
+  }
+  return [...clusters.values()];
+}
+
 async function main() {
   const temporaryRoot = await mkdtemp(join(tmpdir(), 'collection-plans-smoke-'));
   try {
@@ -78,6 +102,7 @@ async function main() {
       nowcoderInterview('ant', 13_000, 'truncated'),
     ];
     const nowcoder = selectNowcoderPlanCandidates(rawInterviews, NOW);
+    const questionClusters = buildQuestionClusterEvidence(nowcoder.accepted);
 
     const store = await CollectionPlanStore.open(join(temporaryRoot, 'plans.json'), () => NOW);
     const jobs = await JobStore.open(join(temporaryRoot, 'jobs.json'), {
@@ -135,6 +160,7 @@ async function main() {
         needsAttention: terminal.needsAttention,
       },
       syncedIds,
+      reports: { questionClusters },
       testedAt: new Date().toISOString(),
     };
     validateCollectionPlanSmoke(report);

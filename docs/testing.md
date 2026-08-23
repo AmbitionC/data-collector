@@ -12,6 +12,9 @@ npm test
 npm run test:e2e
 npm run test:coverage
 npm run package
+npm run smoke:wechat
+npm run smoke:fe-journey
+npm run smoke:plans
 ```
 
 测试层次：
@@ -21,6 +24,7 @@ npm run package
 - 集成：真实 HTTP/WebSocket Bridge、Origin/token 认证、current-page 不重复派发、queued 重连恢复、`4009/replaced` 单连接接管、CLI 采集和错误退出。
 - 端到端：用系统 Chrome 加载构建后的固定 ID 扩展。其一，打开公众号 fixture，验证 Side Panel 无需输入即可进入 ready；从级联下拉里选分类、填标签并点击保存，断言无额外文章 tab、覆盖值进入 Markdown，再覆盖 catalog 去重和 CLI URL collection。其二，打开知识星球列表页 fixture，验证按钮变为“批量保存本页帖子”，一次批量后知识库落两条各自独立的条目、跳过数如实上报、且全程不新开标签页。其三，打开无帖子的列表页，验证零产出被判为“需要你处理”而不是“完成”，并在轮询多轮后终态仍未被覆盖。
 - 真实冒烟：请求指定在线公众号文章，复用生产提取器和知识库写入器，验证标题、作者、正文、最终路径和重复采集幂等性。
+- 固定计划冒烟：离线夹具验证知识星球三视图 topic 合并、星主过滤、公司上限、真实批次计数和自动同步恰好一次；报告部分要求一个规范问题只有一个问题簇记录，且来源链接全部为 A/B 证据。
 
 合并自动门槛使用离线 fixture E2E，并包含在上述自动化命令中。真实在线冒烟依赖外部站点与网络状态，只在网络可用时作为补充验收，不因其未执行或外部网络失败阻塞合并。
 
@@ -48,6 +52,9 @@ headless Chrome 不能通过用户手势可靠打开 Edge 原生 Side Panel surf
 8. 安装非正式 ID 时显示身份异常，并提示删除后从正式发布包重新安装。
 9. 同时启动第二个已安装实例时，旧 Side Panel 显示“另一个浏览器实例已接管”且不反复重连；点击“在此实例重新连接”后可主动接管。
 10. `unzip -l artifacts/data-collector-extension-0.2.0.zip` 只显示六个允许文件。
+11. 打开“任务”页，确认两条固定计划显示上次/下次运行、结果计数与四家公司覆盖；“立即运行”后可观察到运行中和终态。
+12. 退出牛客或知识星球登录后补跑，对应批次应显示“需处理”并提供站点登录入口；登录后重试可恢复。
+13. 在已登录 Edge 对 `zsxq-chen-teacher` 验证“最新 / 精华 / 只看星主”三视图和 topic 去重；对 `nowcoder-agent-market` 验证 A/B 门槛、单公司 4 条上限以及无样本公司明确显示 0。
 
 ## 可复现打包
 

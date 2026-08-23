@@ -8,10 +8,15 @@
 
 ## 运行方式
 
+- 每日固定计划：知识星球 08:00、牛客 Agent 面经 09:00（`Asia/Shanghai`）；Edge 离线时保留，重连补跑。
+- 计划状态：`npm run collector -- plans status`。
+- 立即补跑：`npm run collector -- plans run nowcoder-agent-market --force` 或 `plans run zsxq-chen-teacher --force`。
+- 最近批次：`npm run collector -- plans batches --limit 20`。
 - 常驻服务自动检查：牛客每 24 小时、每轮最多 24 个详情任务；GitHub 每 7 日、每轮最多 12 个项目。
 - 手动补跑：`npm run collector -- fe-journey collect --force`。
 - 查看状态：`npm run collector -- fe-journey status`。
 - 夹具冒烟：`npm run smoke:fe-journey`。
+- 固定计划与报告契约冒烟：`npm run smoke:plans`。
 - 公开网络发现冒烟：`LIVE=1 npm run smoke:fe-journey`；GitHub 限流时可提供已有的 `GITHUB_TOKEN` 环境变量。
 
 预设位于 `packages/bridge/src/feJourney/preset.ts`，没有用户侧编辑入口。
@@ -26,7 +31,7 @@
                                                          ↓ 显式同步
 front-end-journey-resource/_inbox（git ignored，本机）
                                                          ↓ Codex skill
-interview / knowledge 更新 + 本地运营/项目/跳过项报告
+真实面经差距报告 / 运营候选 → 审核后 interview / knowledge 更新
 ```
 
 采集过程中不启动 Claude Code CLI，也不把页面内容通过 Agent 会话传输。Bridge 与 Edge 通过本机令牌保护的 HTTP/WebSocket 通信；采集层与 Codex 加工层通过 `_inbox/**/original.md + meta.json` 文件契约通信。
@@ -37,6 +42,8 @@ interview / knowledge 更新 + 本地运营/项目/跳过项报告
 - `qualityScore` 是 0–100 的确定性初筛；推广导流、求职闲聊、正文过短和缺少可消费类型都会降分并写入 `exclusionReasons`。
 - GitHub 另有 `projectScore`，只根据学习价值、工程要素、运行说明、明确的测试命令/CI 文件、Agent 技术证据、维护/许可证和文档证据初筛；Star/Fork 只用于发现，不参与质量得分。
 - 同 URL 用稳定 ID 覆盖；同正文用规范化 SHA-256 前 16 位识别；轻度改写用 64 位 SimHash 聚类。公开内容必须按 `clusterId` 聚合，不能一条原文生成一篇内容。
+- 牛客详情额外保存 A/B/C 真实性等级和问题指纹。A/B 才能形成题库与运营建议；C 级、截断和付费不可见内容只进入排除或待处理。
+- 在资源仓库运行 `.codex/skills/curate-fe-journey-inbox/scripts/build-interview-gap.mjs <resource-root> --date YYYY-MM-DD`，生成忽略的 `interview-gap-*.md` 与 `operation-topics-*.md`。脚本只做确定性初筛，Codex 必须按题意、生产深度和追问链确认 `covered/evolved/new`。
 
 ## 失败与恢复
 

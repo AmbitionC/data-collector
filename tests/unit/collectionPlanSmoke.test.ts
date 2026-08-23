@@ -18,6 +18,18 @@ describe('fixed collection plan smoke validation', () => {
       },
       batch: { discovered: 3, saved: 1, skipped: 2, failed: 0, needsAttention: 0 },
       syncedIds: ['owner-topic', 'byte-interview'],
+      reports: {
+        questionClusters: [
+          {
+            key: 'agent-loop',
+            evidence: [{ grade: 'A', url: 'https://www.nowcoder.com/discuss/1' }],
+          },
+          {
+            key: 'rag-eval',
+            evidence: [{ grade: 'B', url: 'https://www.nowcoder.com/discuss/2' }],
+          },
+        ],
+      },
     };
 
     expect(validateCollectionPlanSmoke(report)).toBe(true);
@@ -29,5 +41,23 @@ describe('fixed collection plan smoke validation', () => {
       ...report,
       syncedIds: ['owner-topic', 'owner-topic'],
     })).toThrow('重复同步');
+    expect(() => validateCollectionPlanSmoke({
+      ...report,
+      reports: {
+        questionClusters: [
+          ...report.reports.questionClusters,
+          { key: 'agent-loop', evidence: [{ grade: 'B', url: 'https://example.com/repost' }] },
+        ],
+      },
+    })).toThrow('重复问题簇');
+    expect(() => validateCollectionPlanSmoke({
+      ...report,
+      reports: {
+        questionClusters: [{
+          key: 'marketing-list',
+          evidence: [{ grade: 'C', url: 'https://www.nowcoder.com/discuss/3' }],
+        }],
+      },
+    })).toThrow('A/B');
   });
 });
