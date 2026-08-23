@@ -88,6 +88,7 @@ beforeEach(async () => {
 });
 
 afterEach(() => {
+  vi.restoreAllMocks();
   vi.useRealTimers();
   vi.unstubAllGlobals();
   // document.body 这个元素**跨用例复用**（beforeEach 只换 innerHTML）。
@@ -155,6 +156,7 @@ describe('content script list collection', () => {
   it('waits for the SPA menu to render before selecting the initial plan view', async () => {
     document.body.innerHTML = '<main id="app-shell"></main>';
     vi.useFakeTimers();
+    const timeoutSpy = vi.spyOn(globalThis, 'setTimeout');
     setTimeout(() => {
       document.querySelector('#app-shell')!.innerHTML = `
         <app-menu>
@@ -173,6 +175,7 @@ describe('content script list collection', () => {
     const response = await settle(pending);
 
     expect(response.selected).toEqual({ label: '最新', topicIds: ['644444444444444'] });
+    expect(timeoutSpy.mock.calls.some(([, milliseconds]) => milliseconds === 500)).toBe(true);
   });
 
   it('registers only one message listener even if injected twice', async () => {

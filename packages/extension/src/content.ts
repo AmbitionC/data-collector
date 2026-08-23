@@ -423,9 +423,10 @@ function clickMenu(label: string): boolean {
 }
 
 async function waitForMenu(label: ZsxqPlanView): Promise<void> {
-  for (let attempt = 0; attempt < 100; attempt += 1) {
+  // Chromium 会把后台标签的短定时器合并到约 1 秒；100×100ms 会因此膨胀成一分多钟。
+  for (let attempt = 0; attempt < 20; attempt += 1) {
     if (menuLabels().labels.includes(label)) return;
-    await new Promise(resolve => setTimeout(resolve, 100));
+    await new Promise(resolve => setTimeout(resolve, 500));
   }
   const observed = menuLabels().labels;
   const detail = observed.length > 0 ? `（当前看到：${observed.join('、')}）` : '（分类栏尚未渲染）';
@@ -457,8 +458,8 @@ async function selectPlanView(label: ZsxqPlanView): Promise<{ label: ZsxqPlanVie
   }
   let previous = '';
   let stableCount = 0;
-  for (let attempt = 0; attempt < 60; attempt += 1) {
-    await new Promise(resolve => setTimeout(resolve, 100));
+  for (let attempt = 0; attempt < 12; attempt += 1) {
+    await new Promise(resolve => setTimeout(resolve, 500));
     const topicIds = visibleTopicIds();
     const signature = topicIds.join(',');
     if (menuLabels().active === label && (alreadyActive || signature !== before)) {
