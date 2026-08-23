@@ -1,11 +1,12 @@
 import { randomUUID } from 'node:crypto';
-import { mkdir, open, readFile, rm, stat, utimes } from 'node:fs/promises';
+import { mkdir, open, readFile, rename, rm, stat, utimes } from 'node:fs/promises';
 import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 
 const LOCK_WAIT_MS = 5 * 60_000;
 const STALE_LOCK_MS = 30 * 60_000;
 const HEARTBEAT_MS = 60_000;
+const RECOVERY_LEASE_MS = 60_000;
 
 interface LockRecord {
   owner?: string;
@@ -26,7 +27,7 @@ async function lockRecord(lockPath: string): Promise<LockRecord | undefined> {
 }
 
 function processIsAlive(pid: number | undefined): boolean {
-  if (pid === undefined) return true;
+  if (pid === undefined) return false;
   try {
     process.kill(pid, 0);
     return true;
@@ -43,23 +44,60 @@ async function releaseOwnedLock(lockPath: string, owner: string): Promise<void> 
   await rm(lockPath, { force: true });
 }
 
-async function recoverDeadLock(lockPath: string, recoveryPath: string): Promise<void> {
+async function removeAbandonedRecoveryLease(recoveryPath: string): Promise<void> {
   try {
-    await mkdir(recoveryPath);
+    const recoveryStat = await stat(recoveryPath);
+    if (Date.now() - recoveryStat.mtimeMs <= RECOVERY_LEASE_MS) return;
+    const existing = await lockRecord(recoveryPath);
+    if (processIsAlive(existing?.pid)) return;
+    const abandonedPath = `${recoveryPath}.${randomUUID()}.abandoned`;
+    try {
+      await rename(recoveryPath, abandonedPath);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return;
+      throw error;
+    }
+    await rm(abandonedPath, { recursive: true, force: true });
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'EEXIST') return;
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+  }
+}
+
+async function recoverDeadLock(lockPath: string, recoveryPath: string): Promise<void> {
+  const owner = randomUUID();
+  let recoveryHandle;
+  try {
+    recoveryHandle = await open(recoveryPath, 'wx');
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'EEXIST') {
+      await removeAbandonedRecoveryLease(recoveryPath);
+      return;
+    }
     throw error;
   }
   try {
+    await recoveryHandle.writeFile(`${JSON.stringify({ owner, pid: process.pid })}\n`);
     const lockStat = await stat(lockPath);
     const existing = await lockRecord(lockPath);
     if (Date.now() - lockStat.mtimeMs > STALE_LOCK_MS && !processIsAlive(existing?.pid)) {
+      const now = new Date();
+      await recoveryHandle.utimes(now, now);
+      if ((await lockRecord(recoveryPath))?.owner !== owner) return;
       await rm(lockPath, { force: true });
     }
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
   } finally {
-    await rm(recoveryPath, { recursive: true, force: true });
+    const heldStat = await recoveryHandle.stat();
+    await recoveryHandle.close();
+    try {
+      const currentStat = await stat(recoveryPath);
+      if (currentStat.dev === heldStat.dev && currentStat.ino === heldStat.ino) {
+        await rm(recoveryPath, { force: true });
+      }
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    }
   }
 }
 
