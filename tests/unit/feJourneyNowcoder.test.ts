@@ -3,6 +3,7 @@ import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import {
   FE_JOURNEY_PRESET,
+  discoverNowcoderPlanCandidates,
   discoverNowcoderUrls,
 } from '../../packages/bridge/src/feJourney/index.js';
 
@@ -48,5 +49,25 @@ describe('fixed fe-journey Nowcoder discovery', () => {
     await expect(discoverNowcoderUrls(fetcher, new Set())).rejects.toThrow(
       /牛客搜索请求失败.*503/,
     );
+  });
+
+  it('discovers at most 60 company-labelled candidates from fixed company and role queries', async () => {
+    let nextId = 20_000;
+    const fetcher = vi.fn<typeof fetch>(async () => {
+      const links = Array.from({ length: 10 }, () => `<a href="/discuss/${nextId++}">面经</a>`).join('');
+      return new Response(links, { status: 200 });
+    });
+
+    const candidates = await discoverNowcoderPlanCandidates(fetcher, new Set());
+
+    expect(candidates).toHaveLength(60);
+    expect(new Set(candidates.map(candidate => candidate.url)).size).toBe(60);
+    expect(new Set(candidates.map(candidate => candidate.queryCompany))).toEqual(
+      new Set(['bytedance', 'tencent', 'alibaba', 'ant']),
+    );
+    for (const [rawUrl] of fetcher.mock.calls) {
+      const query = new URL(String(rawUrl)).searchParams.get('query') ?? '';
+      expect(FE_JOURNEY_PRESET.nowcoder.companyQueries.some(item => item.query === query)).toBe(true);
+    }
   });
 });
