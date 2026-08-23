@@ -290,6 +290,44 @@ describe('Nowcoder extraction', () => {
     expect(result.text).toContain('最长递增子序列');
     expect(result.text).not.toContain('首页导航');
   });
+
+  it('marks an explicitly paywalled body as unavailable for full-content consumption', async () => {
+    const url = 'https://www.nowcoder.com/discuss/920079269143871488';
+    const result = extractDocument(
+      await fixture('nowcoder-paywalled.html', url),
+      url,
+      () => '2026-08-23T00:00:00.000Z',
+    );
+
+    expect(result.truncated).toBe(true);
+    expect(result.sourceMetadata).toMatchObject({ contentAccess: 'paywalled' });
+  });
+
+  it('uses only the current detail object from embedded SSR state when semantic DOM is absent', async () => {
+    const url = 'https://www.nowcoder.com/feed/main/detail/42ba29ab006d4bb793112eb263d18f6a';
+    const result = extractDocument(
+      await fixture('nowcoder-ssr.html', url),
+      url,
+      () => '2026-08-23T00:00:00.000Z',
+    );
+
+    expect(result).toMatchObject({
+      title: '阿里云 Agent 开发一面',
+      author: '匿名候选人',
+      publishedAt: '2026-08-18T15:39:00.000Z',
+      sourceMetadata: { contentAccess: 'full' },
+    });
+    expect(result.text).toContain('设计 Agent Loop');
+  });
+
+  it('rejects creator rankings and page chrome instead of archiving them as a post', async () => {
+    const url = 'https://www.nowcoder.com/discuss/108000000000000000';
+    const pageChrome = await fixture('nowcoder-page-chrome.html', url);
+
+    expect(() => extractDocument(pageChrome, url, NOW)).toThrowError(
+      expect.objectContaining<Partial<ExtractionError>>({ code: 'UNSUPPORTED_LAYOUT' }),
+    );
+  });
 });
 
 describe('发布时间：宁可说不知道，也不猜一个年份', () => {

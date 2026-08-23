@@ -51,6 +51,120 @@ const TIME_SELECTORS = [
   '[class*="post-time"]',
 ];
 
+type ContentAccess = 'full' | 'truncated' | 'paywalled';
+
+interface EmbeddedNowcoderPost {
+  title?: string;
+  author?: string;
+  createdAt?: string;
+  content?: Element;
+}
+
+const PAYWALL_SIGNAL = /剩余\s*\d{1,3}\s*%\s*内容|(?:订阅专栏|购买|付费)后(?:可)?继续查看/u;
+const TRUNCATION_SIGNAL = /(?:^|\s)(?:展开全部|展开全文|阅读全文|显示全部)(?:\s|$)/u;
+
+function record(value: unknown): Record<string, unknown> | undefined {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : undefined;
+}
+
+function firstString(value: Record<string, unknown>, keys: readonly string[]): string | undefined {
+  for (const key of keys) {
+    const candidate = value[key];
+    if (typeof candidate === 'string' && candidate.trim()) return candidate.trim();
+  }
+  return undefined;
+}
+
+function embeddedTimestamp(value: unknown): string | undefined {
+  let date: Date | undefined;
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    date = new Date(value < 10_000_000_000 ? value * 1_000 : value);
+  } else if (typeof value === 'string' && value.trim()) {
+    const numeric = Number(value);
+    date = Number.isFinite(numeric)
+      ? new Date(numeric < 10_000_000_000 ? numeric * 1_000 : numeric)
+      : new Date(value);
+  }
+  return date && !Number.isNaN(date.getTime()) ? date.toISOString() : undefined;
+}
+
+function detailId(url: URL): string | undefined {
+  return url.pathname.match(/\/(?:discuss|detail)\/([^/]+)/)?.[1];
+}
+
+function objectId(value: Record<string, unknown>): string | undefined {
+  for (const key of ['contentId', 'postId', 'discussId', 'id']) {
+    const candidate = value[key];
+    if (typeof candidate === 'string' || typeof candidate === 'number') return String(candidate);
+  }
+  return undefined;
+}
+
+function findEmbeddedObject(value: unknown, expectedId: string, seen = new Set<object>()): Record<string, unknown> | undefined {
+  if (Array.isArray(value)) {
+    if (seen.has(value)) return undefined;
+    seen.add(value);
+    for (const child of value) {
+      const found = findEmbeddedObject(child, expectedId, seen);
+      if (found) return found;
+    }
+    return undefined;
+  }
+  const current = record(value);
+  if (!current || seen.has(current)) return undefined;
+  seen.add(current);
+  if (objectId(current) === expectedId) {
+    const content = firstString(current, ['content', 'contentHtml', 'postContent', 'description']);
+    const title = firstString(current, ['title', 'subject']);
+    if (content && title) return current;
+  }
+  for (const child of Object.values(current)) {
+    const found = findEmbeddedObject(child, expectedId, seen);
+    if (found) return found;
+  }
+  return undefined;
+}
+
+/**
+ * DOM 语义容器缺失时，只接受「对象 ID 与当前详情 URL 完全相同」的 JSON 状态。
+ * 页面里还有推荐帖、榜单和作者卡，按字段名全局找第一段 content 会串到别的内容。
+ */
+function embeddedNowcoderPost(document: Document, url: URL): EmbeddedNowcoderPost | undefined {
+  const expectedId = detailId(url);
+  if (!expectedId) return undefined;
+  for (const script of document.querySelectorAll<HTMLScriptElement>('script[type="application/json"]')) {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(script.textContent ?? '');
+    } catch {
+      continue;
+    }
+    const value = findEmbeddedObject(parsed, expectedId);
+    if (!value) continue;
+    const html = firstString(value, ['content', 'contentHtml', 'postContent', 'description']);
+    const title = firstString(value, ['title', 'subject']);
+    if (!html || !title) continue;
+    const content = document.createElement('article');
+    content.innerHTML = html;
+    const authorRecord = record(value.author) ?? record(value.user) ?? record(value.creator);
+    const author = firstString(value, ['authorName', 'nickname'])
+      ?? (authorRecord ? firstString(authorRecord, ['name', 'nickname', 'authorName']) : undefined);
+    const createdAt = embeddedTimestamp(
+      value.createdAt ?? value.createTime ?? value.publishTime ?? value.publishedAt,
+    );
+    return { title, content, ...(author ? { author } : {}), ...(createdAt ? { createdAt } : {}) };
+  }
+  return undefined;
+}
+
+function contentAccessOf(document: Document, content: Element): ContentAccess {
+  const evidence = `${visibleText(content)} ${visibleText(document.body)}`;
+  if (PAYWALL_SIGNAL.test(evidence)) return 'paywalled';
+  return TRUNCATION_SIGNAL.test(visibleText(content)) ? 'truncated' : 'full';
+}
+
 function firstWithin(root: ParentNode, selectors: string[]): Element | null {
   for (const selector of selectors) {
     const element = root.querySelector(selector);
@@ -167,10 +281,12 @@ export function extractNowcoder(document: Document, url: URL, now: Clock) {
     throw new ExtractionError('AUTH_REQUIRED', '请先登录牛客网，再打开需要保存的面经详情页');
   }
 
+  const embedded = embeddedNowcoderPost(document, url);
   const primary = firstWithin(document, CONTENT_SELECTORS);
-  const content = primary ? withGallery(document, primary) : scoredFallback(document);
+  const content = primary ? withGallery(document, primary) : embedded?.content ?? scoredFallback(document);
   const title =
     elementText(firstWithin(document, TITLE_SELECTORS)) ||
+    embedded?.title ||
     elementText(document.querySelector('title'));
 
   if (!content || !title || elementText(content).length < 40) {
@@ -181,12 +297,13 @@ export function extractNowcoder(document: Document, url: URL, now: Clock) {
   }
 
   const time = firstWithin(document, TIME_SELECTORS);
-  const author = elementText(firstWithin(document, AUTHOR_SELECTORS));
+  const author = elementText(firstWithin(document, AUTHOR_SELECTORS)) || embedded?.author || '';
   const publishedAt = nowcoderPublishedAt(
     elementText(time),
     time?.getAttribute('datetime') ?? null,
     now(),
-  );
+  ) ?? embedded?.createdAt;
+  const contentAccess = contentAccessOf(document, content);
   return buildDocument({
     source: 'nowcoder',
     kind: 'post',
@@ -196,5 +313,7 @@ export function extractNowcoder(document: Document, url: URL, now: Clock) {
     now,
     ...(author ? { author } : {}),
     ...(publishedAt ? { publishedAt } : {}),
+    ...(contentAccess !== 'full' ? { truncated: true } : {}),
+    sourceMetadata: { contentAccess },
   });
 }
