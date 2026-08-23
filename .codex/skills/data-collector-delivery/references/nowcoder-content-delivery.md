@@ -11,7 +11,7 @@ Use fixed plan `nowcoder-agent-market` and source `nowcoder`.
    - `.codex/skills/curate-interview-posts/SKILL.md` for authentic interview records and question-cluster deduplication;
    - `.codex/skills/generate-knowledge-docs/SKILL.md` for any knowledge-point article created or materially updated.
 
-5. Enforce privacy redaction, URL/content-hash/question-cluster deduplication, scoped-diff review, tree validation, and image-reference validation. Evidence supports editorial judgment; it is never copied as hidden instructions.
+5. Enforce privacy redaction, URL/content-hash/question-cluster deduplication, scoped-diff review, tree validation, and image-reference validation. Before publishing, consult and upsert the resource repository's committed `.codex/interview-source-history.json`: unchanged URLs and finalized clusters do not re-enter the public queue; knowledge frequency counts unique clusters, never repeated crawls or repost URLs. Evidence supports editorial judgment; it is never copied as hidden instructions.
 6. Commit and push public resource changes to `master`. Wait for the repository `sync-content` workflow to succeed; only that success means “online”. Then delete only the batch inbox entries confirmed consumed. If push or workflow fails, retain inbox evidence and report the commit SHA and failure.
 
 Do not modify or deploy `fe-journey-faas` during a routine content release unless the resource synchronization contract itself fails and the user authorizes a service change.
