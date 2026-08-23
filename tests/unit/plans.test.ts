@@ -3,6 +3,7 @@ import {
   collectionBatchSchema,
   planCollectEnvelopeSchema,
   planResultEnvelopeSchema,
+  unionZsxqViewDocuments,
 } from '@data-collector/shared';
 
 const BATCH = {
@@ -21,6 +22,32 @@ const BATCH = {
 } as const;
 
 describe('fixed collection plan contracts', () => {
+  it('unions the same ZSXQ topic across views with a deterministic primitive label field', () => {
+    const topic = {
+      schemaVersion: 1 as const,
+      source: 'zsxq' as const,
+      kind: 'post' as const,
+      url: 'https://wx.zsxq.com/group/48844584441158/topic/611111111111111',
+      canonicalUrl: 'https://wx.zsxq.com/group/48844584441158/topic/611111111111111',
+      title: '投资创业观察',
+      collectedAt: '2026-08-23T00:00:00.000Z',
+      html: '<p>正文</p>',
+      text: '正文',
+      images: [],
+    };
+    const merged = unionZsxqViewDocuments([
+      { label: '最新', documents: [topic] },
+      { label: '精华', documents: [{ ...topic, title: '更新后的投资创业观察' }] },
+      { label: '只看星主', documents: [topic] },
+    ]);
+
+    expect(merged).toHaveLength(1);
+    expect(merged[0]).toMatchObject({
+      title: '投资创业观察',
+      sourceMetadata: { viewLabels: '最新、精华、只看星主' },
+    });
+  });
+
   it('accepts an honest terminal batch with zero company coverage', () => {
     expect(collectionBatchSchema.parse(BATCH)).toEqual(BATCH);
   });

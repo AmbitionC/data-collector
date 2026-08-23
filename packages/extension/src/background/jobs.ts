@@ -1,7 +1,10 @@
 import {
   parseSupportedUrl,
+  unionZsxqViewDocuments,
+  ZSXQ_PLAN_VIEWS,
   type CollectedDocument,
   type CollectionPlanId,
+  type ZsxqPlanView,
 } from '@data-collector/shared';
 import { linkedArticleUrl } from '../extractors/index.js';
 import type { HookStats } from '../topicIndex.js';
@@ -92,9 +95,6 @@ interface PayloadMap {
   refresh: { toggled: boolean; category?: string };
   selected: { label: ZsxqPlanView; topicIds: string[] };
 }
-
-export const ZSXQ_PLAN_VIEWS = ['最新', '精华', '只看星主'] as const;
-export type ZsxqPlanView = (typeof ZSXQ_PLAN_VIEWS)[number];
 
 const TRANSIENT_TAB_ERROR = /Tabs cannot be edited right now|tab.*(?:temporarily|busy)|No tab with id/i;
 const TAB_RETRY_DELAYS = [1_000, 3_000, 9_000] as const;
@@ -211,37 +211,31 @@ export class JobRunner {
     tabId: number,
     views: readonly ZsxqPlanView[] = ZSXQ_PLAN_VIEWS,
   ): Promise<CollectedDocument[]> {
-    const union = new Map<string, { document: CollectedDocument; labels: Set<ZsxqPlanView> }>();
+    const byView: Array<{ label: ZsxqPlanView; documents: CollectedDocument[] }> = [];
+    const uniqueUrls = new Set<string>();
     for (const label of views) {
+      const documents: CollectedDocument[] = [];
       const selected = await this.ask(tabId, { type: 'list.selectView', label });
       if (!selected.ok) throw new Error(selected.error.message);
       payloadOf(selected, 'selected');
       await this.ask(tabId, { type: 'list.restore' }).catch(() => undefined);
-      for (let round = 0; round < 12 && union.size < 60; round += 1) {
+      for (let round = 0; round < 12 && uniqueUrls.size < 60; round += 1) {
         const extracted = await this.ask(tabId, { type: 'extract.list' });
         if (!extracted.ok) throw new Error(extracted.error.message);
         for (const item of payloadOf(extracted, 'list').items) {
           if (!item.document) continue;
-          const existing = union.get(item.document.canonicalUrl);
-          if (existing) existing.labels.add(label);
-          else union.set(item.document.canonicalUrl, { document: item.document, labels: new Set([label]) });
-          if (union.size >= 60) break;
+          documents.push(item.document);
+          uniqueUrls.add(item.document.canonicalUrl);
+          if (uniqueUrls.size >= 60) break;
         }
-        if (union.size >= 60) break;
+        if (uniqueUrls.size >= 60) break;
         const advanced = await this.ask(tabId, { type: 'list.advance' });
         if (!advanced.ok) throw new Error(advanced.error.message);
         if (payloadOf(advanced, 'advance').loaded === 0) break;
       }
+      byView.push({ label, documents });
     }
-    return [...union.values()]
-      .map(({ document, labels }) => ({
-        ...document,
-        sourceMetadata: {
-          ...(document.sourceMetadata ?? {}),
-          viewLabels: ZSXQ_PLAN_VIEWS.filter(label => labels.has(label)).join('、'),
-        },
-      }))
-      .sort((left, right) => left.canonicalUrl.localeCompare(right.canonicalUrl));
+    return unionZsxqViewDocuments(byView).slice(0, 60);
   }
 
   async submitCollectedDocument(

@@ -1,4 +1,8 @@
-import type { CollectedDocument } from '@data-collector/shared';
+import {
+  ZSXQ_PLAN_VIEWS,
+  type CollectedDocument,
+  type ZsxqPlanView,
+} from '@data-collector/shared';
 import {
   COLLECTED_ATTRIBUTE,
   KEY_ATTRIBUTE,
@@ -18,9 +22,6 @@ import {
   type TopicRecord,
 } from './topicIndex.js';
 import { commercialSignals } from './adFilter.js';
-
-export const ZSXQ_PLAN_VIEWS = ['最新', '精华', '只看星主'] as const;
-export type ZsxqPlanView = (typeof ZSXQ_PLAN_VIEWS)[number];
 
 /**
  * 帖子号索引。帖子号不在 DOM 上，只能从应用自己的接口响应里取（见 inject.ts）。

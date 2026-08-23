@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import type { CollectedDocument } from './model.js';
 
 export const COLLECTION_PLAN_IDS = ['zsxq-chen-teacher', 'nowcoder-agent-market'] as const;
 export type CollectionPlanId = (typeof COLLECTION_PLAN_IDS)[number];
@@ -10,6 +11,35 @@ export const BATCH_STATUSES = [
   'failed',
 ] as const;
 export type BatchStatus = (typeof BATCH_STATUSES)[number];
+
+export const ZSXQ_PLAN_VIEWS = ['最新', '精华', '只看星主'] as const;
+export type ZsxqPlanView = (typeof ZSXQ_PLAN_VIEWS)[number];
+
+export interface ZsxqViewDocuments {
+  label: ZsxqPlanView;
+  documents: readonly CollectedDocument[];
+}
+
+/** 按固定视图顺序合并 topic；元数据保持协议允许的 primitive 字符串。 */
+export function unionZsxqViewDocuments(views: readonly ZsxqViewDocuments[]): CollectedDocument[] {
+  const union = new Map<string, { document: CollectedDocument; labels: Set<ZsxqPlanView> }>();
+  for (const view of views) {
+    for (const document of view.documents) {
+      const existing = union.get(document.canonicalUrl);
+      if (existing) existing.labels.add(view.label);
+      else union.set(document.canonicalUrl, { document, labels: new Set([view.label]) });
+    }
+  }
+  return [...union.values()]
+    .map(({ document, labels }) => ({
+      ...document,
+      sourceMetadata: {
+        ...(document.sourceMetadata ?? {}),
+        viewLabels: ZSXQ_PLAN_VIEWS.filter(label => labels.has(label)).join('、'),
+      },
+    }))
+    .sort((left, right) => left.canonicalUrl.localeCompare(right.canonicalUrl));
+}
 
 export interface CollectionBatch {
   id: string;

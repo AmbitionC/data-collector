@@ -19,7 +19,8 @@
     "typecheck": "tsc -b packages/shared packages/bridge --pretty false && tsc -p packages/extension/tsconfig.json --pretty false",
     "collector": "node packages/bridge/dist/cli.js",
     "smoke:wechat": "npm run build && node scripts/smoke-wechat.mjs",
-    "smoke:fe-journey": "npm run build && node scripts/smoke-fe-journey.mjs"
+    "smoke:fe-journey": "npm run build && node scripts/smoke-fe-journey.mjs",
+    "smoke:plans": "npm run build && node scripts/smoke-collection-plans.mjs"
   },
   "devDependencies": {
     "@types/chrome": "0.2.2",
