@@ -8,6 +8,7 @@ import {
   saveCollectedDocument,
 } from '../../packages/bridge/src/feJourney/index.js';
 import { listLibrary } from '../../packages/bridge/src/library/index.js';
+import { organize } from '../../packages/bridge/src/organize/index.js';
 import { SinkRouter } from '../../packages/bridge/src/sinks/index.js';
 import { createTemporaryDirectoryTracker } from '../helpers/temp.js';
 
@@ -31,6 +32,40 @@ function nowcoderDocument(id: string, text: string): CollectedDocument {
 }
 
 describe('FeJourneyCandidateIndex', () => {
+  it('persists Nowcoder evidence and gives a real Agent interview an AI source category', async () => {
+    const root = await temporaryDirectories.create('fe-journey-index-evidence-');
+    const index = await FeJourneyCandidateIndex.open(root);
+    const base = nowcoderDocument(
+      '4001',
+      [
+        '我参加了阿里云 Agent 开发岗位一面，面试时间是8月18日。',
+        '1.如何设计 React 管理端？',
+        '2.如何设计 Agent Loop？',
+        '3.怎样保障 Agent 按需调用工具？',
+        '4.上下文压缩后如何验证需求没有丢失？',
+      ].join(''),
+    );
+    const prepared = index.prepare({
+      ...base,
+      title: '阿里云 Agent 开发一面：React 管理端设计',
+      author: '匿名候选人',
+      publishedAt: '2026-08-18T15:39:00.000Z',
+      sourceMetadata: { contentAccess: 'full' },
+    }).document;
+
+    expect(prepared).toMatchObject({
+      suggestedCategory: '人工智能',
+      sourceMetadata: {
+        company: 'alibaba',
+        businessUnit: '阿里云',
+        evidenceGrade: 'A',
+        questionCount: 4,
+      },
+    });
+    expect(prepared.feJourney?.candidateKinds).toContain('interview');
+    expect(organize(prepared).category).toBe('人工智能');
+  });
+
   it('groups exact and near duplicates while preserving a separate unrelated cluster', async () => {
     const root = await temporaryDirectories.create('fe-journey-index-');
     const index = await FeJourneyCandidateIndex.open(root);

@@ -8,6 +8,7 @@ import {
 } from '@data-collector/shared';
 import { atomicWriteText } from '../library/writer.js';
 import { hammingDistance64 } from './fingerprint.js';
+import { enrichNowcoderEvidence } from './nowcoderEvidence.js';
 import { scoreFeJourneyCandidate } from './quality.js';
 
 interface CandidateIndexEntry {
@@ -96,8 +97,15 @@ export class FeJourneyCandidateIndex {
       return { document, commit: async () => undefined };
     }
 
-    const id = stableContentId(document.canonicalUrl);
-    const score = scoreFeJourneyCandidate(document);
+    const evidenced = enrichNowcoderEvidence(document);
+    const score = scoreFeJourneyCandidate(evidenced);
+    const evidenceGrade = evidenced.sourceMetadata?.evidenceGrade;
+    const candidate = evidenced.source === 'nowcoder' &&
+      (evidenceGrade === 'A' || evidenceGrade === 'B') &&
+      score.candidateKinds.includes('interview')
+      ? { ...evidenced, suggestedCategory: '人工智能' }
+      : evidenced;
+    const id = stableContentId(candidate.canonicalUrl);
     // URL identity is stronger than a changed body: edits and extraction differences must
     // update the existing candidate instead of silently moving it to a new cluster.
     const existing = this.entries.find(entry => entry.id === id);
@@ -118,18 +126,18 @@ export class FeJourneyCandidateIndex {
       clusterId,
       ...(representativeId !== id ? { duplicateOf: representativeId } : {}),
     };
-    const enriched: CollectedDocument = { ...document, feJourney };
+    const enriched: CollectedDocument = { ...candidate, feJourney };
     const entry: CandidateIndexEntry = {
       id,
-      source: document.source,
-      url: document.canonicalUrl,
+      source: candidate.source,
+      url: candidate.canonicalUrl,
       contentHash: score.contentHash,
       simHash: score.simHash,
       clusterId,
       representativeId,
       qualityScore: score.qualityScore,
       ...(score.projectScore !== undefined ? { projectScore: score.projectScore } : {}),
-      updatedAt: document.collectedAt,
+      updatedAt: candidate.collectedAt,
     };
     let committed = false;
 
