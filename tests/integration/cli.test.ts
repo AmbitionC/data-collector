@@ -51,6 +51,37 @@ afterEach(async () => {
 });
 
 describe('Codex CLI', () => {
+  it('reads, runs, and lists fixed collection plans for Codex', async () => {
+    const root = await temporaryDirectories.create('data-collector-cli-plans-');
+    const configDir = join(root, '.config');
+    const bridge = await startBridge({ port: 0, libraryRoot: root, configDir });
+    handles.push(bridge);
+    await authorize(bridge);
+    const port = new URL(bridge.url).port;
+    const base = ['--port', port, '--library', root, '--config', configDir];
+    let stdout = '';
+    let stderr = '';
+    const io = {
+      stdout: (value: string) => { stdout += value; },
+      stderr: (value: string) => { stderr += value; },
+    };
+
+    expect(await runCli(['plans', 'status', ...base], io)).toBe(0);
+    expect(JSON.parse(stdout).plans).toHaveLength(2);
+    stdout = '';
+    expect(await runCli(['plans', 'run', 'zsxq-chen-teacher', '--force', ...base], io)).toBe(0);
+    expect(JSON.parse(stdout)).toMatchObject({ planId: 'zsxq-chen-teacher', status: 'running' });
+    stdout = '';
+    expect(await runCli(['plans', 'batches', '--limit', '1', ...base], io)).toBe(0);
+    expect(JSON.parse(stdout).batches).toEqual([
+      expect.objectContaining({ planId: 'zsxq-chen-teacher' }),
+    ]);
+    expect(stderr).toBe('');
+
+    expect(await runCli(['plans', 'run', 'unknown-plan', ...base], io)).toBe(1);
+    expect(stderr).toContain('固定计划');
+  });
+
   it('runs and reports the fixed fe-journey collection without accepting search configuration', async () => {
     const root = await temporaryDirectories.create('data-collector-cli-fe-journey-');
     const repo = await temporaryDirectories.create('data-collector-cli-fe-repo-');

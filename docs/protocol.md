@@ -36,6 +36,11 @@ WebSocket Origin 校验会阻止普通网页和其他扩展。Origin 与固定 I
 - `POST /v1/reveal`：只允许打开知识库根目录内已存在的文件，供 Side Panel 点击“在文件夹中查看”。
 - `GET /v1/fe-journey/status`：读取固定周期状态、运行中标记和两个来源的下次到期时间。
 - `POST /v1/fe-journey/collect`：立即检查或强制运行固定预设。请求体只接受 `{ "force"?: boolean, "nowcoder"?: boolean, "github"?: boolean }`，未知字段直接 `400`；未启用固定 `fe-journey` sink 时返回 `409 FE_JOURNEY_DISABLED`。
+- `GET /v1/plans/status`：两个每日固定计划的到期、待补跑、下次运行和最近批次状态。
+- `POST /v1/plans/run`：立即运行固定计划，只接受 `{ "planId": "zsxq-chen-teacher|nowcoder-agent-market", "force"?: boolean }`。
+- `GET /v1/plans/batches?limit=20`：最近批次历史；`limit` 必须在 1–100 之间，可选固定 `planId` 过滤。
+
+以上 `/v1/plans/*` 接口同样只允许回环访问并要求 bearer token。对应 Codex CLI 为 `data-collector plans status`、`data-collector plans run <plan-id> --force` 和 `data-collector plans batches --limit 20`；返回只包含计划、计数、覆盖和错误信息，不暴露 Cookie、凭证或本机仓库路径。
 
 URL 只允许 HTTPS 的 `mp.weixin.qq.com`、`wx.zsxq.com`/知识星球子域、`www.nowcoder.com` 和 `github.com`。GitHub 文档只由 Bridge provider 生成，扩展若尝试页面提取会明确返回不支持布局。请求体、字段长度、图片数量和 WebSocket 帧都有上限。
 
@@ -69,8 +74,8 @@ Codex/CLI: queued → dispatched → collecting → saved
 
 主要消息：
 
-- 扩展 → Bridge：`extension.hello`、`bridge.ping`、`job.progress`、`job.result`、`job.error`
-- Bridge → 扩展：`bridge.authorized`、`bridge.pong`、`job.collect`、`job.saved`
+- 扩展 → Bridge：`extension.hello`、`bridge.ping`、`job.progress`、`job.result`、`job.error`、`plan.result`
+- Bridge → 扩展：`bridge.authorized`、`bridge.pong`、`job.collect`、`job.saved`、`plan.collect`
 
 扩展每 20 秒发送心跳，使 Chrome 116+ 的 Manifest V3 service worker 在活跃连接期间保持可用。所有消息都在共享 schema 边界校验，内容脚本返回的数据按不可信输入处理；回传 URL 必须与任务一致，违规消息以 WebSocket `1008` 关闭。
 

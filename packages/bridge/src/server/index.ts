@@ -585,6 +585,19 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
       }
       return sendJson(response, 200, collectionPlans.status());
     }
+    if (request.method === 'GET' && requestUrl.pathname === '/v1/plans/batches') {
+      if (!collectionPlans) {
+        throw new HttpError(409, 'COLLECTION_PLANS_UNAVAILABLE', planStoreError ?? '固定采集计划不可用');
+      }
+      const limit = z.coerce.number().int().min(1).max(100).parse(
+        requestUrl.searchParams.get('limit') ?? '20',
+      );
+      const rawPlanId = requestUrl.searchParams.get('planId');
+      const planId = rawPlanId === null ? undefined : z.enum(COLLECTION_PLAN_IDS).parse(rawPlanId);
+      return sendJson(response, 200, {
+        batches: collectionPlans.batches(limit, planId),
+      });
+    }
     if (request.method === 'POST' && requestUrl.pathname === '/v1/plans/run') {
       if (!collectionPlans) {
         throw new HttpError(409, 'COLLECTION_PLANS_UNAVAILABLE', planStoreError ?? '固定采集计划不可用');

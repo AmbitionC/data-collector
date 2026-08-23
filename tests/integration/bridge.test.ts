@@ -192,6 +192,36 @@ describe('local Bridge', () => {
     });
   });
 
+  it('protects and validates fixed plan status, run, and batch history routes', async () => {
+    const root = await temporaryDirectory();
+    const configDir = join(root, '.config');
+    const bridge = await startBridge({ port: 0, libraryRoot: root, configDir });
+    handles.push(bridge);
+    const { token } = await authorize(bridge);
+
+    expect((await requestJson(bridge.url, '/v1/plans/status')).status).toBe(401);
+    expect((await requestJson(bridge.url, '/v1/plans/batches?limit=20')).status).toBe(401);
+    expect((await requestJson(bridge.url, '/v1/plans/run', {
+      method: 'POST', token, body: { planId: 'user-defined-plan' },
+    })).status).toBe(400);
+    expect((await requestJson(bridge.url, '/v1/plans/batches?limit=0', { token })).status).toBe(400);
+
+    const run = await requestJson<{ id: string }>(bridge.url, '/v1/plans/run', {
+      method: 'POST', token, body: { planId: 'nowcoder-agent-market', force: true },
+    });
+    expect(run.status).toBe(202);
+    const batches = await requestJson<{ batches: Array<{ id: string; planId: string }> }>(
+      bridge.url,
+      '/v1/plans/batches?limit=1',
+      { token },
+    );
+    expect(batches).toMatchObject({
+      status: 200,
+      body: { batches: [{ id: run.body.id, planId: 'nowcoder-agent-market' }] },
+    });
+  });
+
+
   it('keeps fe-journey collection disabled without its fixed sink', async () => {
     const root = await temporaryDirectory();
     const configDir = join(root, '.config');

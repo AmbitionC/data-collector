@@ -139,6 +139,10 @@ export class CollectionPlanService {
     };
   }
 
+  batches(limit = 20, planId?: CollectionPlanId): CollectionBatch[] {
+    return this.dependencies.store.latest(planId, limit);
+  }
+
   async run(planId: CollectionPlanId, options: { force?: boolean } = {}): Promise<CollectionBatch> {
     const running = this.dependencies.store.latest(planId, 20).find(batch => batch.status === 'running');
     if (running && !options.force) {

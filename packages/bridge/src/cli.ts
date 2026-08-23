@@ -11,6 +11,7 @@ import { buildStampCommit, updateWorkspace } from './autoUpdate.js';
 import { runTool } from './git.js';
 import { loadConfig, type ConfigOverrides } from './config.js';
 import { discoverRepoRoot, startBridge } from './server/index.js';
+import { COLLECTION_PLAN_IDS, type CollectionPlanId } from '@data-collector/shared';
 
 export interface CliIo {
   stdout(value: string): void;
@@ -167,6 +168,50 @@ async function feJourney(args: string[], io: CliIo): Promise<number> {
       io.stderr(`fe-journey 采集失败：${failedSources.join('、')}\n`);
       return 1;
     }
+  }
+  return 0;
+}
+
+async function plans(args: string[], io: CliIo): Promise<number> {
+  const action = args[1];
+  if (action !== 'status' && action !== 'run' && action !== 'batches') {
+    throw new Error('用法：data-collector plans <status|run <plan-id>|batches> [--force] [--limit 20]');
+  }
+  const { baseUrl, token } = await authenticatedToken(args);
+  let path = '/v1/plans/status';
+  let init: RequestInit = { headers: { authorization: `Bearer ${token}` } };
+  if (action === 'run') {
+    const planId = args[2];
+    if (!COLLECTION_PLAN_IDS.includes(planId as CollectionPlanId)) {
+      throw new Error(`固定计划必须是：${COLLECTION_PLAN_IDS.join('、')}`);
+    }
+    path = '/v1/plans/run';
+    init = {
+      method: 'POST',
+      headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ planId, force: args.includes('--force') }),
+    };
+  } else if (action === 'batches') {
+    const limit = Number(option(args, '--limit') ?? 20);
+    if (!Number.isInteger(limit) || limit < 1 || limit > 100) {
+      throw new Error('--limit 必须是 1 到 100 之间的整数');
+    }
+    path = `/v1/plans/batches?limit=${limit}`;
+  }
+  const response = await fetch(`${baseUrl}${path}`, init);
+  const body = await response.json() as unknown;
+  if (!response.ok) {
+    const message = typeof body === 'object' && body !== null &&
+      typeof (body as { error?: { message?: unknown } }).error?.message === 'string'
+      ? (body as { error: { message: string } }).error.message
+      : `HTTP ${response.status}`;
+    throw new Error(`固定计划${action === 'run' ? '运行' : '读取'}失败：${message}`);
+  }
+  io.stdout(`${JSON.stringify(body)}\n`);
+  if (action === 'run' && typeof body === 'object' && body !== null &&
+    (body as { status?: unknown }).status === 'failed') {
+    io.stderr('固定计划启动失败\n');
+    return 1;
   }
   return 0;
 }
@@ -349,9 +394,10 @@ export async function runCli(args: string[], io: CliIo = PROCESS_IO): Promise<nu
     if (command === 'collect') return await collect(args, io);
     if (command === 'health') return await health(args, io);
     if (command === 'fe-journey') return await feJourney(args, io);
+    if (command === 'plans') return await plans(args, io);
     if (command === 'bridge') return await bridge(args, io);
     io.stderr(
-      '用法：data-collector <bridge install|bridge start|bridge status|bridge uninstall|collect URL|fe-journey collect|fe-journey status|health>\n',
+      '用法：data-collector <bridge install|bridge start|bridge status|bridge uninstall|collect URL|plans status|plans run|plans batches|fe-journey collect|fe-journey status|health>\n',
     );
     return 2;
   } catch (error) {
