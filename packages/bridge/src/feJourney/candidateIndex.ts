@@ -115,6 +115,38 @@ export class FeJourneyCandidateIndex {
     return result;
   }
 
+  /** 删除本地库条目后同步清理候选索引，并在代表条目被删时重选簇代表。 */
+  remove(ids: readonly string[]): Promise<void> {
+    if (ids.length === 0) return Promise.resolve();
+    const wanted = new Set(ids);
+    return this.runExclusive(async () => {
+      const remaining = this.entries.filter(entry => !wanted.has(entry.id));
+      if (remaining.length === this.entries.length) return;
+
+      const clusterRepresentatives = new Map<string, string>();
+      for (const entry of remaining) {
+        const current = clusterRepresentatives.get(entry.clusterId);
+        if (!current || entry.id < current) clusterRepresentatives.set(entry.clusterId, entry.id);
+      }
+      this.entries = remaining
+        .map(entry => {
+          const representativeStillExists = remaining.some(
+            candidate => candidate.id === entry.representativeId,
+          );
+          return representativeStillExists
+            ? entry
+            : { ...entry, representativeId: clusterRepresentatives.get(entry.clusterId) ?? entry.id };
+        })
+        .sort((left, right) => left.id.localeCompare(right.id));
+      const catalog: CandidateCatalog = { version: 1, entries: this.entries };
+      await atomicWriteText(
+        this.libraryRoot,
+        this.catalogPath,
+        `${JSON.stringify(catalog, null, 2)}\n`,
+      );
+    });
+  }
+
   prepare(document: CollectedDocument): PreparedFeJourneyCandidate {
     if (!isCandidateSource(document.source)) {
       return { document, commit: async () => undefined };

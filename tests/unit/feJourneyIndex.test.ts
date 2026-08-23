@@ -253,4 +253,22 @@ describe('FeJourneyCandidateIndex', () => {
     expect(new Set(catalog.entries.map(entry => entry.clusterId))).toEqual(new Set([originalClusterId]));
     expect(new Set(catalog.entries.map(entry => entry.representativeId))).toEqual(new Set([representativeId]));
   });
+
+  it('removes deleted library ids from the persisted candidate catalog', async () => {
+    const root = await temporaryDirectories.create('fe-journey-index-remove-');
+    const index = await FeJourneyCandidateIndex.open(root);
+    const first = index.prepare(nowcoderDocument('6001', '字节一面追问 Agent Loop、工具调用和 RAG 评测。'));
+    const second = index.prepare(nowcoderDocument('6002', '腾讯一面追问浏览器渲染、网络缓存和性能优化。'));
+    await first.commit();
+    await second.commit();
+
+    await index.remove([stableContentId('https://www.nowcoder.com/discuss/6001')]);
+
+    const catalog = JSON.parse(
+      await readFile(join(root, '_catalog', 'fe-journey.json'), 'utf8'),
+    ) as { entries: Array<{ id: string }> };
+    expect(catalog.entries.map(entry => entry.id)).toEqual([
+      stableContentId('https://www.nowcoder.com/discuss/6002'),
+    ]);
+  });
 });

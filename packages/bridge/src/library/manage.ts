@@ -104,11 +104,17 @@ export interface DeleteOutcome {
   missing: number;
 }
 
+export type AfterLibraryEntriesRemoved = (ids: readonly string[]) => Promise<void>;
+
 /**
  * 删除若干条目：连同各自的目录（正文 + assets）一起删，并更新索引。
  * ids 为空数组时不做任何事；传 'all' 由调用方展开成全部 id，这里不接受隐式全删。
  */
-export async function deleteEntries(root: string, ids: readonly string[]): Promise<DeleteOutcome> {
+export async function deleteEntries(
+  root: string,
+  ids: readonly string[],
+  afterRemove?: AfterLibraryEntriesRemoved,
+): Promise<DeleteOutcome> {
   if (ids.length === 0) return { deleted: 0, missing: 0 };
   const wanted = new Set(ids);
   const entries = await readCatalog(root);
@@ -140,7 +146,9 @@ export async function deleteEntries(root: string, ids: readonly string[]): Promi
     }
   }
 
+  const removedIds = entries.filter(entry => wanted.has(entry.id)).map(entry => entry.id);
   await writeCatalog(root, entries.filter(entry => !wanted.has(entry.id)));
+  if (removedIds.length > 0) await afterRemove?.(removedIds);
   return { deleted, missing };
 }
 
@@ -166,7 +174,10 @@ async function pruneEmptyParents(root: string, from: string): Promise<void> {
 }
 
 /** 一键清空：删掉索引里的每一条。空库时是安全的空操作。 */
-export async function clearLibrary(root: string): Promise<DeleteOutcome> {
+export async function clearLibrary(
+  root: string,
+  afterRemove?: AfterLibraryEntriesRemoved,
+): Promise<DeleteOutcome> {
   const entries = await readCatalog(root);
-  return deleteEntries(root, entries.map(entry => entry.id));
+  return deleteEntries(root, entries.map(entry => entry.id), afterRemove);
 }

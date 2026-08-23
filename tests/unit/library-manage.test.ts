@@ -1,7 +1,7 @@
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   clearLibrary,
   deleteEntries,
@@ -75,6 +75,20 @@ describe('已入库内容管理', () => {
     // 另一条必须完好无损。
     expect(existsSync(join(root, '微信公众号', '投资', '2026', 'bbb-second', 'index.md'))).toBe(true);
     expect((await listLibrary(root)).map(entry => entry.id)).toEqual(['bbb']);
+  });
+
+  it('只在本地目录索引更新后通知实际移除的 id', async () => {
+    const root = await seedLibrary(SEEDS);
+    const removed: string[][] = [];
+    const afterRemove = vi.fn(async (ids: readonly string[]) => {
+      removed.push([...ids]);
+      expect((await listLibrary(root)).map(entry => entry.id)).toEqual(['bbb']);
+    });
+
+    await deleteEntries(root, ['aaa', 'not-in-library'], afterRemove);
+
+    expect(afterRemove).toHaveBeenCalledOnce();
+    expect(removed).toEqual([['aaa']]);
   });
 
   it('清空会删掉每一条，并留下一个空索引', async () => {

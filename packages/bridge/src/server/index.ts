@@ -517,10 +517,12 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
     }
     if (request.method === 'POST' && requestUrl.pathname === '/v1/library/delete') {
       const input = deleteLibrarySchema.parse(await readJson(request));
+      const removeCandidates = (ids: readonly string[]): Promise<void> =>
+        candidateIndex?.remove(ids) ?? Promise.resolve();
       // 「清空」必须显式请求，绝不把「没传 ids」理解成「删全部」。
       const outcome = input.all
-        ? await clearLibrary(config.libraryRoot)
-        : await deleteEntries(config.libraryRoot, input.ids ?? []);
+        ? await clearLibrary(config.libraryRoot, removeCandidates)
+        : await deleteEntries(config.libraryRoot, input.ids ?? [], removeCandidates);
       return sendJson(response, 200, outcome);
     }
     if (request.method === 'POST' && requestUrl.pathname === '/v1/reveal') {
