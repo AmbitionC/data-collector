@@ -378,6 +378,30 @@ export class BridgeConnection {
     return Array.isArray(body.entries) ? body.entries : [];
   }
 
+  /** 固定采集计划状态（受 Bridge token 保护，不把令牌暴露给侧栏）。 */
+  async planStatus(): Promise<unknown> {
+    const { baseUrl, token } = await this.authorized();
+    const fetcher = this.dependencies.fetch;
+    const response = await fetcher(`${baseUrl}/v1/plans/status`, {
+      headers: { authorization: `Bearer ${token}` },
+    });
+    if (!response.ok) throw new Error(`读取采集任务失败：HTTP ${response.status}`);
+    return response.json();
+  }
+
+  /** 立即运行一条固定计划；force 用于用户明确点击的重试/补跑。 */
+  async runPlan(planId: CollectionPlanId, force = false): Promise<unknown> {
+    const { baseUrl, token } = await this.authorized();
+    const fetcher = this.dependencies.fetch;
+    const response = await fetcher(`${baseUrl}/v1/plans/run`, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ planId, ...(force ? { force: true } : {}) }),
+    });
+    if (!response.ok) throw new Error(`启动采集任务失败：HTTP ${response.status}`);
+    return response.json();
+  }
+
   /** 读一条已入库内容的正文（供侧栏「查看内容」）。 */
   async libraryEntry(id: string): Promise<unknown> {
     const { baseUrl, token } = await this.authorized();

@@ -1,8 +1,19 @@
 import { descriptorForHost, sourceLabel } from '@data-collector/shared';
+import type { CollectionBatch, CollectionPlanId } from '@data-collector/shared';
 import { BATCH_STALE_MS } from '../background/autoReload.js';
 import type { BatchItem, BatchPhase } from '../background/jobs.js';
 
 export type { BatchItem, BatchPhase };
+
+export type TopPage = 'collect' | 'plans' | 'library';
+
+export interface CollectionPlanStatus {
+  id: CollectionPlanId;
+  due: boolean;
+  pending: boolean;
+  nextRunAt: string;
+  latest?: CollectionBatch;
+}
 
 /** 已入库的一条内容。 */
 export interface LibraryEntry {
@@ -163,6 +174,13 @@ export type SidePanelState =
       log: string[];
     }
   | {
+      phase: 'plans';
+      plans: CollectionPlanStatus[];
+      loading: boolean;
+      runningPlanId?: CollectionPlanId;
+      error?: string;
+    }
+  | {
       /** 「已入库」页面：查看本机知识库里已有的内容，并可删除 / 清空。 */
       phase: 'library';
       entries: LibraryEntry[];
@@ -222,7 +240,11 @@ export interface SidePanelActions {
   /** 复制整轮的完整报告（运行记录 + 逐条结果 + 页面与钩子诊断），便于排查。 */
   copyLog(log: string[]): Promise<void>;
   /** 顶部页面切换。 */
-  openPage(page: 'collect' | 'library'): void;
+  openPage(page: TopPage): void;
+  /** 用户明确要求立即补跑/重试一条固定任务。 */
+  runPlan(planId: CollectionPlanId, force: boolean): Promise<void>;
+  /** 在新标签页打开计划对应站点，用于登录或人工核对。 */
+  openPlanSource(url: string): void;
   /** 重新拉取已入库列表。 */
   reloadLibrary(): Promise<void>;
   /** 按来源筛选已入库列表。 */
@@ -417,6 +439,7 @@ function setConnectionLabel(document: Document, state: SidePanelState): void {
     'collecting',
     'batch',
     'items',
+    'plans',
     'library',
     'saved',
     'needs_attention',
@@ -861,14 +884,181 @@ function renderConfirmModal(
 }
 
 /** 顶部页面切换按钮的选中态。 */
-export function renderTopNav(document: Document, page: 'collect' | 'library', actions: SidePanelActions): void {
+export function renderTopNav(document: Document, page: TopPage, actions: SidePanelActions): void {
   const collect = document.querySelector<HTMLButtonElement>('#nav-collect');
+  const plans = document.querySelector<HTMLButtonElement>('#nav-plans');
   const library = document.querySelector<HTMLButtonElement>('#nav-library');
-  if (!collect || !library) return;
+  if (!collect || !plans || !library) return;
   collect.setAttribute('aria-pressed', String(page === 'collect'));
+  plans.setAttribute('aria-pressed', String(page === 'plans'));
   library.setAttribute('aria-pressed', String(page === 'library'));
   collect.onclick = () => actions.openPage('collect');
+  plans.onclick = () => actions.openPage('plans');
   library.onclick = () => actions.openPage('library');
+}
+
+const PLAN_PRESENTATION: Record<CollectionPlanId, {
+  title: string;
+  cadence: string;
+  scope: string;
+  url: string;
+}> = {
+  'zsxq-chen-teacher': {
+    title: '陈老师的知识星球',
+    cadence: '每天 08:00',
+    scope: '最新 · 精华 · 只看星主',
+    url: 'https://wx.zsxq.com/group/48844584441158',
+  },
+  'nowcoder-agent-market': {
+    title: 'Agent 面经雷达',
+    cadence: '每天 09:00',
+    scope: '腾讯 · 字节 · 阿里 · 蚂蚁',
+    url: 'https://www.nowcoder.com/search?query=Agent%20%E9%9D%A2%E7%BB%8F',
+  },
+};
+
+const BATCH_STATUS_LABELS: Record<CollectionBatch['status'], string> = {
+  running: '正在采集',
+  completed: '已完成',
+  completed_with_attention: '完成，需处理',
+  failed: '运行失败',
+};
+
+function planTime(value: string | undefined): string {
+  if (!value) return '尚无记录';
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return '时间未知';
+  return new Intl.DateTimeFormat('zh-CN', {
+    timeZone: 'Asia/Shanghai',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+  }).format(date);
+}
+
+function appendMetric(document: Document, parent: HTMLElement, label: string, value: number): void {
+  const item = document.createElement('div');
+  const count = document.createElement('strong');
+  const name = document.createElement('span');
+  count.textContent = String(value);
+  name.textContent = label;
+  item.append(count, name);
+  parent.append(item);
+}
+
+function renderPlans(
+  document: Document,
+  state: Extract<SidePanelState, { phase: 'plans' }>,
+  actions: SidePanelActions,
+): void {
+  show(document, '#plans-panel');
+  const list = required<HTMLElement>(document, '#plans-list');
+  const empty = required<HTMLElement>(document, '#plans-empty');
+  const error = required<HTMLElement>(document, '#plans-error');
+  list.replaceChildren();
+  empty.hidden = state.loading || state.plans.length > 0;
+  empty.textContent = state.loading ? '正在读取任务…' : '还没有可用的采集计划。';
+  error.hidden = !state.error;
+  error.textContent = state.error ?? '';
+
+  for (const plan of state.plans) {
+    const copy = PLAN_PRESENTATION[plan.id];
+    const latest = plan.latest;
+    const ticket = document.createElement('article');
+    ticket.className = 'plan-ticket';
+    ticket.dataset.planId = plan.id;
+
+    const head = document.createElement('header');
+    const heading = document.createElement('div');
+    const kicker = document.createElement('p');
+    const title = document.createElement('h3');
+    const badge = document.createElement('span');
+    kicker.className = 'plan-cadence';
+    kicker.textContent = copy.cadence;
+    title.textContent = copy.title;
+    heading.append(kicker, title);
+    badge.className = 'plan-status';
+    badge.dataset.tone = latest?.status === 'failed' || (latest?.needsAttention ?? 0) > 0
+      ? 'warn'
+      : latest?.status === 'running'
+        ? 'active'
+        : 'ok';
+    badge.textContent = plan.pending
+      ? '等待浏览器'
+      : latest
+        ? BATCH_STATUS_LABELS[latest.status]
+        : plan.due
+          ? '等待首次运行'
+          : '尚未运行';
+    head.append(heading, badge);
+
+    const scope = document.createElement('p');
+    scope.className = 'plan-scope';
+    scope.textContent = copy.scope;
+
+    const spine = document.createElement('dl');
+    spine.className = 'plan-spine';
+    for (const [term, value] of [
+      ['上次', planTime(latest?.startedAt)],
+      ['下次', planTime(plan.nextRunAt)],
+    ] as const) {
+      const row = document.createElement('div');
+      const dt = document.createElement('dt');
+      const dd = document.createElement('dd');
+      dt.textContent = term;
+      dd.textContent = value;
+      row.append(dt, dd);
+      spine.append(row);
+    }
+
+    const metrics = document.createElement('div');
+    metrics.className = 'plan-metrics';
+    appendMetric(document, metrics, '入库', latest?.saved ?? 0);
+    appendMetric(document, metrics, '跳过', latest?.skipped ?? 0);
+    appendMetric(document, metrics, '失败', latest?.failed ?? 0);
+    appendMetric(document, metrics, '需处理', latest?.needsAttention ?? 0);
+
+    ticket.append(head, scope, spine, metrics);
+    if (plan.id === 'nowcoder-agent-market') {
+      const coverage = document.createElement('div');
+      coverage.className = 'plan-coverage';
+      coverage.setAttribute('aria-label', '公司覆盖');
+      for (const [key, label] of [
+        ['ByteDance', '字节'],
+        ['Tencent', '腾讯'],
+        ['Alibaba', '阿里'],
+        ['Ant', '蚂蚁'],
+      ] as const) {
+        const cell = document.createElement('span');
+        cell.textContent = `${label} ${latest?.coverage?.[key] ?? 0}`;
+        coverage.append(cell);
+      }
+      ticket.append(coverage);
+    }
+
+    const footer = document.createElement('footer');
+    const run = document.createElement('button');
+    const source = document.createElement('button');
+    run.type = 'button';
+    run.className = 'primary-button plan-run';
+    run.dataset.planRun = plan.id;
+    run.disabled = state.runningPlanId === plan.id || latest?.status === 'running';
+    run.textContent = state.runningPlanId === plan.id
+      ? '正在启动…'
+      : latest?.status === 'failed' || (latest?.needsAttention ?? 0) > 0
+        ? '重试这一轮'
+        : '立即运行';
+    run.onclick = () => { void actions.runPlan(plan.id, true); };
+    source.type = 'button';
+    source.className = 'secondary-button plan-source';
+    source.textContent = '打开站点 / 登录';
+    source.onclick = () => actions.openPlanSource(copy.url);
+    footer.append(run, source);
+    ticket.append(footer);
+    list.append(ticket);
+  }
 }
 
 export function renderSidePanel(
@@ -903,6 +1093,10 @@ export function renderSidePanel(
   }
   if (state.phase === 'identity_error') {
     show(document, '#identity-error-panel');
+    return;
+  }
+  if (state.phase === 'plans') {
+    renderPlans(document, state, actions);
     return;
   }
   if (state.phase === 'unsupported') {

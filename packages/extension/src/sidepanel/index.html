@@ -15,6 +15,7 @@
         <span id="connection-label" class="connection-label">读取状态</span>
         <nav class="top-nav" aria-label="页面切换">
           <button id="nav-collect" type="button" aria-pressed="true">采集</button>
+          <button id="nav-plans" type="button" aria-pressed="false">任务</button>
           <button id="nav-library" type="button" aria-pressed="false">已入库</button>
         </nav>
       </header>
@@ -138,6 +139,20 @@
             <button id="library-clear-button" type="button" class="secondary-button danger">清空全部</button>
           </div>
           <p id="library-error" class="support compact" hidden></p>
+        </section>
+
+        <section id="plans-panel" class="state-panel plans-panel" hidden>
+          <p class="section-kicker">采集调度台</p>
+          <div class="plans-heading-row">
+            <div>
+              <h2>每日固定任务</h2>
+              <p class="support compact">Edge 在线时自动执行；离线任务会保留，重新连接后继续。</p>
+            </div>
+            <span class="plans-timezone">北京时间</span>
+          </div>
+          <div id="plans-list" class="plans-list" aria-live="polite"></div>
+          <p id="plans-empty" class="support compact" hidden>还没有可用的采集计划。</p>
+          <p id="plans-error" class="support compact plans-error" hidden></p>
         </section>
 
         <!-- 删除不可逆：用真正的模态对话框问，别混在正文里当一行说明。

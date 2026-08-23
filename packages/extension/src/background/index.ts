@@ -321,6 +321,16 @@ chrome.runtime.onMessage.addListener((message: unknown, _sender, sendResponse) =
     if (request.type === 'library.list') {
       return { entries: await connection.library() };
     }
+    if (request.type === 'plans.status') {
+      return connection.planStatus();
+    }
+    if (request.type === 'plans.run') {
+      const input = request as { planId?: unknown; force?: unknown };
+      if (input.planId !== 'zsxq-chen-teacher' && input.planId !== 'nowcoder-agent-market') {
+        throw new Error('未知的采集计划');
+      }
+      return connection.runPlan(input.planId, input.force === true);
+    }
     if (request.type === 'library.entry' && typeof (request as { id?: unknown }).id === 'string') {
       return connection.libraryEntry((request as { id: string }).id);
     }

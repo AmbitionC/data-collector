@@ -349,6 +349,126 @@ button { appearance: none; }
 
 .support.compact { margin: 16px 0 0; font-size: 13px; color: var(--muted); }
 
+/* ── 固定采集任务：两张「运行票据」，状态脊线是唯一的视觉签名。 ── */
+.plans-heading-row {
+  display: flex;
+  gap: 12px;
+  align-items: flex-start;
+  justify-content: space-between;
+  margin-bottom: 18px;
+}
+
+.plans-heading-row h2 { margin-bottom: 2px; }
+.plans-heading-row .support { margin-top: 4px; }
+
+.plans-timezone {
+  flex: none;
+  margin-top: 5px;
+  color: var(--muted);
+  font: 11px/1.4 var(--mono);
+}
+
+.plans-list { display: grid; gap: 12px; }
+
+.plan-ticket {
+  padding: 16px;
+  border: 1px solid var(--hairline-strong);
+  border-radius: var(--radius-lg);
+  background: var(--surface);
+}
+
+.plan-ticket > header,
+.plan-ticket > footer {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  justify-content: space-between;
+}
+
+.plan-ticket h3 {
+  margin: 2px 0 0;
+  color: var(--ink);
+  font-size: 16px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+.plan-cadence {
+  margin: 0;
+  color: var(--muted);
+  font: 10px/1.3 var(--mono);
+  letter-spacing: 0.04em;
+}
+
+.plan-status {
+  flex: none;
+  padding: 3px 7px;
+  border: 1px solid var(--hairline);
+  border-radius: 9999px;
+  color: var(--muted);
+  font-size: 10px;
+  white-space: nowrap;
+}
+
+.plan-status[data-tone="warn"] { border-color: var(--error); color: var(--error); }
+.plan-status[data-tone="active"] { border-color: var(--primary); color: var(--primary); }
+.plan-status[data-tone="ok"] { color: var(--success); }
+
+.plan-scope { margin: 10px 0 14px; color: var(--body); font-size: 12px; }
+
+.plan-spine {
+  position: relative;
+  display: grid;
+  gap: 6px;
+  margin: 0 0 14px;
+  padding-left: 16px;
+}
+
+.plan-spine::before {
+  position: absolute;
+  top: 4px;
+  bottom: 4px;
+  left: 3px;
+  width: 1px;
+  background: var(--primary);
+  content: "";
+}
+
+.plan-spine div { display: grid; grid-template-columns: 36px 1fr; gap: 8px; }
+.plan-spine dt { color: var(--muted); font-size: 11px; }
+.plan-spine dd { margin: 0; color: var(--ink); font: 11px/1.5 var(--mono); }
+
+.plan-metrics {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  margin-bottom: 10px;
+  border-block: 1px solid var(--hairline-soft);
+}
+
+.plan-metrics div { padding: 9px 2px; text-align: center; }
+.plan-metrics strong { display: block; color: var(--ink); font: 600 15px/1.2 var(--mono); }
+.plan-metrics span { color: var(--muted); font-size: 10px; }
+
+.plan-coverage {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 4px;
+  margin: 0 0 12px;
+}
+
+.plan-coverage span {
+  padding: 5px 2px;
+  border-radius: var(--radius-sm);
+  background: var(--canvas-soft);
+  color: var(--body);
+  font: 10px/1.3 var(--mono);
+  text-align: center;
+}
+
+.plan-ticket > footer { justify-content: flex-start; }
+.plan-ticket > footer button { width: auto; min-height: 34px; padding: 7px 12px; }
+.plans-error { color: var(--error); white-space: pre-line; }
+
 code {
   padding: 2px 6px;
   border: 1px solid var(--hairline);

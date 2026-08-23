@@ -109,6 +109,42 @@ describe('side panel build stamp', () => {
   });
 });
 
+describe('fixed collection plans page', () => {
+  it('loads plan status and can force an immediate run through the background', async () => {
+    const seen: Array<{ type: string; planId?: string; force?: boolean }> = [];
+    handler = async message => {
+      seen.push(message as { type: string; planId?: string; force?: boolean });
+      if (message.type === 'plans.status') {
+        return {
+          ok: true,
+          value: {
+            plans: [{
+              id: 'nowcoder-agent-market',
+              due: false,
+              pending: false,
+              nextRunAt: '2026-08-24T01:00:00.000Z',
+            }],
+          },
+        };
+      }
+      if (message.type === 'plans.run') return { ok: true, value: { batch: { id: 'batch-1' } } };
+      return { ok: true, value: readyStatus() };
+    };
+
+    document.querySelector<HTMLButtonElement>('#nav-plans')!.click();
+    await vi.waitFor(() => expect(visible('#plans-panel')).toBe(true));
+    await vi.waitFor(() => expect(
+      document.querySelector<HTMLButtonElement>('[data-plan-run="nowcoder-agent-market"]'),
+    ).not.toBeNull());
+    document.querySelector<HTMLButtonElement>('[data-plan-run="nowcoder-agent-market"]')!.click();
+    await vi.waitFor(() => expect(seen).toContainEqual({
+      type: 'plans.run',
+      planId: 'nowcoder-agent-market',
+      force: true,
+    }));
+  });
+});
+
 describe('side panel details view', () => {
   it('opens the per-post list from the batch result and can come back', async () => {
     handler = async message =>

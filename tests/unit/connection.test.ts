@@ -903,4 +903,37 @@ describe('extension Bridge connection', () => {
       '浏览器扩展仍在自动连接 Bridge',
     );
   });
+
+  it('proxies fixed collection plan status and run requests with extension authorization', async () => {
+    const storage = new MemoryStorage({ bridgeToken: 'x'.repeat(43) });
+    const fetcher = vi.fn<typeof fetch>(async (input, init) => {
+      const url = String(input);
+      if (url.endsWith('/v1/plans/status')) {
+        return new Response(JSON.stringify({ plans: [] }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        });
+      }
+      expect(init?.method).toBe('POST');
+      expect(JSON.parse(String(init?.body))).toEqual({
+        planId: 'nowcoder-agent-market',
+        force: true,
+      });
+      return new Response(JSON.stringify({ batch: { id: 'batch-1' } }), {
+        status: 202,
+        headers: { 'content-type': 'application/json' },
+      });
+    });
+    const connection = new BridgeConnection(dependencies(storage, () => new MemorySocket(), fetcher));
+
+    await expect(connection.planStatus()).resolves.toEqual({ plans: [] });
+    await expect(connection.runPlan('nowcoder-agent-market', true)).resolves.toEqual({
+      batch: { id: 'batch-1' },
+    });
+    expect(fetcher).toHaveBeenNthCalledWith(
+      1,
+      'http://127.0.0.1:17321/v1/plans/status',
+      { headers: { authorization: `Bearer ${'x'.repeat(43)}` } },
+    );
+  });
 });

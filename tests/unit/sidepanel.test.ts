@@ -5,6 +5,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   sidePanelStateFromStatus,
   renderSidePanel,
+  renderTopNav,
   renderUpdateBanner,
   type SidePanelActions,
 } from '../../packages/extension/src/sidepanel/state.js';
@@ -55,6 +56,80 @@ beforeEach(async () => {
 });
 
 describe('side panel state mapping', () => {
+  it('renders the two fixed plans as compact run tickets with coverage and recovery actions', () => {
+    const planActions = actions as SidePanelActions & {
+      runPlan: ReturnType<typeof vi.fn>;
+      openPlanSource: ReturnType<typeof vi.fn>;
+    };
+    planActions.runPlan = vi.fn(async () => undefined);
+    planActions.openPlanSource = vi.fn();
+    renderSidePanel(document, {
+      phase: 'plans',
+      loading: false,
+      plans: [
+        {
+          id: 'zsxq-chen-teacher',
+          due: false,
+          pending: false,
+          nextRunAt: '2026-08-24T00:00:00.000Z',
+          latest: {
+            id: 'zsxq-batch',
+            planId: 'zsxq-chen-teacher',
+            status: 'completed_with_attention',
+            startedAt: '2026-08-23T00:00:00.000Z',
+            finishedAt: '2026-08-23T00:02:00.000Z',
+            discovered: 6,
+            accepted: 4,
+            saved: 3,
+            skipped: 1,
+            failed: 0,
+            needsAttention: 1,
+          },
+        },
+        {
+          id: 'nowcoder-agent-market',
+          due: true,
+          pending: true,
+          nextRunAt: '2026-08-24T01:00:00.000Z',
+          latest: {
+            id: 'nowcoder-batch',
+            planId: 'nowcoder-agent-market',
+            status: 'running',
+            startedAt: '2026-08-23T01:00:00.000Z',
+            discovered: 10,
+            accepted: 9,
+            saved: 8,
+            skipped: 1,
+            failed: 0,
+            needsAttention: 0,
+            coverage: { ByteDance: 3, Tencent: 3, Alibaba: 2, Ant: 1 },
+          },
+        },
+      ],
+    } as never, planActions);
+
+    expect(document.querySelector<HTMLElement>('#plans-panel')?.hidden).toBe(false);
+    expect(document.querySelectorAll('.plan-ticket')).toHaveLength(2);
+    expect(document.querySelector('#plans-panel')?.textContent).toContain('陈老师的知识星球');
+    expect(document.querySelector('#plans-panel')?.textContent).toContain('字节 3');
+    expect(document.querySelector('#plans-panel')?.textContent).toContain('腾讯 3');
+    expect(document.querySelector('#plans-panel')?.textContent).toContain('阿里 2');
+    expect(document.querySelector('#plans-panel')?.textContent).toContain('蚂蚁 1');
+    expect(document.querySelector('#plans-panel')?.textContent).toContain('需处理');
+
+    document.querySelector<HTMLButtonElement>('[data-plan-run="zsxq-chen-teacher"]')!.click();
+    expect(planActions.runPlan).toHaveBeenCalledWith('zsxq-chen-teacher', true);
+  });
+
+  it('adds a top-level 任务 tab', () => {
+    const planActions = actions as SidePanelActions & { openPage: ReturnType<typeof vi.fn> };
+    renderTopNav(document, 'plans' as never, planActions);
+    const nav = document.querySelector<HTMLButtonElement>('#nav-plans');
+    expect(nav?.getAttribute('aria-pressed')).toBe('true');
+    nav?.click();
+    expect(planActions.openPage).toHaveBeenCalledWith('plans');
+  });
+
   it('shows a persistent connection state while the local service is connecting', () => {
     const state = sidePanelStateFromStatus({
       bridgeStatus: 'connecting',

@@ -8,6 +8,8 @@ import {
   type EntryView,
   type ItemFilter,
   type LibraryEntry,
+  type CollectionPlanStatus,
+  type TopPage,
   type SyncFilter,
   type SidePanelActions,
   type SidePanelState,
@@ -60,7 +62,7 @@ let itemsOpen = false;
 let itemsFilter: ItemFilter = 'all';
 
 /** 「已入库」页面的本地视图状态。 */
-let page: 'collect' | 'library' = 'collect';
+let page: TopPage = 'collect';
 let library: LibraryEntry[] = [];
 let librarySource = '';
 let libraryLoading = false;
@@ -72,6 +74,40 @@ let syncing: string[] = [];
 let syncNote: string | undefined;
 /** 正在查看正文的那一条（浮层），只活在侧栏本地。 */
 let viewing: EntryView | undefined;
+
+/** 固定任务页只保存服务端真相；运行中按钮状态是短暂的本地视图状态。 */
+let plans: CollectionPlanStatus[] = [];
+let plansLoading = false;
+let plansError: string | undefined;
+let runningPlanId: CollectionPlanStatus['id'] | undefined;
+
+function plansState(): SidePanelState {
+  return {
+    phase: 'plans',
+    plans,
+    loading: plansLoading,
+    ...(runningPlanId ? { runningPlanId } : {}),
+    ...(plansError ? { error: plansError } : {}),
+  };
+}
+
+async function loadPlans(): Promise<void> {
+  plansLoading = plans.length === 0;
+  plansError = undefined;
+  renderSidePanel(document, plansState(), actions);
+  try {
+    const status = await message<{ plans: CollectionPlanStatus[] }>({ type: 'plans.status' });
+    plans = status.plans;
+  } catch (error) {
+    plansError = errorMessage(error, '读取采集任务失败。');
+  } finally {
+    plansLoading = false;
+    if (page === 'plans') {
+      renderSidePanel(document, plansState(), actions);
+      scheduleRefresh('plans');
+    }
+  }
+}
 
 function libraryState(): SidePanelState {
   return {
@@ -183,6 +219,11 @@ async function refresh(): Promise<void> {
   if (page === 'library') {
     renderTopNav(document, page, actions);
     renderSidePanel(document, libraryState(), actions);
+    return;
+  }
+  if (page === 'plans') {
+    renderTopNav(document, page, actions);
+    await loadPlans();
     return;
   }
   renderTopNav(document, page, actions);
@@ -397,7 +438,24 @@ const actions: SidePanelActions = {
     syncNote = undefined;
     renderTopNav(document, page, actions);
     if (next === 'library') void loadLibrary();
+    else if (next === 'plans') void loadPlans();
     else void refresh();
+  },
+  async runPlan(planId, force) {
+    runningPlanId = planId;
+    plansError = undefined;
+    renderSidePanel(document, plansState(), actions);
+    try {
+      await message({ type: 'plans.run', planId, force });
+    } catch (error) {
+      plansError = errorMessage(error, '启动采集任务失败。');
+    } finally {
+      runningPlanId = undefined;
+      await loadPlans();
+    }
+  },
+  openPlanSource(url) {
+    void chrome.tabs.create({ url, active: true });
   },
   async reloadLibrary() {
     libraryPending = undefined;
