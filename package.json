@@ -12,7 +12,8 @@
   "scripts": {
     "build": "npm run build -w @data-collector/shared && npm run build -w @data-collector/bridge && npm run build -w @data-collector/extension",
     "package": "npm run build && node scripts/package-extension.mjs",
-    "setup": "npm run build && node packages/bridge/dist/cli.js bridge install",
+    "setup": "npm run build && node packages/bridge/dist/cli.js bridge install && npm run install:codex-skill",
+    "install:codex-skill": "node .codex/skills/data-collector-delivery/scripts/install-global-entry.mjs",
     "test": "vitest run",
     "test:e2e": "npm run build && vitest run --config vitest.e2e.config.ts",
     "test:coverage": "vitest run --coverage",
