@@ -2,6 +2,7 @@ import { z } from 'zod';
 import { CONTENT_KINDS, FE_JOURNEY_CANDIDATE_KINDS, SOURCES } from './model.js';
 import { descriptorForHost } from './sources.js';
 import { canonicalizeUrl, parseSupportedUrl } from './url.js';
+import { collectionBatchSchema, collectionPlanIdSchema } from './plans.js';
 
 export const EXTENSION_REPLACED_CLOSE_CODE = 4009;
 export const EXTENSION_REPLACED_CLOSE_REASON = 'replaced';
@@ -109,6 +110,25 @@ export const collectJobPayloadSchema = z.object({
 
 export const jobResultPayloadSchema = z.object({
   document: collectedDocumentSchema,
+});
+
+export const planCollectPayloadSchema = z.object({
+  planId: collectionPlanIdSchema,
+  force: z.boolean().optional(),
+}).strict();
+
+export const planResultPayloadSchema = z.object({
+  batch: collectionBatchSchema,
+}).strict();
+
+export const planCollectEnvelopeSchema = wsEnvelopeSchema.extend({
+  type: z.literal('plan.collect'),
+  payload: planCollectPayloadSchema,
+});
+
+export const planResultEnvelopeSchema = wsEnvelopeSchema.extend({
+  type: z.literal('plan.result'),
+  payload: planResultPayloadSchema,
 });
 
 export type CollectedDocumentInput = z.infer<typeof collectedDocumentSchema>;

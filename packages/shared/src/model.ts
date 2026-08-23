@@ -90,6 +90,8 @@ export interface JobRecord {
   outputPath?: string;
   errorCode?: string;
   errorMessage?: string;
+  batchId?: string;
+  planId?: import('./plans.js').CollectionPlanId;
 }
 
 export interface WsEnvelope<TType extends string = string, TPayload = unknown> {
