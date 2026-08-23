@@ -95,6 +95,24 @@ describe('Nowcoder interview evidence', () => {
     expect(evidence.evidenceReasons).toContain('汇编或营销');
   });
 
+  it('does not mistake a JD and preparation analysis for a first-hand interview', () => {
+    const evidence = analyzeNowcoderEvidence(nowcoder(
+      '年包50w的字节 Agent 岗，到底要会啥',
+      [
+        '我挑了这个 AI 应用开发岗仔细看了一下 JD，下面逐条拆解岗位职责。',
+        '面试官大概率会追问：LLM 响应慢怎么办？上下文太长怎么办？',
+        '准备清单：1.吃透 RAG 全链路。2.掌握 Agent 核心机制。3.夯实后端基础。',
+      ].join(''),
+    ));
+
+    expect(evidence).toMatchObject({
+      company: 'bytedance',
+      evidenceGrade: 'C',
+    });
+    expect(evidence.evidenceReasons).toContain('汇编或营销');
+    expect(evidence.evidenceReasons).toContain('缺少第一人称过程');
+  });
+
   it('grades a first-hand post with one soft repository recommendation as B', () => {
     const evidence = analyzeNowcoderEvidence(nowcoder(
       '字节跳动火山引擎 Agent 平台一面面经',

@@ -200,6 +200,28 @@ describe('fe-journey deterministic fingerprints', () => {
     expect(questionFingerprint(expanded)).toBe(questionFingerprint(short));
   });
 
+  it('uses the earliest question signal instead of answer prose for expanded reposts', () => {
+    const short = [
+      '1.项目相关介绍',
+      '2.多 Agent 协作系统如何设计？',
+      '3.向量召回结果不准确时优先排查什么？',
+      '4.Rerank 通常如何实现？',
+      '5.如何优化 RAG 系统，降低整体延迟和成本？',
+      '6.大模型调用超时或异常时如何处理？',
+    ].join('');
+    const expanded = [
+      '1.手搓 AI Coding 项目深挖？回答里介绍了代码执行安全。',
+      '2.多 Agent 协作系统如何设计？回答里继续讨论 Agent 系统架构。',
+      '3.向量召回结果不准确时优先排查什么？回答里也检查 Chunk 质量。',
+      '4.Rerank 通常如何实现？回答里介绍重排模型。',
+      '5.如何优化 RAG 系统的延迟和成本？回答里回顾 RAG 完整流程。',
+      '6.大模型调用超时或异常时如何处理？回答里补充 Agent 架构。',
+    ].join('');
+
+    expect(questionFingerprint(short)).toMatch(/^[a-f0-9]{16}$/);
+    expect(questionFingerprint(expanded)).toBe(questionFingerprint(short));
+  });
+
   it('normalizes punctuation, whitespace and Latin case for exact content hashes', () => {
     expect(contentFingerprint('Agent 架构：MCP 工具调用。')).toBe(
       contentFingerprint('  agent\n架构 mcp 工具调用!  '),

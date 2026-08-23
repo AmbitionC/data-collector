@@ -38,14 +38,14 @@ export function contentFingerprint(text: string): string {
 const INTERVIEW_TOPIC_RULES: readonly [string, RegExp][] = [
   ['introduction', /自我介绍|介绍一下自己/iu],
   ['ai-direction', /为什么.{0,12}(?:选择|做).{0,12}(?:AI|人工智能|大模型).{0,12}方向|选择.{0,12}(?:AI|人工智能|大模型).{0,12}方向/iu],
-  ['ai-coding-project', /AI\s*Coding|智能编码|代码生成.{0,12}项目/iu],
+  ['project-deep-dive', /AI\s*Coding|智能编码|代码生成.{0,12}项目|项目.{0,12}(?:介绍|深挖)|介绍.{0,12}项目/iu],
   ['learning-tools', /(?:学习|跟进).{0,12}(?:前沿|新).{0,12}技术|编程工具/iu],
   ['agent-architecture', /(?:理解|设计).{0,8}Agent|Agent.{0,12}(?:系统|架构|核心模块)/iu],
   ['tool-design', /(?:Tool|工具调用).{0,12}(?:设计|原则|实现)/iu],
   ['memory', /Memory|记忆.{0,8}(?:类型|实现|设计)/iu],
   ['react-plan', /ReAct|Plan[-\s]?Execute/iu],
   ['multi-agent', /多\s*Agent|Multi[-\s]?Agent/iu],
-  ['rag-pipeline', /RAG.{0,12}(?:整体|完整|流程|链路)/iu],
+  ['rag-pipeline', /RAG.{0,16}(?:(?:整体|完整).{0,4})?(?:流程|链路)/iu],
   ['chunking', /Chunk|分块.{0,12}(?:大小|重叠|策略)/iu],
   ['retrieval', /向量.{0,8}(?:召回|检索)|混合检索|召回结果/iu],
   ['rerank', /Rerank|重排/iu],
@@ -82,7 +82,11 @@ function normalizedQuestionHeader(segment: string): string {
 export function normalizedInterviewQuestions(text: string): string[] {
   return numberedSegments(text)
     .map(segment => {
-      const topic = INTERVIEW_TOPIC_RULES.find(([, pattern]) => pattern.test(segment))?.[0];
+      const topic = INTERVIEW_TOPIC_RULES
+        .map(([name, pattern], ruleIndex) => ({ name, ruleIndex, index: pattern.exec(segment)?.index }))
+        .filter((match): match is { name: string; ruleIndex: number; index: number } =>
+          match.index !== undefined)
+        .sort((left, right) => left.index - right.index || left.ruleIndex - right.ruleIndex)[0]?.name;
       return topic ?? normalizedQuestionHeader(segment);
     })
     .filter(question => question.length > 0);
