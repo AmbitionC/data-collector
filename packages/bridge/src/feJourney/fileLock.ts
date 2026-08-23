@@ -1,104 +1,110 @@
-import { randomUUID } from 'node:crypto';
-import { mkdir, open, readFile, rename, rm, stat, utimes } from 'node:fs/promises';
+import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
+import { createHash } from 'node:crypto';
+import { mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 
-const LOCK_WAIT_MS = 5 * 60_000;
-const STALE_LOCK_MS = 30 * 60_000;
-const HEARTBEAT_MS = 60_000;
-const RECOVERY_LEASE_MS = 60_000;
+const LOCK_WAIT_SECONDS = 5 * 60;
+const RELEASE_WAIT_MS = 5_000;
+const READY_MARKER = 'DATA_COLLECTOR_LOCK_READY';
+const HOLDER_SCRIPT = `
+process.stdout.write('${READY_MARKER}\\n');
+process.stdin.resume();
+process.stdin.once('end', () => process.exit(0));
+`;
 
-interface LockRecord {
-  owner?: string;
-  pid?: number;
+interface LockCommand {
+  command: string;
+  args: string[];
 }
 
-async function lockRecord(lockPath: string): Promise<LockRecord | undefined> {
-  try {
-    const value = JSON.parse(await readFile(lockPath, 'utf8')) as { owner?: unknown; pid?: unknown };
+function lockCommand(lockPath: string, platform: NodeJS.Platform = process.platform): LockCommand {
+  if (platform === 'darwin') {
     return {
-      ...(typeof value.owner === 'string' ? { owner: value.owner } : {}),
-      ...(typeof value.pid === 'number' && Number.isInteger(value.pid) ? { pid: value.pid } : {}),
+      command: '/usr/bin/lockf',
+      args: ['-k', '-s', '-t', String(LOCK_WAIT_SECONDS), lockPath, process.execPath, '-e', HOLDER_SCRIPT],
     };
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
-    return undefined;
   }
+  if (platform === 'linux') {
+    return {
+      command: '/usr/bin/flock',
+      args: ['-w', String(LOCK_WAIT_SECONDS), lockPath, process.execPath, '-e', HOLDER_SCRIPT],
+    };
+  }
+  if (platform === 'win32') {
+    const mutexName = `Local\\DataCollector-${createHash('sha256').update(lockPath).digest('hex')}`;
+    const script = `
+$mutex = [System.Threading.Mutex]::new($false, '${mutexName}')
+$acquired = $false
+try {
+  try { $acquired = $mutex.WaitOne(${LOCK_WAIT_SECONDS * 1_000}) }
+  catch [System.Threading.AbandonedMutexException] { $acquired = $true }
+  if (-not $acquired) { exit 75 }
+  [Console]::Out.WriteLine('${READY_MARKER}')
+  [Console]::In.ReadLine() | Out-Null
+} finally {
+  if ($acquired) { $mutex.ReleaseMutex() }
+  $mutex.Dispose()
+}
+`;
+    return {
+      command: 'powershell.exe',
+      args: ['-NoProfile', '-NonInteractive', '-Command', script],
+    };
+  }
+  throw new Error(`暂不支持在 ${platform} 上创建 fe-journey 候选索引写锁`);
 }
 
-function processIsAlive(pid: number | undefined): boolean {
-  if (pid === undefined) return false;
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (error) {
-    return (error as NodeJS.ErrnoException).code !== 'ESRCH';
-  }
+function waitForLock(child: ChildProcessWithoutNullStreams): Promise<void> {
+  return new Promise((resolve, reject) => {
+    let stdout = '';
+    let stderr = '';
+    const cleanup = () => {
+      child.stdout.off('data', onStdout);
+      child.stderr.off('data', onStderr);
+      child.off('error', onError);
+      child.off('exit', onExit);
+    };
+    const onStdout = (chunk: Buffer) => {
+      stdout += chunk.toString('utf8');
+      if (!stdout.includes(`${READY_MARKER}\n`)) return;
+      cleanup();
+      child.stdout.resume();
+      child.stderr.resume();
+      resolve();
+    };
+    const onStderr = (chunk: Buffer) => {
+      stderr = `${stderr}${chunk.toString('utf8')}`.slice(-2_000);
+    };
+    const onError = (error: Error) => {
+      cleanup();
+      reject(error);
+    };
+    const onExit = (code: number | null, signal: NodeJS.Signals | null) => {
+      cleanup();
+      reject(new Error(
+        `等待 fe-journey 候选索引写锁失败（exit=${code ?? 'null'}, signal=${signal ?? 'none'}）`
+        + (stderr.trim() ? `：${stderr.trim()}` : ''),
+      ));
+    };
+    child.stdout.on('data', onStdout);
+    child.stderr.on('data', onStderr);
+    child.once('error', onError);
+    child.once('exit', onExit);
+  });
 }
 
-async function releaseOwnedLock(lockPath: string, owner: string): Promise<void> {
-  if ((await lockRecord(lockPath))?.owner !== owner) return;
-  const now = new Date();
-  await utimes(lockPath, now, now);
-  if ((await lockRecord(lockPath))?.owner !== owner) return;
-  await rm(lockPath, { force: true });
-}
-
-async function removeAbandonedRecoveryLease(recoveryPath: string): Promise<void> {
-  try {
-    const recoveryStat = await stat(recoveryPath);
-    if (Date.now() - recoveryStat.mtimeMs <= RECOVERY_LEASE_MS) return;
-    const existing = await lockRecord(recoveryPath);
-    if (processIsAlive(existing?.pid)) return;
-    const abandonedPath = `${recoveryPath}.${randomUUID()}.abandoned`;
-    try {
-      await rename(recoveryPath, abandonedPath);
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return;
-      throw error;
-    }
-    await rm(abandonedPath, { recursive: true, force: true });
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
-  }
-}
-
-async function recoverDeadLock(lockPath: string, recoveryPath: string): Promise<void> {
-  const owner = randomUUID();
-  let recoveryHandle;
-  try {
-    recoveryHandle = await open(recoveryPath, 'wx');
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'EEXIST') {
-      await removeAbandonedRecoveryLease(recoveryPath);
-      return;
-    }
-    throw error;
-  }
-  try {
-    await recoveryHandle.writeFile(`${JSON.stringify({ owner, pid: process.pid })}\n`);
-    const lockStat = await stat(lockPath);
-    const existing = await lockRecord(lockPath);
-    if (Date.now() - lockStat.mtimeMs > STALE_LOCK_MS && !processIsAlive(existing?.pid)) {
-      const now = new Date();
-      await recoveryHandle.utimes(now, now);
-      if ((await lockRecord(recoveryPath))?.owner !== owner) return;
-      await rm(lockPath, { force: true });
-    }
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
-  } finally {
-    const heldStat = await recoveryHandle.stat();
-    await recoveryHandle.close();
-    try {
-      const currentStat = await stat(recoveryPath);
-      if (currentStat.dev === heldStat.dev && currentStat.ino === heldStat.ino) {
-        await rm(recoveryPath, { force: true });
-      }
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
-    }
-  }
+async function releaseLock(child: ChildProcessWithoutNullStreams): Promise<void> {
+  if (child.exitCode !== null || child.signalCode !== null) return;
+  const exited = new Promise<void>(resolve => child.once('exit', () => resolve()));
+  child.stdin.end();
+  const result = await Promise.race([
+    exited.then(() => 'exited' as const),
+    delay(RELEASE_WAIT_MS).then(() => 'timeout' as const),
+  ]);
+  if (result === 'exited') return;
+  child.kill('SIGTERM');
+  await exited;
 }
 
 export async function withFeJourneyCandidateLock<T>(
@@ -107,45 +113,13 @@ export async function withFeJourneyCandidateLock<T>(
 ): Promise<T> {
   const catalogDirectory = join(libraryRoot, '_catalog');
   const lockPath = join(catalogDirectory, 'fe-journey.lock');
-  const recoveryPath = `${lockPath}.recovery`;
-  const owner = randomUUID();
   await mkdir(catalogDirectory, { recursive: true });
-  const deadline = Date.now() + LOCK_WAIT_MS;
-
-  for (;;) {
-    let handle;
-    try {
-      handle = await open(lockPath, 'wx');
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
-      try {
-        await recoverDeadLock(lockPath, recoveryPath);
-      } catch (statError) {
-        if ((statError as NodeJS.ErrnoException).code === 'ENOENT') continue;
-        throw statError;
-      }
-      if (Date.now() >= deadline) throw new Error('等待 fe-journey 候选索引写锁超时');
-      await delay(50);
-      continue;
-    }
-    try {
-      await handle.writeFile(`${JSON.stringify({ owner, pid: process.pid, createdAt: new Date().toISOString() })}\n`);
-      const heartbeat = setInterval(() => {
-        void lockRecord(lockPath).then(current => {
-          if (current?.owner !== owner) return;
-          const now = new Date();
-          return utimes(lockPath, now, now);
-        }).catch(() => undefined);
-      }, HEARTBEAT_MS);
-      heartbeat.unref();
-      try {
-        return await operation();
-      } finally {
-        clearInterval(heartbeat);
-      }
-    } finally {
-      await handle.close();
-      await releaseOwnedLock(lockPath, owner);
-    }
+  const command = lockCommand(lockPath);
+  const child = spawn(command.command, command.args, { stdio: 'pipe' });
+  await waitForLock(child);
+  try {
+    return await operation();
+  } finally {
+    await releaseLock(child);
   }
 }
