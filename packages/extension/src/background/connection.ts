@@ -43,6 +43,19 @@ type PlanCollectHandler = (
 ) => void | Promise<void>;
 
 const DEFAULT_PORT = 17321;
+const PLAN_REJECTIONS_MINIMUM_BRIDGE_VERSION = '0.4.11';
+
+function versionAtLeast(actual: string | undefined, minimum: string): boolean {
+  if (!actual) return false;
+  const parse = (value: string) => value.split('.').slice(0, 3).map(part => Number.parseInt(part, 10));
+  const left = parse(actual);
+  const right = parse(minimum);
+  if (left.length !== 3 || right.length !== 3 || [...left, ...right].some(Number.isNaN)) return false;
+  for (let index = 0; index < 3; index += 1) {
+    if (left[index]! !== right[index]!) return left[index]! > right[index]!;
+  }
+  return true;
+}
 
 interface ConnectionTransition {
   generation: number;
@@ -64,6 +77,7 @@ export class BridgeConnection {
   private tokenInvalidation: Promise<void> | undefined;
   private ignoreStoredToken = false;
   private reconnectSuppressed = false;
+  private bridgeVersion: string | undefined;
 
   constructor(private readonly dependencies: ConnectionDependencies) {}
 
@@ -111,6 +125,7 @@ export class BridgeConnection {
       const response = await fetcher(`http://127.0.0.1:${port}/health`);
       if (!response.ok) return;
       const health = (await response.json()) as {
+        version?: unknown;
         routing?: unknown;
         update?: unknown;
         buildId?: unknown;
@@ -124,6 +139,7 @@ export class BridgeConnection {
         // 磁盘上那份产物的构建标记。和本扩展烙进来的一比就知道自己是不是最新的。
         ...(typeof health.buildId === 'string' ? { buildId: health.buildId } : {}),
       });
+      if (typeof health.version === 'string') this.bridgeVersion = health.version;
     } catch {
       // 忽略。
     }
@@ -132,6 +148,8 @@ export class BridgeConnection {
   private async startOnce(force: boolean): Promise<void> {
     await this.tokenInvalidation;
     const settings = await this.settings();
+    // 每次建连都重新验证；health 失败时必须保守按旧 Bridge 发送。
+    this.bridgeVersion = undefined;
     if (!force && settings.status === 'replaced') {
       this.reconnectSuppressed = true;
       return;
@@ -151,6 +169,7 @@ export class BridgeConnection {
         );
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
         const health = (await response.json()) as {
+          version?: unknown;
           trustedExtensionId?: unknown;
           routing?: unknown;
           buildId?: unknown;
@@ -159,6 +178,7 @@ export class BridgeConnection {
           throw new Error('Bridge health response is missing trustedExtensionId');
         }
         trustedExtensionId = health.trustedExtensionId;
+        if (typeof health.version === 'string') this.bridgeVersion = health.version;
         // 缓存路由说明（可选去向 + 各自分类 + 来源默认去向），供侧边栏渲染选择器。
         if (health.routing && typeof health.routing === 'object') {
           await this.dependencies.storage.set({ routing: health.routing });
@@ -290,13 +310,23 @@ export class BridgeConnection {
   send(type: string, requestId: string, payload: unknown): void {
     const socket = this.socket;
     if (socket?.readyState !== 1) throw new Error('Bridge WebSocket 未连接');
+    let compatiblePayload = payload;
+    if (
+      type === 'plan.result' &&
+      !versionAtLeast(this.bridgeVersion, PLAN_REJECTIONS_MINIMUM_BRIDGE_VERSION) &&
+      typeof payload === 'object' &&
+      payload !== null
+    ) {
+      const { rejections: _rejections, ...legacyPayload } = payload as Record<string, unknown>;
+      compatiblePayload = legacyPayload;
+    }
     socket.send(
       JSON.stringify({
         protocolVersion: 1,
         type,
         requestId,
         timestamp: new Date().toISOString(),
-        payload,
+        payload: compatiblePayload,
       }),
     );
     const localStatus =

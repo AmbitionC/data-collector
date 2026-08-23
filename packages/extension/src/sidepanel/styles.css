@@ -465,6 +465,13 @@ button { appearance: none; }
   text-align: center;
 }
 
+.plan-rejections {
+  margin: -4px 0 12px;
+  color: var(--muted);
+  font: 10px/1.5 var(--mono);
+  overflow-wrap: anywhere;
+}
+
 .plan-ticket > footer { justify-content: flex-start; }
 .plan-ticket > footer button { width: auto; min-height: 34px; padding: 7px 12px; }
 .plans-error { color: var(--error); white-space: pre-line; }

@@ -200,6 +200,16 @@ export interface CaptureOverrides {
 
 const NEEDS_ATTENTION = new Set(['AUTH_REQUIRED', 'UNSUPPORTED_LAYOUT']);
 
+function lifeTeacherCategory(document: CollectedDocument): string {
+  const combined = `${document.title}\n${document.text}`;
+  if (/职场|职业|求职|管理|升职/u.test(combined)) return '职场';
+  if (/财富|资产|现金流|保险|养老/u.test(combined)) return '财富';
+  if (/投资|创业|商业模式|经营/u.test(combined)) return '投资';
+  if (/认知|决策|思维|复盘/u.test(combined)) return '认知';
+  if (/教育|学校|择校|学习/u.test(combined)) return '教育';
+  return '其他';
+}
+
 export class JobRunner {
   private remoteQueue: Promise<void> = Promise.resolve();
   private batchStopped = false;
@@ -212,30 +222,46 @@ export class JobRunner {
     views: readonly ZsxqPlanView[] = ZSXQ_PLAN_VIEWS,
   ): Promise<CollectedDocument[]> {
     const byView: Array<{ label: ZsxqPlanView; documents: CollectedDocument[] }> = [];
-    const uniqueUrls = new Set<string>();
     for (const label of views) {
       const documents: CollectedDocument[] = [];
+      const viewUrls = new Set<string>();
       const selected = await this.ask(tabId, { type: 'list.selectView', label });
       if (!selected.ok) throw new Error(selected.error.message);
       payloadOf(selected, 'selected');
       await this.ask(tabId, { type: 'list.restore' }).catch(() => undefined);
-      for (let round = 0; round < 12 && uniqueUrls.size < 60; round += 1) {
+      for (let round = 0; round < 12 && viewUrls.size < 60; round += 1) {
         const extracted = await this.ask(tabId, { type: 'extract.list' });
         if (!extracted.ok) throw new Error(extracted.error.message);
         for (const item of payloadOf(extracted, 'list').items) {
           if (!item.document) continue;
+          if (viewUrls.has(item.document.canonicalUrl)) continue;
           documents.push(item.document);
-          uniqueUrls.add(item.document.canonicalUrl);
-          if (uniqueUrls.size >= 60) break;
+          viewUrls.add(item.document.canonicalUrl);
+          if (viewUrls.size >= 60) break;
         }
-        if (uniqueUrls.size >= 60) break;
+        if (viewUrls.size >= 60) break;
         const advanced = await this.ask(tabId, { type: 'list.advance' });
         if (!advanced.ok) throw new Error(advanced.error.message);
         if (payloadOf(advanced, 'advance').loaded === 0) break;
       }
       byView.push({ label, documents });
     }
-    return unionZsxqViewDocuments(byView).slice(0, 60);
+    const merged = new Map(
+      unionZsxqViewDocuments(byView).map(document => [document.canonicalUrl, document]),
+    );
+    const selected: CollectedDocument[] = [];
+    const selectedUrls = new Set<string>();
+    const maxDepth = Math.max(0, ...byView.map(view => view.documents.length));
+    for (let index = 0; index < maxDepth && selected.length < 60; index += 1) {
+      for (const view of byView) {
+        const url = view.documents[index]?.canonicalUrl;
+        if (!url || selectedUrls.has(url)) continue;
+        selectedUrls.add(url);
+        selected.push(merged.get(url)!);
+        if (selected.length >= 60) break;
+      }
+    }
+    return selected;
   }
 
   async submitCollectedDocument(
@@ -252,7 +278,11 @@ export class JobRunner {
 
   async runZsxqCollectionPlan(
     batchId: string,
-    reportPhase?: (result: { discovered: number; prepared: boolean }) => Promise<void> | void,
+    reportPhase?: (result: {
+      discovered: number;
+      prepared: boolean;
+      rejections?: Record<string, number>;
+    }) => Promise<void> | void,
   ): Promise<{ discovered: number }> {
     const groupUrl = 'https://wx.zsxq.com/group/48844584441158';
     let tabId: number | undefined;
@@ -269,26 +299,69 @@ export class JobRunner {
         () => this.collectZsxqPlanViews(tabId!),
         milliseconds => this.wait(milliseconds),
       );
-      const cutoff = Date.now() - 30 * 24 * 60 * 60 * 1_000;
-      const relevant = documents
-        .filter(document => document.sourceMetadata?.authorRole === 'owner')
-        .filter(document => !document.publishedAt || Date.parse(document.publishedAt) >= cutoff)
-        .filter(document => /投资|创业|商业模式|经营|财富|职业|职场|认知/u.test(`${document.title}\n${document.text}`))
-        .slice(0, 60);
+      const now = Date.now();
+      const cutoff = now - 15 * 24 * 60 * 60 * 1_000;
+      let known: ReadonlySet<string> = new Set();
+      try {
+        known = (await this.options.knownUrls?.()) ?? new Set();
+      } catch {
+        known = new Set();
+      }
+      const relevant: CollectedDocument[] = [];
+      const rejections: Record<string, number> = {};
+      const reject = (reason: string): void => {
+        rejections[reason] = (rejections[reason] ?? 0) + 1;
+      };
+      for (const document of documents) {
+        if (document.sourceMetadata?.authorRole !== 'owner') {
+          reject('非星主');
+          continue;
+        }
+        const publishedAt = document.publishedAt ? Date.parse(document.publishedAt) : Number.NaN;
+        if (!Number.isFinite(publishedAt)) {
+          reject('缺少可信日期');
+          continue;
+        }
+        if (publishedAt < cutoff || publishedAt > now) {
+          reject('超出15天');
+          continue;
+        }
+        if (!/投资|创业|商业模式|经营|财富|职业|职场|认知/u.test(`${document.title}\n${document.text}`)) {
+          reject('非投资创业主题');
+          continue;
+        }
+        if (known.has(document.canonicalUrl)) {
+          reject('本机库已有');
+          continue;
+        }
+        relevant.push(document);
+      }
+      relevant.sort((left, right) => (right.publishedAt ?? '').localeCompare(left.publishedAt ?? ''));
+      relevant.splice(60);
       if (documents.length > 0 && !documents.some(document =>
         document.sourceMetadata?.authorRole === 'owner' || document.sourceMetadata?.authorRole === 'member')) {
         throw new Error('UNSUPPORTED_LAYOUT：无法验证知识星球作者是否为星主');
       }
-      await reportPhase?.({ discovered: documents.length, prepared: false });
+      await reportPhase?.({ discovered: documents.length, prepared: false, rejections });
       const staged: Array<{ id: string; document: CollectedDocument }> = [];
       for (const document of relevant) {
-        const job = await this.options.bridge.createJob(document.canonicalUrl, {
+        const plannedDocument: CollectedDocument = {
+          ...document,
+          userCategory: lifeTeacherCategory(document),
+          sourceMetadata: {
+            ...(document.sourceMetadata ?? {}),
+            planId: 'zsxq-chen-teacher',
+            batchId,
+            windowDays: '15',
+          },
+        };
+        const job = await this.options.bridge.createJob(plannedDocument.canonicalUrl, {
           batchId,
           planId: 'zsxq-chen-teacher',
         });
-        staged.push({ id: job.id, document });
+        staged.push({ id: job.id, document: plannedDocument });
       }
-      await reportPhase?.({ discovered: documents.length, prepared: true });
+      await reportPhase?.({ discovered: documents.length, prepared: true, rejections });
       for (const item of staged) {
         this.options.bridge.send('job.progress', item.id, { stage: 'collecting' });
         this.options.bridge.send('job.result', item.id, {

@@ -139,8 +139,11 @@ class MemorySocket implements SocketLike {
   }
 }
 
-function healthResponse(trustedExtensionId = TRUSTED_EXTENSION_ID): Response {
-  return new Response(JSON.stringify({ ok: true, trustedExtensionId }), {
+function healthResponse(
+  trustedExtensionId = TRUSTED_EXTENSION_ID,
+  version = APP_VERSION,
+): Response {
+  return new Response(JSON.stringify({ ok: true, trustedExtensionId, version }), {
     status: 200,
     headers: { 'content-type': 'application/json' },
   });
@@ -276,6 +279,87 @@ describe('extension Bridge connection', () => {
       payload: { version: APP_VERSION },
     });
     expect(storage.values.bridgeStatus).toBe('connected');
+  });
+
+  it('omits new plan-result fields while connected to a strict 0.4.10 Bridge', async () => {
+    const storage = new MemoryStorage({ bridgeToken: 'x'.repeat(43) });
+    const socket = new MemorySocket();
+    const connection = new BridgeConnection(dependencies(
+      storage,
+      () => socket,
+      vi.fn<typeof fetch>(async () => healthResponse(TRUSTED_EXTENSION_ID, '0.4.10')),
+    ));
+    await connection.start();
+    socket.emit('open');
+    await vi.waitFor(() => expect(socket.sent).toHaveLength(1));
+
+    connection.send('plan.result', 'batch-1', {
+      batchId: 'batch-1',
+      discovered: 3,
+      prepared: false,
+      rejections: { '非星主': 2 },
+    });
+
+    expect(JSON.parse(socket.sent.at(-1)!).payload).toEqual({
+      batchId: 'batch-1',
+      discovered: 3,
+      prepared: false,
+    });
+  });
+
+  it('keeps rejection counts when the Bridge supports them', async () => {
+    const storage = new MemoryStorage({ bridgeToken: 'x'.repeat(43) });
+    const socket = new MemorySocket();
+    const connection = new BridgeConnection(dependencies(
+      storage,
+      () => socket,
+      vi.fn<typeof fetch>(async () => healthResponse(TRUSTED_EXTENSION_ID, APP_VERSION)),
+    ));
+    await connection.start();
+    socket.emit('open');
+    await vi.waitFor(() => expect(socket.sent).toHaveLength(1));
+
+    connection.send('plan.result', 'batch-1', {
+      batchId: 'batch-1',
+      discovered: 3,
+      rejections: { '非星主': 2 },
+    });
+
+    expect(JSON.parse(socket.sent.at(-1)!).payload.rejections).toEqual({ '非星主': 2 });
+  });
+
+  it('fails closed after a later health refresh cannot verify the Bridge version', async () => {
+    const storage = new MemoryStorage({ bridgeToken: 'x'.repeat(43) });
+    const firstSocket = new MemorySocket();
+    const secondSocket = new MemorySocket();
+    const fetcher = vi.fn<typeof fetch>()
+      .mockResolvedValueOnce(healthResponse(TRUSTED_EXTENSION_ID, APP_VERSION))
+      .mockRejectedValueOnce(new Error('health unavailable'));
+    const connection = new BridgeConnection(dependencies(
+      storage,
+      vi.fn()
+        .mockReturnValueOnce(firstSocket)
+        .mockReturnValueOnce(secondSocket),
+      fetcher,
+    ));
+    await connection.start();
+    firstSocket.emit('open');
+    await vi.waitFor(() => expect(firstSocket.sent).toHaveLength(1));
+    connection.send('plan.result', 'new-bridge', {
+      batchId: 'new-bridge', discovered: 1, rejections: { '非星主': 1 },
+    });
+    expect(JSON.parse(firstSocket.sent.at(-1)!).payload.rejections).toBeDefined();
+
+    firstSocket.emit('close');
+    await flushPromises();
+    await connection.retry();
+    secondSocket.emit('open');
+    await vi.waitFor(() => expect(secondSocket.sent).toHaveLength(1));
+    connection.send('plan.result', 'unknown-bridge', {
+      batchId: 'unknown-bridge', discovered: 1, rejections: { '非星主': 1 },
+    });
+
+    expect(JSON.parse(secondSocket.sent.at(-1)!).payload.rejections).toBeUndefined();
   });
 
   it('refreshes routing on every authorized connect（改去向无需重装扩展）', async () => {

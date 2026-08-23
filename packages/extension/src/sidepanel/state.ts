@@ -1015,7 +1015,17 @@ function renderPlans(
 
     const metrics = document.createElement('div');
     metrics.className = 'plan-metrics';
-    appendMetric(document, metrics, '入库', latest?.saved ?? 0);
+    const nowcoderSelectionComplete = latest?.selectionStatus === 'completed';
+    appendMetric(
+      document,
+      metrics,
+      plan.id === 'nowcoder-agent-market'
+        ? nowcoderSelectionComplete ? '入选' : '待筛选'
+        : '入库',
+      plan.id === 'nowcoder-agent-market' && nowcoderSelectionComplete
+        ? (latest?.accepted ?? 0)
+        : (latest?.saved ?? 0),
+    );
     appendMetric(document, metrics, '跳过', latest?.skipped ?? 0);
     appendMetric(document, metrics, '失败', latest?.failed ?? 0);
     appendMetric(document, metrics, '需处理', latest?.needsAttention ?? 0);
@@ -1026,16 +1036,24 @@ function renderPlans(
       coverage.className = 'plan-coverage';
       coverage.setAttribute('aria-label', '公司覆盖');
       for (const [key, label] of [
-        ['ByteDance', '字节'],
-        ['Tencent', '腾讯'],
-        ['Alibaba', '阿里'],
-        ['Ant', '蚂蚁'],
+        ['bytedance', '字节'],
+        ['tencent', '腾讯'],
+        ['alibaba', '阿里'],
+        ['ant', '蚂蚁'],
       ] as const) {
         const cell = document.createElement('span');
         cell.textContent = `${label} ${latest?.coverage?.[key] ?? 0}`;
         coverage.append(cell);
       }
       ticket.append(coverage);
+    }
+    if (latest?.rejections && Object.keys(latest.rejections).length > 0) {
+      const rejections = document.createElement('p');
+      rejections.className = 'plan-rejections';
+      rejections.textContent = `未入选：${Object.entries(latest.rejections)
+        .map(([reason, count]) => `${reason} ${count}`)
+        .join(' · ')}`;
+      ticket.append(rejections);
     }
 
     const footer = document.createElement('footer');

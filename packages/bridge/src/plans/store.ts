@@ -102,6 +102,7 @@ export class CollectionPlanStore {
         skipped: 0,
         failed: 0,
         needsAttention: 0,
+        ...(planId === 'nowcoder-agent-market' ? { selectionStatus: 'collecting' as const } : {}),
         jobIds: [],
       };
       this.batches.set(id, batch);
@@ -123,18 +124,64 @@ export class CollectionPlanStore {
     batchId: string,
     discovered: number,
     coverage?: Record<string, number>,
+    rejections?: Record<string, number>,
   ): Promise<void> {
     return this.serializeMutation(async () => {
       const batch = this.require(batchId);
       batch.discovered = discovered;
       if (coverage) batch.coverage = { ...coverage };
+      if (rejections) batch.rejections = { ...rejections };
       await this.persist();
+    });
+  }
+
+  markSelectionPending(batchId: string): Promise<void> {
+    return this.serializeMutation(async () => {
+      const batch = this.require(batchId);
+      batch.selectionStatus = 'pending';
+      await this.persist();
+    });
+  }
+
+  finalizeSelection(
+    batchId: string,
+    accepted: number,
+    coverage: Record<string, number>,
+    rejections: Record<string, number>,
+    syncError?: string,
+  ): Promise<CollectionBatch> {
+    return this.serializeMutation(async () => {
+      const batch = this.require(batchId);
+      batch.accepted = accepted;
+      batch.saved = accepted;
+      batch.skipped = Math.max(
+        0,
+        batch.discovered - accepted - batch.failed - batch.needsAttention,
+      );
+      batch.coverage = { ...coverage };
+      batch.rejections = { ...rejections };
+      batch.selectionStatus = 'completed';
+      if (syncError) {
+        batch.status = 'completed_with_attention';
+        batch.error = syncError;
+      } else {
+        batch.status = batch.failed > 0 && batch.saved === 0
+          ? 'failed'
+          : batch.failed > 0 || batch.needsAttention > 0
+            ? 'completed_with_attention'
+            : 'completed';
+        delete batch.error;
+      }
+      batch.finishedAt ??= this.now();
+      await this.persist();
+      return publicBatch(batch);
     });
   }
 
   reconcile(batchId: string, jobs: readonly JobRecord[]): Promise<CollectionBatch> {
     return this.serializeMutation(async () => {
       const batch = this.require(batchId);
+      if (batch.selectionStatus === 'completed') return publicBatch(batch);
       const byId = new Map(jobs.map(job => [job.id, job]));
       const children = batch.jobIds.map(id => byId.get(id)).filter((job): job is JobRecord => Boolean(job));
       batch.saved = children.filter(job => job.status === 'saved').length;

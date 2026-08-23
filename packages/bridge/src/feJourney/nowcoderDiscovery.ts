@@ -2,7 +2,7 @@ import { canonicalizeUrl } from '@data-collector/shared';
 import { FE_JOURNEY_PRESET } from './preset.js';
 import type { NowcoderCompany } from './nowcoderEvidence.js';
 
-const DETAIL_PATH = /^\/(?:discuss\/\d+|feed\/main\/detail\/\d+)\/?$/;
+const DETAIL_PATH = /^\/(?:discuss\/\d+|feed\/main\/detail\/[A-Za-z0-9_-]+)\/?$/;
 
 function canonicalNowcoderDetail(raw: string, base: URL): string | undefined {
   try {

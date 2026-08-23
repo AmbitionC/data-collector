@@ -1,6 +1,6 @@
 import { createHash, randomBytes } from 'node:crypto';
 import { lookup } from 'node:dns/promises';
-import { mkdir, open, rename } from 'node:fs/promises';
+import { mkdir, open, rename, rmdir } from 'node:fs/promises';
 import { extname, join, relative } from 'node:path';
 import { isIP } from 'node:net';
 import type { CollectedImage } from '@data-collector/shared';
@@ -209,8 +209,6 @@ export async function downloadAssets(options: {
     join(options.entryDirectory, 'assets'),
   );
   await assertSafeWritePath(options.libraryRoot, assetsDirectory);
-  await mkdir(assetsDirectory, { recursive: true });
-  await assertSafeWritePath(options.libraryRoot, assetsDirectory);
   let html = options.html;
   let downloaded = 0;
   let failed = 0;
@@ -238,6 +236,8 @@ export async function downloadAssets(options: {
         const hint = safeSlug(image.alt ?? 'image', 28);
         const filename = `${digest}-${hint}${extension || extname(new URL(image.url).pathname)}`;
         const target = assertInsideRoot(options.libraryRoot, join(assetsDirectory, filename));
+        await mkdir(assetsDirectory, { recursive: true });
+        await assertSafeWritePath(options.libraryRoot, assetsDirectory);
         await atomicWrite(options.libraryRoot, target, bytes);
         const relativeUrl = relative(options.entryDirectory, target).split('\\').join('/');
         html = replaceUrl(html, image.url, relativeUrl);
@@ -249,6 +249,8 @@ export async function downloadAssets(options: {
       failed += 1;
     }
   }
+
+  if (downloaded === 0) await rmdir(assetsDirectory).catch(() => undefined);
 
   return { html, downloaded, failed };
 }

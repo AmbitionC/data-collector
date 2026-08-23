@@ -55,6 +55,7 @@ import {
 import {
   CollectionPlanService,
   CollectionPlanStore,
+  selectNowcoderPlanCandidates,
   type ExtensionPlanResult,
 } from '../plans/index.js';
 
@@ -377,6 +378,27 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
           }
           const grade = document.sourceMetadata?.evidenceGrade;
           return grade === 'A' || grade === 'B';
+        },
+        selectNowcoderJobs: async (planJobs, now) => {
+          const readable: Array<{ job: JobRecord; document: CollectedDocument }> = [];
+          const rejected: Array<{ url: string; reason: string }> = [];
+          for (const planJob of planJobs) {
+            const document = await storedDocumentFor(planJob);
+            if (document) readable.push({ job: planJob, document });
+            else rejected.push({ url: planJob.url, reason: '本机文档不可读' });
+          }
+          const selection = selectNowcoderPlanCandidates(
+            readable.map(item => item.document),
+            now,
+          );
+          const acceptedUrls = new Set(selection.accepted.map(document => document.canonicalUrl));
+          return {
+            accepted: readable
+              .filter(item => acceptedUrls.has(item.document.canonicalUrl))
+              .map(item => item.job),
+            coverage: selection.coverage,
+            rejected: rejected.concat(selection.rejected),
+          };
         },
         coverageKey: async job => {
           if (job.planId !== 'nowcoder-agent-market') return undefined;

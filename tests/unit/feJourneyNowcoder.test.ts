@@ -51,6 +51,31 @@ describe('fixed fe-journey Nowcoder discovery', () => {
     );
   });
 
+  it('accepts opaque feed detail IDs emitted by current Nowcoder pages', async () => {
+    const fetcher = vi.fn<typeof fetch>(async () => new Response(
+      '<a href="/feed/main/detail/4c8da8a740e64eb5827fb1b962928eda">面经</a>',
+      { status: 200 },
+    ));
+
+    const urls = await discoverNowcoderUrls(fetcher, new Set());
+
+    expect(urls).toContain(
+      'https://www.nowcoder.com/feed/main/detail/4c8da8a740e64eb5827fb1b962928eda',
+    );
+  });
+
+  it('covers every target company with the fixed Agent role families', () => {
+    const roleFamilies = [/Agent 开发/u, /AI 应用开发/u, /大模型应用开发/u, /RAG/u, /MCP/u, /AI 全栈/u, /Agent 平台/u];
+    for (const company of ['bytedance', 'tencent', 'alibaba', 'ant'] as const) {
+      const queries = FE_JOURNEY_PRESET.nowcoder.companyQueries
+        .filter(item => item.company === company)
+        .map(item => item.query);
+      for (const family of roleFamilies) {
+        expect(queries.some(query => family.test(query)), `${company} missing ${family}`).toBe(true);
+      }
+    }
+  });
+
   it('discovers at most 60 company-labelled candidates from fixed company and role queries', async () => {
     let nextId = 20_000;
     const fetcher = vi.fn<typeof fetch>(async () => {

@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { TRUSTED_EXTENSION_ID, type CollectedDocument } from '@data-collector/shared';
 import {
   JobRunner,
@@ -13,6 +13,10 @@ import {
 
 const URL = 'https://mp.weixin.qq.com/s/background-test';
 const LIST_URL = 'https://wx.zsxq.com/group/48844584441158';
+
+afterEach(() => {
+  vi.useRealTimers();
+});
 
 function document(): CollectedDocument {
   return {
@@ -279,6 +283,135 @@ describe('extension job runner', () => {
       `${LIST_URL}/topic/9001`,
       `${LIST_URL}/topic/9002`,
     ]);
+  });
+
+  it('keeps sampling all three ZSXQ views when the latest view alone reaches the global cap', async () => {
+    const tabs = new InMemoryTabs();
+    const bridge = new InMemoryBridge();
+    let active = '';
+    const latest = Array.from({ length: 60 }, (_, index) => topic(String(10_000 + index)));
+    const byView: Record<string, CollectedDocument[]> = {
+      '最新': latest,
+      '精华': [topic('20001')],
+      '只看星主': [topic('30001')],
+    };
+    const extractedViews: string[] = [];
+    tabs.sendMessage = async (_id, message) => {
+      const request = message as { type: string; label?: string };
+      if (request.type === 'list.selectView') {
+        active = request.label ?? '';
+        return { ok: true, selected: { label: active, topicIds: [] } } as never;
+      }
+      if (request.type === 'list.restore') {
+        return { ok: true, advance: { collapsed: 0, loaded: 0 } };
+      }
+      if (request.type === 'extract.list') {
+        extractedViews.push(active);
+        const documents = byView[active] ?? [];
+        return {
+          ok: true,
+          list: {
+            items: documents.map((document, index) => ({ key: `${active}-${index}`, title: document.title, document })),
+            skipped: 0,
+            total: documents.length,
+            captured: documents.length,
+          },
+        };
+      }
+      if (request.type === 'list.advance') {
+        return { ok: true, advance: { collapsed: 0, loaded: 0 } };
+      }
+      throw new Error(`unexpected ${request.type}`);
+    };
+    const runner = new JobRunner({ tabs, bridge, waitForTabComplete: async () => undefined });
+
+    const documents = await runner.collectZsxqPlanViews(7);
+
+    expect(extractedViews).toEqual(['最新', '精华', '只看星主']);
+    expect(documents).toHaveLength(60);
+    expect(documents.map(document => document.canonicalUrl)).toContain(`${LIST_URL}/topic/20001`);
+    expect(documents.map(document => document.canonicalUrl)).toContain(`${LIST_URL}/topic/30001`);
+  });
+
+  it('backfills only new owner posts from the last 15 days with a trustworthy date', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-08-23T10:00:00.000Z'));
+    const knownUrl = `${LIST_URL}/topic/41004`;
+    const tabs = new InMemoryTabs();
+    const bridge = new InMemoryBridge();
+    let active = '';
+    const planTopic = (
+      id: string,
+      publishedAt: string | undefined,
+    ): CollectedDocument => ({
+      ...topic(id),
+      title: `投资创业复盘 ${id}`,
+      text: '这是陈老师关于投资、创业和经营的完整复盘。',
+      ...(publishedAt ? { publishedAt } : {}),
+      sourceMetadata: { authorRole: 'owner' },
+    });
+    const candidates = [
+      planTopic('41001', '2026-08-10T10:00:00.000Z'),
+      planTopic('41002', '2026-08-07T09:59:59.000Z'),
+      planTopic('41003', undefined),
+      planTopic('41004', '2026-08-12T10:00:00.000Z'),
+    ];
+    tabs.sendMessage = async (_id, message) => {
+      const request = message as { type: string; label?: string };
+      if (request.type === 'list.selectView') {
+        active = request.label ?? '';
+        return { ok: true, selected: { label: active, topicIds: [] } } as never;
+      }
+      if (request.type === 'list.restore') {
+        return { ok: true, advance: { collapsed: 0, loaded: 0 } };
+      }
+      if (request.type === 'extract.list') {
+        const documents = active === '最新' ? candidates : [];
+        return {
+          ok: true,
+          list: {
+            items: documents.map((document, index) => ({ key: `${active}-${index}`, title: document.title, document })),
+            skipped: 0,
+            total: documents.length,
+            captured: documents.length,
+          },
+        };
+      }
+      if (request.type === 'list.advance') {
+        return { ok: true, advance: { collapsed: 0, loaded: 0 } };
+      }
+      throw new Error(`unexpected ${request.type}`);
+    };
+    const runner = new JobRunner({
+      tabs,
+      bridge,
+      waitForTabComplete: async () => undefined,
+      delay: async () => undefined,
+      knownUrls: async () => new Set([knownUrl]),
+    });
+
+    const phases: Array<{ rejections?: Record<string, number> }> = [];
+    await runner.runZsxqCollectionPlan('backfill-15-days', result => {
+      phases.push(result as { rejections?: Record<string, number> });
+    });
+
+    expect(bridge.createdFor).toEqual([`${LIST_URL}/topic/41001`]);
+    expect(phases.at(-1)?.rejections).toEqual({
+      '超出15天': 1,
+      '缺少可信日期': 1,
+      '本机库已有': 1,
+    });
+    const saved = bridge.sent.find(message => message.type === 'job.result');
+    expect(saved?.payload).toMatchObject({
+      document: {
+        userCategory: '投资',
+        sourceMetadata: {
+          planId: 'zsxq-chen-teacher',
+          batchId: 'backfill-15-days',
+          windowDays: '15',
+        },
+      },
+    });
   });
 
   it('queues remote jobs so reconnect bursts do not open unlimited tabs', async () => {

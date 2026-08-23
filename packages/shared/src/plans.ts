@@ -53,7 +53,11 @@ export interface CollectionBatch {
   skipped: number;
   failed: number;
   needsAttention: number;
+  /** 需要二次筛选的计划用持久状态保证 Bridge 重启后可续跑。 */
+  selectionStatus?: 'collecting' | 'pending' | 'completed';
   coverage?: Record<string, number>;
+  /** 固定计划过滤原因的同源计数，便于审计为什么没入选。 */
+  rejections?: Record<string, number>;
   error?: string;
 }
 
@@ -71,7 +75,9 @@ export const collectionBatchSchema = z.object({
   skipped: countSchema,
   failed: countSchema,
   needsAttention: countSchema,
+  selectionStatus: z.enum(['collecting', 'pending', 'completed']).optional(),
   coverage: z.record(z.string().trim().min(1).max(100), countSchema).optional(),
+  rejections: z.record(z.string().trim().min(1).max(100), countSchema).optional(),
   error: z.string().trim().min(1).max(2_000).optional(),
 }).superRefine((batch, context) => {
   const terminal = batch.status !== 'running';

@@ -84,25 +84,28 @@ describe('side panel state mapping', () => {
             skipped: 1,
             failed: 0,
             needsAttention: 1,
+            rejections: { '非星主': 2, '超出15天': 1 },
           },
         },
         {
           id: 'nowcoder-agent-market',
           due: true,
-          pending: true,
+          pending: false,
           nextRunAt: '2026-08-24T01:00:00.000Z',
           latest: {
             id: 'nowcoder-batch',
             planId: 'nowcoder-agent-market',
-            status: 'running',
+            status: 'completed',
             startedAt: '2026-08-23T01:00:00.000Z',
+            finishedAt: '2026-08-23T01:02:00.000Z',
             discovered: 10,
-            accepted: 9,
+            accepted: 4,
             saved: 8,
-            skipped: 1,
+            skipped: 6,
             failed: 0,
             needsAttention: 0,
-            coverage: { ByteDance: 3, Tencent: 3, Alibaba: 2, Ant: 1 },
+            selectionStatus: 'completed',
+            coverage: { bytedance: 3, tencent: 3, alibaba: 2, ant: 1 },
           },
         },
       ],
@@ -115,10 +118,47 @@ describe('side panel state mapping', () => {
     expect(document.querySelector('#plans-panel')?.textContent).toContain('腾讯 3');
     expect(document.querySelector('#plans-panel')?.textContent).toContain('阿里 2');
     expect(document.querySelector('#plans-panel')?.textContent).toContain('蚂蚁 1');
+    expect(document.querySelector('#plans-panel')?.textContent).toContain('4入选');
+    expect(document.querySelector('#plans-panel')?.textContent).toContain('未入选：非星主 2 · 超出15天 1');
     expect(document.querySelector('#plans-panel')?.textContent).toContain('需处理');
 
     document.querySelector<HTMLButtonElement>('[data-plan-run="zsxq-chen-teacher"]')!.click();
     expect(planActions.runPlan).toHaveBeenCalledWith('zsxq-chen-teacher', true);
+  });
+
+  it('labels provisional Nowcoder detail saves as waiting for selection', () => {
+    const planActions = actions as SidePanelActions & {
+      runPlan: ReturnType<typeof vi.fn>;
+      openPlanSource: ReturnType<typeof vi.fn>;
+    };
+    planActions.runPlan = vi.fn(async () => undefined);
+    planActions.openPlanSource = vi.fn();
+    renderSidePanel(document, {
+      phase: 'plans',
+      loading: false,
+      plans: [{
+        id: 'nowcoder-agent-market',
+        due: false,
+        pending: false,
+        nextRunAt: '2026-08-24T01:00:00.000Z',
+        latest: {
+          id: 'nowcoder-running',
+          planId: 'nowcoder-agent-market',
+          status: 'running',
+          startedAt: '2026-08-23T01:00:00.000Z',
+          discovered: 10,
+          accepted: 8,
+          saved: 3,
+          skipped: 0,
+          failed: 0,
+          needsAttention: 0,
+          selectionStatus: 'pending',
+        },
+      }],
+    } as never, planActions);
+
+    expect(document.querySelector('#plans-panel')?.textContent).toContain('3待筛选');
+    expect(document.querySelector('#plans-panel')?.textContent).not.toContain('8入选');
   });
 
   it('adds a top-level 任务 tab', () => {

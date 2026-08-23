@@ -60,6 +60,10 @@ export function selectNowcoderPlanCandidates(
 
   for (const raw of documents) {
     const document = enrichNowcoderEvidence(raw);
+    if (document.feJourney?.duplicateOf) {
+      rejected.push({ url: document.canonicalUrl, reason: '重复问题簇' });
+      continue;
+    }
     const recentAt = recencyOf(document);
     if (!recentAt || Date.parse(recentAt) < cutoff || Date.parse(recentAt) > Date.parse(now)) {
       rejected.push({ url: document.canonicalUrl, reason: '超过30天' });

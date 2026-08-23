@@ -421,6 +421,16 @@ function clickMenu(label: string): boolean {
   return true;
 }
 
+async function waitForMenu(label: ZsxqPlanView): Promise<void> {
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    if (menuLabels().labels.includes(label)) return;
+    await new Promise(resolve => setTimeout(resolve, 100));
+  }
+  const observed = menuLabels().labels;
+  const detail = observed.length > 0 ? `（当前看到：${observed.join('、')}）` : '（分类栏尚未渲染）';
+  throw new ExtractionError('UNSUPPORTED_LAYOUT', `页面上找不到「${label}」标签${detail}`);
+}
+
 function visibleTopicIds(): string[] {
   const ids = new Set<string>();
   for (const container of document.querySelectorAll<HTMLElement>('.topic-container')) {
@@ -438,6 +448,7 @@ async function selectPlanView(label: ZsxqPlanView): Promise<{ label: ZsxqPlanVie
   if (!ZSXQ_PLAN_VIEWS.includes(label)) {
     throw new ExtractionError('UNSUPPORTED_LAYOUT', `不支持的知识星球视图：${label}`);
   }
+  await waitForMenu(label);
   const before = visibleTopicIds().join(',');
   const alreadyActive = menuLabels().active === label;
   if (!alreadyActive && !clickMenu(label)) {

@@ -152,6 +152,29 @@ describe('content script list collection', () => {
     expect(response.selected).toEqual({ label: '精华', topicIds: ['633333333333333'] });
   });
 
+  it('waits for the SPA menu to render before selecting the initial plan view', async () => {
+    document.body.innerHTML = '<main id="app-shell"></main>';
+    vi.useFakeTimers();
+    setTimeout(() => {
+      document.querySelector('#app-shell')!.innerHTML = `
+        <app-menu>
+          <div class="menu-container">
+            <div class="item ng-star-inserted actived">最新</div>
+            <div class="item ng-star-inserted">精华</div>
+            <div class="item ng-star-inserted">只看星主</div>
+          </div>
+        </app-menu>
+        <div class="topic-container" data-topic-id="644444444444444">
+          <div class="talk-content-container">SPA 延迟渲染后的知识星球帖子。</div>
+        </div>`;
+    }, 300);
+
+    const pending = ask<ViewResponse>({ type: 'list.selectView', label: '最新' });
+    const response = await settle(pending);
+
+    expect(response.selected).toEqual({ label: '最新', topicIds: ['644444444444444'] });
+  });
+
   it('registers only one message listener even if injected twice', async () => {
     const listeners: Listener[] = [];
     vi.stubGlobal('chrome', {

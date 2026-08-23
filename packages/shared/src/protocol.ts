@@ -122,6 +122,7 @@ export const extensionPlanResultPayloadSchema = z.object({
   batchId: z.string().trim().min(1).max(200),
   discovered: z.number().int().min(0),
   coverage: z.record(z.string().trim().min(1).max(100), z.number().int().min(0)).optional(),
+  rejections: z.record(z.string().trim().min(1).max(100), z.number().int().min(0)).optional(),
   error: z.string().trim().min(1).max(2_000).optional(),
   needsAttention: z.boolean().optional(),
   prepared: z.boolean().optional(),

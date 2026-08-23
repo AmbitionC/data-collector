@@ -1,5 +1,5 @@
 import { mkdir, readFile, readdir, symlink, writeFile } from 'node:fs/promises';
-import { isAbsolute, join, relative } from 'node:path';
+import { dirname, isAbsolute, join, relative } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { CollectedDocument } from '@data-collector/shared';
 import { organize } from '../../packages/bridge/src/organize/index.js';
@@ -118,8 +118,9 @@ describe('Markdown library', () => {
 
     const catalog = JSON.parse(
       await readFile(join(root, '_catalog', 'index.json'), 'utf8'),
-    ) as unknown[];
+    ) as Array<{ relativePath: string }>;
     expect(catalog).toHaveLength(documents.length);
+    expect(await readdir(dirname(join(root, catalog[0]!.relativePath)))).not.toContain('assets');
   });
 
   it('blocks loopback image SSRF before invoking fetch', async () => {
@@ -144,6 +145,7 @@ describe('Markdown library', () => {
     expect(saved).toMatchObject({ downloadedImages: 0, failedImages: 1 });
     expect(fetcher).not.toHaveBeenCalled();
     expect(await readFile(saved.markdownPath, 'utf8')).toContain(imageUrl);
+    expect(await readdir(dirname(saved.markdownPath))).not.toContain('assets');
   });
 
   it('streams image bodies and stops reading at the hard byte limit', async () => {

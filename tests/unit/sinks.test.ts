@@ -1,4 +1,4 @@
-import { readFile } from 'node:fs/promises';
+import { readFile, readdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { CollectedDocument } from '@data-collector/shared';
@@ -131,6 +131,7 @@ describe('RepoInboxSink', () => {
     expect(original).toContain('date: 2026-07-18');
     expect(original).toContain('date_source: collected');
     expect(result.detail).toMatchObject({ committed: false });
+    expect(await readdir(result.outputRef)).not.toContain('assets');
   });
 
   it('preserves fe-journey scoring and primitive source evidence in meta.json', async () => {

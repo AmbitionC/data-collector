@@ -69,4 +69,28 @@ describe('Nowcoder fixed collection plan selection', () => {
     );
     expect(Math.max(...Object.values(firstDay.coverage))).toBeLessThanOrEqual(4);
   });
+
+  it('rejects a candidate already linked to an existing question-cluster representative', () => {
+    const original = interview('bytedance', 50_000);
+    const duplicate = {
+      ...interview('bytedance', 50_001),
+      feJourney: {
+        candidateKinds: ['interview'] as const,
+        qualityScore: 90,
+        qualitySignals: [],
+        contentHash: '1'.repeat(64),
+        simHash: '2'.repeat(16),
+        clusterId: 'cluster-existing',
+        duplicateOf: 'existing-representative',
+      },
+    };
+
+    const result = selectNowcoderPlanCandidates([original, duplicate], '2026-08-23T01:00:00.000Z');
+
+    expect(result.accepted.map(document => document.canonicalUrl)).toEqual([original.canonicalUrl]);
+    expect(result.rejected).toContainEqual({
+      url: duplicate.canonicalUrl,
+      reason: '重复问题簇',
+    });
+  });
 });
