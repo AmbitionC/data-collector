@@ -54,6 +54,20 @@ async function writeFixture(root: string): Promise<string> {
 }
 
 describe('extension package validation', () => {
+  it('builds each workspace without recursively invoking the root build script', async () => {
+    const workspaceRoot = join(import.meta.dirname, '..', '..');
+    const rootPackage = JSON.parse(
+      await readFile(join(workspaceRoot, 'package.json'), 'utf8'),
+    ) as { scripts: { build: string } };
+
+    expect(rootPackage.scripts.build).toBe(
+      'npm --workspace=@data-collector/shared run build'
+      + ' && npm --workspace=@data-collector/bridge run build'
+      + ' && npm --workspace=@data-collector/extension run build',
+    );
+    expect(rootPackage.scripts.build).not.toContain('npm run build -w');
+  });
+
   it('accepts only the complete production allowlist', async () => {
     expect(await validateExtensionDirectory(await fixture())).toEqual(REQUIRED_FILES);
   });

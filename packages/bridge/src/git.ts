@@ -1,4 +1,4 @@
-import { execFile } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 
@@ -179,6 +179,124 @@ export interface ToolCommand {
   args: string[];
 }
 
+export interface ToolProcessOptions {
+  timeoutMs?: number;
+  maxBufferBytes?: number;
+  killGraceMs?: number;
+  platform?: NodeJS.Platform;
+}
+
+class ToolProcessError extends Error {
+  constructor(
+    message: string,
+    readonly stdout: string,
+    readonly stderr: string,
+  ) {
+    super(message);
+    this.name = 'ToolProcessError';
+  }
+}
+
+function signalProcessTree(
+  pid: number,
+  signal: NodeJS.Signals,
+  platform: NodeJS.Platform,
+): void {
+  try {
+    if (platform === 'win32') {
+      const args = ['/pid', String(pid), '/T'];
+      if (signal === 'SIGKILL') args.push('/F');
+      const killer = spawn('taskkill', args, { detached: false, stdio: 'ignore', windowsHide: true });
+      killer.unref();
+      return;
+    }
+    // detached=true 让外部命令成为独立进程组。向负 PID 发信号会覆盖 npm -> sh -> tsc
+    // 整棵树，避免 execFile 只杀 npm、把真正构建的孙进程遗留在后台。
+    process.kill(-pid, signal);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ESRCH') throw error;
+  }
+}
+
+/**
+ * 在独立进程组里运行自更新命令。超时或输出失控时会先 TERM、再 KILL 整棵进程树。
+ * 导出是为了用真实子进程做资源回收回归测试；业务入口仍是 runTool。
+ */
+export function runProcessForTool(
+  command: string,
+  args: readonly string[],
+  cwd: string,
+  env: NodeJS.ProcessEnv,
+  options: ToolProcessOptions = {},
+): Promise<string> {
+  const timeoutMs = options.timeoutMs ?? 10 * 60_000;
+  const maxBufferBytes = options.maxBufferBytes ?? 8 * 1024 * 1024;
+  const killGraceMs = options.killGraceMs ?? 2_000;
+  const platform = options.platform ?? process.platform;
+
+  return new Promise((resolveRun, rejectRun) => {
+    const child = spawn(command, [...args], {
+      cwd,
+      env,
+      detached: platform !== 'win32',
+      stdio: ['ignore', 'pipe', 'pipe'],
+      windowsHide: true,
+    });
+    const stdout: Buffer[] = [];
+    const stderr: Buffer[] = [];
+    let outputBytes = 0;
+    let terminalError: Error | undefined;
+    let forceTimer: NodeJS.Timeout | undefined;
+
+    const output = (chunks: Buffer[]) => Buffer.concat(chunks).toString('utf8');
+    const stopTree = (error: Error) => {
+      if (terminalError) return;
+      terminalError = error;
+      if (child.pid === undefined) return;
+      signalProcessTree(child.pid, 'SIGTERM', platform);
+      forceTimer = setTimeout(() => {
+        if (child.pid !== undefined) signalProcessTree(child.pid, 'SIGKILL', platform);
+      }, killGraceMs);
+      forceTimer.unref();
+    };
+    const append = (target: Buffer[], chunk: Buffer | string) => {
+      const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      outputBytes += buffer.length;
+      if (outputBytes > maxBufferBytes) {
+        stopTree(new Error(`命令输出超过 ${maxBufferBytes} 字节上限`));
+        return;
+      }
+      target.push(buffer);
+    };
+
+    child.stdout.on('data', chunk => append(stdout, chunk));
+    child.stderr.on('data', chunk => append(stderr, chunk));
+
+    const timeout = setTimeout(
+      () => stopTree(new Error(`命令执行超时（${timeoutMs}ms）`)),
+      timeoutMs,
+    );
+    child.once('error', error => {
+      terminalError = terminalError ?? error;
+    });
+    child.once('close', code => {
+      clearTimeout(timeout);
+      if (forceTimer) clearTimeout(forceTimer);
+      const stdoutText = output(stdout);
+      const stderrText = output(stderr);
+      if (terminalError) {
+        rejectRun(new ToolProcessError(terminalError.message, stdoutText, stderrText));
+        return;
+      }
+      if (code !== 0) {
+        rejectRun(new ToolProcessError(`进程退出码 ${code ?? '未知'}`, stdoutText, stderrText));
+        return;
+      }
+      resolveRun(stdoutText);
+    });
+  });
+}
+
 /**
  * npm 藏在哪。
  *
@@ -227,24 +345,24 @@ export async function runTool(
   cwd: string,
 ): Promise<string> {
   const resolved = command === 'npm' ? await resolveNpm() : await resolveNamed(command);
-  return new Promise((resolveRun, reject) => {
-    execFile(
+  try {
+    return await runProcessForTool(
       resolved.command,
       [...resolved.args, ...args],
-      { cwd, env: gitEnvironment(), timeout: 10 * 60_000, maxBuffer: 8 * 1024 * 1024 },
-      (error, stdout, stderr) => {
-        if (!error) {
-          resolveRun(stdout);
-          return;
-        }
-        // 构建失败时有用的那行经常在 stdout（tsc / vitest 都往那儿写），别只看 stderr。
-        const detail = ((stderr ?? '').trim() || (stdout ?? '').trim())
-          .split('\n')
-          .map(line => line.trim())
-          .filter(Boolean)
-          .pop();
-        reject(new Error(`${command} ${args.join(' ')} 失败：${detail || error.message}`));
-      },
+      cwd,
+      gitEnvironment(),
     );
-  });
+  } catch (error) {
+    const processError = error instanceof ToolProcessError ? error : undefined;
+    // 构建失败时有用的那行经常在 stdout（tsc / vitest 都往那儿写），别只看 stderr。
+    const detail = ((processError?.stderr ?? '').trim() || (processError?.stdout ?? '').trim())
+      .split('\n')
+      .map(line => line.trim())
+      .filter(Boolean)
+      .pop();
+    const reason = error instanceof Error ? error.message : String(error);
+    throw new Error(
+      `${command} ${args.join(' ')} 失败：${reason}${detail ? `；${detail}` : ''}`,
+    );
+  }
 }

@@ -1,3 +1,6 @@
+import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
   MISSING_GIT_PREFIX,
@@ -8,6 +11,7 @@ import {
   npmCliCandidates,
   resolveGit,
   resolveNpm,
+  runProcessForTool,
   toolCandidates,
   type GitProbe,
 } from '../../packages/bridge/src/git.js';
@@ -168,5 +172,33 @@ describe('自更新要用的外部命令', () => {
     expect(message).toContain('本机服务找不到能用的 npm');
     expect(message).toContain('which npm');
     expect(message).not.toMatch(/没装|你的机器/);
+  });
+
+  it('超时会终止命令的整棵子进程树，不留下后台构建进程', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'data-collector-process-tree-'));
+    const childPidPath = join(directory, 'child.pid');
+    const script = [
+      "const { spawn } = require('node:child_process');",
+      "const { writeFileSync } = require('node:fs');",
+      `const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)']);`,
+      `writeFileSync(${JSON.stringify(childPidPath)}, String(child.pid));`,
+      'setInterval(() => {}, 1000);',
+    ].join('\n');
+
+    try {
+      await expect(runProcessForTool(
+        process.execPath,
+        ['-e', script],
+        directory,
+        process.env,
+        { timeoutMs: 150, killGraceMs: 200 },
+      )).rejects.toThrow(/超时/);
+
+      const childPid = Number(await readFile(childPidPath, 'utf8'));
+      expect(Number.isInteger(childPid)).toBe(true);
+      expect(() => process.kill(childPid, 0)).toThrow();
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
   });
 });
