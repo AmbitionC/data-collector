@@ -79,12 +79,27 @@ export async function updateWorkspace(
   try {
     await git('fetch', 'origin', branch);
   } catch (error) {
-    return {
-      changed: false,
-      commit: before,
-      message: `拉取失败（网络或权限）：${message(error)}`,
-      checkedAt: host.now(),
-    };
+    if (isHttp2TransportFailure(error)) {
+      try {
+        // GitHub/代理偶发会把 HTTP/2 流提前掐断；HTTP/1.1 是同一只读 fetch 的
+        // 传输降级，不改变远端、分支或工作区语义。只重试一次，避免后台死循环。
+        await git('-c', 'http.version=HTTP/1.1', 'fetch', 'origin', branch);
+      } catch (fallbackError) {
+        return {
+          changed: false,
+          commit: before,
+          message: `拉取失败（HTTP/2 降级重试后仍失败）：${message(fallbackError)}`,
+          checkedAt: host.now(),
+        };
+      }
+    } else {
+      return {
+        changed: false,
+        commit: before,
+        message: `拉取失败（网络或权限）：${message(error)}`,
+        checkedAt: host.now(),
+      };
+    }
   }
 
   const target = (await git('rev-parse', `origin/${branch}`)).trim().slice(0, SHORT);
@@ -100,7 +115,12 @@ export async function updateWorkspace(
   const built = await host.builtCommit?.(repoRoot);
   const stale = built !== undefined && !before.startsWith(built);
   if (target === before && !stale) {
-    return { changed: false, commit: before, message: '已是最新。', checkedAt: host.now() };
+    return {
+      changed: false,
+      commit: before,
+      message: '已是最新。',
+      checkedAt: host.now(),
+    };
   }
 
   const moved = target !== before;
@@ -158,4 +178,9 @@ export function buildStampCommit(buildId: string): string | undefined {
 function message(error: unknown): string {
   const text = error instanceof Error ? error.message : String(error);
   return text.split('\n')[0]!.slice(0, 200);
+}
+
+function isHttp2TransportFailure(error: unknown): boolean {
+  const detail = error instanceof Error ? error.message : String(error);
+  return /HTTP\/?2|HTTP2|curl\s+92|stream\s+\d+\s+was\s+not\s+closed\s+cleanly/iu.test(detail);
 }

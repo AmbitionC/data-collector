@@ -170,6 +170,27 @@ describe('bridge auto update', () => {
 
     expect(outcome.changed).toBe(false);
     expect(outcome.message).toContain('拉取失败');
+    expect(target.ran).not.toContain('git -c http.version=HTTP/1.1 fetch origin master');
+  });
+
+  it('retries an HTTP/2 transport failure once with HTTP/1.1', async () => {
+    const target = host({
+      ...AT_OLD,
+      'git fetch origin master': new Error(
+        'RPC failed; curl 92 HTTP/2 stream 5 was not closed cleanly: INTERNAL_ERROR',
+      ),
+      'git -c http.version=HTTP/1.1 fetch origin master': '',
+      'git rev-parse origin/master': 'aaaaaaaaaaaabbbb\n',
+    });
+
+    const outcome = await updateWorkspace(REPO, target);
+
+    expect(outcome).toMatchObject({ changed: false, commit: 'aaaaaaaaaaaa' });
+    expect(outcome.message).toBe('已是最新。');
+    expect(target.ran).toEqual(expect.arrayContaining([
+      'git fetch origin master',
+      'git -c http.version=HTTP/1.1 fetch origin master',
+    ]));
   });
 
   it('rejects a branch name that could smuggle extra git arguments', async () => {
