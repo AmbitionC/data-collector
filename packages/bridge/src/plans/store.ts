@@ -1,5 +1,5 @@
 import { randomBytes } from 'node:crypto';
-import { mkdir, open, readFile, rename } from 'node:fs/promises';
+import { mkdir, open, readFile, rename, unlink } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import {
   collectionBatchSchema,
@@ -49,14 +49,19 @@ function parseStoredPlans(value: unknown): StoredPlans {
 async function atomicWrite(path: string, value: StoredPlans): Promise<void> {
   await mkdir(dirname(path), { recursive: true });
   const temporary = `${path}.${process.pid}.${randomBytes(6).toString('hex')}.tmp`;
-  const handle = await open(temporary, 'w', 0o600);
   try {
-    await handle.writeFile(`${JSON.stringify(value, null, 2)}\n`, 'utf8');
-    await handle.sync();
-  } finally {
-    await handle.close();
+    const handle = await open(temporary, 'w', 0o600);
+    try {
+      await handle.writeFile(`${JSON.stringify(value, null, 2)}\n`, 'utf8');
+      await handle.sync();
+    } finally {
+      await handle.close();
+    }
+    await rename(temporary, path);
+  } catch (error) {
+    await unlink(temporary).catch(() => undefined);
+    throw error;
   }
-  await rename(temporary, path);
 }
 
 function publicBatch(batch: StoredBatch): CollectionBatch {
@@ -78,6 +83,7 @@ export class CollectionPlanStore {
     try {
       const parsed = parseStoredPlans(JSON.parse(await readFile(path, 'utf8')) as unknown);
       for (const batch of parsed.batches) store.batches.set(batch.id, batch);
+      if (store.prune()) await store.persist();
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
         if (error instanceof SyntaxError) throw new Error('采集批次文件格式无效');
@@ -264,9 +270,24 @@ export class CollectionPlanStore {
   }
 
   private persist(): Promise<void> {
+    this.prune();
     return atomicWrite(this.path, {
       version: 1,
       batches: [...this.batches.values()].sort((left, right) => left.id.localeCompare(right.id)),
     });
+  }
+
+  private prune(): boolean {
+    const terminal = [...this.batches.values()]
+      .filter(batch => batch.status !== 'running')
+      .sort((left, right) => (
+        right.startedAt.localeCompare(left.startedAt) || right.id.localeCompare(left.id)
+      ));
+    let changed = false;
+    for (const batch of terminal.slice(180)) {
+      this.batches.delete(batch.id);
+      changed = true;
+    }
+    return changed;
   }
 }

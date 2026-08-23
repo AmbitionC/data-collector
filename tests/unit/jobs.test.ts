@@ -1,4 +1,4 @@
-import { readFile } from 'node:fs/promises';
+import { readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { loadConfig } from '../../packages/bridge/src/config.js';
@@ -29,6 +29,37 @@ describe('bridge configuration', () => {
 });
 
 describe('durable jobs', () => {
+  it('keeps active and attention jobs plus only the newest 1000 terminal jobs', async () => {
+    const root = await temporaryDirectory();
+    const path = join(root, 'jobs.json');
+    const terminal = Array.from({ length: 1_005 }, (_, index) => ({
+      id: `terminal-${String(index).padStart(4, '0')}`,
+      url: `https://www.nowcoder.com/discuss/${10_000 + index}`,
+      requestedBy: 'codex' as const,
+      status: index % 2 === 0 ? 'saved' as const : 'failed' as const,
+      createdAt: `2026-08-20T00:${String(Math.floor(index / 60) % 60).padStart(2, '0')}:${String(index % 60).padStart(2, '0')}.000Z`,
+      updatedAt: new Date(Date.parse('2026-08-20T00:00:00.000Z') + index * 1_000).toISOString(),
+    }));
+    const protectedJobs = ['queued', 'dispatched', 'collecting', 'needs_attention'].map((status, index) => ({
+      id: `protected-${status}`,
+      url: `https://www.nowcoder.com/discuss/${20_000 + index}`,
+      requestedBy: 'codex' as const,
+      status,
+      createdAt: '2020-01-01T00:00:00.000Z',
+      updatedAt: '2020-01-01T00:00:00.000Z',
+    }));
+    await writeFile(path, `${JSON.stringify({ version: 1, jobs: [...terminal, ...protectedJobs] })}\n`);
+
+    const jobs = await JobStore.open(path);
+
+    expect(jobs.list()).toHaveLength(1_004);
+    for (const item of protectedJobs) expect(jobs.get(item.id)).toBeDefined();
+    expect(jobs.get('terminal-0000')).toBeUndefined();
+    expect(jobs.get('terminal-0004')).toBeUndefined();
+    expect(jobs.get('terminal-0005')).toBeDefined();
+    expect((JSON.parse(await readFile(path, 'utf8')) as { jobs: unknown[] }).jobs).toHaveLength(1_004);
+  });
+
   it('persists legal transitions and refuses terminal-state reversal', async () => {
     const root = await temporaryDirectory();
     const path = join(root, '_catalog', 'jobs.json');

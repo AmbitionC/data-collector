@@ -1,5 +1,5 @@
 import { randomBytes, randomUUID } from 'node:crypto';
-import { mkdir, open, readFile, rename } from 'node:fs/promises';
+import { mkdir, open, readFile, rename, unlink } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import {
   canonicalizeUrl,
@@ -52,14 +52,19 @@ export class JobStateError extends Error {
 async function atomicWrite(path: string, value: StoredJobs): Promise<void> {
   await mkdir(dirname(path), { recursive: true });
   const temporary = `${path}.${process.pid}.${randomBytes(6).toString('hex')}.tmp`;
-  const handle = await open(temporary, 'w', 0o600);
   try {
-    await handle.writeFile(`${JSON.stringify(value, null, 2)}\n`, 'utf8');
-    await handle.sync();
-  } finally {
-    await handle.close();
+    const handle = await open(temporary, 'w', 0o600);
+    try {
+      await handle.writeFile(`${JSON.stringify(value, null, 2)}\n`, 'utf8');
+      await handle.sync();
+    } finally {
+      await handle.close();
+    }
+    await rename(temporary, path);
+  } catch (error) {
+    await unlink(temporary).catch(() => undefined);
+    throw error;
   }
-  await rename(temporary, path);
 }
 
 export class JobStore {
@@ -86,6 +91,7 @@ export class JobStore {
         throw new Error('任务文件格式无效');
       }
       for (const job of data.jobs) store.jobs.set(job.id, job);
+      if (store.prune()) await store.persist();
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
     }
@@ -206,6 +212,21 @@ export class JobStore {
   }
 
   private async persist(): Promise<void> {
+    this.prune();
     await atomicWrite(this.path, { version: 1, jobs: this.list() });
+  }
+
+  private prune(): boolean {
+    const terminal = [...this.jobs.values()]
+      .filter(job => job.status === 'saved' || job.status === 'failed')
+      .sort((left, right) => (
+        right.updatedAt.localeCompare(left.updatedAt) || right.id.localeCompare(left.id)
+      ));
+    let changed = false;
+    for (const job of terminal.slice(1_000)) {
+      this.jobs.delete(job.id);
+      changed = true;
+    }
+    return changed;
   }
 }

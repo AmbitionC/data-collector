@@ -95,4 +95,41 @@ describe('CollectionPlanStore', () => {
     await expect(CollectionPlanStore.open(path)).rejects.toThrow('采集批次文件格式无效');
     expect(await readFile(path, 'utf8')).toBe(corrupt);
   });
+
+  it('keeps every running batch plus only the newest 180 terminal batches', async () => {
+    const root = await temporaryDirectories.create('plan-store-retention-');
+    const path = join(root, 'plans.json');
+    const terminal = Array.from({ length: 185 }, (_, index) => ({
+      id: `terminal-${String(index).padStart(3, '0')}`,
+      planId: 'zsxq-chen-teacher',
+      status: 'completed',
+      startedAt: new Date(Date.parse('2026-01-01T00:00:00.000Z') + index * 1_000).toISOString(),
+      finishedAt: new Date(Date.parse('2026-01-01T00:00:00.500Z') + index * 1_000).toISOString(),
+      discovered: 0,
+      accepted: 0,
+      saved: 0,
+      skipped: 0,
+      failed: 0,
+      needsAttention: 0,
+      deliveryIds: [],
+      jobIds: [],
+    }));
+    const running = {
+      ...terminal[0],
+      id: 'running-oldest',
+      status: 'running',
+      startedAt: '2020-01-01T00:00:00.000Z',
+      finishedAt: undefined,
+    };
+    await writeFile(path, `${JSON.stringify({ version: 1, batches: [...terminal, running] })}\n`);
+
+    const store = await CollectionPlanStore.open(path);
+
+    expect(store.latest(undefined, 500)).toHaveLength(181);
+    expect(store.latest(undefined, 500).some(batch => batch.id === running.id)).toBe(true);
+    expect(store.latest(undefined, 500).some(batch => batch.id === 'terminal-004')).toBe(false);
+    expect(store.latest(undefined, 500).some(batch => batch.id === 'terminal-005')).toBe(true);
+    const persisted = JSON.parse(await readFile(path, 'utf8')) as { batches: unknown[] };
+    expect(persisted.batches).toHaveLength(181);
+  });
 });

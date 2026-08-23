@@ -1,5 +1,5 @@
 import { randomBytes } from 'node:crypto';
-import { mkdir, open, readdir, rename } from 'node:fs/promises';
+import { mkdir, open, readdir, rename, unlink } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { descriptorFor, stableContentId } from '@data-collector/shared';
@@ -50,19 +50,29 @@ function yamlString(value: string): string {
   return JSON.stringify(value);
 }
 
-async function atomicWriteText(root: string, path: string, contents: string): Promise<void> {
+export async function atomicWriteInboxText(
+  root: string,
+  path: string,
+  contents: string,
+  renameFile: typeof rename = rename,
+): Promise<void> {
   await assertSafeWritePath(root, dirname(path));
   await mkdir(dirname(path), { recursive: true });
   await assertSafeWritePath(root, path);
   const temporary = `${path}.${process.pid}.${randomBytes(6).toString('hex')}.tmp`;
-  const handle = await open(temporary, 'w', 0o600);
   try {
-    await handle.writeFile(contents, 'utf8');
-    await handle.sync();
-  } finally {
-    await handle.close();
+    const handle = await open(temporary, 'w', 0o600);
+    try {
+      await handle.writeFile(contents, 'utf8');
+      await handle.sync();
+    } finally {
+      await handle.close();
+    }
+    await renameFile(temporary, path);
+  } catch (error) {
+    await unlink(temporary).catch(() => undefined);
+    throw error;
   }
-  await rename(temporary, path);
 }
 
 // git 怎么找、跑在什么环境里，见 ../git.ts 顶部那段注释（登录项的 PATH 和终端不是一回事）。
@@ -198,8 +208,8 @@ export class RepoInboxSink implements ContentSink {
 
     const originalPath = join(entryDirectory, 'original.md');
     const metaPath = join(entryDirectory, 'meta.json');
-    await atomicWriteText(this.repoRoot, originalPath, originalMarkdown);
-    await atomicWriteText(this.repoRoot, metaPath, `${JSON.stringify(meta, null, 2)}\n`);
+    await atomicWriteInboxText(this.repoRoot, originalPath, originalMarkdown);
+    await atomicWriteInboxText(this.repoRoot, metaPath, `${JSON.stringify(meta, null, 2)}\n`);
 
     const git = await this.commitEntry(relativeEntry, document.title);
 

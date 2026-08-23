@@ -215,9 +215,11 @@ export class CollectionPlanService {
 
   async onExtensionPlanResult(result: ExtensionPlanResult): Promise<CollectionBatch> {
     if (result.error) {
-      return result.needsAttention
+      const terminal = await (result.needsAttention
         ? this.dependencies.store.attention(result.batchId, result.error)
-        : this.dependencies.store.fail(result.batchId, result.error);
+        : this.dependencies.store.fail(result.batchId, result.error));
+      this.clearBatchRuntime(result.batchId);
+      return terminal;
     }
     await this.dependencies.store.markDiscovery(
       result.batchId,
@@ -229,11 +231,16 @@ export class CollectionPlanService {
       return this.dependencies.store.latest(undefined, 100)
         .find(batch => batch.id === result.batchId)!;
     }
-    return this.dependencies.store.reconcile(result.batchId, this.dependencies.jobs.list());
+    const batch = await this.dependencies.store.reconcile(result.batchId, this.dependencies.jobs.list());
+    if (batch.status !== 'running') this.clearBatchRuntime(batch.id);
+    return batch;
   }
 
   async onJobTerminal(job: JobRecord): Promise<void> {
     if (!job.batchId || !job.planId) return;
+    const currentBatch = this.dependencies.store.latest(job.planId, 100)
+      .find(batch => batch.id === job.batchId);
+    if (currentBatch?.status !== 'running') return;
     if (job.planId !== 'nowcoder-agent-market' && job.status === 'saved' && !this.coveredJobs.has(job.id)) {
       this.coveredJobs.add(job.id);
       const key = await this.dependencies.coverageKey?.(job);
@@ -263,7 +270,10 @@ export class CollectionPlanService {
       this.dependencies.jobs.list(),
     );
     if (job.planId !== 'nowcoder-agent-market') {
-      if (reconciled.status !== 'running') await this.surfaceSyncErrors(job.batchId);
+      if (reconciled.status !== 'running') {
+        await this.surfaceSyncErrors(job.batchId);
+        this.clearBatchRuntime(job.batchId);
+      }
       return;
     }
     if (reconciled.status === 'running') return;
@@ -307,6 +317,7 @@ export class CollectionPlanService {
       );
     } finally {
       this.finalizingBatches.delete(batch.id);
+      this.clearBatchRuntime(batch.id);
     }
   }
 
@@ -321,6 +332,15 @@ export class CollectionPlanService {
     const errors = this.batchSyncErrors.get(batchId);
     if (!errors || errors.length === 0) return;
     await this.dependencies.store.attention(batchId, `自动同步失败：${errors.join('；')}`);
+  }
+
+  private clearBatchRuntime(batchId: string): void {
+    for (const job of this.dependencies.jobs.list()) {
+      if (job.batchId !== batchId) continue;
+      this.syncedJobs.delete(job.id);
+      this.coveredJobs.delete(job.id);
+    }
+    this.batchSyncErrors.delete(batchId);
   }
 
   private async execute(batch: CollectionBatch): Promise<void> {

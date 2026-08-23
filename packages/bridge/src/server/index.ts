@@ -502,49 +502,53 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
       return;
     }
     if (parsedEnvelope.type === 'job.result') {
-      if (job.status === 'saved') return;
-      const result = jobResultPayloadSchema.parse(parsedEnvelope.payload);
-      if (result.document.canonicalUrl !== job.url) {
-        throw new Error('回传内容 URL 与采集任务不一致');
+      try {
+        if (job.status === 'saved') return;
+        const result = jobResultPayloadSchema.parse(parsedEnvelope.payload);
+        if (result.document.canonicalUrl !== job.url) {
+          throw new Error('回传内容 URL 与采集任务不一致');
+        }
+        if (job.status === 'dispatched') await jobs.transition(job.id, 'collecting');
+        const override = sinkOverrides.get(job.id);
+        const document: CollectedDocument = job.batchId && job.planId
+          ? {
+              ...(result.document as CollectedDocument),
+              sourceMetadata: {
+                ...(result.document.sourceMetadata ?? {}),
+                batchId: job.batchId,
+                planId: job.planId,
+              },
+            }
+          : result.document as CollectedDocument;
+        const sinkResults = await saveCollectedDocument(
+          router,
+          candidateIndex,
+          document,
+          override,
+        );
+        const succeeded = sinkResults.filter(sinkResult => sinkResult.ok);
+        if (succeeded.length === 0) {
+          const detail = sinkResults
+            .map(sinkResult => `${sinkResult.sinkId}: ${sinkResult.detail?.error ?? '失败'}`)
+            .join('；');
+          throw new Error(`所有落地目标均失败：${detail || '无可用目标'}`);
+        }
+        const primary = succeeded[0]!;
+        const saved = await jobs.transition(job.id, 'saved', { outputPath: primary.outputRef });
+        socket.send(
+          JSON.stringify(
+            envelope('job.saved', job.id, { outputPath: primary.outputRef, results: sinkResults }),
+          ),
+        );
+        await collectionPlans?.onJobTerminal(saved);
+        return;
+      } finally {
+        sinkOverrides.delete(job.id);
       }
-      if (job.status === 'dispatched') await jobs.transition(job.id, 'collecting');
-      const override = sinkOverrides.get(job.id);
-      const document: CollectedDocument = job.batchId && job.planId
-        ? {
-            ...(result.document as CollectedDocument),
-            sourceMetadata: {
-              ...(result.document.sourceMetadata ?? {}),
-              batchId: job.batchId,
-              planId: job.planId,
-            },
-          }
-        : result.document as CollectedDocument;
-      const sinkResults = await saveCollectedDocument(
-        router,
-        candidateIndex,
-        document,
-        override,
-      );
-      sinkOverrides.delete(job.id);
-      const succeeded = sinkResults.filter(sinkResult => sinkResult.ok);
-      if (succeeded.length === 0) {
-        const detail = sinkResults
-          .map(sinkResult => `${sinkResult.sinkId}: ${sinkResult.detail?.error ?? '失败'}`)
-          .join('；');
-        throw new Error(`所有落地目标均失败：${detail || '无可用目标'}`);
-      }
-      const primary = succeeded[0]!;
-      const saved = await jobs.transition(job.id, 'saved', { outputPath: primary.outputRef });
-      socket.send(
-        JSON.stringify(
-          envelope('job.saved', job.id, { outputPath: primary.outputRef, results: sinkResults }),
-        ),
-      );
-      await collectionPlans?.onJobTerminal(saved);
-      return;
     }
     if (parsedEnvelope.type === 'job.error') {
       const error = errorSchema.parse(parsedEnvelope.payload);
+      sinkOverrides.delete(job.id);
       const status = error.needsAttention ? 'needs_attention' : 'failed';
       const terminal = await jobs.transition(job.id, status, {
         errorCode: error.code,

@@ -3,7 +3,10 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { CollectedDocument } from '@data-collector/shared';
 import { organize } from '../../packages/bridge/src/organize/index.js';
-import { explainGitFailure } from '../../packages/bridge/src/sinks/repoInboxSink.js';
+import {
+  atomicWriteInboxText,
+  explainGitFailure,
+} from '../../packages/bridge/src/sinks/repoInboxSink.js';
 import {
   DEFAULT_SINKS_CONFIG,
   RepoInboxSink,
@@ -67,6 +70,19 @@ function wechatDoc(): CollectedDocument {
 }
 
 describe('RepoInboxSink', () => {
+  it('removes only its exact temporary file when atomic rename fails', async () => {
+    const repo = await temporaryDirectory();
+    const target = join(repo, 'meta.json');
+    await expect(atomicWriteInboxText(
+      repo,
+      target,
+      '{"ok":true}\n',
+      async () => { throw new Error('injected rename failure'); },
+    )).rejects.toThrow('injected rename failure');
+
+    expect(await readdir(repo)).toEqual([]);
+  });
+
   it('drops original.md + meta.json + assets into <repo>/_inbox/<source>/ and commits', async () => {
     const repo = await temporaryDirectory();
     const runGit = vi.fn(async () => ({ code: 0, stderr: '' }));
