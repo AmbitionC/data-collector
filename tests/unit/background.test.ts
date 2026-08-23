@@ -285,11 +285,11 @@ describe('extension job runner', () => {
     ]);
   });
 
-  it('keeps sampling all three ZSXQ views when the latest view alone reaches the global cap', async () => {
+  it('keeps sampling all three ZSXQ views when the latest view reaches its per-view cap', async () => {
     const tabs = new InMemoryTabs();
     const bridge = new InMemoryBridge();
     let active = '';
-    const latest = Array.from({ length: 60 }, (_, index) => topic(String(10_000 + index)));
+    const latest = Array.from({ length: 20 }, (_, index) => topic(String(10_000 + index)));
     const byView: Record<string, CollectedDocument[]> = {
       '最新': latest,
       '精华': [topic('20001')],
@@ -328,9 +328,23 @@ describe('extension job runner', () => {
     const documents = await runner.collectZsxqPlanViews(7);
 
     expect(extractedViews).toEqual(['最新', '精华', '只看星主']);
-    expect(documents).toHaveLength(60);
+    expect(documents).toHaveLength(22);
     expect(documents.map(document => document.canonicalUrl)).toContain(`${LIST_URL}/topic/20001`);
     expect(documents.map(document => document.canonicalUrl)).toContain(`${LIST_URL}/topic/30001`);
+  });
+
+  it('times out a content-script request instead of leaving a plan running forever', async () => {
+    vi.useFakeTimers();
+    const tabs = new InMemoryTabs();
+    const bridge = new InMemoryBridge();
+    tabs.sendMessage = async () => new Promise(() => undefined);
+    const runner = new JobRunner({ tabs, bridge, waitForTabComplete: async () => undefined });
+
+    const pending = runner.collectZsxqPlanViews(7);
+    const assertion = expect(pending).rejects.toThrow('页面交互超时');
+    await vi.advanceTimersByTimeAsync(45_001);
+
+    await assertion;
   });
 
   it('backfills only new owner posts from the last 15 days with a trustworthy date', async () => {

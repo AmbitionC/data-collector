@@ -199,6 +199,8 @@ export interface CaptureOverrides {
 }
 
 const NEEDS_ATTENTION = new Set(['AUTH_REQUIRED', 'UNSUPPORTED_LAYOUT']);
+const ZSXQ_PLAN_ITEMS_PER_VIEW = 20;
+const CONTENT_SCRIPT_REQUEST_TIMEOUT_MS = 45_000;
 
 function lifeTeacherCategory(document: CollectedDocument): string {
   const combined = `${document.title}\n${document.text}`;
@@ -229,7 +231,11 @@ export class JobRunner {
       if (!selected.ok) throw new Error(selected.error.message);
       payloadOf(selected, 'selected');
       await this.ask(tabId, { type: 'list.restore' }).catch(() => undefined);
-      for (let round = 0; round < 12 && viewUrls.size < 60; round += 1) {
+      for (
+        let round = 0;
+        round < 12 && viewUrls.size < ZSXQ_PLAN_ITEMS_PER_VIEW;
+        round += 1
+      ) {
         const extracted = await this.ask(tabId, { type: 'extract.list' });
         if (!extracted.ok) throw new Error(extracted.error.message);
         for (const item of payloadOf(extracted, 'list').items) {
@@ -237,9 +243,9 @@ export class JobRunner {
           if (viewUrls.has(item.document.canonicalUrl)) continue;
           documents.push(item.document);
           viewUrls.add(item.document.canonicalUrl);
-          if (viewUrls.size >= 60) break;
+          if (viewUrls.size >= ZSXQ_PLAN_ITEMS_PER_VIEW) break;
         }
-        if (viewUrls.size >= 60) break;
+        if (viewUrls.size >= ZSXQ_PLAN_ITEMS_PER_VIEW) break;
         const advanced = await this.ask(tabId, { type: 'list.advance' });
         if (!advanced.ok) throw new Error(advanced.error.message);
         if (payloadOf(advanced, 'advance').loaded === 0) break;
@@ -394,7 +400,20 @@ export class JobRunner {
     let lastError: unknown;
     for (let attempt = 0; attempt < 4; attempt += 1) {
       try {
-        return await this.options.tabs.sendMessage(tabId, message);
+        let timeout: ReturnType<typeof setTimeout> | undefined;
+        try {
+          return await Promise.race([
+            this.options.tabs.sendMessage(tabId, message),
+            new Promise<never>((_resolve, reject) => {
+              timeout = setTimeout(
+                () => reject(new Error('页面交互超时（45 秒）')),
+                CONTENT_SCRIPT_REQUEST_TIMEOUT_MS,
+              );
+            }),
+          ]);
+        } finally {
+          if (timeout !== undefined) clearTimeout(timeout);
+        }
       } catch (error) {
         if (!isContentScriptNotReady(error) || attempt === 3) throw error;
         lastError = error;
