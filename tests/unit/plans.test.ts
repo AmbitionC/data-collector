@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   collectionBatchSchema,
+  jobCollectPayloadSchema,
   planCollectEnvelopeSchema,
   planResultEnvelopeSchema,
   unionZsxqViewDocuments,
@@ -84,5 +85,16 @@ describe('fixed collection plan contracts', () => {
       type: 'plan.collect',
       payload: { planId: 'arbitrary-user-plan' },
     }).success).toBe(false);
+  });
+
+  it('defaults old direct collection commands to interactive and accepts explicit plan isolation', () => {
+    expect(jobCollectPayloadSchema.parse({ url: 'https://mp.weixin.qq.com/s/x' })).toEqual({
+      url: 'https://mp.weixin.qq.com/s/x',
+      interactive: true,
+    });
+    expect(jobCollectPayloadSchema.parse({
+      url: 'https://www.nowcoder.com/discuss/1',
+      interactive: false,
+    }).interactive).toBe(false);
   });
 });

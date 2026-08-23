@@ -49,6 +49,7 @@ class InMemoryTabs implements TabsApi {
   readonly created: Array<{ url: string; active: boolean }> = [];
   readonly removed: number[] = [];
   readonly updated: Array<{ id: number; active: boolean }> = [];
+  readonly handedOff: Array<{ id: number; url: string }> = [];
   /** 内容脚本收到的消息类型顺序（批量采集靠它验证「提取一轮 → 翻一页」的节奏）。 */
   readonly asked: string[] = [];
   /** 只保留采集节奏（去掉还原页面这类善后消息），断言更聚焦。 */
@@ -103,6 +104,10 @@ class InMemoryTabs implements TabsApi {
 
   async update(id: number, input: { active: boolean }): Promise<void> {
     this.updated.push({ id, ...input });
+  }
+
+  async handoff(id: number, url: string): Promise<void> {
+    this.handedOff.push({ id, url });
   }
 
   async query(): Promise<BrowserTab[]> {
@@ -538,13 +543,13 @@ describe('extension job runner', () => {
 
     await runner.runRemoteJob('job-1', URL);
 
-    expect(tabs.created).toEqual([{ url: URL, active: false }]);
+    expect(tabs.created).toEqual([{ url: URL, active: false, purpose: 'remote-job' }]);
     expect(tabs.removed).toEqual([42]);
     expect(bridge.sent.map(message => message.type)).toEqual(['job.progress', 'job.result']);
     expect(bridge.sent[1]).toMatchObject({ requestId: 'job-1', payload: { document: { title: '后台任务测试文章' } } });
   });
 
-  it('keeps and activates a tab that needs login', async () => {
+  it('hands an interactive authentication tab to the user', async () => {
     const tabs = new InMemoryTabs();
     tabs.response = {
       ok: false,
@@ -557,10 +562,78 @@ describe('extension job runner', () => {
 
     expect(tabs.removed).toEqual([]);
     expect(tabs.updated).toEqual([{ id: 42, active: true }]);
+    expect(tabs.handedOff).toEqual([{
+      id: 42,
+      url: 'https://wx.zsxq.com/dweb2/index/topic_detail/1',
+    }]);
     expect(bridge.sent.at(-1)).toMatchObject({
       type: 'job.error',
       requestId: 'job-2',
       payload: { code: 'AUTH_REQUIRED', needsAttention: true },
+    });
+  });
+
+  it('reports plan authentication attention but closes its non-interactive generated tab', async () => {
+    const tabs = new InMemoryTabs();
+    tabs.response = {
+      ok: false,
+      error: { code: 'AUTH_REQUIRED', message: '请先登录知识星球' },
+    };
+    const bridge = new InMemoryBridge();
+    const runner = new JobRunner({ tabs, bridge, waitForTabComplete: async () => undefined });
+
+    await runner.runRemoteJob(
+      'plan-job',
+      'https://wx.zsxq.com/dweb2/index/topic_detail/1',
+      false,
+    );
+
+    expect(tabs.handedOff).toEqual([]);
+    expect(tabs.updated).toEqual([]);
+    expect(tabs.removed).toEqual([42]);
+    expect(bridge.sent.at(-1)).toMatchObject({
+      type: 'job.error',
+      payload: { code: 'AUTH_REQUIRED', needsAttention: true },
+    });
+  });
+
+  it('hands off the single ZSXQ plan page when the whole plan requires login', async () => {
+    const tabs = new InMemoryTabs();
+    tabs.sendMessage = async () => ({
+      ok: false,
+      error: { code: 'AUTH_REQUIRED', message: '请先登录知识星球' },
+    });
+    const bridge = new InMemoryBridge();
+    const runner = new JobRunner({ tabs, bridge, waitForTabComplete: async () => undefined });
+
+    await expect(runner.runZsxqCollectionPlan('login-batch')).rejects.toThrow('请先登录知识星球');
+
+    expect(tabs.created).toEqual([{
+      url: LIST_URL,
+      active: false,
+      purpose: 'zsxq-plan',
+    }]);
+    expect(tabs.updated).toEqual([{ id: 42, active: true }]);
+    expect(tabs.handedOff).toEqual([{ id: 42, url: LIST_URL }]);
+    expect(tabs.removed).toEqual([]);
+  });
+
+  it('closes an unsupported-layout tab instead of retaining it for attention', async () => {
+    const tabs = new InMemoryTabs();
+    tabs.response = {
+      ok: false,
+      error: { code: 'UNSUPPORTED_LAYOUT', message: '页面结构暂不支持' },
+    };
+    const bridge = new InMemoryBridge();
+    const runner = new JobRunner({ tabs, bridge, waitForTabComplete: async () => undefined });
+
+    await runner.runRemoteJob('unsupported', URL);
+
+    expect(tabs.handedOff).toEqual([]);
+    expect(tabs.removed).toEqual([42]);
+    expect(bridge.sent.at(-1)).toMatchObject({
+      type: 'job.error',
+      payload: { code: 'UNSUPPORTED_LAYOUT', needsAttention: false },
     });
   });
 
@@ -1097,6 +1170,10 @@ function backgroundChromeMock(withSidePanel: boolean) {
     storage: {
       local: {
         get: vi.fn(async () => ({ bridgeToken: 'x'.repeat(43), bridgePort: 17321 })),
+        set: vi.fn(async () => undefined),
+      },
+      session: {
+        get: vi.fn(async () => ({})),
         set: vi.fn(async () => undefined),
       },
     },

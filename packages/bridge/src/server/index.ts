@@ -337,7 +337,10 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
       return;
     }
     await jobs.transition(job.id, 'dispatched');
-    extensionSocket.send(JSON.stringify(envelope('job.collect', job.id, { url: job.url })));
+    extensionSocket.send(JSON.stringify(envelope('job.collect', job.id, {
+      url: job.url,
+      interactive: !job.batchId,
+    })));
   };
 
   const dispatchQueued = async (): Promise<void> => {

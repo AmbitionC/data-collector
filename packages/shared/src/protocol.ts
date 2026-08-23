@@ -108,6 +108,12 @@ export const collectJobPayloadSchema = z.object({
   sinks: z.array(z.string().trim().min(1).max(100)).max(10).optional(),
 });
 
+export const jobCollectPayloadSchema = z.object({
+  url: z.string().url().max(4096),
+  /** 只有用户直接发起的单条任务可把登录页交给用户；自动批次必须自行回收页面。 */
+  interactive: z.boolean().default(true),
+}).strict();
+
 export const jobResultPayloadSchema = z.object({
   document: collectedDocumentSchema,
 });

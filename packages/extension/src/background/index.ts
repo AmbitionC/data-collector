@@ -17,6 +17,7 @@ import {
   type ExtractionResponse,
   type TabsApi,
 } from './jobs.js';
+import { OwnedTabRegistry, type OwnedTabsStorage } from './ownedTabs.js';
 
 const storage: ExtensionStorage = {
   get: keys => chrome.storage.local.get(keys),
@@ -24,10 +25,24 @@ const storage: ExtensionStorage = {
   remove: keys => chrome.storage.local.remove(keys),
 };
 
-const tabs: TabsApi = {
-  create: async input => chrome.tabs.create(input) as Promise<BrowserTab>,
+const sessionStorage: OwnedTabsStorage = {
+  get: keys => chrome.storage.session.get(keys),
+  set: values => chrome.storage.session.set(values),
+};
+const ownedTabs = new OwnedTabRegistry(sessionStorage, {
   remove: id => chrome.tabs.remove(id),
+});
+
+const tabs: TabsApi = {
+  create: async input => {
+    const { purpose = 'remote-job', ...chromeInput } = input;
+    const tab = await chrome.tabs.create(chromeInput) as BrowserTab;
+    await ownedTabs.track(tab, purpose);
+    return tab;
+  },
+  remove: id => ownedTabs.close(id),
   update: async (id, input) => { await chrome.tabs.update(id, input); },
+  handoff: (id, url) => ownedTabs.handoff(id, url),
   query: async input => chrome.tabs.query(input as chrome.tabs.QueryInfo) as Promise<BrowserTab[]>,
   sendMessage: async (id, message) =>
     chrome.tabs.sendMessage(id, message) as Promise<ExtractionResponse>,
@@ -107,7 +122,7 @@ const runner = new JobRunner({
     return new Set(entries.map(entry => String(entry.url ?? '')).filter(Boolean));
   },
 });
-connection.onCollect((requestId, url) => runner.runRemoteJob(requestId, url));
+connection.onCollect((requestId, url, interactive) => runner.runRemoteJob(requestId, url, interactive));
 connection.onPlanCollect(async (requestId, payload) => {
   if (payload.planId !== 'zsxq-chen-teacher') {
     connection.send('plan.result', requestId, {
@@ -418,12 +433,10 @@ async function maybeAutoReload(): Promise<void> {
 
 chrome.runtime.onInstalled.addListener(() => {
   void chrome.alarms.create('bridge-reconnect', { periodInMinutes: 1 });
-  void configureSidePanel();
-  void connection.start();
+  void startExtension();
 });
 chrome.runtime.onStartup.addListener(() => {
-  void configureSidePanel();
-  void connection.start();
+  void startExtension();
 });
 chrome.alarms.onAlarm.addListener(alarm => {
   if (alarm.name !== 'bridge-reconnect') return;
@@ -433,5 +446,16 @@ chrome.alarms.onAlarm.addListener(alarm => {
     .catch(() => undefined)
     .then(() => maybeAutoReload());
 });
-void configureSidePanel();
-void connection.start();
+let staleTabsCleaned = false;
+async function startExtension(): Promise<void> {
+  let cleanup: Promise<void> | undefined;
+  if (!staleTabsCleaned) {
+    staleTabsCleaned = true;
+    cleanup = ownedTabs.cleanupStale();
+  }
+  await configureSidePanel();
+  await cleanup;
+  await connection.start();
+}
+
+void startExtension();

@@ -788,7 +788,11 @@ describe('extension Bridge connection', () => {
         payload: { url: 'https://mp.weixin.qq.com/s/B' },
       }),
     );
-    await vi.waitFor(() => expect(collect).toHaveBeenCalledWith('job-B', 'https://mp.weixin.qq.com/s/B'));
+    await vi.waitFor(() => expect(collect).toHaveBeenCalledWith(
+      'job-B',
+      'https://mp.weixin.qq.com/s/B',
+      true,
+    ));
     currentSocket.emit(
       'message',
       JSON.stringify({
@@ -854,7 +858,7 @@ describe('extension Bridge connection', () => {
     );
 
     await flushPromises();
-    expect(collect).toHaveBeenCalledWith('job-1', 'https://mp.weixin.qq.com/s/x');
+    expect(collect).toHaveBeenCalledWith('job-1', 'https://mp.weixin.qq.com/s/x', true);
     expect(storage.values.lastJobUrl).toBe('https://mp.weixin.qq.com/s/x');
 
     connection.send('job.progress', 'job-1', { stage: 'collecting' });
@@ -900,6 +904,7 @@ describe('extension Bridge connection', () => {
     await vi.waitFor(() => expect(collect).toHaveBeenCalledWith(
       'job-burst-2',
       'https://www.nowcoder.com/discuss/10002',
+      true,
     ));
 
     firstWrite.release();
@@ -907,6 +912,7 @@ describe('extension Bridge connection', () => {
     await vi.waitFor(() => expect(collect).toHaveBeenCalledWith(
       'job-burst-1',
       'https://www.nowcoder.com/discuss/10001',
+      true,
     ));
     expect(collect).toHaveBeenCalledTimes(2);
   });

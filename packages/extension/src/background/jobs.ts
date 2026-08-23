@@ -8,6 +8,7 @@ import {
 } from '@data-collector/shared';
 import { linkedArticleUrl } from '../extractors/index.js';
 import type { HookStats } from '../topicIndex.js';
+import type { OwnedTabPurpose } from './ownedTabs.js';
 
 export interface BrowserTab {
   id?: number;
@@ -55,9 +56,11 @@ export type ExtractionResponse =
   | { ok: false; error: { code: string; message: string } };
 
 export interface TabsApi {
-  create(input: { url: string; active: boolean }): Promise<BrowserTab>;
+  create(input: { url: string; active: boolean; purpose?: OwnedTabPurpose }): Promise<BrowserTab>;
   remove(id: number): Promise<void>;
   update(id: number, input: { active: boolean }): Promise<void>;
+  /** 将一个登录页交给用户；实现会从自动清理集合移除，并替换上一个登录提示页。 */
+  handoff(id: number, url: string): Promise<void>;
   query(input?: unknown): Promise<BrowserTab[]>;
   sendMessage(id: number, message: unknown): Promise<ExtractionResponse>;
   /**
@@ -198,9 +201,9 @@ export interface CaptureOverrides {
   sinks?: string[];
 }
 
-const NEEDS_ATTENTION = new Set(['AUTH_REQUIRED', 'UNSUPPORTED_LAYOUT']);
 const ZSXQ_PLAN_ITEMS_PER_VIEW = 20;
 const CONTENT_SCRIPT_REQUEST_TIMEOUT_MS = 45_000;
+const CURRENT_PAGE_NEEDS_ATTENTION = new Set(['AUTH_REQUIRED', 'UNSUPPORTED_LAYOUT']);
 
 function lifeTeacherCategory(document: CollectedDocument): string {
   const categoryOf = (text: string): string | undefined => {
@@ -299,7 +302,7 @@ export class JobRunner {
     let keepTab = false;
     try {
       const tab = await retryTransientTabOperation(
-        () => this.options.tabs.create({ url: groupUrl, active: false }),
+        () => this.options.tabs.create({ url: groupUrl, active: false, purpose: 'zsxq-plan' }),
         milliseconds => this.wait(milliseconds),
       );
       if (tab.id === undefined) throw new Error('浏览器未返回知识星球标签页 ID');
@@ -386,8 +389,11 @@ export class JobRunner {
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       if (/AUTH_REQUIRED|登录/u.test(message)) {
-        keepTab = true;
         if (tabId !== undefined) await this.options.tabs.update(tabId, { active: true }).catch(() => undefined);
+        if (tabId !== undefined) {
+          await this.options.tabs.handoff(tabId, groupUrl);
+          keepTab = true;
+        }
       }
       throw error;
     } finally {
@@ -487,7 +493,11 @@ export class JobRunner {
     if (!articleUrl) return document;
     let tabId: number | undefined;
     try {
-      const tab = await this.options.tabs.create({ url: articleUrl, active: false });
+      const tab = await this.options.tabs.create({
+        url: articleUrl,
+        active: false,
+        purpose: 'linked-article',
+      });
       if (tab.id === undefined) return document;
       tabId = tab.id;
       await this.options.waitForTabComplete(tabId, 30_000);
@@ -529,19 +539,19 @@ export class JobRunner {
     }
   }
 
-  async runRemoteJob(requestId: string, rawUrl: string): Promise<void> {
-    const result = this.remoteQueue.then(() => this.runRemoteJobNow(requestId, rawUrl));
+  async runRemoteJob(requestId: string, rawUrl: string, interactive = true): Promise<void> {
+    const result = this.remoteQueue.then(() => this.runRemoteJobNow(requestId, rawUrl, interactive));
     this.remoteQueue = result.catch(() => undefined);
     return result;
   }
 
-  private async runRemoteJobNow(requestId: string, rawUrl: string): Promise<void> {
+  private async runRemoteJobNow(requestId: string, rawUrl: string, interactive: boolean): Promise<void> {
     let tabId: number | undefined;
     let keepTab = false;
     try {
       const parsedUrl = parseSupportedUrl(rawUrl);
       const url = parsedUrl.href;
-      const tab = await this.options.tabs.create({ url, active: false });
+      const tab = await this.options.tabs.create({ url, active: false, purpose: 'remote-job' });
       if (tab.id === undefined) throw new Error('浏览器未返回新标签页 ID');
       tabId = tab.id;
       await this.options.waitForTabComplete(tabId, 30_000);
@@ -552,12 +562,16 @@ export class JobRunner {
         parsedUrl.hostname === 'www.nowcoder.com',
       );
       if (!response.ok) {
-        keepTab = NEEDS_ATTENTION.has(response.error.code);
-        if (keepTab) await this.options.tabs.update(tabId, { active: true });
+        const needsAttention = response.error.code === 'AUTH_REQUIRED';
+        if (needsAttention && interactive) {
+          await this.options.tabs.update(tabId, { active: true }).catch(() => undefined);
+          await this.options.tabs.handoff(tabId, url);
+          keepTab = true;
+        }
         this.options.bridge.send('job.error', requestId, {
           code: response.error.code,
           message: response.error.message,
-          needsAttention: keepTab,
+          needsAttention,
         });
         return;
       }
@@ -574,7 +588,7 @@ export class JobRunner {
         needsAttention: false,
       });
     } finally {
-      if (tabId !== undefined && !keepTab) await this.options.tabs.remove(tabId);
+      if (tabId !== undefined && !keepTab) await this.options.tabs.remove(tabId).catch(() => undefined);
     }
   }
 
@@ -608,7 +622,7 @@ export class JobRunner {
       this.options.bridge.send('job.error', job.id, {
         code: response.error.code,
         message: response.error.message,
-        needsAttention: NEEDS_ATTENTION.has(response.error.code),
+        needsAttention: CURRENT_PAGE_NEEDS_ATTENTION.has(response.error.code),
       });
       return job.id;
     }

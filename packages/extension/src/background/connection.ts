@@ -3,6 +3,7 @@ import {
   EXTENSION_REPLACED_CLOSE_CODE,
   EXTENSION_REPLACED_CLOSE_REASON,
   bridgeAuthorizedPayloadSchema,
+  jobCollectPayloadSchema,
   planCollectPayloadSchema,
   wsEnvelopeSchema,
   type CollectionPlanId,
@@ -36,7 +37,7 @@ interface ConnectionDependencies {
   clearTimeout: (handle: unknown) => void;
 }
 
-type CollectHandler = (requestId: string, url: string) => void | Promise<void>;
+type CollectHandler = (requestId: string, url: string, interactive: boolean) => void | Promise<void>;
 type PlanCollectHandler = (
   requestId: string,
   payload: { batchId: string; planId: CollectionPlanId; force?: boolean },
@@ -535,8 +536,8 @@ export class BridgeConnection {
         const payload = bridgeAuthorizedPayloadSchema.parse(message.payload);
         await authorize(payload.token);
       } else if (message.type === 'job.collect') {
-        const payload = message.payload as { url?: unknown };
-        if (typeof payload.url === 'string' && isCurrent()) {
+        const payload = jobCollectPayloadSchema.parse(message.payload);
+        if (isCurrent()) {
           await this.transitionJob(generation, isCurrent, {
             lastJobId: message.requestId,
             lastJobStatus: 'collecting',
@@ -548,7 +549,7 @@ export class BridgeConnection {
           // transitionJob=false 只表示侧栏状态已被更新的一条覆盖，绝不表示这个任务可丢弃。
           // 牛客一批会快速下发 12 条，存储写入重叠时每条仍必须进入采集队列。
           if (isCurrent()) {
-            await this.collectHandler?.(message.requestId, payload.url);
+            await this.collectHandler?.(message.requestId, payload.url, payload.interactive);
           }
         }
       } else if (message.type === 'plan.collect') {

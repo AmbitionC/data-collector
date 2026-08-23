@@ -237,15 +237,20 @@ describe('local Bridge', () => {
     });
     await planCommand;
     const topicUrl = 'https://wx.zsxq.com/group/48844584441158/topic/844444444444444';
+    const dispatchedPlanJob = nextMessage<{ url: string; interactive: boolean }>(socket);
     const created = await requestJson<{ id: string }>(bridge.url, '/v1/jobs', {
       method: 'POST',
       token,
       body: {
         url: topicUrl,
-        requestedBy: 'extension',
+        requestedBy: 'codex',
         batchId: started.body.id,
         planId: 'zsxq-chen-teacher',
       },
+    });
+    await expect(dispatchedPlanJob).resolves.toMatchObject({
+      requestId: created.body.id,
+      payload: { url: topicUrl, interactive: false },
     });
     socket.send(envelope('job.progress', created.body.id, { stage: 'collecting' }));
     socket.send(envelope('job.result', created.body.id, {
@@ -371,7 +376,7 @@ describe('local Bridge', () => {
     await expectNoMessage(socket);
 
     const zsxqUrl = 'https://wx.zsxq.com/group/1/topic/533333333333333';
-    const dispatchedPromise = nextMessage<{ url: string }>(socket);
+    const dispatchedPromise = nextMessage<{ url: string; interactive: boolean }>(socket);
     const zsxq = await requestJson<{ id: string }>(bridge.url, '/v1/jobs', {
       method: 'POST',
       token,
@@ -380,7 +385,7 @@ describe('local Bridge', () => {
     await expect(dispatchedPromise).resolves.toMatchObject({
       type: 'job.collect',
       requestId: zsxq.body.id,
-      payload: { url: zsxqUrl },
+      payload: { url: zsxqUrl, interactive: true },
     });
     socket.send(envelope('job.progress', zsxq.body.id, { stage: 'collecting' }));
     socket.send(envelope('job.result', zsxq.body.id, {
@@ -655,7 +660,7 @@ describe('local Bridge', () => {
     expect(removedPairing.status).toBe(404);
     expect(token.length).toBeGreaterThanOrEqual(32);
     socket.send(envelope('extension.hello', 'extension', { version: '0.1.0' }));
-    const dispatchedPromise = nextMessage<{ url: string }>(socket);
+    const dispatchedPromise = nextMessage<{ url: string; interactive: boolean }>(socket);
     const jobResponse = await requestJson<{ id: string; status: string }>(bridge.url, '/v1/jobs', {
       method: 'POST',
       token,
@@ -664,7 +669,11 @@ describe('local Bridge', () => {
     expect(jobResponse.status).toBe(202);
     const job = jobResponse.body;
     const dispatched = await dispatchedPromise;
-    expect(dispatched).toMatchObject({ type: 'job.collect', requestId: job.id });
+    expect(dispatched).toMatchObject({
+      type: 'job.collect',
+      requestId: job.id,
+      payload: { url: URL, interactive: true },
+    });
 
     socket.send(envelope('job.progress', job.id, { stage: 'collecting' }));
     socket.send(envelope('job.result', job.id, { document: document() }));
