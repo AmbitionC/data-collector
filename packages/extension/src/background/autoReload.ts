@@ -26,7 +26,7 @@ export interface UpdateSignal {
   updateMessage?: string | undefined;
   /** 正在采集：service worker 一重启就断在半路。 */
   busy?: boolean | undefined;
-  /** 侧栏开着：重载会把它连同「本轮明细」一起关掉。 */
+  /** 兼容旧调用；侧栏常开不再阻止重载，任务明细会从持久化状态恢复。 */
   panelOpen?: boolean | undefined;
 }
 
@@ -62,14 +62,12 @@ export function hasNewBuild(signal: UpdateSignal): boolean {
  *
  * - **正在采集**：service worker 一重启，跑到一半的批次就断在那儿，而页面上的
  *   已处理标记还在——重来一遍会整批跳过，用户看到的是「采了个寂寞」。
- * - **侧栏开着**：重载会把侧栏连同还没看完的「本轮明细」一起关掉。这时横幅就在
- *   他眼前，点一下即可，不必替他做决定。
  * - **同一个构建已经自动重载过一次还是没变**：说明浏览器里加载的根本不是这份产物
  *   （多半是从别的目录加载的），再重载多少次都一样，交给横幅把话说清楚。
  */
 export function shouldAutoReload(signal: UpdateSignal): boolean {
   if (!hasNewBuild(signal)) return false;
-  if (signal.busy || signal.panelOpen) return false;
+  if (signal.busy) return false;
   return signal.triedBuildId !== signal.builtBuildId;
 }
 

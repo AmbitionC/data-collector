@@ -142,11 +142,6 @@ async function configureSidePanel(): Promise<void> {
   await sidePanel.setPanelBehavior({ openPanelOnActionClick: true });
 }
 
-/** 侧栏最后一次来问状态的时刻。它开着时会每秒轮询，关掉就停表。 */
-let lastStatusAt = 0;
-/** 超过这个时长没人来问状态，就认为侧栏关着，可以放心重载。 */
-const PANEL_OPEN_MS = 5_000;
-
 /**
  * 本扩展这份产物的构建标记，打包时由 esbuild 烙进来。
  * 直接跑源码（测试、调试）时它不存在——那时一律按「不知道」处理，什么都不做。
@@ -252,8 +247,6 @@ chrome.runtime.onMessage.addListener((message: unknown, _sender, sendResponse) =
   const request = message as { type?: string; overrides?: unknown };
   const action = async () => {
     if (request.type === 'status.get') {
-      // 侧栏只在开着的时候轮询（关掉会 pagehide 停表），据此判断「现在能不能重载」。
-      lastStatusAt = Date.now();
       return status();
     }
     if (request.type === 'capture.current') {
@@ -417,7 +410,6 @@ async function maybeAutoReload(): Promise<void> {
   ]);
   const signal: UpdateSignal = {
     ...updateSignal(values),
-    panelOpen: Date.now() - lastStatusAt < PANEL_OPEN_MS,
   };
   if (!shouldAutoReload(signal)) return;
   await chrome.storage.local.set({ autoReloadTried: signal.builtBuildId });

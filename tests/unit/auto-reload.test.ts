@@ -38,9 +38,8 @@ describe('什么时候可以自己重新加载', () => {
     expect(shouldAutoReload({ ...READY, busy: true })).toBe(false);
   });
 
-  it('侧栏开着时不重载，交给横幅让用户自己挑时机', () => {
-    // 重载会把侧栏连同还没看完的「本轮明细」一起关掉。
-    expect(shouldAutoReload({ ...READY, panelOpen: true })).toBe(false);
+  it('侧栏固定常开也会重载，任务明细从持久化状态恢复', () => {
+    expect(shouldAutoReload({ ...READY, panelOpen: true })).toBe(true);
     expect(updateBanner({ ...READY, panelOpen: true }).available).toBe(true);
   });
 
