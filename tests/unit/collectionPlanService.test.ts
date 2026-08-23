@@ -85,6 +85,26 @@ describe('CollectionPlanService', () => {
     });
   });
 
+  it('reconciles a running batch with attached jobs on reconnect without rediscovering or redispatching', async () => {
+    const context = await fixture();
+    const batch = await context.service.run('nowcoder-agent-market', { force: true });
+    const children = context.jobs.list().filter(job => job.batchId === batch.id);
+    expect(children).toHaveLength(2);
+    await context.jobs.transition(children[0]!.id, 'dispatched');
+    const dispatchedBeforeReconnect = [...context.dispatched];
+    context.discover.mockClear();
+
+    await context.service.onExtensionConnected();
+
+    expect(context.discover).not.toHaveBeenCalled();
+    expect(context.dispatched).toEqual(dispatchedBeforeReconnect);
+    expect(context.store.latest('nowcoder-agent-market', 1)[0]).toMatchObject({
+      status: 'running',
+      discovered: 2,
+      accepted: 2,
+    });
+  });
+
   it('starts ZSXQ collection through the extension and records discovery after its union pass', async () => {
     const context = await fixture();
     const batch = await context.service.run('zsxq-chen-teacher', { force: true });

@@ -163,7 +163,13 @@ export class CollectionPlanService {
 
   async onExtensionConnected(options: { runDue?: boolean } = {}): Promise<void> {
     for (const batch of this.dependencies.store.latest(undefined, 100)) {
-      if (batch.status === 'running') await this.execute(batch);
+      if (batch.status !== 'running') continue;
+      const jobs = this.dependencies.jobs.list();
+      const attached = jobs.filter(job => job.batchId === batch.id);
+      // Bridge 已在 extension.hello 前把 dispatched/collecting 恢复为 queued 并重派。
+      // 这里若再次执行发现，会覆盖原批次 discovered/coverage，甚至重复分发同一批子任务。
+      if (attached.length > 0) await this.dependencies.store.reconcile(batch.id, jobs);
+      else await this.execute(batch);
     }
     if (options.runDue) await this.runDuePlans();
   }
