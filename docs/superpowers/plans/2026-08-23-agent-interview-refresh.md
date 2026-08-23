@@ -69,7 +69,7 @@
 
 - [ ] **Step 7: 实现原子重建与 CLI**
 
-  按目录索引读取 `source.json`，以 `publishedAt || collectedAt || id` 稳定排序，在临时目录中用修复后的 `FeJourneyCandidateIndex` 重新 prepare/commit；全部成功后原子更新真实 `source.json` 和 `_catalog/fe-journey.json`。CLI 只输出 JSON 计数，不输出正文或凭据。
+  按目录索引读取 `source.json`，以 `publishedAt || collectedAt || id` 稳定排序，在临时目录中用修复后的 `FeJourneyCandidateIndex` 重新 prepare/commit；真实库写入由跨进程批次锁串行化，写前保留全部原文与 catalog，任一写入失败则整批回滚。CLI 只输出 JSON 计数，不输出正文或凭据。
 
 - [ ] **Step 8: 运行定向与全量测试、构建**
 
@@ -261,4 +261,3 @@
 - [ ] **Step 7: 线上冒烟**
 
   验证导航只含 12 篇定位一致面经，随机打开字节/腾讯/蚂蚁各一篇，确认来源、正文、知识互链可访问；旧前端面经不再出现在导航且 OSS 返回删除结果。
-

@@ -165,6 +165,28 @@ describe('FeJourneyCandidateIndex', () => {
     expect(otherTencentAuthor.document.feJourney?.duplicateOf).toBeUndefined();
   });
 
+  it('serializes writes across independent index instances without losing entries', async () => {
+    const root = await temporaryDirectories.create('fe-journey-index-cross-process-lock-');
+    const firstIndex = await FeJourneyCandidateIndex.open(root);
+    const secondIndex = await FeJourneyCandidateIndex.open(root);
+
+    await Promise.all([
+      firstIndex.runExclusive(async () => {
+        const prepared = firstIndex.prepare(nowcoderDocument('5201', '腾讯 Agent 一面追问 RAG 评测与工具安全。'));
+        await prepared.commit();
+      }),
+      secondIndex.runExclusive(async () => {
+        const prepared = secondIndex.prepare(nowcoderDocument('5202', '字节 Agent 二面追问记忆系统与状态恢复。'));
+        await prepared.commit();
+      }),
+    ]);
+
+    const catalog = JSON.parse(
+      await readFile(join(root, '_catalog', 'fe-journey.json'), 'utf8'),
+    ) as { entries: Array<{ id: string }> };
+    expect(catalog.entries).toHaveLength(2);
+  });
+
   it('clusters same-author same-company question reposts even when one contains long answers', async () => {
     const root = await temporaryDirectories.create('fe-journey-index-question-duplicate-');
     const index = await FeJourneyCandidateIndex.open(root);

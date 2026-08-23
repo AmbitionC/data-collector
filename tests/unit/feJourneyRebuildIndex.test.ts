@@ -101,4 +101,34 @@ describe('rebuildFeJourneyCandidateIndex', () => {
       catalogAfterFirstPass,
     );
   });
+
+  it('rolls back every source and catalog when a batch write fails', async () => {
+    const root = await temporaryDirectories.create('fe-journey-index-rebuild-rollback-');
+    const library = new MarkdownLibrary({ root });
+    const documents = [
+      interview('7201', '腾讯', '候选人甲'),
+      interview('7202', '字节', '候选人乙'),
+    ];
+    for (const document of documents) await library.save(organize(document));
+    const paths = await Promise.all(documents.map(document => sourcePath(
+      root,
+      stableContentId(document.canonicalUrl),
+    )));
+    const catalogPath = join(root, '_catalog', 'fe-journey.json');
+    await writeFile(catalogPath, `${JSON.stringify({ version: 1, entries: [] }, null, 2)}\n`);
+    const beforeSources = await Promise.all(paths.map(path => readFile(path, 'utf8')));
+    const beforeCatalog = await readFile(catalogPath, 'utf8');
+    let writes = 0;
+
+    await expect(rebuildFeJourneyCandidateIndex(root, {
+      writeText: async (_libraryRoot, target, contents) => {
+        writes += 1;
+        if (writes === 2) throw new Error('injected batch write failure');
+        await writeFile(target, contents, 'utf8');
+      },
+    })).rejects.toThrow('injected batch write failure');
+
+    await expect(Promise.all(paths.map(path => readFile(path, 'utf8')))).resolves.toEqual(beforeSources);
+    await expect(readFile(catalogPath, 'utf8')).resolves.toBe(beforeCatalog);
+  });
 });

@@ -10,6 +10,7 @@ import { atomicWriteText } from '../library/writer.js';
 import { hammingDistance64, questionFingerprint } from './fingerprint.js';
 import { enrichNowcoderEvidence } from './nowcoderEvidence.js';
 import { scoreFeJourneyCandidate } from './quality.js';
+import { withFeJourneyCandidateLock } from './fileLock.js';
 
 interface CandidateIndexEntry {
   id: string;
@@ -79,8 +80,8 @@ function parseCatalog(value: unknown): CandidateCatalog {
 export class FeJourneyCandidateIndex {
   private readonly catalogPath: string;
   private entries: CandidateIndexEntry[];
-  private commitQueue: Promise<void> = Promise.resolve();
   private candidateSaveQueue: Promise<void> = Promise.resolve();
+  private lockDepth = 0;
 
   private constructor(private readonly libraryRoot: string, catalog: CandidateCatalog) {
     this.catalogPath = join(libraryRoot, '_catalog', 'fe-journey.json');
@@ -107,7 +108,24 @@ export class FeJourneyCandidateIndex {
    * 会同时读取旧 entries，虽然 contentHash 相同，却都缺少 duplicateOf。
    */
   runExclusive<T>(operation: () => Promise<T>): Promise<T> {
-    const result = this.candidateSaveQueue.then(operation);
+    const result = this.candidateSaveQueue.then(() => withFeJourneyCandidateLock(
+      this.libraryRoot,
+      async () => {
+        try {
+          const catalog = parseCatalog(JSON.parse(await readFile(this.catalogPath, 'utf8')) as unknown);
+          this.entries = catalog.entries;
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code === 'ENOENT') this.entries = [];
+          else throw error;
+        }
+        this.lockDepth += 1;
+        try {
+          return await operation();
+        } finally {
+          this.lockDepth -= 1;
+        }
+      },
+    ));
     this.candidateSaveQueue = result.then(
       () => undefined,
       () => undefined,
@@ -231,7 +249,7 @@ export class FeJourneyCandidateIndex {
       commit: async () => {
         if (committed) return;
         committed = true;
-        const operation = this.commitQueue.then(async () => {
+        const commitEntry = async () => {
           this.entries = this.entries
             .filter(existing => existing.id !== entry.id)
             .concat(entry)
@@ -242,12 +260,9 @@ export class FeJourneyCandidateIndex {
             this.catalogPath,
             `${JSON.stringify(catalog, null, 2)}\n`,
           );
-        });
-        this.commitQueue = operation.then(
-          () => undefined,
-          () => undefined,
-        );
-        await operation;
+        };
+        if (this.lockDepth > 0) await commitEntry();
+        else await this.runExclusive(commitEntry);
       },
     };
   }
