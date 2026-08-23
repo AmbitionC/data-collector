@@ -4,6 +4,7 @@ import type {
   FeJourneyCandidateMetadata,
 } from '@data-collector/shared';
 import { contentFingerprint, simHash64 } from './fingerprint.js';
+import { analyzeNowcoderEvidence } from './nowcoderEvidence.js';
 
 type UnclusteredCandidate = Omit<FeJourneyCandidateMetadata, 'clusterId' | 'duplicateOf'>;
 
@@ -138,8 +139,14 @@ export function scoreFeJourneyCandidate(document: CollectedDocument): Unclustere
   const projectCount = matchCount(combined, PROJECT_SIGNALS);
   const hasRepositoryEvidence = document.source === 'github' ||
     /https?:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+/i.test(`${combined}\n${document.html}`);
+  const nowcoderEvidence = document.source === 'nowcoder'
+    ? analyzeNowcoderEvidence(document)
+    : undefined;
 
-  if (interviewCount >= 2) candidateKinds.push('interview');
+  if (
+    interviewCount >= 2 ||
+    (nowcoderEvidence && nowcoderEvidence.evidenceGrade !== 'C' && nowcoderEvidence.questionCount >= 3)
+  ) candidateKinds.push('interview');
   if (knowledgeCount >= 2) candidateKinds.push('knowledge');
   if (operationCount >= 2) candidateKinds.push('operation');
   if (document.source === 'github' || (projectCount >= 2 && hasRepositoryEvidence)) {
@@ -193,6 +200,12 @@ export function scoreFeJourneyCandidate(document: CollectedDocument): Unclustere
   if (document.source === 'nowcoder' && suspiciousBareDomains(combined).length >= 2) {
     score -= 50;
     exclusionReasons.push('可疑导流链接');
+  }
+  if (nowcoderEvidence?.evidenceGrade === 'C' && nowcoderEvidence.questionCount >= 3) {
+    score -= nowcoderEvidence.contentAccess === 'full' ? 30 : 50;
+    exclusionReasons.push(
+      nowcoderEvidence.contentAccess === 'full' ? '面经证据不足' : '付费或截断正文',
+    );
   }
   if (candidateKinds.length === 0) {
     score -= 20;
