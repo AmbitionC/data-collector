@@ -153,6 +153,29 @@ describe('content script list collection', () => {
     expect(response.selected).toEqual({ label: '精华', topicIds: ['633333333333333'] });
   });
 
+  it('does not rely on throttled page timers after a view switch has updated the DOM', async () => {
+    const html = await readFile(join(import.meta.dirname, '..', 'fixtures', 'zsxq-three-views.html'), 'utf8');
+    document.body.innerHTML = new RegExp('<body>([\\s\\S]*)</body>').exec(html)![1]!;
+    for (const item of document.querySelectorAll<HTMLElement>('.menu-container .item')) {
+      item.addEventListener('click', () => {
+        for (const candidate of document.querySelectorAll('.menu-container .item')) {
+          candidate.classList.toggle('actived', candidate === item);
+        }
+        document.querySelector('#feed')!.innerHTML = `
+          <div class="topic-container" data-topic-id="655555555555555">
+            <div class="talk-content-container">后台标签切换后由 DOM 变化直接确认。</div>
+          </div>`;
+      });
+    }
+    vi.useFakeTimers();
+    const timeoutSpy = vi.spyOn(globalThis, 'setTimeout');
+
+    const response = await settle(ask<ViewResponse>({ type: 'list.selectView', label: '精华' }));
+
+    expect(response.selected).toEqual({ label: '精华', topicIds: ['655555555555555'] });
+    expect(timeoutSpy).not.toHaveBeenCalled();
+  });
+
   it('waits for the SPA menu to render before selecting the initial plan view', async () => {
     document.body.innerHTML = '<main id="app-shell"></main>';
     vi.useFakeTimers();
@@ -175,7 +198,7 @@ describe('content script list collection', () => {
     const response = await settle(pending);
 
     expect(response.selected).toEqual({ label: '最新', topicIds: ['644444444444444'] });
-    expect(timeoutSpy.mock.calls.some(([, milliseconds]) => milliseconds === 500)).toBe(true);
+    expect(timeoutSpy.mock.calls.some(([, milliseconds]) => milliseconds === 10_000)).toBe(true);
   });
 
   it('registers only one message listener even if injected twice', async () => {

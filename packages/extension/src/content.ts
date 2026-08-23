@@ -422,15 +422,46 @@ function clickMenu(label: string): boolean {
   return true;
 }
 
+function observeDocumentUntil<T>(
+  read: () => T | undefined,
+  timeoutMs: number,
+  timeoutError: () => Error,
+): Promise<T> {
+  const initial = read();
+  if (initial !== undefined) return Promise.resolve(initial);
+  return new Promise<T>((resolve, reject) => {
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    const observer = new MutationObserver(() => {
+      const value = read();
+      if (value === undefined) return;
+      observer.disconnect();
+      if (timeout !== undefined) clearTimeout(timeout);
+      resolve(value);
+    });
+    observer.observe(document.documentElement, {
+      subtree: true,
+      childList: true,
+      attributes: true,
+      attributeFilter: ['class', 'data-topic-id'],
+    });
+    // 只作异常布局的最终诊断；正常路径由 DOM 变化直接唤醒，不依赖后台页计时器。
+    timeout = setTimeout(() => {
+      observer.disconnect();
+      reject(timeoutError());
+    }, timeoutMs);
+  });
+}
+
 async function waitForMenu(label: ZsxqPlanView): Promise<void> {
-  // Chromium 会把后台标签的短定时器合并到约 1 秒；100×100ms 会因此膨胀成一分多钟。
-  for (let attempt = 0; attempt < 20; attempt += 1) {
-    if (menuLabels().labels.includes(label)) return;
-    await new Promise(resolve => setTimeout(resolve, 500));
-  }
-  const observed = menuLabels().labels;
-  const detail = observed.length > 0 ? `（当前看到：${observed.join('、')}）` : '（分类栏尚未渲染）';
-  throw new ExtractionError('UNSUPPORTED_LAYOUT', `页面上找不到「${label}」标签${detail}`);
+  await observeDocumentUntil(
+    () => menuLabels().labels.includes(label) ? true : undefined,
+    10_000,
+    () => {
+      const observed = menuLabels().labels;
+      const detail = observed.length > 0 ? `（当前看到：${observed.join('、')}）` : '（分类栏尚未渲染）';
+      return new ExtractionError('UNSUPPORTED_LAYOUT', `页面上找不到「${label}」标签${detail}`);
+    },
+  );
 }
 
 function visibleTopicIds(): string[] {
@@ -445,7 +476,7 @@ function visibleTopicIds(): string[] {
   return [...ids].sort();
 }
 
-/** 精确切换固定视图，并等 Angular 的激活态与帖子集合稳定后才回复。 */
+/** 精确切换固定视图，并由 Angular 的 DOM 变化确认激活态与帖子集合已经更新。 */
 async function selectPlanView(label: ZsxqPlanView): Promise<{ label: ZsxqPlanView; topicIds: string[] }> {
   if (!ZSXQ_PLAN_VIEWS.includes(label)) {
     throw new ExtractionError('UNSUPPORTED_LAYOUT', `不支持的知识星球视图：${label}`);
@@ -456,22 +487,17 @@ async function selectPlanView(label: ZsxqPlanView): Promise<{ label: ZsxqPlanVie
   if (!alreadyActive && !clickMenu(label)) {
     throw new ExtractionError('UNSUPPORTED_LAYOUT', `页面上找不到「${label}」标签`);
   }
-  let previous = '';
-  let stableCount = 0;
-  for (let attempt = 0; attempt < 12; attempt += 1) {
-    await new Promise(resolve => setTimeout(resolve, 500));
-    const topicIds = visibleTopicIds();
-    const signature = topicIds.join(',');
-    if (menuLabels().active === label && (alreadyActive || signature !== before)) {
-      stableCount = signature === previous ? stableCount + 1 : 1;
-      if (stableCount >= 2) return { label, topicIds };
-      previous = signature;
-    } else {
-      stableCount = 0;
-      previous = signature;
-    }
-  }
-  throw new ExtractionError('CONTENT_EMPTY', `「${label}」视图切换后内容未稳定`);
+  if (alreadyActive) return { label, topicIds: visibleTopicIds() };
+  return observeDocumentUntil(
+    () => {
+      if (menuLabels().active !== label) return undefined;
+      const topicIds = visibleTopicIds();
+      const signature = topicIds.join(',');
+      return signature !== before ? { label, topicIds } : undefined;
+    },
+    10_000,
+    () => new ExtractionError('CONTENT_EMPTY', `「${label}」视图切换后内容未更新`),
+  );
 }
 
 /**
