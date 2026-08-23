@@ -640,6 +640,39 @@ describe('list page batch capture', () => {
       expect(bridge.sent.some(item => item.type === 'job.result')).toBe(true);
     });
 
+    it('牛客详情页短暂报布局不支持时也等待 SPA 正文渲染', async () => {
+      const { tabs, bridge, runner } = listRunner();
+      let asked = 0;
+      tabs.sendMessage = async () => {
+        asked += 1;
+        if (asked <= 2) {
+          return {
+            ok: false as const,
+            error: { code: 'UNSUPPORTED_LAYOUT', message: '请在牛客网打开一篇面经或讨论的详情页后重试' },
+          };
+        }
+        return {
+          ok: true as const,
+          document: {
+            schemaVersion: 1, source: 'nowcoder', kind: 'post',
+            url: 'https://www.nowcoder.com/feed/main/detail/abc',
+            canonicalUrl: 'https://www.nowcoder.com/feed/main/detail/abc',
+            title: '字节 Agent 开发面经', collectedAt: '2026-08-23T00:00:00.000Z',
+            html: '<p>Agent 开发面试问题完整正文。</p>', text: 'Agent 开发面试问题完整正文。', images: [],
+          },
+        };
+      };
+
+      await runner.runRemoteJob(
+        'nowcoder-spa',
+        'https://www.nowcoder.com/feed/main/detail/abc',
+      );
+
+      expect(asked).toBe(3);
+      expect(bridge.sent.some(item => item.type === 'job.result')).toBe(true);
+      expect(bridge.sent.some(item => item.type === 'job.error')).toBe(false);
+    });
+
     it('要登录这种再等也没用的错误，一次就返回', async () => {
       const { tabs, bridge, runner } = listRunner();
       let asked = 0;

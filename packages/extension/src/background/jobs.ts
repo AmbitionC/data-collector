@@ -449,12 +449,13 @@ export class JobRunner {
    * 批量采集不会踩到（那时页面早渲染好了），但**按 URL 单条采集必然 100% 撞上**，
    * 实测第一条就是这么失败的。
    *
-   * 只重试 CONTENT_EMPTY：AUTH_REQUIRED（要登录）和 UNSUPPORTED_LAYOUT（页面形态不对）
-   * 再等也不会变，重试只是白白拖时间。
+   * 通常只重试 CONTENT_EMPTY。牛客详情页首屏会在正文挂载前短暂返回
+   * UNSUPPORTED_LAYOUT，所以远程牛客任务也有限重试；AUTH_REQUIRED 再等没有意义。
    */
   private async extractWithRetry(
     tabId: number,
     overrides?: CaptureOverrides,
+    retryUnsupportedLayout = false,
   ): Promise<ExtractionResponse> {
     let last: ExtractionResponse | undefined;
     for (let attempt = 0; attempt < 5; attempt += 1) {
@@ -463,7 +464,10 @@ export class JobRunner {
         type: 'extract.document',
         ...(overrides ? { overrides } : {}),
       });
-      if (response.ok || response.error.code !== 'CONTENT_EMPTY') return response;
+      if (response.ok) return response;
+      const retryable = response.error.code === 'CONTENT_EMPTY'
+        || (retryUnsupportedLayout && response.error.code === 'UNSUPPORTED_LAYOUT');
+      if (!retryable) return response;
       last = response;
     }
     return last as ExtractionResponse;
@@ -535,13 +539,18 @@ export class JobRunner {
     let tabId: number | undefined;
     let keepTab = false;
     try {
-      const url = parseSupportedUrl(rawUrl).href;
+      const parsedUrl = parseSupportedUrl(rawUrl);
+      const url = parsedUrl.href;
       const tab = await this.options.tabs.create({ url, active: false });
       if (tab.id === undefined) throw new Error('浏览器未返回新标签页 ID');
       tabId = tab.id;
       await this.options.waitForTabComplete(tabId, 30_000);
       this.options.bridge.send('job.progress', requestId, { stage: 'collecting' });
-      const response = await this.extractWithRetry(tabId);
+      const response = await this.extractWithRetry(
+        tabId,
+        undefined,
+        parsedUrl.hostname === 'www.nowcoder.com',
+      );
       if (!response.ok) {
         keepTab = NEEDS_ATTENTION.has(response.error.code);
         if (keepTab) await this.options.tabs.update(tabId, { active: true });
