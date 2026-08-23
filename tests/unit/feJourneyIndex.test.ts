@@ -105,6 +105,48 @@ describe('FeJourneyCandidateIndex', () => {
     expect(catalog.entries).toHaveLength(4);
   });
 
+  it('clusters same-author same-company question reposts even when one contains long answers', async () => {
+    const root = await temporaryDirectories.create('fe-journey-index-question-duplicate-');
+    const index = await FeJourneyCandidateIndex.open(root);
+    const prompts = [
+      '1.为什么选择 AI 应用开发方向？',
+      '2.怎么理解 Agent 系统，核心模块有哪些？',
+      '3.Tool 的设计原则是什么？',
+      '4.Memory 有哪些类型？',
+      '5.ReAct 和 Plan-Execute 适用什么场景？',
+      '6.多 Agent 协作系统怎么设计？',
+      '7.RAG 整体流程是什么？',
+      '8.Chunk 大小如何确定？',
+      '9.Rerank 怎么实现？',
+      '10.大模型异常时如何重试和降级？',
+    ];
+    const base = {
+      author: '同一位候选人',
+      publishedAt: '2026-08-10T09:22:00.000Z',
+      sourceMetadata: { contentAccess: 'full' },
+    };
+    const first = index.prepare({
+      ...nowcoderDocument('5001', `我参加了字节 AI 应用开发一面。${prompts.join('')}`),
+      ...base,
+      title: '字节 AI 应用开发一面面经',
+    });
+    await first.commit();
+    const expanded = index.prepare({
+      ...nowcoderDocument(
+        '5002',
+        `我参加了字节大模型应用开发一面。${prompts.map((prompt, index) =>
+          `${prompt}这里是第${index + 1}题很长的项目回答、代码和追问复盘。`).join('')}`,
+      ),
+      ...base,
+      title: '字节大模型应用开发一面深度复盘',
+    });
+
+    expect(expanded.document.feJourney?.clusterId).toBe(first.document.feJourney?.clusterId);
+    expect(expanded.document.feJourney?.duplicateOf).toBe(
+      stableContentId('https://www.nowcoder.com/discuss/5001'),
+    );
+  });
+
   it('does not enrich or index WeChat and ZSXQ documents', async () => {
     const root = await temporaryDirectories.create('fe-journey-index-');
     const index = await FeJourneyCandidateIndex.open(root);

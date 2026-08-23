@@ -7,7 +7,7 @@ import {
   type Source,
 } from '@data-collector/shared';
 import { atomicWriteText } from '../library/writer.js';
-import { hammingDistance64 } from './fingerprint.js';
+import { hammingDistance64, questionFingerprint } from './fingerprint.js';
 import { enrichNowcoderEvidence } from './nowcoderEvidence.js';
 import { scoreFeJourneyCandidate } from './quality.js';
 
@@ -17,6 +17,11 @@ interface CandidateIndexEntry {
   url: string;
   contentHash: string;
   simHash: string;
+  questionHash?: string;
+  company?: string;
+  authorKey?: string;
+  evidenceGrade?: string;
+  questionCount?: number;
   clusterId: string;
   representativeId: string;
   qualityScore: number;
@@ -38,6 +43,24 @@ const NEAR_DUPLICATE_DISTANCE = 12;
 
 function isCandidateSource(source: Source): source is CandidateIndexEntry['source'] {
   return source === 'nowcoder' || source === 'github';
+}
+
+function normalizedAuthor(author: string | undefined): string | undefined {
+  const value = author
+    ?.normalize('NFKC')
+    .toLocaleLowerCase('en-US')
+    .replace(/[\p{P}\p{S}\s]+/gu, '');
+  return value ? value : undefined;
+}
+
+function metadataString(document: CollectedDocument, key: string): string | undefined {
+  const value = document.sourceMetadata?.[key];
+  return typeof value === 'string' && value.length > 0 ? value : undefined;
+}
+
+function metadataNumber(document: CollectedDocument, key: string): number | undefined {
+  const value = document.sourceMetadata?.[key];
+  return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
 }
 
 function parseCatalog(value: unknown): CandidateCatalog {
@@ -99,26 +122,41 @@ export class FeJourneyCandidateIndex {
 
     const evidenced = enrichNowcoderEvidence(document);
     const score = scoreFeJourneyCandidate(evidenced);
-    const evidenceGrade = evidenced.sourceMetadata?.evidenceGrade;
+    const evidenceGrade = metadataString(evidenced, 'evidenceGrade');
     const candidate = evidenced.source === 'nowcoder' &&
       (evidenceGrade === 'A' || evidenceGrade === 'B') &&
       score.candidateKinds.includes('interview')
       ? { ...evidenced, suggestedCategory: '人工智能' }
       : evidenced;
     const id = stableContentId(candidate.canonicalUrl);
+    const company = metadataString(candidate, 'company');
+    const authorKey = normalizedAuthor(candidate.author);
+    const questionCount = metadataNumber(candidate, 'questionCount');
+    const questionHash = candidate.source === 'nowcoder' &&
+      (evidenceGrade === 'A' || evidenceGrade === 'B')
+      ? questionFingerprint(candidate.text)
+      : undefined;
     // URL identity is stronger than a changed body: edits and extraction differences must
     // update the existing candidate instead of silently moving it to a new cluster.
     const existing = this.entries.find(entry => entry.id === id);
     const candidates = this.entries.filter(entry => entry.id !== id);
     const exact = candidates.find(entry => entry.contentHash === score.contentHash);
-    const near = exact
+    const questionDuplicate = exact || !questionHash || !company
+      ? undefined
+      : candidates.find(entry =>
+          entry.source === 'nowcoder' &&
+          entry.questionHash === questionHash &&
+          entry.company === company &&
+          (!entry.authorKey || !authorKey || entry.authorKey === authorKey) &&
+          (entry.evidenceGrade === 'A' || entry.evidenceGrade === 'B'));
+    const near = exact || questionDuplicate
       ? undefined
       : candidates
           .map(entry => ({ entry, distance: hammingDistance64(entry.simHash, score.simHash) }))
           .filter(item => item.distance <= NEAR_DUPLICATE_DISTANCE)
           .sort((left, right) => left.distance - right.distance || left.entry.id.localeCompare(right.entry.id))[0]
           ?.entry;
-    const duplicate = existing ?? exact ?? near;
+    const duplicate = existing ?? exact ?? questionDuplicate ?? near;
     const representativeId = duplicate?.representativeId ?? id;
     const clusterId = duplicate?.clusterId ?? `cluster-${score.contentHash.slice(0, 12)}`;
     const feJourney: FeJourneyCandidateMetadata = {
@@ -129,10 +167,15 @@ export class FeJourneyCandidateIndex {
     const enriched: CollectedDocument = { ...candidate, feJourney };
     const entry: CandidateIndexEntry = {
       id,
-      source: candidate.source,
+      source: document.source,
       url: candidate.canonicalUrl,
       contentHash: score.contentHash,
       simHash: score.simHash,
+      ...(questionHash ? { questionHash } : {}),
+      ...(company ? { company } : {}),
+      ...(authorKey ? { authorKey } : {}),
+      ...(evidenceGrade ? { evidenceGrade } : {}),
+      ...(questionCount !== undefined ? { questionCount } : {}),
       clusterId,
       representativeId,
       qualityScore: score.qualityScore,

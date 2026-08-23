@@ -3,6 +3,7 @@ import type { CollectedDocument } from '@data-collector/shared';
 import {
   contentFingerprint,
   hammingDistance64,
+  questionFingerprint,
   scoreFeJourneyCandidate,
   simHash64,
 } from '../../packages/bridge/src/feJourney/index.js';
@@ -170,6 +171,35 @@ describe('fe-journey deterministic candidate scoring', () => {
 });
 
 describe('fe-journey deterministic fingerprints', () => {
+  it('gives a question-only post and its answer-expanded repost the same interview fingerprint', () => {
+    const prompts = [
+      '1.自我介绍',
+      '2.为什么选择 AI 应用开发方向？',
+      '3.介绍 AI Coding 项目',
+      '4.如何学习前沿技术，使用哪些编程工具？',
+      '5.怎么理解 Agent 系统，核心模块有哪些？',
+      '6.Tool 的设计原则是什么？',
+      '7.Memory 有哪些类型，分别怎么实现？',
+      '8.ReAct 和 Plan-Execute 适用什么场景？',
+      '9.多 Agent 协作系统怎么设计？',
+      '10.RAG 整体流程是什么？',
+      '11.Chunk 大小和重叠度怎么确定？',
+      '12.向量召回结果不准怎么排查？',
+      '13.Rerank 怎么实现？',
+      '14.RAG 和微调怎么选？',
+      '15.怎么优化 RAG 延迟和成本？',
+      '16.最大的 Bad Case 是什么，怎么解决幻觉？',
+      '17.大模型调用超时或异常怎么处理，如何建设可观测性？',
+    ];
+    const short = prompts.join('');
+    const expanded = prompts.map((prompt, index) =>
+      `${prompt}\n这里是第 ${index + 1} 题的项目回答、代码示例、方案取舍和追问复盘，正文长度明显更长。`,
+    ).join('\n');
+
+    expect(questionFingerprint(short)).toMatch(/^[a-f0-9]{16}$/);
+    expect(questionFingerprint(expanded)).toBe(questionFingerprint(short));
+  });
+
   it('normalizes punctuation, whitespace and Latin case for exact content hashes', () => {
     expect(contentFingerprint('Agent 架构：MCP 工具调用。')).toBe(
       contentFingerprint('  agent\n架构 mcp 工具调用!  '),
