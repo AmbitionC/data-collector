@@ -15,6 +15,10 @@ const PLAN_HOURS: Record<CollectionPlanId, number> = {
   'nowcoder-agent-market': 9,
 };
 
+const NOWCODER_CONTENT_REJECTION_CODES = new Map([
+  ['UNSUPPORTED_LAYOUT', '页面结构不含可采集正文'],
+]);
+
 export interface PlanDueState {
   due: boolean;
   targetAt: string;
@@ -286,10 +290,22 @@ export class CollectionPlanService {
     try {
       const saved = this.dependencies.jobs.list().filter(candidate =>
         candidate.batchId === batch.id && candidate.status === 'saved');
+      // 搜索结果会混入求建议、招聘等非面经详情页。只在同批至少有一页成功抽取、
+      // 足以证明采集器仍可用时，才把布局不支持降级为内容过滤；整批都失败仍保留故障信号。
+      const contentRejectionFailures = saved.length === 0
+        ? []
+        : this.dependencies.jobs.list().filter(candidate =>
+          candidate.batchId === batch.id &&
+          candidate.status === 'failed' &&
+          NOWCODER_CONTENT_REJECTION_CODES.has(candidate.errorCode ?? ''));
       const selection = await this.dependencies.selectNowcoderJobs(saved, batch.startedAt);
       const rejectionCounts: Record<string, number> = { ...(batch.rejections ?? {}) };
       for (const rejected of selection.rejected) {
         rejectionCounts[rejected.reason] = (rejectionCounts[rejected.reason] ?? 0) + 1;
+      }
+      for (const rejected of contentRejectionFailures) {
+        const reason = NOWCODER_CONTENT_REJECTION_CODES.get(rejected.errorCode ?? '')!;
+        rejectionCounts[reason] = (rejectionCounts[reason] ?? 0) + 1;
       }
       for (const accepted of selection.accepted) {
         const contentId = stableContentId(accepted.url);
@@ -309,6 +325,7 @@ export class CollectionPlanService {
         selection.coverage,
         rejectionCounts,
         syncErrors?.length ? `自动同步失败：${syncErrors.join('；')}` : undefined,
+        contentRejectionFailures.length,
       );
     } catch (error) {
       await this.dependencies.store.attention(

@@ -165,9 +165,14 @@ export class CollectionPlanStore {
     coverage: Record<string, number>,
     rejections: Record<string, number>,
     syncError?: string,
+    reclassifiedFailureCount = 0,
   ): Promise<CollectionBatch> {
     return this.serializeMutation(async () => {
       const batch = this.require(batchId);
+      if (!Number.isSafeInteger(reclassifiedFailureCount) || reclassifiedFailureCount < 0) {
+        throw new Error('重分类失败数无效');
+      }
+      batch.failed = Math.max(0, batch.failed - reclassifiedFailureCount);
       batch.accepted = accepted;
       batch.saved = accepted;
       batch.skipped = Math.max(

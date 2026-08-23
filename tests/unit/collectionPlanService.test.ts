@@ -319,6 +319,67 @@ describe('CollectionPlanService', () => {
     });
   });
 
+  it('treats one unsupported discovery detail as a content rejection when another detail proves extraction works', async () => {
+    const context = await fixture({
+      selectNowcoderJobs: async jobs => ({
+        accepted: [],
+        coverage: { bytedance: 0, tencent: 0, alibaba: 0, ant: 0 },
+        rejected: jobs.map(item => ({ url: item.url, reason: '证据等级不足' })),
+      }),
+    });
+    const batch = await context.service.run('nowcoder-agent-market', { force: true });
+    const children = context.jobs.list().filter(job => job.batchId === batch.id);
+
+    await context.jobs.transition(children[0]!.id, 'collecting');
+    const saved = await context.jobs.transition(children[0]!.id, 'saved', {
+      outputPath: `/tmp/${children[0]!.id}/index.md`,
+    });
+    await context.service.onJobTerminal(saved);
+    await context.jobs.transition(children[1]!.id, 'collecting');
+    const unsupported = await context.jobs.transition(children[1]!.id, 'failed', {
+      errorCode: 'UNSUPPORTED_LAYOUT',
+      errorMessage: '请在牛客网打开一篇面经或讨论的详情页后重试',
+    });
+    await context.service.onJobTerminal(unsupported);
+
+    expect(context.store.latest('nowcoder-agent-market', 1)[0]).toMatchObject({
+      status: 'completed',
+      discovered: 2,
+      accepted: 0,
+      saved: 0,
+      skipped: 2,
+      failed: 0,
+      selectionStatus: 'completed',
+      rejections: {
+        '证据等级不足': 1,
+        '页面结构不含可采集正文': 1,
+      },
+    });
+  });
+
+  it('keeps an all-unsupported Nowcoder batch failed so a site-wide layout change cannot pass silently', async () => {
+    const context = await fixture();
+    const batch = await context.service.run('nowcoder-agent-market', { force: true });
+    const children = context.jobs.list().filter(job => job.batchId === batch.id);
+
+    for (const child of children) {
+      await context.jobs.transition(child.id, 'collecting');
+      const unsupported = await context.jobs.transition(child.id, 'failed', {
+        errorCode: 'UNSUPPORTED_LAYOUT',
+        errorMessage: '请在牛客网打开一篇面经或讨论的详情页后重试',
+      });
+      await context.service.onJobTerminal(unsupported);
+    }
+
+    expect(context.store.latest('nowcoder-agent-market', 1)[0]).toMatchObject({
+      status: 'failed',
+      accepted: 0,
+      saved: 0,
+      failed: 2,
+      selectionStatus: 'completed',
+    });
+  });
+
   it('resumes a terminal Nowcoder batch whose persisted final selection is still pending', async () => {
     const selected = vi.fn(async (jobs: readonly JobRecord[]) => ({
       accepted: [jobs[0]!],
