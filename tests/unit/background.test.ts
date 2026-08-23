@@ -341,7 +341,7 @@ describe('extension job runner', () => {
     const runner = new JobRunner({ tabs, bridge, waitForTabComplete: async () => undefined });
 
     const pending = runner.collectZsxqPlanViews(7);
-    const assertion = expect(pending).rejects.toThrow('页面交互超时');
+    const assertion = expect(pending).rejects.toThrow(/页面交互.*超时/u);
     await vi.advanceTimersByTimeAsync(45_001);
 
     await assertion;

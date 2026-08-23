@@ -309,7 +309,8 @@ function jumpToLastPost(): void {
 async function scrollLikeHuman(
   nudges = 3,
 ): Promise<{ host: string; moved: number; bottom: boolean }> {
-  const candidates = scrollCandidates();
+  // 候选过多时逐个试会把一次翻页拖到几十秒；前四个已覆盖滚动祖先和文档回退。
+  const candidates = scrollCandidates().slice(0, 4);
   // 每个候选滚动前的位置：位移要把 jumpToLastPost 那一下也算进去。
   const startTops = candidates.map(candidate => candidate.scrollTop);
 
@@ -367,7 +368,7 @@ async function advanceList(): Promise<{
 
   // 「到底」才是懒加载真正会触发的地方，所以判停条件是**滚到底且没有新内容**，
   // 而不是「滚了固定几下」。步数上限只是防死循环。
-  for (let round = 0; round < 6; round += 1) {
+  for (let round = 0; round < 2; round += 1) {
     const { host, moved, bottom } = await scrollLikeHuman().catch(
       () => ({ host: '(滚动失败)', moved: 0, bottom: false }),
     );

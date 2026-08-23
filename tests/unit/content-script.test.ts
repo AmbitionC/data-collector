@@ -397,6 +397,31 @@ describe('content script list collection', () => {
     expect(advance.advance.loaded).toBe(0);
   });
 
+  it('懒加载始终没返回时在 20 秒内收敛本轮翻页', async () => {
+    await ask<ListResponse>({ type: 'extract.list' });
+    const host = document.querySelector<HTMLElement>('.main-content-container')!;
+    let scrollTop = 0;
+    Object.defineProperty(host, 'scrollHeight', { value: 1_000_000, configurable: true });
+    Object.defineProperty(host, 'clientHeight', { value: 800, configurable: true });
+    Object.defineProperty(host, 'scrollTop', {
+      configurable: true,
+      get: () => scrollTop,
+      set: (value: number) => { scrollTop = value; },
+    });
+    vi.spyOn(Math, 'random').mockReturnValue(1);
+    vi.useFakeTimers();
+    let settled = false;
+    const pending = ask<AdvanceResponse>({ type: 'list.advance' }).then(result => {
+      settled = true;
+      return result;
+    });
+
+    await vi.advanceTimersByTimeAsync(20_000);
+
+    expect(settled).toBe(true);
+    await pending;
+  });
+
   it('skips posts that were handled in an earlier round', async () => {
     await ask<ListResponse>({ type: 'extract.list' });
     vi.useFakeTimers();

@@ -398,6 +398,9 @@ export class JobRunner {
    */
   private async ask(tabId: number, message: unknown): Promise<ExtractionResponse> {
     let lastError: unknown;
+    const requestType = typeof (message as { type?: unknown })?.type === 'string'
+      ? (message as { type: string }).type
+      : '未知请求';
     for (let attempt = 0; attempt < 4; attempt += 1) {
       try {
         let timeout: ReturnType<typeof setTimeout> | undefined;
@@ -406,7 +409,7 @@ export class JobRunner {
             this.options.tabs.sendMessage(tabId, message),
             new Promise<never>((_resolve, reject) => {
               timeout = setTimeout(
-                () => reject(new Error('页面交互超时（45 秒）')),
+                () => reject(new Error(`页面交互「${requestType}」超时（45 秒）`)),
                 CONTENT_SCRIPT_REQUEST_TIMEOUT_MS,
               );
             }),
