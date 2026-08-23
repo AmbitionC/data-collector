@@ -6,6 +6,7 @@ import {
   parseSupportedUrl,
   type JobRecord,
   type JobStatus,
+  type CollectionPlanId,
 } from '@data-collector/shared';
 
 interface JobStoreDependencies {
@@ -22,6 +23,8 @@ export interface CreateJobInput {
   id?: string;
   url: string;
   requestedBy: JobRecord['requestedBy'];
+  batchId?: string;
+  planId?: CollectionPlanId;
 }
 
 export interface JobTransitionPatch {
@@ -118,6 +121,8 @@ export class JobStore {
         status: 'queued',
         createdAt: timestamp,
         updatedAt: timestamp,
+        ...(input.batchId ? { batchId: input.batchId } : {}),
+        ...(input.planId ? { planId: input.planId } : {}),
       };
       this.jobs.set(id, job);
       await this.persist();
