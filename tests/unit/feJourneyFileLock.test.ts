@@ -1,4 +1,4 @@
-import { mkdir, writeFile } from 'node:fs/promises';
+import { mkdir, symlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -31,6 +31,24 @@ describe('withFeJourneyCandidateLock', () => {
     })).rejects.toThrow('expected failure');
 
     await expect(withFeJourneyCandidateLock(root, async () => 'recovered')).resolves.toBe('recovered');
+  });
+
+  it('serializes real and aliased paths to the same library', async () => {
+    const root = await temporaryDirectories.create('fe-journey-file-lock-real-');
+    const aliasParent = await temporaryDirectories.create('fe-journey-file-lock-alias-');
+    const alias = join(aliasParent, 'library-link');
+    await symlink(root, alias, 'dir');
+    let active = 0;
+    let maximumActive = 0;
+
+    await Promise.all([root, alias].map(libraryRoot => withFeJourneyCandidateLock(libraryRoot, async () => {
+      active += 1;
+      maximumActive = Math.max(maximumActive, active);
+      await delay(25);
+      active -= 1;
+    })));
+
+    expect(maximumActive).toBe(1);
   });
 
   it('ignores stale artifacts from the previous userspace lock protocol', async () => {

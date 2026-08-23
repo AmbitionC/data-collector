@@ -1,6 +1,6 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { mkdir } from 'node:fs/promises';
+import { mkdir, realpath } from 'node:fs/promises';
 import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 
@@ -32,7 +32,7 @@ function lockCommand(lockPath: string, platform: NodeJS.Platform = process.platf
     };
   }
   if (platform === 'win32') {
-    const mutexName = `Local\\DataCollector-${createHash('sha256').update(lockPath).digest('hex')}`;
+    const mutexName = `Local\\DataCollector-${createHash('sha256').update(lockPath.toLowerCase()).digest('hex')}`;
     const script = `
 $mutex = [System.Threading.Mutex]::new($false, '${mutexName}')
 $acquired = $false
@@ -124,8 +124,8 @@ export async function withFeJourneyCandidateLock<T>(
   operation: () => Promise<T>,
 ): Promise<T> {
   const catalogDirectory = join(libraryRoot, '_catalog');
-  const lockPath = join(catalogDirectory, 'fe-journey.lock');
   await mkdir(catalogDirectory, { recursive: true });
+  const lockPath = join(await realpath(catalogDirectory), 'fe-journey.lock');
   const command = lockCommand(lockPath);
   const child = spawn(command.command, command.args, { stdio: 'pipe' });
   await waitForLock(child);
