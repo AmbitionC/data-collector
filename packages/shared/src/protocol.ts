@@ -114,12 +114,23 @@ export const jobResultPayloadSchema = z.object({
 
 export const planCollectPayloadSchema = z.object({
   planId: collectionPlanIdSchema,
+  batchId: z.string().trim().min(1).max(200),
   force: z.boolean().optional(),
 }).strict();
 
-export const planResultPayloadSchema = z.object({
-  batch: collectionBatchSchema,
+export const extensionPlanResultPayloadSchema = z.object({
+  batchId: z.string().trim().min(1).max(200),
+  discovered: z.number().int().min(0),
+  coverage: z.record(z.string().trim().min(1).max(100), z.number().int().min(0)).optional(),
+  error: z.string().trim().min(1).max(2_000).optional(),
+  needsAttention: z.boolean().optional(),
+  prepared: z.boolean().optional(),
 }).strict();
+
+export const planResultPayloadSchema = z.union([
+  z.object({ batch: collectionBatchSchema }).strict(),
+  extensionPlanResultPayloadSchema,
+]);
 
 export const planCollectEnvelopeSchema = wsEnvelopeSchema.extend({
   type: z.literal('plan.collect'),

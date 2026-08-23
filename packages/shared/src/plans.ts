@@ -56,7 +56,7 @@ export const collectionBatchSchema = z.object({
     context.addIssue({ code: 'custom', path: ['accepted'], message: '接受数不能超过发现数' });
   }
   const terminalCount = batch.saved + batch.skipped + batch.failed + batch.needsAttention;
-  if (terminalCount > batch.accepted) {
-    context.addIssue({ code: 'custom', path: ['accepted'], message: '结果数不能超过接受数' });
+  if (terminalCount > batch.discovered) {
+    context.addIssue({ code: 'custom', path: ['discovered'], message: '结果数不能超过发现数' });
   }
 });

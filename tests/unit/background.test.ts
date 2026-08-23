@@ -3,6 +3,7 @@ import { TRUSTED_EXTENSION_ID, type CollectedDocument } from '@data-collector/sh
 import {
   JobRunner,
   explainEmptyIndex,
+  retryTransientTabOperation,
   type BatchItem,
   type BatchProgress,
   type BridgeClient,
@@ -164,6 +165,22 @@ class InMemoryBridge implements BridgeClient {
 }
 
 describe('extension job runner', () => {
+  it('retries transient tab edit failures after 1/3/9 seconds but not authentication failures', async () => {
+    const waits: number[] = [];
+    let attempts = 0;
+    const value = await retryTransientTabOperation(async () => {
+      attempts += 1;
+      if (attempts < 4) throw new Error('Tabs cannot be edited right now');
+      return 'ok';
+    }, async milliseconds => { waits.push(milliseconds); });
+
+    expect(value).toBe('ok');
+    expect(waits).toEqual([1_000, 3_000, 9_000]);
+    const auth = vi.fn(async () => { throw new Error('AUTH_REQUIRED'); });
+    await expect(retryTransientTabOperation(auth, async () => undefined)).rejects.toThrow('AUTH_REQUIRED');
+    expect(auth).toHaveBeenCalledOnce();
+  });
+
   it('unions ZSXQ documents across three views before creating any save job', async () => {
     const tabs = new InMemoryTabs();
     const bridge = new InMemoryBridge();
@@ -195,6 +212,12 @@ describe('extension job runner', () => {
           },
         };
       }
+      if (request.type === 'list.restore') {
+        return { ok: true, advance: { collapsed: 0, loaded: 0 } };
+      }
+      if (request.type === 'list.advance') {
+        return { ok: true, advance: { collapsed: 0, loaded: 0 } };
+      }
       throw new Error(`unexpected ${request.type}`);
     };
     const runner = new JobRunner({ tabs, bridge, waitForTabComplete: async () => undefined });
@@ -211,6 +234,51 @@ describe('extension job runner', () => {
     expect(documents[0]?.sourceMetadata?.viewLabels).toBe('最新、只看星主');
     expect(documents[1]?.sourceMetadata?.viewLabels).toBe('最新、精华');
     expect(bridge.createdFor).toHaveLength(0);
+  });
+
+  it('pages within a plan view before switching to the next view', async () => {
+    const tabs = new InMemoryTabs();
+    const bridge = new InMemoryBridge();
+    let active = '';
+    let latestRound = 0;
+    tabs.sendMessage = async (_id, message) => {
+      const request = message as { type: string; label?: string };
+      tabs.asked.push(request.type);
+      if (request.type === 'list.selectView') {
+        active = request.label ?? '';
+        return { ok: true, selected: { label: active, topicIds: [] } } as never;
+      }
+      if (request.type === 'list.restore') {
+        return { ok: true, advance: { collapsed: 0, loaded: 0 } };
+      }
+      if (request.type === 'extract.list') {
+        const documents = active === '最新' && latestRound < 2
+          ? [topic(String(9001 + latestRound))]
+          : [];
+        latestRound += active === '最新' ? 1 : 0;
+        return {
+          ok: true,
+          list: {
+            items: documents.map((document, index) => ({ key: `${active}-${index}`, title: document.title, document })),
+            skipped: 0,
+            total: documents.length,
+            captured: documents.length,
+          },
+        };
+      }
+      if (request.type === 'list.advance') {
+        return { ok: true, advance: { collapsed: 1, loaded: active === '最新' && latestRound === 1 ? 1 : 0 } };
+      }
+      throw new Error(`unexpected ${request.type}`);
+    };
+    const runner = new JobRunner({ tabs, bridge, waitForTabComplete: async () => undefined });
+
+    const documents = await runner.collectZsxqPlanViews(7);
+
+    expect(documents.map(document => document.canonicalUrl)).toEqual([
+      `${LIST_URL}/topic/9001`,
+      `${LIST_URL}/topic/9002`,
+    ]);
   });
 
   it('queues remote jobs so reconnect bursts do not open unlimited tabs', async () => {

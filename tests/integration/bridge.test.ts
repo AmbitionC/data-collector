@@ -152,6 +152,46 @@ afterEach(async () => {
 });
 
 describe('local Bridge', () => {
+  it('keeps an offline fixed plan pending, dispatches it on extension hello, and records the result', async () => {
+    const root = await temporaryDirectory();
+    const configDir = join(root, '.config');
+    const bridge = await startBridge({ port: 0, libraryRoot: root, configDir });
+    handles.push(bridge);
+    const { socket, token } = await authorize(bridge);
+
+    const started = await requestJson<{ id: string; status: string }>(bridge.url, '/v1/plans/run', {
+      method: 'POST',
+      token,
+      body: { planId: 'zsxq-chen-teacher', force: true },
+    });
+    expect(started).toMatchObject({ status: 202, body: { status: 'running' } });
+    const pending = await requestJson<{ plans: Array<{ id: string; pending: boolean }> }>(
+      bridge.url,
+      '/v1/plans/status',
+      { token },
+    );
+    expect(pending.body.plans.find(plan => plan.id === 'zsxq-chen-teacher')?.pending).toBe(true);
+
+    socket.send(envelope('extension.hello', 'extension-plan', { version: APP_VERSION }));
+    const command = await nextMessage<{ batchId: string; planId: string }>(socket);
+    expect(command).toMatchObject({
+      type: 'plan.collect',
+      payload: { batchId: started.body.id, planId: 'zsxq-chen-teacher' },
+    });
+    socket.send(envelope('plan.result', command.requestId, {
+      batchId: started.body.id,
+      discovered: 0,
+    }));
+
+    await vi.waitFor(async () => {
+      const status = await requestJson<{
+        plans: Array<{ id: string; latest?: { status: string } }>;
+      }>(bridge.url, '/v1/plans/status', { token });
+      expect(status.body.plans.find(plan => plan.id === 'zsxq-chen-teacher')?.latest?.status)
+        .toBe('completed');
+    });
+  });
+
   it('keeps fe-journey collection disabled without its fixed sink', async () => {
     const root = await temporaryDirectory();
     const configDir = join(root, '.config');

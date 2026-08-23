@@ -39,13 +39,18 @@ describe('fixed collection plan contracts', () => {
     expect(planCollectEnvelopeSchema.parse({
       ...base,
       type: 'plan.collect',
-      payload: { planId: 'zsxq-chen-teacher', force: true },
+      payload: { planId: 'zsxq-chen-teacher', batchId: 'batch-zsxq-1', force: true },
     }).payload.force).toBe(true);
     expect(planResultEnvelopeSchema.parse({
       ...base,
       type: 'plan.result',
       payload: { batch: BATCH },
     }).payload.batch.saved).toBe(8);
+    expect(planResultEnvelopeSchema.parse({
+      ...base,
+      type: 'plan.result',
+      payload: { batchId: 'batch-zsxq-1', discovered: 17 },
+    }).payload).toMatchObject({ batchId: 'batch-zsxq-1', discovered: 17 });
     expect(planCollectEnvelopeSchema.safeParse({
       ...base,
       type: 'plan.collect',

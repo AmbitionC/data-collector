@@ -138,7 +138,7 @@ export class CollectionPlanStore {
       const byId = new Map(jobs.map(job => [job.id, job]));
       const children = batch.jobIds.map(id => byId.get(id)).filter((job): job is JobRecord => Boolean(job));
       batch.saved = children.filter(job => job.status === 'saved').length;
-      batch.skipped = children.filter(
+      batch.skipped = Math.max(0, batch.discovered - batch.accepted) + children.filter(
         job => job.status === 'failed' && SKIPPED_ERROR_CODES.has(job.errorCode ?? ''),
       ).length;
       batch.failed = children.filter(
@@ -155,6 +155,9 @@ export class CollectionPlanStore {
             ? 'completed_with_attention'
             : 'completed';
         batch.finishedAt ??= this.now();
+      } else {
+        batch.status = 'running';
+        delete batch.finishedAt;
       }
       await this.persist();
       return publicBatch(batch);
@@ -165,6 +168,17 @@ export class CollectionPlanStore {
     return this.serializeMutation(async () => {
       const batch = this.require(batchId);
       batch.status = 'failed';
+      batch.finishedAt = this.now();
+      batch.error = message;
+      await this.persist();
+      return publicBatch(batch);
+    });
+  }
+
+  attention(batchId: string, message: string): Promise<CollectionBatch> {
+    return this.serializeMutation(async () => {
+      const batch = this.require(batchId);
+      batch.status = 'completed_with_attention';
       batch.finishedAt = this.now();
       batch.error = message;
       await this.persist();

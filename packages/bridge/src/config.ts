@@ -9,6 +9,7 @@ export interface BridgeConfig {
   authFile: string;
   jobsFile: string;
   sinksFile: string;
+  plansFile: string;
 }
 
 export interface ConfigOverrides {
@@ -54,5 +55,6 @@ export function loadConfig(overrides: ConfigOverrides = {}): BridgeConfig {
     authFile: join(configDir, 'auth.json'),
     jobsFile: join(libraryRoot, '_catalog', 'jobs.json'),
     sinksFile: join(configDir, 'sinks.json'),
+    plansFile: join(configDir, 'collection-plans.json'),
   };
 }

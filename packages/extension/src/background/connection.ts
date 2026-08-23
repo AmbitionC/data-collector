@@ -3,7 +3,9 @@ import {
   EXTENSION_REPLACED_CLOSE_CODE,
   EXTENSION_REPLACED_CLOSE_REASON,
   bridgeAuthorizedPayloadSchema,
+  planCollectPayloadSchema,
   wsEnvelopeSchema,
+  type CollectionPlanId,
 } from '@data-collector/shared';
 
 export interface ExtensionStorage {
@@ -35,6 +37,10 @@ interface ConnectionDependencies {
 }
 
 type CollectHandler = (requestId: string, url: string) => void | Promise<void>;
+type PlanCollectHandler = (
+  requestId: string,
+  payload: { batchId: string; planId: CollectionPlanId; force?: boolean },
+) => void | Promise<void>;
 
 const DEFAULT_PORT = 17321;
 
@@ -49,6 +55,7 @@ export class BridgeConnection {
   private reconnectTimer: unknown;
   private reconnectAttempt = 0;
   private collectHandler: CollectHandler | undefined;
+  private planCollectHandler: PlanCollectHandler | undefined;
   private stopped = false;
   private startPromise: Promise<void> | undefined;
   private generation = 0;
@@ -62,6 +69,10 @@ export class BridgeConnection {
 
   onCollect(handler: CollectHandler): void {
     this.collectHandler = handler;
+  }
+
+  onPlanCollect(handler: PlanCollectHandler): void {
+    this.planCollectHandler = handler;
   }
 
   async start(options: { force?: boolean } = {}): Promise<void> {
@@ -313,7 +324,13 @@ export class BridgeConnection {
 
   async createJob(
     url: string,
-    overrides?: { userCategory?: string; userTags?: string[]; sinks?: string[] },
+    overrides?: {
+      userCategory?: string;
+      userTags?: string[];
+      sinks?: string[];
+      batchId?: string;
+      planId?: CollectionPlanId;
+    },
   ): Promise<{ id: string }> {
     const settings = await this.settings();
     if (!settings.token) throw new Error('浏览器扩展仍在自动连接 Bridge');
@@ -332,6 +349,8 @@ export class BridgeConnection {
           url,
           requestedBy: 'extension',
           ...(overrides?.sinks?.length ? { sinks: overrides.sinks } : {}),
+          ...(overrides?.batchId ? { batchId: overrides.batchId } : {}),
+          ...(overrides?.planId ? { planId: overrides.planId } : {}),
         }),
       },
     );
@@ -476,6 +495,13 @@ export class BridgeConnection {
             await this.collectHandler?.(message.requestId, payload.url);
           }
         }
+      } else if (message.type === 'plan.collect') {
+        const payload = planCollectPayloadSchema.parse(message.payload);
+        if (isCurrent()) await this.planCollectHandler?.(message.requestId, {
+          batchId: payload.batchId,
+          planId: payload.planId,
+          ...(payload.force === undefined ? {} : { force: payload.force }),
+        });
       } else if (message.type === 'job.saved' && isCurrent()) {
         // Bridge 的 job.saved 载荷为 { outputPath, results }（多 sink 后的首要产出路径）。
         const payload = message.payload as { outputPath?: unknown; results?: unknown };

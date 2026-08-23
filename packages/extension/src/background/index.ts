@@ -108,6 +108,29 @@ const runner = new JobRunner({
   },
 });
 connection.onCollect((requestId, url) => runner.runRemoteJob(requestId, url));
+connection.onPlanCollect(async (requestId, payload) => {
+  if (payload.planId !== 'zsxq-chen-teacher') {
+    connection.send('plan.result', requestId, {
+      batchId: payload.batchId,
+      discovered: 0,
+      error: `扩展不支持计划：${payload.planId}`,
+    });
+    return;
+  }
+  try {
+    await runner.runZsxqCollectionPlan(payload.batchId, result => {
+      connection.send('plan.result', requestId, { batchId: payload.batchId, ...result });
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : '知识星球计划采集失败';
+    connection.send('plan.result', requestId, {
+      batchId: payload.batchId,
+      discovered: 0,
+      error: message,
+      ...(/AUTH_REQUIRED|登录/u.test(message) ? { needsAttention: true } : {}),
+    });
+  }
+});
 
 async function configureSidePanel(): Promise<void> {
   const sidePanel = (chrome as typeof chrome & {

@@ -1,4 +1,8 @@
-import { parseSupportedUrl, type CollectedDocument } from '@data-collector/shared';
+import {
+  parseSupportedUrl,
+  type CollectedDocument,
+  type CollectionPlanId,
+} from '@data-collector/shared';
 import { linkedArticleUrl } from '../extractors/index.js';
 import type { HookStats } from '../topicIndex.js';
 
@@ -67,7 +71,13 @@ export interface BridgeClient {
   send(type: string, requestId: string, payload: unknown): void;
   createJob(
     url: string,
-    overrides?: { userCategory?: string; userTags?: string[]; sinks?: string[] },
+    overrides?: {
+      userCategory?: string;
+      userTags?: string[];
+      sinks?: string[];
+      batchId?: string;
+      planId?: CollectionPlanId;
+    },
   ): Promise<{ id: string }>;
 }
 
@@ -85,6 +95,27 @@ interface PayloadMap {
 
 export const ZSXQ_PLAN_VIEWS = ['最新', '精华', '只看星主'] as const;
 export type ZsxqPlanView = (typeof ZSXQ_PLAN_VIEWS)[number];
+
+const TRANSIENT_TAB_ERROR = /Tabs cannot be edited right now|tab.*(?:temporarily|busy)|No tab with id/i;
+const TAB_RETRY_DELAYS = [1_000, 3_000, 9_000] as const;
+
+export async function retryTransientTabOperation<T>(
+  operation: () => Promise<T>,
+  wait: (milliseconds: number) => Promise<void>,
+): Promise<T> {
+  let lastError: unknown;
+  for (let attempt = 0; attempt <= TAB_RETRY_DELAYS.length; attempt += 1) {
+    try {
+      return await operation();
+    } catch (error) {
+      lastError = error;
+      const message = error instanceof Error ? error.message : String(error);
+      if (!TRANSIENT_TAB_ERROR.test(message) || attempt === TAB_RETRY_DELAYS.length) throw error;
+      await wait(TAB_RETRY_DELAYS[attempt]!);
+    }
+  }
+  throw lastError;
+}
 
 /** 按请求类型取出应答载荷；字段对不上说明页面里的内容脚本还是旧版本。 */
 function payloadOf<K extends keyof PayloadMap>(
@@ -185,13 +216,21 @@ export class JobRunner {
       const selected = await this.ask(tabId, { type: 'list.selectView', label });
       if (!selected.ok) throw new Error(selected.error.message);
       payloadOf(selected, 'selected');
-      const extracted = await this.ask(tabId, { type: 'extract.list' });
-      if (!extracted.ok) throw new Error(extracted.error.message);
-      for (const item of payloadOf(extracted, 'list').items) {
-        if (!item.document) continue;
-        const existing = union.get(item.document.canonicalUrl);
-        if (existing) existing.labels.add(label);
-        else union.set(item.document.canonicalUrl, { document: item.document, labels: new Set([label]) });
+      await this.ask(tabId, { type: 'list.restore' }).catch(() => undefined);
+      for (let round = 0; round < 12 && union.size < 60; round += 1) {
+        const extracted = await this.ask(tabId, { type: 'extract.list' });
+        if (!extracted.ok) throw new Error(extracted.error.message);
+        for (const item of payloadOf(extracted, 'list').items) {
+          if (!item.document) continue;
+          const existing = union.get(item.document.canonicalUrl);
+          if (existing) existing.labels.add(label);
+          else union.set(item.document.canonicalUrl, { document: item.document, labels: new Set([label]) });
+          if (union.size >= 60) break;
+        }
+        if (union.size >= 60) break;
+        const advanced = await this.ask(tabId, { type: 'list.advance' });
+        if (!advanced.ok) throw new Error(advanced.error.message);
+        if (payloadOf(advanced, 'advance').loaded === 0) break;
       }
     }
     return [...union.values()]
@@ -203,6 +242,76 @@ export class JobRunner {
         },
       }))
       .sort((left, right) => left.canonicalUrl.localeCompare(right.canonicalUrl));
+  }
+
+  async submitCollectedDocument(
+    document: CollectedDocument,
+    context: { batchId: string; planId: CollectionPlanId },
+  ): Promise<string> {
+    const job = await this.options.bridge.createJob(document.canonicalUrl, context);
+    this.options.bridge.send('job.progress', job.id, { stage: 'collecting' });
+    this.options.bridge.send('job.result', job.id, {
+      document: await this.withLinkedArticle(document),
+    });
+    return job.id;
+  }
+
+  async runZsxqCollectionPlan(
+    batchId: string,
+    reportPhase?: (result: { discovered: number; prepared: boolean }) => Promise<void> | void,
+  ): Promise<{ discovered: number }> {
+    const groupUrl = 'https://wx.zsxq.com/group/48844584441158';
+    let tabId: number | undefined;
+    let keepTab = false;
+    try {
+      const tab = await retryTransientTabOperation(
+        () => this.options.tabs.create({ url: groupUrl, active: false }),
+        milliseconds => this.wait(milliseconds),
+      );
+      if (tab.id === undefined) throw new Error('浏览器未返回知识星球标签页 ID');
+      tabId = tab.id;
+      await this.options.waitForTabComplete(tabId, 30_000);
+      const documents = await retryTransientTabOperation(
+        () => this.collectZsxqPlanViews(tabId!),
+        milliseconds => this.wait(milliseconds),
+      );
+      const cutoff = Date.now() - 30 * 24 * 60 * 60 * 1_000;
+      const relevant = documents
+        .filter(document => document.sourceMetadata?.authorRole === 'owner')
+        .filter(document => !document.publishedAt || Date.parse(document.publishedAt) >= cutoff)
+        .filter(document => /投资|创业|商业模式|经营|财富|职业|职场|认知/u.test(`${document.title}\n${document.text}`))
+        .slice(0, 60);
+      if (documents.length > 0 && !documents.some(document =>
+        document.sourceMetadata?.authorRole === 'owner' || document.sourceMetadata?.authorRole === 'member')) {
+        throw new Error('UNSUPPORTED_LAYOUT：无法验证知识星球作者是否为星主');
+      }
+      await reportPhase?.({ discovered: documents.length, prepared: false });
+      const staged: Array<{ id: string; document: CollectedDocument }> = [];
+      for (const document of relevant) {
+        const job = await this.options.bridge.createJob(document.canonicalUrl, {
+          batchId,
+          planId: 'zsxq-chen-teacher',
+        });
+        staged.push({ id: job.id, document });
+      }
+      await reportPhase?.({ discovered: documents.length, prepared: true });
+      for (const item of staged) {
+        this.options.bridge.send('job.progress', item.id, { stage: 'collecting' });
+        this.options.bridge.send('job.result', item.id, {
+          document: await this.withLinkedArticle(item.document),
+        });
+      }
+      return { discovered: documents.length };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (/AUTH_REQUIRED|登录/u.test(message)) {
+        keepTab = true;
+        if (tabId !== undefined) await this.options.tabs.update(tabId, { active: true }).catch(() => undefined);
+      }
+      throw error;
+    } finally {
+      if (tabId !== undefined && !keepTab) await this.options.tabs.remove(tabId).catch(() => undefined);
+    }
   }
 
   private wait(ms: number): Promise<void> {

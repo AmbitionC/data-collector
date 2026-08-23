@@ -12,7 +12,9 @@ import {
   EXTENSION_REPLACED_CLOSE_REASON,
   TRUSTED_EXTENSION_ID,
   bridgeAuthorizedPayloadSchema,
+  COLLECTION_PLAN_IDS,
   descriptorForHost,
+  extensionPlanResultPayloadSchema,
   jobResultPayloadSchema,
   wsEnvelopeSchema,
   stableContentId,
@@ -44,11 +46,17 @@ import {
   FeJourneyCollector,
   FeJourneyCandidateIndex,
   discoverGithubProjects,
+  discoverNowcoderPlanCandidates,
   discoverNowcoderUrls,
   saveCollectedDocument,
   type FeJourneyRunOptions,
   type FeJourneyRunReport,
 } from '../feJourney/index.js';
+import {
+  CollectionPlanService,
+  CollectionPlanStore,
+  type ExtensionPlanResult,
+} from '../plans/index.js';
 
 /** 删除请求：要么给明确的 id 列表，要么显式 all:true —— 不接受隐式全删。 */
 const deleteLibrarySchema = z.object({
@@ -63,6 +71,12 @@ const createJobSchema = z.object({
   requestedBy: z.enum(['codex', 'cli', 'extension']).default('cli'),
   /** 用户为本次采集显式选择的落地去向（sink id）；缺省按来源默认路由。 */
   sinks: z.array(z.string().trim().min(1).max(100)).max(10).optional(),
+  batchId: z.string().trim().min(1).max(200).optional(),
+  planId: z.enum(COLLECTION_PLAN_IDS).optional(),
+}).superRefine((input, context) => {
+  if (Boolean(input.batchId) !== Boolean(input.planId)) {
+    context.addIssue({ code: 'custom', path: ['batchId'], message: 'batchId 与 planId 必须同时提供' });
+  }
 });
 const progressSchema = z.object({ stage: z.enum(['collecting']) });
 const errorSchema = z.object({
@@ -104,6 +118,9 @@ export interface StartBridgeOptions extends ConfigOverrides {
   enableFeJourneyScheduler?: boolean;
   /** 到期检查间隔，默认 15 分钟。 */
   feJourneyCheckIntervalMs?: number;
+  /** 常驻服务才开启两个固定采集计划；测试/嵌入启动不产生定时任务。 */
+  enableCollectionPlanScheduler?: boolean;
+  collectionPlanCheckIntervalMs?: number;
 }
 
 export interface BridgeHandle {
@@ -225,6 +242,14 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
   const access = await AccessTokenManager.open(config.authFile);
   const jobs = await JobStore.open(config.jobsFile);
   await jobs.recover();
+  let planStore: CollectionPlanStore | undefined;
+  let planStoreError: string | undefined;
+  try {
+    planStore = await CollectionPlanStore.open(config.plansFile);
+  } catch (error) {
+    planStoreError = error instanceof Error ? error.message : String(error);
+    console.warn(`[plans] ${planStoreError}`);
+  }
   const sinksConfig = await loadSinksConfig(config.sinksFile);
   const router = SinkRouter.build(
     sinksConfig,
@@ -317,10 +342,64 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
   const dispatchQueued = async (): Promise<void> => {
     for (const job of jobs.list('queued')) await dispatch(job);
   };
+  const collectorFetcher = options.fetch ?? fetch;
+
+  const storedDocumentFor = async (job: JobRecord): Promise<CollectedDocument | undefined> => {
+    if (!job.outputPath) return undefined;
+    try {
+      const raw = JSON.parse(await readFile(join(dirname(job.outputPath), 'source.json'), 'utf8')) as {
+        document?: CollectedDocument;
+      };
+      return raw.document;
+    } catch {
+      return undefined;
+    }
+  };
+
+  const collectionPlans = planStore
+    ? new CollectionPlanService({
+        store: planStore,
+        jobs,
+        extensionConnected: () => extensionReady && extensionSocket?.readyState === WebSocket.OPEN,
+        discoverNowcoder: knownUrls => discoverNowcoderPlanCandidates(collectorFetcher, knownUrls),
+        dispatch,
+        collectZsxq: async (batchId, planId) => {
+          if (!extensionReady || extensionSocket?.readyState !== WebSocket.OPEN) {
+            throw new Error('Edge 扩展当前离线');
+          }
+          extensionSocket.send(JSON.stringify(envelope('plan.collect', batchId, { batchId, planId })));
+        },
+        shouldAutoSync: async job => {
+          const document = await storedDocumentFor(job);
+          if (!document) return false;
+          if (job.planId === 'zsxq-chen-teacher') {
+            return document.sourceMetadata?.authorRole === 'owner';
+          }
+          const grade = document.sourceMetadata?.evidenceGrade;
+          return grade === 'A' || grade === 'B';
+        },
+        coverageKey: async job => {
+          if (job.planId !== 'nowcoder-agent-market') return undefined;
+          const document = await storedDocumentFor(job);
+          const grade = document?.sourceMetadata?.evidenceGrade;
+          const company = document?.sourceMetadata?.company;
+          return (grade === 'A' || grade === 'B') && typeof company === 'string'
+            ? company
+            : undefined;
+        },
+        syncJob: async job => {
+          const outcome = await syncEntries(
+            config.libraryRoot,
+            [stableContentId(job.url)],
+            source => router.syncTarget(source),
+          );
+          if (outcome.failed > 0 || outcome.synced === 0) throw new Error('自动同步未送达目标收件箱');
+        },
+      })
+    : undefined;
 
   const feJourneyConfigured = sinksConfig.sinks['fe-journey']?.type === 'repo-inbox';
   const feJourneyEnabled = feJourneyConfigured && Boolean(candidateIndex);
-  const collectorFetcher = options.fetch ?? fetch;
   const feJourneyCollector = await FeJourneyCollector.open({
     stateFile: join(config.configDir, 'fe-journey-state.json'),
     enabled: feJourneyEnabled,
@@ -371,10 +450,21 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
       if (!extensionReady) await jobs.recover();
       extensionReady = true;
       await dispatchQueued();
+      void collectionPlans?.onExtensionConnected({
+        runDue: options.enableCollectionPlanScheduler ?? options.enableFeJourneyScheduler ?? false,
+      }).catch(error => {
+        console.warn(`[plans] 扩展重连补跑失败：${error instanceof Error ? error.message : error}`);
+      });
       return;
     }
     if (parsedEnvelope.type === 'bridge.ping') {
       socket.send(JSON.stringify(envelope('bridge.pong', parsedEnvelope.requestId, {})));
+      return;
+    }
+    if (parsedEnvelope.type === 'plan.result') {
+      if (!collectionPlans) throw new Error(planStoreError ?? '固定采集计划不可用');
+      const result = extensionPlanResultPayloadSchema.parse(parsedEnvelope.payload);
+      await collectionPlans.onExtensionPlanResult(result as ExtensionPlanResult);
       return;
     }
     const job = jobs.get(parsedEnvelope.requestId);
@@ -412,21 +502,23 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
         throw new Error(`所有落地目标均失败：${detail || '无可用目标'}`);
       }
       const primary = succeeded[0]!;
-      await jobs.transition(job.id, 'saved', { outputPath: primary.outputRef });
+      const saved = await jobs.transition(job.id, 'saved', { outputPath: primary.outputRef });
       socket.send(
         JSON.stringify(
           envelope('job.saved', job.id, { outputPath: primary.outputRef, results: sinkResults }),
         ),
       );
+      await collectionPlans?.onJobTerminal(saved);
       return;
     }
     if (parsedEnvelope.type === 'job.error') {
       const error = errorSchema.parse(parsedEnvelope.payload);
       const status = error.needsAttention ? 'needs_attention' : 'failed';
-      await jobs.transition(job.id, status, {
+      const terminal = await jobs.transition(job.id, status, {
         errorCode: error.code,
         errorMessage: error.message,
       });
+      await collectionPlans?.onJobTerminal(terminal);
       return;
     }
     throw new Error(`不支持的 WebSocket 消息：${parsedEnvelope.type}`);
@@ -446,6 +538,7 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
         routing: router.describeRouting(),
         // 同步去向：采集只落本机库，这里说明「之后会同步到哪」。
         syncTargets: router.describeSyncTargets(),
+        ...(planStoreError ? { planError: planStoreError } : {}),
         // 扩展据此判断「我加载的是不是当前这一版」，是就不打扰，不是就自己重新加载。
         ...(buildId ? { buildId } : {}),
         ...(update ? { update } : {}),
@@ -472,12 +565,38 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
       const job = await jobs.create({
         url: input.url,
         requestedBy: input.requestedBy,
-        ...(input.id ? { id: input.id } : {}),
+        ...(input.id
+          ? { id: input.id }
+          : input.batchId
+            ? { id: `${input.batchId}-${stableContentId(input.url)}` }
+            : {}),
+        ...(input.batchId ? { batchId: input.batchId } : {}),
+        ...(input.planId ? { planId: input.planId } : {}),
       });
+      await collectionPlans?.onJobCreated(job);
       if (input.sinks?.length) sinkOverrides.set(job.id, input.sinks);
       sendJson(response, 202, job);
       if (job.requestedBy !== 'extension') await dispatch(job);
       return;
+    }
+    if (request.method === 'GET' && requestUrl.pathname === '/v1/plans/status') {
+      if (!collectionPlans) {
+        throw new HttpError(409, 'COLLECTION_PLANS_UNAVAILABLE', planStoreError ?? '固定采集计划不可用');
+      }
+      return sendJson(response, 200, collectionPlans.status());
+    }
+    if (request.method === 'POST' && requestUrl.pathname === '/v1/plans/run') {
+      if (!collectionPlans) {
+        throw new HttpError(409, 'COLLECTION_PLANS_UNAVAILABLE', planStoreError ?? '固定采集计划不可用');
+      }
+      const input = z.object({
+        planId: z.enum(COLLECTION_PLAN_IDS),
+        force: z.boolean().optional(),
+      }).strict().parse(await readJson(request));
+      return sendJson(response, 202, await collectionPlans.run(
+        input.planId,
+        input.force === undefined ? {} : { force: input.force },
+      ));
     }
     if (request.method === 'GET' && requestUrl.pathname === '/v1/fe-journey/status') {
       return sendJson(response, 200, feJourneyCollector.status());
@@ -620,6 +739,15 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
     );
     feJourneyTimer.unref?.();
   }
+  let collectionPlanTimer: NodeJS.Timeout | undefined;
+  if ((options.enableCollectionPlanScheduler ?? options.enableFeJourneyScheduler) && collectionPlans) {
+    collectionPlanTimer = setInterval(() => {
+      void collectionPlans.runDuePlans().catch(error => {
+        console.warn(`[plans] 到期检查失败：${error instanceof Error ? error.message : error}`);
+      });
+    }, options.collectionPlanCheckIntervalMs ?? 15 * 60_000);
+    collectionPlanTimer.unref?.();
+  }
   const address = server.address() as AddressInfo;
   const url = `http://${config.host}:${address.port}`;
   return {
@@ -628,6 +756,7 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
     async close() {
       if (updateTimer) clearInterval(updateTimer);
       if (feJourneyTimer) clearInterval(feJourneyTimer);
+      if (collectionPlanTimer) clearInterval(collectionPlanTimer);
       extensionSocket?.close(1001, 'server shutdown');
       websocketServer.close();
       server.close();
