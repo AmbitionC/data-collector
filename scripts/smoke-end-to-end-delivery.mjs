@@ -9,7 +9,7 @@ import { build } from 'esbuild';
 
 const execFileAsync = promisify(execFile);
 const WORKSPACE = resolve(import.meta.dirname, '..');
-const EXPECTED_VERSION = '0.4.22';
+const EXPECTED_VERSION = '0.4.23';
 const CURRENT_BATCH = 'delivery-smoke-current';
 const OLD_BATCH = 'delivery-smoke-old';
 

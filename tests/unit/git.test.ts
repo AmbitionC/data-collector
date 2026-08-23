@@ -1,6 +1,7 @@
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { setTimeout as delay } from 'node:timers/promises';
 import { describe, expect, it } from 'vitest';
 import {
   MISSING_GIT_PREFIX,
@@ -12,6 +13,7 @@ import {
   resolveGit,
   resolveNpm,
   runProcessForTool,
+  terminateActiveToolProcesses,
   toolCandidates,
   type GitProbe,
 } from '../../packages/bridge/src/git.js';
@@ -191,13 +193,113 @@ describe('自更新要用的外部命令', () => {
         ['-e', script],
         directory,
         process.env,
-        { timeoutMs: 150, killGraceMs: 200 },
+        // 全量 Vitest 会并发启动多个 worker；留足 Node 子进程完成冷启动并写出 PID。
+        { timeoutMs: 2_000, killGraceMs: 200 },
       )).rejects.toThrow(/超时/);
 
       const childPid = Number(await readFile(childPidPath, 'utf8'));
       expect(Number.isInteger(childPid)).toBe(true);
-      expect(() => process.kill(childPid, 0)).toThrow();
+      let gone = false;
+      for (let attempt = 0; attempt < 50 && !gone; attempt += 1) {
+        try {
+          process.kill(childPid, 0);
+          await delay(10);
+        } catch {
+          gone = true;
+        }
+      }
+      expect(gone).toBe(true);
     } finally {
+      terminateActiveToolProcesses('SIGKILL');
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('Bridge 关闭时会终止仍在运行的更新进程树', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'data-collector-shutdown-tree-'));
+    const childPidPath = join(directory, 'child.pid');
+    const script = [
+      "const { spawn } = require('node:child_process');",
+      "const { writeFileSync } = require('node:fs');",
+      `const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)']);`,
+      `writeFileSync(${JSON.stringify(childPidPath)}, String(child.pid));`,
+      'setInterval(() => {}, 1000);',
+    ].join('\n');
+
+    try {
+      const running = runProcessForTool(
+        process.execPath,
+        ['-e', script],
+        directory,
+        process.env,
+        { timeoutMs: 5_000, killGraceMs: 100 },
+      );
+      const outcome = running.then(
+        () => undefined,
+        error => error,
+      );
+      let childPid = 0;
+      for (let attempt = 0; attempt < 50 && childPid === 0; attempt += 1) {
+        try {
+          childPid = Number(await readFile(childPidPath, 'utf8'));
+        } catch {
+          await delay(10);
+        }
+      }
+      expect(Number.isInteger(childPid) && childPid > 0).toBe(true);
+
+      terminateActiveToolProcesses();
+      expect(await outcome).toBeInstanceOf(Error);
+      let gone = false;
+      for (let attempt = 0; attempt < 50 && !gone; attempt += 1) {
+        try {
+          process.kill(childPid, 0);
+          await delay(10);
+        } catch {
+          gone = true;
+        }
+      }
+      expect(gone).toBe(true);
+    } finally {
+      terminateActiveToolProcesses();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('超时后会强制清理忽略 TERM 的子进程树', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'data-collector-force-kill-tree-'));
+    const childPidPath = join(directory, 'child.pid');
+    const script = [
+      "const { spawn } = require('node:child_process');",
+      "const { writeFileSync } = require('node:fs');",
+      "const childCode = `process.on('SIGTERM', () => {}); setInterval(() => {}, 1000)`;",
+      "const child = spawn(process.execPath, ['-e', childCode]);",
+      `writeFileSync(${JSON.stringify(childPidPath)}, String(child.pid));`,
+      "process.on('SIGTERM', () => {});",
+      'setInterval(() => {}, 1000);',
+    ].join('\n');
+
+    try {
+      await expect(runProcessForTool(
+        process.execPath,
+        ['-e', script],
+        directory,
+        process.env,
+        { timeoutMs: 2_000, killGraceMs: 100 },
+      )).rejects.toThrow(/超时/);
+      const childPid = Number(await readFile(childPidPath, 'utf8'));
+      let gone = false;
+      for (let attempt = 0; attempt < 50 && !gone; attempt += 1) {
+        try {
+          process.kill(childPid, 0);
+          await delay(10);
+        } catch {
+          gone = true;
+        }
+      }
+      expect(gone).toBe(true);
+    } finally {
+      terminateActiveToolProcesses('SIGKILL');
       await rm(directory, { recursive: true, force: true });
     }
   });

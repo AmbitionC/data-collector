@@ -41,7 +41,7 @@ import {
   syncEntries,
 } from '../library/index.js';
 import { buildStampCommit, updateWorkspace, type UpdateOutcome } from '../autoUpdate.js';
-import { runTool } from '../git.js';
+import { runTool, terminateActiveToolProcesses } from '../git.js';
 import {
   FeJourneyCollector,
   FeJourneyCandidateIndex,
@@ -807,6 +807,9 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
     wsUrl: `ws://${config.host}:${address.port}/v1/extension`,
     async close() {
       if (updateTimer) clearInterval(updateTimer);
+      // 服务已经明确进入关闭流程，不再等待外部更新命令优雅退出；立即收掉整棵树，
+      // 否则忽略 TERM 的 git/npm 孙进程会反过来卡住 Node 的自然退出。
+      terminateActiveToolProcesses('SIGKILL');
       if (feJourneyTimer) clearInterval(feJourneyTimer);
       if (collectionPlanTimer) clearInterval(collectionPlanTimer);
       extensionSocket?.close(1001, 'server shutdown');

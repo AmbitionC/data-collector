@@ -218,6 +218,27 @@ function signalProcessTree(
   }
 }
 
+const activeToolProcesses = new Map<number, NodeJS.Platform>();
+let exitCleanupRegistered = false;
+
+function registerToolProcess(pid: number, platform: NodeJS.Platform): void {
+  activeToolProcesses.set(pid, platform);
+  if (exitCleanupRegistered) return;
+  exitCleanupRegistered = true;
+  process.once('exit', () => terminateActiveToolProcesses('SIGKILL'));
+}
+
+/** Bridge 停止或重启时同步通知仍在运行的更新命令，避免 detached 进程变成孤儿。 */
+export function terminateActiveToolProcesses(signal: NodeJS.Signals = 'SIGTERM'): void {
+  for (const [pid, platform] of activeToolProcesses) {
+    try {
+      signalProcessTree(pid, signal, platform);
+    } catch {
+      // 关闭流程不能因为某一棵已经退出的进程树而中断；close 事件会清掉登记。
+    }
+  }
+}
+
 /**
  * 在独立进程组里运行自更新命令。超时或输出失控时会先 TERM、再 KILL 整棵进程树。
  * 导出是为了用真实子进程做资源回收回归测试；业务入口仍是 runTool。
@@ -242,6 +263,7 @@ export function runProcessForTool(
       stdio: ['ignore', 'pipe', 'pipe'],
       windowsHide: true,
     });
+    if (child.pid !== undefined) registerToolProcess(child.pid, platform);
     const stdout: Buffer[] = [];
     const stderr: Buffer[] = [];
     let outputBytes = 0;
@@ -280,6 +302,7 @@ export function runProcessForTool(
       terminalError = terminalError ?? error;
     });
     child.once('close', code => {
+      if (child.pid !== undefined) activeToolProcesses.delete(child.pid);
       clearTimeout(timeout);
       if (forceTimer) clearTimeout(forceTimer);
       const stdoutText = output(stdout);
