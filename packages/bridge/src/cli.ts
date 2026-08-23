@@ -8,6 +8,7 @@ import { promisify } from 'node:util';
 import { AccessTokenManager } from './auth.js';
 import { autostartPlan, UnsupportedPlatformError } from './autostart.js';
 import { buildStampCommit, updateWorkspace } from './autoUpdate.js';
+import { rebuildFeJourneyCandidateIndex } from './feJourney/index.js';
 import { runTool } from './git.js';
 import { loadConfig, type ConfigOverrides } from './config.js';
 import { discoverRepoRoot, startBridge } from './server/index.js';
@@ -132,8 +133,13 @@ async function health(args: string[], io: CliIo): Promise<number> {
 
 async function feJourney(args: string[], io: CliIo): Promise<number> {
   const action = args[1];
+  if (action === 'rebuild-index') {
+    const config = loadConfig(configOverrides(args));
+    io.stdout(`${JSON.stringify(await rebuildFeJourneyCandidateIndex(config.libraryRoot))}\n`);
+    return 0;
+  }
   if (action !== 'collect' && action !== 'status') {
-    throw new Error('用法：data-collector fe-journey <collect|status> [--force]');
+    throw new Error('用法：data-collector fe-journey <collect|status|rebuild-index> [--force]');
   }
   const { baseUrl, token } = await authenticatedToken(args);
   const response = await fetch(`${baseUrl}/v1/fe-journey/${action}`, {
@@ -439,7 +445,7 @@ export async function runCli(args: string[], io: CliIo = PROCESS_IO): Promise<nu
     if (command === 'plans') return await plans(args, io);
     if (command === 'bridge') return await bridge(args, io);
     io.stderr(
-      '用法：data-collector <bridge install|bridge start|bridge status|bridge uninstall|collect URL|plans status|plans run|plans batches|fe-journey collect|fe-journey status|health>\n',
+      '用法：data-collector <bridge install|bridge start|bridge status|bridge uninstall|collect URL|plans status|plans run|plans batches|fe-journey collect|fe-journey status|fe-journey rebuild-index|health>\n',
     );
     return 2;
   } catch (error) {

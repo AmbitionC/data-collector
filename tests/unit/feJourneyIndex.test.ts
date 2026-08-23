@@ -70,20 +70,31 @@ describe('FeJourneyCandidateIndex', () => {
     const root = await temporaryDirectories.create('fe-journey-index-');
     const index = await FeJourneyCandidateIndex.open(root);
     const originalText = '一面面试官追问 RAG 文档切分、向量召回、重排以及答案评测的实现原理。';
-    const first = index.prepare(nowcoderDocument('1001', originalText));
+    const sourceIdentity = {
+      author: '同一位候选人',
+      title: '字节 Agent 开发一面面经',
+      publishedAt: '2026-08-18T09:00:00.000Z',
+    };
+    const first = index.prepare({ ...nowcoderDocument('1001', originalText), ...sourceIdentity });
     await first.commit();
 
-    const exact = index.prepare(nowcoderDocument('1002', ` ${originalText} `));
+    const exact = index.prepare({
+      ...nowcoderDocument('1002', ` ${originalText} `),
+      ...sourceIdentity,
+    });
     expect(exact.document.feJourney?.clusterId).toBe(first.document.feJourney?.clusterId);
     expect(exact.document.feJourney?.duplicateOf).toBe(
       stableContentId('https://www.nowcoder.com/discuss/1001'),
     );
     await exact.commit();
 
-    const near = index.prepare(nowcoderDocument(
-      '1003',
-      '一面面试官继续追问 RAG 文档切分、向量召回、结果重排以及答案评测的实现原理。',
-    ));
+    const near = index.prepare({
+      ...nowcoderDocument(
+        '1003',
+        '一面面试官继续追问 RAG 文档切分、向量召回、结果重排以及答案评测的实现原理。',
+      ),
+      ...sourceIdentity,
+    });
     expect(near.document.feJourney?.clusterId).toBe(first.document.feJourney?.clusterId);
     expect(near.document.feJourney?.duplicateOf).toBe(
       stableContentId('https://www.nowcoder.com/discuss/1001'),
@@ -103,6 +114,55 @@ describe('FeJourneyCandidateIndex', () => {
     ) as { version: number; entries: unknown[] };
     expect(catalog).toMatchObject({ version: 1 });
     expect(catalog.entries).toHaveLength(4);
+  });
+
+  it('keeps near-similar interview lists separate across companies and authors', async () => {
+    const root = await temporaryDirectories.create('fe-journey-index-source-boundary-');
+    const index = await FeJourneyCandidateIndex.open(root);
+    const prompts = [
+      '1.介绍 Agent 项目架构。',
+      '2.RAG 的完整流程是什么？',
+      '3.如何选择 Agent 框架？',
+      '4.长期记忆怎么存储？',
+      '5.工具调用失败如何恢复？',
+      '6.怎么做 Agent 评测？',
+    ];
+    const tencent = index.prepare({
+      ...nowcoderDocument('5101', `我参加了腾讯 Agent 开发一面。${prompts.join('')}`),
+      title: '腾讯 Agent 开发一面面经',
+      author: '腾讯候选人甲',
+      publishedAt: '2026-08-18T09:00:00.000Z',
+    });
+    await tencent.commit();
+
+    const bytedance = index.prepare({
+      ...nowcoderDocument(
+        '5102',
+        `我参加了字节 Agent 开发一面。${prompts.join('')}最后还追问了项目上线效果。`,
+      ),
+      title: '字节 Agent 开发一面面经',
+      author: '字节候选人乙',
+      publishedAt: '2026-08-18T10:00:00.000Z',
+    });
+    expect(bytedance.document.feJourney?.clusterId).not.toBe(
+      tencent.document.feJourney?.clusterId,
+    );
+    expect(bytedance.document.feJourney?.duplicateOf).toBeUndefined();
+    await bytedance.commit();
+
+    const otherTencentAuthor = index.prepare({
+      ...nowcoderDocument(
+        '5103',
+        `我参加了腾讯 Agent 开发一面。${prompts.join('')}最后还讨论了团队协作。`,
+      ),
+      title: '腾讯 Agent 开发一面复盘',
+      author: '腾讯候选人丙',
+      publishedAt: '2026-08-18T11:00:00.000Z',
+    });
+    expect(otherTencentAuthor.document.feJourney?.clusterId).not.toBe(
+      tencent.document.feJourney?.clusterId,
+    );
+    expect(otherTencentAuthor.document.feJourney?.duplicateOf).toBeUndefined();
   });
 
   it('clusters same-author same-company question reposts even when one contains long answers', async () => {

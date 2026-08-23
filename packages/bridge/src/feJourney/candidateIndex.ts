@@ -184,6 +184,16 @@ export class FeJourneyCandidateIndex {
     const near = exact || questionDuplicate
       ? undefined
       : candidates
+          .filter(entry => {
+            if (entry.source !== document.source) return false;
+            if (document.source !== 'nowcoder') return true;
+            return Boolean(
+              company &&
+              authorKey &&
+              entry.company === company &&
+              entry.authorKey === authorKey,
+            );
+          })
           .map(entry => ({ entry, distance: hammingDistance64(entry.simHash, score.simHash) }))
           .filter(item => item.distance <= NEAR_DUPLICATE_DISTANCE)
           .sort((left, right) => left.distance - right.distance || left.entry.id.localeCompare(right.entry.id))[0]

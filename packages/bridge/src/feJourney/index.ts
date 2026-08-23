@@ -6,5 +6,6 @@ export * from './nowcoderDiscovery.js';
 export * from './nowcoderEvidence.js';
 export * from './preset.js';
 export * from './quality.js';
+export * from './rebuildIndex.js';
 export * from './save.js';
 export * from './state.js';

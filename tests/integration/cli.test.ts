@@ -68,6 +68,20 @@ afterEach(async () => {
 });
 
 describe('Codex CLI', () => {
+  it('rebuilds the local fe-journey candidate index without a running Bridge', async () => {
+    const root = await temporaryDirectories.create('data-collector-cli-rebuild-index-');
+    let stdout = '';
+    let stderr = '';
+    const io = {
+      stdout: (value: string) => { stdout += value; },
+      stderr: (value: string) => { stderr += value; },
+    };
+
+    expect(await runCli(['fe-journey', 'rebuild-index', '--library', root], io)).toBe(0);
+    expect(JSON.parse(stdout)).toEqual({ scanned: 0, rebuilt: 0 });
+    expect(stderr).toBe('');
+  });
+
   it('reads, runs, and lists fixed collection plans for Codex', async () => {
     const root = await temporaryDirectories.create('data-collector-cli-plans-');
     const configDir = join(root, '.config');
