@@ -198,9 +198,9 @@ export async function packageExtension(workspaceRoot, dependencies = {}) {
   await mkdir(artifactDirectory, { recursive: true });
   await validateExtensionDirectory(extensionRoot);
   const manifest = JSON.parse(await readFile(join(extensionRoot, 'manifest.json'), 'utf8'));
-  const archive = join(artifactDirectory, `data-collector-extension-${manifest.version}.zip`);
+  const archiveName = `data-collector-extension-${manifest.version}.zip`;
+  const archive = join(artifactDirectory, archiveName);
   const stableDirectory = join(artifactDirectory, 'data-collector-extension');
-  const obsoleteArchive = join(artifactDirectory, 'data-collector-extension-0.1.0.zip');
   const stagingRoot = await mkdtemp(join(artifactDirectory, '.data-collector-extension-'));
   const stagedDirectory = join(stagingRoot, 'unpacked');
   const stagedArchive = join(stagingRoot, 'extension.zip');
@@ -217,7 +217,16 @@ export async function packageExtension(workspaceRoot, dependencies = {}) {
       stableDirectory,
       archive,
     }, dependencies);
-    if (obsoleteArchive !== archive) await rm(obsoleteArchive, { force: true });
+    // 新成品完整落盘并复验之后，历史安装包才失去价值。只删严格匹配版本命名的
+    // Data Collector ZIP，不碰 artifacts 里可能存在的其他调试/交付文件。
+    const versionedArchives = (await readdir(artifactDirectory)).filter(name =>
+      /^data-collector-extension-\d+(?:\.\d+){2,3}\.zip$/u.test(name),
+    );
+    await Promise.all(
+      versionedArchives
+        .filter(name => name !== archiveName)
+        .map(name => rm(join(artifactDirectory, name), { force: true })),
+    );
     return archive;
   } finally {
     await rm(stagingRoot, { recursive: true, force: true });

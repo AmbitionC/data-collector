@@ -197,6 +197,8 @@ describe('extension package validation', () => {
     await mkdir(stable, { recursive: true });
     await writeFile(join(stable, 'stale.txt'), 'stale');
     await writeFile(join(workspace, 'artifacts', 'data-collector-extension-0.1.0.zip'), 'obsolete');
+    await writeFile(join(workspace, 'artifacts', 'data-collector-extension-0.1.9.zip'), 'obsolete');
+    await writeFile(join(workspace, 'artifacts', 'keep-me.zip'), 'unrelated artifact');
 
     expect(await packageExtension(workspace)).toBe(
       join(workspace, 'artifacts', 'data-collector-extension-0.2.0.zip'),
@@ -209,6 +211,10 @@ describe('extension package validation', () => {
     );
     await expect(stat(join(workspace, 'artifacts', 'data-collector-extension-0.1.0.zip')))
       .rejects.toMatchObject({ code: 'ENOENT' });
+    await expect(stat(join(workspace, 'artifacts', 'data-collector-extension-0.1.9.zip')))
+      .rejects.toMatchObject({ code: 'ENOENT' });
+    expect(await readFile(join(workspace, 'artifacts', 'keep-me.zip'), 'utf8'))
+      .toBe('unrelated artifact');
   });
 
   it('leaves the previous artifacts untouched when dist validation fails', async () => {
