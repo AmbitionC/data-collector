@@ -871,6 +871,46 @@ describe('extension Bridge connection', () => {
     });
   });
 
+  it('does not drop a collection job when a newer sidebar-state write wins', async () => {
+    const storage = new DeferredStorage({ bridgeToken: 'x'.repeat(43) });
+    const socket = new MemorySocket();
+    const collect = vi.fn(async () => undefined);
+    const connection = new BridgeConnection(dependencies(storage, () => socket));
+    connection.onCollect(collect);
+    await connection.start();
+    socket.emit('open');
+    await vi.waitFor(() => expect(socket.sent).toHaveLength(1));
+
+    const firstWrite = storage.delayNextJobWrite('job-burst-1', 'collecting');
+    socket.emit('message', JSON.stringify({
+      protocolVersion: 1,
+      type: 'job.collect',
+      requestId: 'job-burst-1',
+      timestamp: '2026-08-23T00:00:00.000Z',
+      payload: { url: 'https://www.nowcoder.com/discuss/10001' },
+    }));
+    await firstWrite.started;
+    socket.emit('message', JSON.stringify({
+      protocolVersion: 1,
+      type: 'job.collect',
+      requestId: 'job-burst-2',
+      timestamp: '2026-08-23T00:00:01.000Z',
+      payload: { url: 'https://www.nowcoder.com/discuss/10002' },
+    }));
+    await vi.waitFor(() => expect(collect).toHaveBeenCalledWith(
+      'job-burst-2',
+      'https://www.nowcoder.com/discuss/10002',
+    ));
+
+    firstWrite.release();
+    await firstWrite.completed;
+    await vi.waitFor(() => expect(collect).toHaveBeenCalledWith(
+      'job-burst-1',
+      'https://www.nowcoder.com/discuss/10001',
+    ));
+    expect(collect).toHaveBeenCalledTimes(2);
+  });
+
   it('restores saved state after an older outgoing organizing write finishes late', async () => {
     const url = 'https://mp.weixin.qq.com/s/outgoing-organizing';
     const storage = new DeferredStorage({ bridgeToken: 'x'.repeat(43) });

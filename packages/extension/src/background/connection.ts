@@ -537,7 +537,7 @@ export class BridgeConnection {
       } else if (message.type === 'job.collect') {
         const payload = message.payload as { url?: unknown };
         if (typeof payload.url === 'string' && isCurrent()) {
-          const committed = await this.transitionJob(generation, isCurrent, {
+          await this.transitionJob(generation, isCurrent, {
             lastJobId: message.requestId,
             lastJobStatus: 'collecting',
             lastJobUrl: payload.url,
@@ -545,7 +545,9 @@ export class BridgeConnection {
             lastOutputPath: '',
             lastSinkIds: [],
           });
-          if (committed && isCurrent()) {
+          // transitionJob=false 只表示侧栏状态已被更新的一条覆盖，绝不表示这个任务可丢弃。
+          // 牛客一批会快速下发 12 条，存储写入重叠时每条仍必须进入采集队列。
+          if (isCurrent()) {
             await this.collectHandler?.(message.requestId, payload.url);
           }
         }
