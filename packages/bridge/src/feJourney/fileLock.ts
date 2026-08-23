@@ -1,9 +1,47 @@
-import { mkdir, open, rm, stat } from 'node:fs/promises';
+import { randomUUID } from 'node:crypto';
+import { mkdir, open, readFile, rm, stat, utimes } from 'node:fs/promises';
 import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 
 const LOCK_WAIT_MS = 5 * 60_000;
 const STALE_LOCK_MS = 30 * 60_000;
+const HEARTBEAT_MS = 60_000;
+
+interface LockRecord {
+  owner?: string;
+  pid?: number;
+}
+
+async function lockRecord(lockPath: string): Promise<LockRecord | undefined> {
+  try {
+    const value = JSON.parse(await readFile(lockPath, 'utf8')) as { owner?: unknown; pid?: unknown };
+    return {
+      ...(typeof value.owner === 'string' ? { owner: value.owner } : {}),
+      ...(typeof value.pid === 'number' && Number.isInteger(value.pid) ? { pid: value.pid } : {}),
+    };
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
+    return undefined;
+  }
+}
+
+function processIsAlive(pid: number | undefined): boolean {
+  if (pid === undefined) return true;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code !== 'ESRCH';
+  }
+}
+
+async function releaseOwnedLock(lockPath: string, owner: string): Promise<void> {
+  if ((await lockRecord(lockPath))?.owner !== owner) return;
+  const now = new Date();
+  await utimes(lockPath, now, now);
+  if ((await lockRecord(lockPath))?.owner !== owner) return;
+  await rm(lockPath, { force: true });
+}
 
 export async function withFeJourneyCandidateLock<T>(
   libraryRoot: string,
@@ -11,6 +49,7 @@ export async function withFeJourneyCandidateLock<T>(
 ): Promise<T> {
   const catalogDirectory = join(libraryRoot, '_catalog');
   const lockPath = join(catalogDirectory, 'fe-journey.lock');
+  const owner = randomUUID();
   await mkdir(catalogDirectory, { recursive: true });
   const deadline = Date.now() + LOCK_WAIT_MS;
 
@@ -22,7 +61,8 @@ export async function withFeJourneyCandidateLock<T>(
       if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
       try {
         const lockStat = await stat(lockPath);
-        if (Date.now() - lockStat.mtimeMs > STALE_LOCK_MS) {
+        const existing = await lockRecord(lockPath);
+        if (Date.now() - lockStat.mtimeMs > STALE_LOCK_MS && !processIsAlive(existing?.pid)) {
           await rm(lockPath, { force: true });
           continue;
         }
@@ -35,11 +75,23 @@ export async function withFeJourneyCandidateLock<T>(
       continue;
     }
     try {
-      await handle.writeFile(`${JSON.stringify({ pid: process.pid, createdAt: new Date().toISOString() })}\n`);
-      return await operation();
+      await handle.writeFile(`${JSON.stringify({ owner, pid: process.pid, createdAt: new Date().toISOString() })}\n`);
+      const heartbeat = setInterval(() => {
+        void lockRecord(lockPath).then(current => {
+          if (current?.owner !== owner) return;
+          const now = new Date();
+          return utimes(lockPath, now, now);
+        }).catch(() => undefined);
+      }, HEARTBEAT_MS);
+      heartbeat.unref();
+      try {
+        return await operation();
+      } finally {
+        clearInterval(heartbeat);
+      }
     } finally {
       await handle.close();
-      await rm(lockPath, { force: true });
+      await releaseOwnedLock(lockPath, owner);
     }
   }
 }
