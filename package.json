@@ -1,7 +1,7 @@
 {
   "name": "data-collector",
   "private": true,
-  "version": "0.4.19",
+  "version": "0.4.20",
   "type": "module",
   "workspaces": [
     "packages/*"
@@ -21,7 +21,8 @@
     "collector": "node packages/bridge/dist/cli.js",
     "smoke:wechat": "npm run build && node scripts/smoke-wechat.mjs",
     "smoke:fe-journey": "npm run build && node scripts/smoke-fe-journey.mjs",
-    "smoke:plans": "npm run build && node scripts/smoke-collection-plans.mjs"
+    "smoke:plans": "npm run build && node scripts/smoke-collection-plans.mjs",
+    "smoke:delivery": "node scripts/smoke-end-to-end-delivery.mjs"
   },
   "devDependencies": {
     "@types/chrome": "0.2.2",

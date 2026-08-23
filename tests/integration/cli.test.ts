@@ -2,7 +2,7 @@ import { mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import WebSocket from 'ws';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { TRUSTED_EXTENSION_ID, type CollectedDocument } from '@data-collector/shared';
+import { APP_VERSION, TRUSTED_EXTENSION_ID, type CollectedDocument } from '@data-collector/shared';
 import { runCli } from '../../packages/bridge/src/cli.js';
 import { startBridge, type BridgeHandle } from '../../packages/bridge/src/index.js';
 import { createTemporaryDirectoryTracker } from '../helpers/temp.js';
@@ -105,7 +105,7 @@ describe('Codex CLI', () => {
     const bridge = await startBridge({ port: 0, libraryRoot: root, configDir });
     handles.push(bridge);
     const { socket } = await authorize(bridge);
-    socket.send(envelope('extension.hello', 'extension-plan-wait', { version: '0.4.19' }));
+    socket.send(envelope('extension.hello', 'extension-plan-wait', { version: APP_VERSION }));
     const port = new URL(bridge.url).port;
     let stdout = '';
     let stderr = '';
@@ -145,7 +145,7 @@ describe('Codex CLI', () => {
     const bridge = await startBridge({ port: 0, libraryRoot: root, configDir });
     handles.push(bridge);
     const { socket } = await authorize(bridge);
-    socket.send(envelope('extension.hello', 'extension-plan-attention', { version: '0.4.19' }));
+    socket.send(envelope('extension.hello', 'extension-plan-attention', { version: APP_VERSION }));
     const port = new URL(bridge.url).port;
     let stdout = '';
     let stderr = '';

@@ -234,6 +234,17 @@ npm run collector -- fe-journey status
 
 固定预设是牛客每日一次（最多 24 个详情任务）、GitHub 每 7 日一次（最多 12 个项目）。牛客公开搜索页只负责发现 URL，详情正文仍由 Edge 扩展使用现有浏览器会话采集；GitHub 公共仓库由 Bridge 读取 API 与 README。采集阶段不会启动 Claude Code CLI：Agent 只在之后读取本机 `front-end-journey-resource/_inbox`，按资源仓库中的 Codex skill 聚合并更新内容。详见 [fe-journey 采集与消费](docs/fe-journey-collection.md)。
 
+### 从 Codex 端到端交付
+
+仓库内置并通过 `npm run setup` 安装 `data-collector-delivery` Skill。对 Codex 说下面两句话即可走完整交付，而不是只停在本机采集：
+
+- `触发知识星球内容收集`：运行陈老师的 15 天固定计划，只处理本批次星主内容，归档到 `life-teachers` 并推送。
+- `更新牛客产品内容`：采集腾讯、字节、阿里、蚂蚁的近期 Agent 研发面经，只消费本批次 A/B 证据，更新面经与知识点，推送后等待 `sync-content` 成功上线。
+
+两个流程都会返回可等待的批次 JSON，并用 `batchId` 精确圈定收件箱。登录缺失、正文截断、验证失败、推送或发布失败时会保留原始证据并停止，不会把失败说成完成。运营内容目前只形成私有候选，不自动发布小红书。
+
+资源边界是固定的：自动采集标签页并发为 1，最多临时增加 1 个关联文章页；正常终态自动页为 0，只有登录授权页可以交给用户。任务记录只保留全部未终态/待处理项和最近 1,000 个终态，固定计划只保留全部运行中批次和最近 180 个终态；正文、去重状态和仓库收件箱不受此清理影响。
+
 ## 输出结构
 
 ```text
@@ -255,7 +266,7 @@ npm run collector -- fe-journey status
 它是打包时烙进产物的，和 `git log --oneline -1` 的短 sha 逐字对得上；
 本地有未提交改动时会显示 `<sha>+本地改动`。
 
-对不上就说明浏览器里加载的还是旧构建，重新执行：
+对不上就说明浏览器里加载的还是旧构建。正常情况下常驻服务会自动拉取、打包并通知扩展自行重载；需要立即排查时可执行：
 
 ```bash
 cd ~/code/data-collector
@@ -263,10 +274,9 @@ git pull origin master
 npm run package          # 刷新 Edge 实际加载的 artifacts/data-collector-extension
 ```
 
-然后在 `edge://extensions` 点一次 Data Collector 的「重新加载」。
+侧栏关闭且没有采集任务时会自动重载；若侧栏正在使用，会显示“立即加载”以免丢掉当前明细。只有确认浏览器加载目录不是稳定目录时，才需要去 `edge://extensions` 重新选择 `artifacts/data-collector-extension`。
 
-> `npm run setup` 只负责构建并把**本机服务**装成登录项，**不会**刷新 Edge 加载的解压目录——
-> 要更新扩展本体必须跑 `npm run package`。
+> `npm run setup` 负责构建和安装本机服务；`npm run package` 负责刷新 Edge 加载的稳定目录。自动更新器会依次完成这两类更新。
 
 ## 常用开发命令
 
@@ -275,6 +285,7 @@ npm run typecheck
 npm test
 npm run test:e2e
 npm run smoke:fe-journey
+npm run smoke:delivery
 npm run test:coverage
 npm run package
 ```
