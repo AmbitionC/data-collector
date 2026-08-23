@@ -203,13 +203,17 @@ const ZSXQ_PLAN_ITEMS_PER_VIEW = 20;
 const CONTENT_SCRIPT_REQUEST_TIMEOUT_MS = 45_000;
 
 function lifeTeacherCategory(document: CollectedDocument): string {
-  const combined = `${document.title}\n${document.text}`;
-  if (/职场|职业|求职|管理|升职/u.test(combined)) return '职场';
-  if (/财富|资产|现金流|保险|养老/u.test(combined)) return '财富';
-  if (/投资|创业|商业模式|经营/u.test(combined)) return '投资';
-  if (/认知|决策|思维|复盘/u.test(combined)) return '认知';
-  if (/教育|学校|择校|学习/u.test(combined)) return '教育';
-  return '其他';
+  const categoryOf = (text: string): string | undefined => {
+    // “管理”单字会误伤“基金管理费”；职场只认明确语境。
+    if (/职场|职业|求职|升职|团队管理|企业管理|人员管理/u.test(text)) return '职场';
+    if (/财富|资产|现金流|保险|养老/u.test(text)) return '财富';
+    if (/投资|创业|商业模式|经营/u.test(text)) return '投资';
+    if (/认知|决策|思维|复盘/u.test(text)) return '认知';
+    if (/教育|学校|择校|学习/u.test(text)) return '教育';
+    return undefined;
+  };
+  // 标题表达主问题，优先级高于正文里顺带提到的词。
+  return categoryOf(document.title) ?? categoryOf(document.text) ?? '其他';
 }
 
 export class JobRunner {
@@ -321,6 +325,10 @@ export class JobRunner {
       for (const document of documents) {
         if (document.sourceMetadata?.authorRole !== 'owner') {
           reject('非星主');
+          continue;
+        }
+        if (document.truncated) {
+          reject('正文不完整');
           continue;
         }
         const publishedAt = document.publishedAt ? Date.parse(document.publishedAt) : Number.NaN;

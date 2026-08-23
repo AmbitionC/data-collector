@@ -369,6 +369,12 @@ describe('extension job runner', () => {
       planTopic('41002', '2026-08-07T09:59:59.000Z'),
       planTopic('41003', undefined),
       planTopic('41004', '2026-08-12T10:00:00.000Z'),
+      { ...planTopic('41005', '2026-08-22T10:00:00.000Z'), truncated: true },
+      {
+        ...planTopic('41006', '2026-08-22T11:00:00.000Z'),
+        title: '老师，如果想投资黄金的话，最方便灵活的是买什么',
+        text: '黄金 ETF 联结基金分为 A 和 C 两种，管理费和交易费不同。',
+      },
     ];
     tabs.sendMessage = async (_id, message) => {
       const request = message as { type: string; label?: string };
@@ -409,11 +415,15 @@ describe('extension job runner', () => {
       phases.push(result as { rejections?: Record<string, number> });
     });
 
-    expect(bridge.createdFor).toEqual([`${LIST_URL}/topic/41001`]);
+    expect(bridge.createdFor).toEqual([
+      `${LIST_URL}/topic/41006`,
+      `${LIST_URL}/topic/41001`,
+    ]);
     expect(phases.at(-1)?.rejections).toEqual({
       '超出15天': 1,
       '缺少可信日期': 1,
       '本机库已有': 1,
+      '正文不完整': 1,
     });
     const saved = bridge.sent.find(message => message.type === 'job.result');
     expect(saved?.payload).toMatchObject({
@@ -426,6 +436,10 @@ describe('extension job runner', () => {
         },
       },
     });
+    const gold = bridge.sent.find(message =>
+      (message.payload as { document?: CollectedDocument }).document?.canonicalUrl
+        === `${LIST_URL}/topic/41006`);
+    expect(gold?.payload).toMatchObject({ document: { userCategory: '投资' } });
   });
 
   it('queues remote jobs so reconnect bursts do not open unlimited tabs', async () => {

@@ -42,7 +42,7 @@ headless Chrome 不能通过用户手势可靠打开 Edge 原生 Side Panel surf
 
 ## 手工验收清单
 
-1. 运行 `npm run package`，确认稳定安装目录和 `data-collector-extension-0.4.16.zip` 均生成。
+1. 运行 `npm run package`，确认稳定安装目录和 `data-collector-extension-0.4.17.zip` 均生成。
 2. 在 `edge://extensions` 删除任何旧 Data Collector，再加载 `artifacts/data-collector-extension`。
 3. 启动 Bridge，在公众号文章点击扩展图标；Edge 一步打开 Side Panel，并自动显示“本机在线”。
 4. 保存后文件包含标题、来源 URL、摘要、正文；Side Panel 显示最终路径。
@@ -51,20 +51,20 @@ headless Chrome 不能通过用户手势可靠打开 Edge 原生 Side Panel surf
 7. 停止 Bridge 后 Side Panel 显示服务离线；重启并点击“重新连接”后恢复。
 8. 安装非正式 ID 时显示身份异常，并提示删除后从正式发布包重新安装。
 9. 同时启动第二个已安装实例时，旧 Side Panel 显示“另一个浏览器实例已接管”且不反复重连；点击“在此实例重新连接”后可主动接管。
-10. `unzip -l artifacts/data-collector-extension-0.4.16.zip` 只显示八个允许文件。
+10. `unzip -l artifacts/data-collector-extension-0.4.17.zip` 只显示八个允许文件。
 11. 打开“任务”页，确认两条固定计划显示上次/下次运行、结果计数与四家公司覆盖；“立即运行”后可观察到运行中和终态。
 12. 退出牛客或知识星球登录后补跑，对应批次应显示“需处理”并提供站点登录入口；登录后重试可恢复。
 13. 在已登录 Edge 对 `zsxq-chen-teacher` 验证“最新 / 精华 / 只看星主”三视图和 topic 去重；对 `nowcoder-agent-market` 验证 A/B 门槛、单公司 4 条上限以及无样本公司明确显示 0。
 
 ## 可复现打包
 
-打包脚本从已校验的 `packages/extension/dist/manifest.json` 读取版本，先在临时目录准备完整 ZIP 和已解压目录，再切换稳定安装目录。只有 0.4.16 成品验证完成后才删除旧 ZIP。
+打包脚本从已校验的 `packages/extension/dist/manifest.json` 读取版本，先在临时目录准备完整 ZIP 和已解压目录，再切换稳定安装目录。只有 0.4.17 成品验证完成后才删除旧 ZIP。
 
 ```bash
 npm run package
-shasum -a 256 artifacts/data-collector-extension-0.4.16.zip
+shasum -a 256 artifacts/data-collector-extension-0.4.17.zip
 npm run package
-shasum -a 256 artifacts/data-collector-extension-0.4.16.zip
+shasum -a 256 artifacts/data-collector-extension-0.4.17.zip
 ```
 
 两次 SHA-256 必须完全一致。发布前还应执行任务简报指定的当前源码扫描，并排除历史 `docs/superpowers`；预期没有遗留人工授权或旧入口文本。

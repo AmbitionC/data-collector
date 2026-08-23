@@ -20,7 +20,7 @@ describe('fixed extension identity and authorization payload', () => {
       `chrome-extension://${derived}`,
       `extension://${derived}`,
     ]));
-    expect(APP_VERSION).toBe('0.4.16');
+    expect(APP_VERSION).toBe('0.4.17');
   });
 
   it('accepts only strong authorization tokens', () => {
