@@ -476,13 +476,24 @@ function visibleTopicIds(): string[] {
   return [...ids].sort();
 }
 
+/**
+ * 真实知识星球 DOM 不暴露帖子号；视图是否换批要看节点正文，而不是 topic id。
+ * 只取前 20 条、每条前 240 字，既足以区分信息流，也避免在大列表上反复拼整页文本。
+ */
+function visibleTopicSignature(): string {
+  const topics = [...document.querySelectorAll<HTMLElement>('.topic-container')].slice(0, 20);
+  return `${topics.length}:` + topics
+    .map(topic => (topic.textContent ?? '').replace(/\s+/g, ' ').trim().slice(0, 240))
+    .join('\n---\n');
+}
+
 /** 精确切换固定视图，并由 Angular 的 DOM 变化确认激活态与帖子集合已经更新。 */
 async function selectPlanView(label: ZsxqPlanView): Promise<{ label: ZsxqPlanView; topicIds: string[] }> {
   if (!ZSXQ_PLAN_VIEWS.includes(label)) {
     throw new ExtractionError('UNSUPPORTED_LAYOUT', `不支持的知识星球视图：${label}`);
   }
   await waitForMenu(label);
-  const before = visibleTopicIds().join(',');
+  const before = visibleTopicSignature();
   const alreadyActive = menuLabels().active === label;
   if (!alreadyActive && !clickMenu(label)) {
     throw new ExtractionError('UNSUPPORTED_LAYOUT', `页面上找不到「${label}」标签`);
@@ -492,7 +503,7 @@ async function selectPlanView(label: ZsxqPlanView): Promise<{ label: ZsxqPlanVie
     () => {
       if (menuLabels().active !== label) return undefined;
       const topicIds = visibleTopicIds();
-      const signature = topicIds.join(',');
+      const signature = visibleTopicSignature();
       return signature !== before ? { label, topicIds } : undefined;
     },
     10_000,

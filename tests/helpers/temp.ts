@@ -16,7 +16,14 @@ export function createTemporaryDirectoryTracker() {
       const pending = [...directories];
       directories.clear();
       await Promise.all(
-        pending.map(directory => rm(directory, { recursive: true, force: true })),
+        // macOS 上并行关闭 socket/文件句柄时，递归 rm 偶尔会在目录项刚变化的瞬间
+        // 抛 ENOTEMPTY；Node 原生重试正是为这种竞态准备的。
+        pending.map(directory => rm(directory, {
+          recursive: true,
+          force: true,
+          maxRetries: 5,
+          retryDelay: 20,
+        })),
       );
     },
   };

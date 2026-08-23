@@ -176,6 +176,30 @@ describe('content script list collection', () => {
     expect(timeoutSpy).not.toHaveBeenCalled();
   });
 
+  it('recognizes a changed view when real topic DOM has no topic ids', async () => {
+    const html = await readFile(join(import.meta.dirname, '..', 'fixtures', 'zsxq-three-views.html'), 'utf8');
+    document.body.innerHTML = new RegExp('<body>([\\s\\S]*)</body>').exec(html)![1]!;
+    for (const container of document.querySelectorAll<HTMLElement>('.topic-container')) {
+      delete container.dataset.topicId;
+    }
+    for (const item of document.querySelectorAll<HTMLElement>('.menu-container .item')) {
+      item.addEventListener('click', () => {
+        for (const candidate of document.querySelectorAll('.menu-container .item')) {
+          candidate.classList.toggle('actived', candidate === item);
+        }
+        document.querySelector('#feed')!.innerHTML = `
+          <div class="topic-container">
+            <div class="talk-content-container">真实页面没有帖子号，但精华正文已经换成另一批。</div>
+          </div>`;
+      });
+    }
+    vi.useFakeTimers();
+
+    const response = await settle(ask<ViewResponse>({ type: 'list.selectView', label: '精华' }));
+
+    expect(response.selected).toEqual({ label: '精华', topicIds: [] });
+  });
+
   it('waits for the SPA menu to render before selecting the initial plan view', async () => {
     document.body.innerHTML = '<main id="app-shell"></main>';
     vi.useFakeTimers();

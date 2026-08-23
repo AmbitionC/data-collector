@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "Data Collector",
   "description": "把微信公众号、知识星球与牛客网内容整理到本地 Markdown 知识库并投递到目标仓库。",
-  "version": "0.4.15",
+  "version": "0.4.16",
   "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA5j32H1bhAUPC0m0KrRBNrt+b/aEK4NInYbdOKtnxdtBiXU2sZnw+GvWcHKe7qV5U2182ckYlquJvZWAIecHZmRN4uA/TuadXt0nQt9p0LYLHobquh8G0cBv39N/H7AzHcb+eFTgKJ/rP6F4VPKrXheELstyHwUoGl8kE8zESQxjt0i679tJon/QXsKCwqr8YVGg1Yoc0Rs/0o1EZBWEgNCthuVpD6RcmkmchdTavYhgqAhhB/nISMJv3c1xwM85hypSNBJIeTi685W7FVz/mH5nGNHKatN3wKoahtgb1UKckTDErtRwUJzv9htcvNy6sUoTqVo3fwNTU750olVEzdwIDAQAB",
   "minimum_chrome_version": "116",
   "permissions": [
