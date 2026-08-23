@@ -168,6 +168,38 @@ describe('ZSXQ extraction（按真实 Angular DOM）', () => {
     expect(reason).toContain('切走再切回来');
   });
 
+  it('records owner/member evidence, topic id, active view, and preserves the questioner', async () => {
+    const doc = await fixture('zsxq-three-views.html', LIST);
+    const index = new TopicIndex();
+    index.add([
+      { topicId: '611111111111111', text: '陈老师发布的投资创业观察，正文长度足够用于采集与分类归纳。' },
+      {
+        topicId: '622222222222222',
+        text: '请问创业项目在融资前应该重点验证哪些数据指标？ 应该先验证真实留存、付费意愿和获客成本，再谈规模。',
+        parts: [
+          '请问创业项目在融资前应该重点验证哪些数据指标？',
+          '应该先验证真实留存、付费意愿和获客成本，再谈规模。',
+        ],
+      },
+    ]);
+
+    const collected = extractList(doc, LIST, index, NOW).entries.flatMap(entry => entry.document ?? []);
+
+    expect(collected[0]?.sourceMetadata).toMatchObject({
+      authorRole: 'owner',
+      topicId: '611111111111111',
+      viewLabels: '最新',
+    });
+    expect(collected[1]).toMatchObject({
+      questioner: '提问者乙',
+      sourceMetadata: {
+        authorRole: 'member',
+        topicId: '622222222222222',
+        viewLabels: '最新',
+      },
+    });
+  });
+
   it('问答帖：问和答都归档，且靠任意一段就能对上帖子号', async () => {
     // 精华里混着不少问答帖。页面上问与答是两块、中间还夹着「回答」这类标签，
     // 接口那边则是 question / answer 两段。只取第一块 → 丢掉回答，

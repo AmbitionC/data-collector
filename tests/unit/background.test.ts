@@ -164,6 +164,55 @@ class InMemoryBridge implements BridgeClient {
 }
 
 describe('extension job runner', () => {
+  it('unions ZSXQ documents across three views before creating any save job', async () => {
+    const tabs = new InMemoryTabs();
+    const bridge = new InMemoryBridge();
+    const labels: string[] = [];
+    let active = '';
+    const byView: Record<string, CollectedDocument[]> = {
+      最新: [topic('7001'), topic('7002')],
+      精华: [topic('7002'), topic('7003')],
+      只看星主: [topic('7001'), topic('7004')],
+    };
+    tabs.sendMessage = async (_id, message) => {
+      const request = message as { type: string; label?: string };
+      tabs.asked.push(request.type);
+      if (request.type === 'list.selectView') {
+        active = request.label ?? '';
+        labels.push(active);
+        return { ok: true, selected: { label: active, topicIds: [] } } as never;
+      }
+      if (request.type === 'extract.list') {
+        expect(bridge.createdFor).toHaveLength(0);
+        const documents = byView[active] ?? [];
+        return {
+          ok: true,
+          list: {
+            items: documents.map((document, index) => ({ key: `${active}-${index}`, title: document.title, document })),
+            skipped: 0,
+            total: documents.length,
+            captured: documents.length,
+          },
+        };
+      }
+      throw new Error(`unexpected ${request.type}`);
+    };
+    const runner = new JobRunner({ tabs, bridge, waitForTabComplete: async () => undefined });
+
+    const documents = await runner.collectZsxqPlanViews(7);
+
+    expect(labels).toEqual(['最新', '精华', '只看星主']);
+    expect(documents.map(document => document.canonicalUrl)).toEqual([
+      `${LIST_URL}/topic/7001`,
+      `${LIST_URL}/topic/7002`,
+      `${LIST_URL}/topic/7003`,
+      `${LIST_URL}/topic/7004`,
+    ]);
+    expect(documents[0]?.sourceMetadata?.viewLabels).toBe('最新、只看星主');
+    expect(documents[1]?.sourceMetadata?.viewLabels).toBe('最新、精华');
+    expect(bridge.createdFor).toHaveLength(0);
+  });
+
   it('queues remote jobs so reconnect bursts do not open unlimited tabs', async () => {
     const tabs = new InMemoryTabs();
     const bridge = new InMemoryBridge();

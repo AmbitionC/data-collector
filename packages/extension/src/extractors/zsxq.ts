@@ -90,6 +90,18 @@ function firstWithin(root: ParentNode, selectors: string[]): Element | null {
   return null;
 }
 
+function authorRoleOf(container: Element): 'owner' | 'member' | undefined {
+  const role = container.querySelector('.author .role');
+  if (!role) return undefined;
+  return role.classList.contains('owner') ? 'owner' : 'member';
+}
+
+function activeViewOf(document: Document): string | undefined {
+  const active = document.querySelector('.menu-container .item.actived');
+  const label = elementText(active);
+  return label || undefined;
+}
+
 /**
  * 一条帖子里的全部正文块。
  *
@@ -420,6 +432,8 @@ export function extractZsxqList(
     const truncated = /展开全部|展开全文|阅读全文/.test(elementText(archived));
     // 问答帖的提问者：`<div class="question-owner"><span>依依</span> 提问：</div>`
     const questioner = elementText(container.querySelector('.question-owner span'));
+    const authorRole = authorRoleOf(container);
+    const viewLabel = activeViewOf(document);
     entries.push({
       container,
       key,
@@ -435,6 +449,11 @@ export function extractZsxqList(
         ...(publishedAt ? { publishedAt } : {}),
         ...(truncated ? { truncated: true } : {}),
         ...(questioner ? { questioner } : {}),
+        sourceMetadata: {
+          ...(authorRole ? { authorRole } : {}),
+          ...(topicId ? { topicId } : {}),
+          ...(viewLabel ? { viewLabels: viewLabel } : {}),
+        },
       }),
     });
   }
@@ -549,6 +568,8 @@ export function extractZsxq(document: Document, url: URL, now: Clock) {
   // 一个 truncated 都没有，归档侧只能回去靠字数猜。两条路径必须给同样的字段。
   const truncated = /展开全部|展开全文|阅读全文/.test(text);
   const questioner = elementText(container.querySelector('.question-owner span'));
+  const topicId = url.pathname.match(/\/topic\/(\d+)/)?.[1];
+  const authorRole = authorRoleOf(container);
   return buildDocument({
     source: 'zsxq',
     kind: 'post',
@@ -560,5 +581,9 @@ export function extractZsxq(document: Document, url: URL, now: Clock) {
     ...(publishedAt ? { publishedAt } : {}),
     ...(truncated ? { truncated: true } : {}),
     ...(questioner ? { questioner } : {}),
+    sourceMetadata: {
+      ...(authorRole ? { authorRole } : {}),
+      ...(topicId ? { topicId } : {}),
+    },
   });
 }

@@ -26,6 +26,11 @@ interface AdvanceResponse {
   advance: { collapsed: number; loaded: number; scroll?: string };
 }
 
+interface ViewResponse {
+  ok: true;
+  selected: { label: '最新' | '精华' | '只看星主'; topicIds: string[] };
+}
+
 let listener: Listener;
 
 async function loadContentScript(): Promise<void> {
@@ -114,6 +119,39 @@ async function settle<T>(pending: Promise<T>, limitMs = 60_000): Promise<T> {
 }
 
 describe('content script list collection', () => {
+  it('selects an exact plan view and responds only after the active label and topic set change', async () => {
+    const html = await readFile(join(import.meta.dirname, '..', 'fixtures', 'zsxq-three-views.html'), 'utf8');
+    document.body.innerHTML = new RegExp('<body>([\\s\\S]*)</body>').exec(html)![1]!;
+    const clicked: string[] = [];
+    for (const item of document.querySelectorAll<HTMLElement>('.menu-container .item')) {
+      item.addEventListener('click', () => {
+        clicked.push((item.textContent ?? '').trim());
+        setTimeout(() => {
+          for (const candidate of document.querySelectorAll('.menu-container .item')) {
+            candidate.classList.toggle('actived', candidate === item);
+          }
+          document.querySelector('#feed')!.innerHTML = `
+            <div class="topic-container" data-topic-id="633333333333333">
+              <div class="author"><div class="role owner">陈老师</div></div>
+              <div class="talk-content-container">精华视图切换后的稳定帖子正文，长度足够采集。</div>
+            </div>`;
+        }, 120);
+      });
+    }
+    vi.useFakeTimers();
+
+    const pending = ask<ViewResponse>({ type: 'list.selectView', label: '精华' });
+    await vi.advanceTimersByTimeAsync(100);
+    let settledEarly = false;
+    void pending.then(() => { settledEarly = true; });
+    await Promise.resolve();
+    expect(settledEarly).toBe(false);
+    const response = await settle(pending);
+
+    expect(clicked).toEqual(['精华']);
+    expect(response.selected).toEqual({ label: '精华', topicIds: ['633333333333333'] });
+  });
+
   it('registers only one message listener even if injected twice', async () => {
     const listeners: Listener[] = [];
     vi.stubGlobal('chrome', {

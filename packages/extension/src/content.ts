@@ -19,6 +19,9 @@ import {
 } from './topicIndex.js';
 import { commercialSignals } from './adFilter.js';
 
+export const ZSXQ_PLAN_VIEWS = ['最新', '精华', '只看星主'] as const;
+export type ZsxqPlanView = (typeof ZSXQ_PLAN_VIEWS)[number];
+
 /**
  * 帖子号索引。帖子号不在 DOM 上，只能从应用自己的接口响应里取（见 inject.ts）。
  * 主世界脚本捕获后 postMessage 过来，这里累积成「正文 → 帖子号」的对照表。
@@ -90,9 +93,11 @@ interface ExtractMessage {
     | 'list.itemDiagnose'
     | 'list.hookStats'
     | 'list.refreshTopics'
-    | 'list.focusLast';
+    | 'list.focusLast'
+    | 'list.selectView';
   /** list.highlight：要滚过去并高亮的那一条。 */
   key?: string;
+  label?: ZsxqPlanView;
   overrides?: {
     userCategory?: string;
     userTags?: string[];
@@ -415,6 +420,46 @@ function clickMenu(label: string): boolean {
   return true;
 }
 
+function visibleTopicIds(): string[] {
+  const ids = new Set<string>();
+  for (const container of document.querySelectorAll<HTMLElement>('.topic-container')) {
+    const direct = container.dataset.topicId;
+    if (direct) ids.add(direct);
+    const linked = container.querySelector<HTMLAnchorElement>('a[href*="/topic/"]')
+      ?.getAttribute('href')?.match(/\/topic\/(\d+)/)?.[1];
+    if (linked) ids.add(linked);
+  }
+  return [...ids].sort();
+}
+
+/** 精确切换固定视图，并等 Angular 的激活态与帖子集合稳定后才回复。 */
+async function selectPlanView(label: ZsxqPlanView): Promise<{ label: ZsxqPlanView; topicIds: string[] }> {
+  if (!ZSXQ_PLAN_VIEWS.includes(label)) {
+    throw new ExtractionError('UNSUPPORTED_LAYOUT', `不支持的知识星球视图：${label}`);
+  }
+  const before = visibleTopicIds().join(',');
+  const alreadyActive = menuLabels().active === label;
+  if (!alreadyActive && !clickMenu(label)) {
+    throw new ExtractionError('UNSUPPORTED_LAYOUT', `页面上找不到「${label}」标签`);
+  }
+  let previous = '';
+  let stableCount = 0;
+  for (let attempt = 0; attempt < 60; attempt += 1) {
+    await new Promise(resolve => setTimeout(resolve, 100));
+    const topicIds = visibleTopicIds();
+    const signature = topicIds.join(',');
+    if (menuLabels().active === label && (alreadyActive || signature !== before)) {
+      stableCount = signature === previous ? stableCount + 1 : 1;
+      if (stableCount >= 2) return { label, topicIds };
+      previous = signature;
+    } else {
+      stableCount = 0;
+      previous = signature;
+    }
+  }
+  throw new ExtractionError('CONTENT_EMPTY', `「${label}」视图切换后内容未稳定`);
+}
+
 /**
  * 让站点重新请求一次列表，好让主世界钩子截到帖子号。
  *
@@ -675,9 +720,29 @@ if (!alreadyRegistered) chrome.runtime.onMessage.addListener((message: unknown, 
     request.type !== 'list.itemDiagnose' &&
     request.type !== 'list.hookStats' &&
     request.type !== 'list.refreshTopics' &&
-    request.type !== 'list.focusLast'
+    request.type !== 'list.focusLast' &&
+    request.type !== 'list.selectView'
   ) {
     return false;
+  }
+
+  if (request.type === 'list.selectView') {
+    const label = request.label;
+    if (!label || !ZSXQ_PLAN_VIEWS.includes(label)) {
+      sendResponse({ ok: false, error: { code: 'UNSUPPORTED_LAYOUT', message: '知识星球视图无效' } });
+      return false;
+    }
+    void selectPlanView(label).then(
+      selected => sendResponse({ ok: true, selected }),
+      error => sendResponse({
+        ok: false,
+        error: {
+          code: error instanceof ExtractionError ? error.code : 'COLLECTION_FAILED',
+          message: error instanceof Error ? error.message : '切换知识星球视图失败',
+        },
+      }),
+    );
+    return true;
   }
 
   if (request.type === 'list.refreshTopics') {

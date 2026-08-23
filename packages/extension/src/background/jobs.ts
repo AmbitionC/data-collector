@@ -44,6 +44,7 @@ export type ExtractionResponse =
   | { ok: true; highlight: { found: boolean } }
   | { ok: true; hook: HookStats }
   | { ok: true; refresh: { toggled: boolean; category?: string } }
+  | { ok: true; selected: { label: ZsxqPlanView; topicIds: string[] } }
   | { ok: false; error: { code: string; message: string } };
 
 export interface TabsApi {
@@ -79,7 +80,11 @@ interface PayloadMap {
   highlight: { found: boolean };
   hook: HookStats;
   refresh: { toggled: boolean; category?: string };
+  selected: { label: ZsxqPlanView; topicIds: string[] };
 }
+
+export const ZSXQ_PLAN_VIEWS = ['最新', '精华', '只看星主'] as const;
+export type ZsxqPlanView = (typeof ZSXQ_PLAN_VIEWS)[number];
 
 /** 按请求类型取出应答载荷；字段对不上说明页面里的内容脚本还是旧版本。 */
 function payloadOf<K extends keyof PayloadMap>(
@@ -169,6 +174,36 @@ export class JobRunner {
   private batchStopped = false;
 
   constructor(private readonly options: JobRunnerOptions) {}
+
+  /** 先完成三个视图的只读提取与 URL 合并，再把结果交给调用方创建保存任务。 */
+  async collectZsxqPlanViews(
+    tabId: number,
+    views: readonly ZsxqPlanView[] = ZSXQ_PLAN_VIEWS,
+  ): Promise<CollectedDocument[]> {
+    const union = new Map<string, { document: CollectedDocument; labels: Set<ZsxqPlanView> }>();
+    for (const label of views) {
+      const selected = await this.ask(tabId, { type: 'list.selectView', label });
+      if (!selected.ok) throw new Error(selected.error.message);
+      payloadOf(selected, 'selected');
+      const extracted = await this.ask(tabId, { type: 'extract.list' });
+      if (!extracted.ok) throw new Error(extracted.error.message);
+      for (const item of payloadOf(extracted, 'list').items) {
+        if (!item.document) continue;
+        const existing = union.get(item.document.canonicalUrl);
+        if (existing) existing.labels.add(label);
+        else union.set(item.document.canonicalUrl, { document: item.document, labels: new Set([label]) });
+      }
+    }
+    return [...union.values()]
+      .map(({ document, labels }) => ({
+        ...document,
+        sourceMetadata: {
+          ...(document.sourceMetadata ?? {}),
+          viewLabels: ZSXQ_PLAN_VIEWS.filter(label => labels.has(label)).join('、'),
+        },
+      }))
+      .sort((left, right) => left.canonicalUrl.localeCompare(right.canonicalUrl));
+  }
 
   private wait(ms: number): Promise<void> {
     return this.options.delay ? this.options.delay(ms) : new Promise(resolve => setTimeout(resolve, ms));
