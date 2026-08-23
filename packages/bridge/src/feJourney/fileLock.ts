@@ -43,12 +43,33 @@ async function releaseOwnedLock(lockPath: string, owner: string): Promise<void> 
   await rm(lockPath, { force: true });
 }
 
+async function recoverDeadLock(lockPath: string, recoveryPath: string): Promise<void> {
+  try {
+    await mkdir(recoveryPath);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'EEXIST') return;
+    throw error;
+  }
+  try {
+    const lockStat = await stat(lockPath);
+    const existing = await lockRecord(lockPath);
+    if (Date.now() - lockStat.mtimeMs > STALE_LOCK_MS && !processIsAlive(existing?.pid)) {
+      await rm(lockPath, { force: true });
+    }
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+  } finally {
+    await rm(recoveryPath, { recursive: true, force: true });
+  }
+}
+
 export async function withFeJourneyCandidateLock<T>(
   libraryRoot: string,
   operation: () => Promise<T>,
 ): Promise<T> {
   const catalogDirectory = join(libraryRoot, '_catalog');
   const lockPath = join(catalogDirectory, 'fe-journey.lock');
+  const recoveryPath = `${lockPath}.recovery`;
   const owner = randomUUID();
   await mkdir(catalogDirectory, { recursive: true });
   const deadline = Date.now() + LOCK_WAIT_MS;
@@ -60,12 +81,7 @@ export async function withFeJourneyCandidateLock<T>(
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
       try {
-        const lockStat = await stat(lockPath);
-        const existing = await lockRecord(lockPath);
-        if (Date.now() - lockStat.mtimeMs > STALE_LOCK_MS && !processIsAlive(existing?.pid)) {
-          await rm(lockPath, { force: true });
-          continue;
-        }
+        await recoverDeadLock(lockPath, recoveryPath);
       } catch (statError) {
         if ((statError as NodeJS.ErrnoException).code === 'ENOENT') continue;
         throw statError;
