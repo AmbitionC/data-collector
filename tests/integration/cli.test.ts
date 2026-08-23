@@ -16,6 +16,23 @@ function envelope(type: string, requestId: string, payload: unknown): string {
   return JSON.stringify({ protocolVersion: 1, type, requestId, timestamp: new Date().toISOString(), payload });
 }
 
+async function nextSocketMessage<T>(socket: WebSocket): Promise<{
+  requestId: string;
+  payload: T;
+}> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error('WebSocket message timeout')), 5_000);
+    socket.once('error', error => {
+      clearTimeout(timer);
+      reject(error);
+    });
+    socket.once('message', data => {
+      clearTimeout(timer);
+      resolve(JSON.parse(data.toString()) as { requestId: string; payload: T });
+    });
+  });
+}
+
 function document(): CollectedDocument {
   return {
     schemaVersion: 1,
@@ -80,6 +97,81 @@ describe('Codex CLI', () => {
 
     expect(await runCli(['plans', 'run', 'unknown-plan', ...base], io)).toBe(1);
     expect(stderr).toContain('固定计划');
+  });
+
+  it('waits for the exact plan batch and prints its terminal delivery manifest', async () => {
+    const root = await temporaryDirectories.create('data-collector-cli-plan-wait-');
+    const configDir = join(root, '.config');
+    const bridge = await startBridge({ port: 0, libraryRoot: root, configDir });
+    handles.push(bridge);
+    const { socket } = await authorize(bridge);
+    socket.send(envelope('extension.hello', 'extension-plan-wait', { version: '0.4.19' }));
+    const port = new URL(bridge.url).port;
+    let stdout = '';
+    let stderr = '';
+    const command = new Promise<{ requestId: string; payload: { batchId: string } }>((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error('plan timeout')), 5_000);
+      socket.once('message', data => {
+        clearTimeout(timer);
+        resolve(JSON.parse(data.toString()) as { requestId: string; payload: { batchId: string } });
+      });
+    });
+
+    const running = runCli([
+      'plans', 'run', 'zsxq-chen-teacher', '--force', '--wait', '5000',
+      '--port', port, '--library', root, '--config', configDir,
+    ], {
+      stdout: value => { stdout += value; },
+      stderr: value => { stderr += value; },
+    });
+    const collect = await command;
+    socket.send(envelope('plan.result', collect.requestId, {
+      batchId: collect.payload.batchId,
+      discovered: 0,
+    }));
+
+    expect(await running).toBe(0);
+    expect(stderr).toBe('');
+    expect(JSON.parse(stdout)).toMatchObject({
+      id: collect.payload.batchId,
+      status: 'completed',
+      deliveryIds: [],
+    });
+  });
+
+  it('preserves the terminal plan JSON and fails on attention', async () => {
+    const root = await temporaryDirectories.create('data-collector-cli-plan-attention-');
+    const configDir = join(root, '.config');
+    const bridge = await startBridge({ port: 0, libraryRoot: root, configDir });
+    handles.push(bridge);
+    const { socket } = await authorize(bridge);
+    socket.send(envelope('extension.hello', 'extension-plan-attention', { version: '0.4.19' }));
+    const port = new URL(bridge.url).port;
+    let stdout = '';
+    let stderr = '';
+    const command = nextSocketMessage<{ batchId: string }>(socket);
+    const running = runCli([
+      'plans', 'run', 'zsxq-chen-teacher', '--force', '--wait', '5000',
+      '--port', port, '--library', root, '--config', configDir,
+    ], {
+      stdout: value => { stdout += value; },
+      stderr: value => { stderr += value; },
+    });
+    const collect = await command;
+    socket.send(envelope('plan.result', collect.requestId, {
+      batchId: collect.payload.batchId,
+      discovered: 0,
+      error: '请先登录知识星球',
+      needsAttention: true,
+    }));
+
+    expect(await running).toBe(1);
+    expect(JSON.parse(stdout)).toMatchObject({
+      id: collect.payload.batchId,
+      status: 'completed_with_attention',
+      error: '请先登录知识星球',
+    });
+    expect(stderr).toContain('固定计划需要处理');
   });
 
   it('runs and reports the fixed fe-journey collection without accepting search configuration', async () => {

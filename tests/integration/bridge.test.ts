@@ -221,6 +221,64 @@ describe('local Bridge', () => {
     });
   });
 
+  it('stamps plan identity into every plan document before saving it', async () => {
+    const root = await temporaryDirectory();
+    const configDir = join(root, '.config');
+    const bridge = await startBridge({ port: 0, libraryRoot: root, configDir });
+    handles.push(bridge);
+    const { socket, token } = await authorize(bridge);
+    socket.send(envelope('extension.hello', 'extension-plan-metadata', { version: APP_VERSION }));
+
+    const planCommand = nextMessage(socket);
+    const started = await requestJson<{ id: string }>(bridge.url, '/v1/plans/run', {
+      method: 'POST',
+      token,
+      body: { planId: 'zsxq-chen-teacher', force: true },
+    });
+    await planCommand;
+    const topicUrl = 'https://wx.zsxq.com/group/48844584441158/topic/844444444444444';
+    const created = await requestJson<{ id: string }>(bridge.url, '/v1/jobs', {
+      method: 'POST',
+      token,
+      body: {
+        url: topicUrl,
+        requestedBy: 'extension',
+        batchId: started.body.id,
+        planId: 'zsxq-chen-teacher',
+      },
+    });
+    socket.send(envelope('job.progress', created.body.id, { stage: 'collecting' }));
+    socket.send(envelope('job.result', created.body.id, {
+      document: document({
+        source: 'zsxq',
+        kind: 'post',
+        url: topicUrl,
+        canonicalUrl: topicUrl,
+        title: '批次元数据测试',
+        sourceMetadata: { authorRole: 'member' },
+      }),
+    }));
+
+    let outputPath: string | undefined;
+    await vi.waitFor(async () => {
+      const saved = await requestJson<{ status: string; outputPath?: string }>(
+        bridge.url,
+        `/v1/jobs/${created.body.id}`,
+        { token },
+      );
+      expect(saved.body.status).toBe('saved');
+      outputPath = saved.body.outputPath;
+    });
+    const source = JSON.parse(await readFile(join(outputPath!, '..', 'source.json'), 'utf8')) as {
+      document: CollectedDocument;
+    };
+    expect(source.document.sourceMetadata).toMatchObject({
+      authorRole: 'member',
+      planId: 'zsxq-chen-teacher',
+      batchId: started.body.id,
+    });
+  });
+
 
   it('keeps fe-journey collection disabled without its fixed sink', async () => {
     const root = await temporaryDirectory();

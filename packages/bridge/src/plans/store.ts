@@ -102,6 +102,7 @@ export class CollectionPlanStore {
         skipped: 0,
         failed: 0,
         needsAttention: 0,
+        deliveryIds: [],
         ...(planId === 'nowcoder-agent-market' ? { selectionStatus: 'collecting' as const } : {}),
         jobIds: [],
       };
@@ -139,6 +140,15 @@ export class CollectionPlanStore {
     return this.serializeMutation(async () => {
       const batch = this.require(batchId);
       batch.selectionStatus = 'pending';
+      await this.persist();
+    });
+  }
+
+  markDelivered(batchId: string, contentId: string): Promise<void> {
+    return this.serializeMutation(async () => {
+      if (!/^[a-f0-9]{12}$/.test(contentId)) throw new Error(`交付内容 ID 无效：${contentId}`);
+      const batch = this.require(batchId);
+      if (!batch.deliveryIds.includes(contentId)) batch.deliveryIds.push(contentId);
       await this.persist();
     });
   }

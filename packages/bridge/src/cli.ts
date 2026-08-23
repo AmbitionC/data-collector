@@ -180,10 +180,20 @@ async function plans(args: string[], io: CliIo): Promise<number> {
   const { baseUrl, token } = await authenticatedToken(args);
   let path = '/v1/plans/status';
   let init: RequestInit = { headers: { authorization: `Bearer ${token}` } };
+  let waitMs: number | undefined;
+  let planId: CollectionPlanId | undefined;
   if (action === 'run') {
-    const planId = args[2];
-    if (!COLLECTION_PLAN_IDS.includes(planId as CollectionPlanId)) {
+    const rawPlanId = args[2];
+    if (!COLLECTION_PLAN_IDS.includes(rawPlanId as CollectionPlanId)) {
       throw new Error(`固定计划必须是：${COLLECTION_PLAN_IDS.join('、')}`);
+    }
+    planId = rawPlanId as CollectionPlanId;
+    const rawWait = option(args, '--wait');
+    if (rawWait !== undefined) {
+      waitMs = Number(rawWait);
+      if (!Number.isInteger(waitMs) || waitMs < 100 || waitMs > 30 * 60 * 1000) {
+        throw new Error('--wait 必须是 100 到 1800000 之间的毫秒数');
+      }
     }
     path = '/v1/plans/run';
     init = {
@@ -207,11 +217,43 @@ async function plans(args: string[], io: CliIo): Promise<number> {
       : `HTTP ${response.status}`;
     throw new Error(`固定计划${action === 'run' ? '运行' : '读取'}失败：${message}`);
   }
-  io.stdout(`${JSON.stringify(body)}\n`);
-  if (action === 'run' && typeof body === 'object' && body !== null &&
-    (body as { status?: unknown }).status === 'failed') {
-    io.stderr('固定计划启动失败\n');
-    return 1;
+  let result = body;
+  if (action === 'run' && waitMs !== undefined && planId &&
+    typeof body === 'object' && body !== null && typeof (body as { id?: unknown }).id === 'string') {
+    const batchId = (body as { id: string }).id;
+    const deadline = Date.now() + waitMs;
+    while ((result as { status?: unknown }).status === 'running' && Date.now() <= deadline) {
+      await new Promise(resolveTimeout => setTimeout(resolveTimeout, 100));
+      const statusResponse = await fetch(
+        `${baseUrl}/v1/plans/batches?limit=100&planId=${encodeURIComponent(planId)}`,
+        { headers: { authorization: `Bearer ${token}` } },
+      );
+      if (!statusResponse.ok) throw new Error(`固定计划读取失败：HTTP ${statusResponse.status}`);
+      const statusBody = await statusResponse.json() as { batches?: unknown };
+      if (!Array.isArray(statusBody.batches)) throw new Error('固定计划返回了无效批次列表');
+      const exact = statusBody.batches.find(item => (
+        typeof item === 'object' && item !== null && (item as { id?: unknown }).id === batchId
+      ));
+      if (!exact) throw new Error(`固定计划批次消失：${batchId}`);
+      result = exact;
+    }
+    if ((result as { status?: unknown }).status === 'running') {
+      io.stdout(`${JSON.stringify(result)}\n`);
+      io.stderr(`固定计划等待超时：${batchId}\n`);
+      return 1;
+    }
+  }
+  io.stdout(`${JSON.stringify(result)}\n`);
+  if (action === 'run' && typeof result === 'object' && result !== null) {
+    const status = (result as { status?: unknown }).status;
+    if (status === 'failed') {
+      io.stderr('固定计划运行失败\n');
+      return 1;
+    }
+    if (status === 'completed_with_attention') {
+      io.stderr('固定计划需要处理\n');
+      return 1;
+    }
   }
   return 0;
 }

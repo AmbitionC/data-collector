@@ -53,6 +53,8 @@ export interface CollectionBatch {
   skipped: number;
   failed: number;
   needsAttention: number;
+  /** 已成功同步到目标仓库收件箱的稳定内容 ID；下游只加工这里列出的本批内容。 */
+  deliveryIds: string[];
   /** 需要二次筛选的计划用持久状态保证 Bridge 重启后可续跑。 */
   selectionStatus?: 'collecting' | 'pending' | 'completed';
   coverage?: Record<string, number>;
@@ -75,6 +77,7 @@ export const collectionBatchSchema = z.object({
   skipped: countSchema,
   failed: countSchema,
   needsAttention: countSchema,
+  deliveryIds: z.array(z.string().regex(/^[a-f0-9]{12}$/)).max(100).default([]),
   selectionStatus: z.enum(['collecting', 'pending', 'completed']).optional(),
   coverage: z.record(z.string().trim().min(1).max(100), countSchema).optional(),
   rejections: z.record(z.string().trim().min(1).max(100), countSchema).optional(),

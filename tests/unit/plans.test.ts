@@ -18,6 +18,7 @@ const BATCH = {
   skipped: 1,
   failed: 0,
   needsAttention: 1,
+  deliveryIds: ['a1b2c3d4e5f6', '0123456789ab'],
   coverage: { bytedance: 3, tencent: 3, alibaba: 2, ant: 0 },
 } as const;
 

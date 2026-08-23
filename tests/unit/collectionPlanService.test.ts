@@ -190,6 +190,37 @@ describe('CollectionPlanService', () => {
       failed: 0,
       needsAttention: 0,
       selectionStatus: 'completed',
+      deliveryIds: [expect.any(String)],
+    });
+    expect(context.store.latest('nowcoder-agent-market', 1)[0]!.deliveryIds).toEqual([
+      expect.stringMatching(/^[a-f0-9]{12}$/),
+    ]);
+  });
+
+  it('records only successfully synchronized ZSXQ content as batch deliveries', async () => {
+    const context = await fixture({ shouldAutoSync: async () => true });
+    const batch = await context.service.run('zsxq-chen-teacher', { force: true });
+    const child = await context.jobs.create({
+      id: 'owner-delivered',
+      url: 'https://wx.zsxq.com/group/48844584441158/topic/833333333333333',
+      requestedBy: 'extension',
+      batchId: batch.id,
+      planId: 'zsxq-chen-teacher',
+    });
+    await context.service.onJobCreated(child);
+    await context.service.onExtensionPlanResult({ batchId: batch.id, discovered: 1 });
+    await context.jobs.transition(child.id, 'collecting');
+    const saved = await context.jobs.transition(child.id, 'saved', {
+      outputPath: `/tmp/${child.id}/index.md`,
+    });
+
+    await context.service.onJobTerminal(saved);
+    await context.service.onJobTerminal(saved);
+
+    expect(context.synced).toEqual([child.id]);
+    expect(context.store.latest('zsxq-chen-teacher', 1)[0]).toMatchObject({
+      status: 'completed',
+      deliveryIds: [expect.stringMatching(/^[a-f0-9]{12}$/)],
     });
   });
 

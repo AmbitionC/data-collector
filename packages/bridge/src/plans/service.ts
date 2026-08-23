@@ -251,6 +251,7 @@ export class CollectionPlanService {
       if (await this.dependencies.shouldAutoSync(job)) {
         try {
           await this.dependencies.syncJob(job);
+          await this.dependencies.store.markDelivered(job.batchId, stableContentId(job.url));
         } catch (error) {
           this.recordSyncError(job.batchId, error);
         }
@@ -281,10 +282,12 @@ export class CollectionPlanService {
         rejectionCounts[rejected.reason] = (rejectionCounts[rejected.reason] ?? 0) + 1;
       }
       for (const accepted of selection.accepted) {
-        if (this.syncedJobs.has(accepted.id)) continue;
+        const contentId = stableContentId(accepted.url);
+        if (batch.deliveryIds.includes(contentId) || this.syncedJobs.has(accepted.id)) continue;
         this.syncedJobs.add(accepted.id);
         try {
           await this.dependencies.syncJob(accepted);
+          await this.dependencies.store.markDelivered(batch.id, contentId);
         } catch (error) {
           this.recordSyncError(batch.id, error);
         }

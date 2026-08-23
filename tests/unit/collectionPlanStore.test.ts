@@ -75,11 +75,14 @@ describe('CollectionPlanStore', () => {
     const batch = await first.start('zsxq-chen-teacher');
     await first.markDiscovery(batch.id, 1);
     await first.attachJob(batch.id, 'topic-1');
+    await first.markDelivered(batch.id, 'a1b2c3d4e5f6');
+    await first.markDelivered(batch.id, 'a1b2c3d4e5f6');
 
     const reopened = await CollectionPlanStore.open(path, () => '2026-08-23T01:05:00.000Z');
     const completed = await reopened.reconcile(batch.id, [job('topic-1', 'saved')]);
 
     expect(completed.status).toBe('completed');
+    expect(completed.deliveryIds).toEqual(['a1b2c3d4e5f6']);
     expect(reopened.latest('zsxq-chen-teacher', 1)[0]).toEqual(completed);
   });
 

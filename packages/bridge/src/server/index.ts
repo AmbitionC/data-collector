@@ -509,10 +509,20 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
       }
       if (job.status === 'dispatched') await jobs.transition(job.id, 'collecting');
       const override = sinkOverrides.get(job.id);
+      const document: CollectedDocument = job.batchId && job.planId
+        ? {
+            ...(result.document as CollectedDocument),
+            sourceMetadata: {
+              ...(result.document.sourceMetadata ?? {}),
+              batchId: job.batchId,
+              planId: job.planId,
+            },
+          }
+        : result.document as CollectedDocument;
       const sinkResults = await saveCollectedDocument(
         router,
         candidateIndex,
-        result.document as CollectedDocument,
+        document,
         override,
       );
       sinkOverrides.delete(job.id);
