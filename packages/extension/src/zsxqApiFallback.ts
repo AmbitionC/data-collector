@@ -592,9 +592,13 @@ export async function collectZsxqApiViews(
     pruneBusinessSkips();
   }
 
+  const richestObservation = (document: CollectedDocument): CollectedDocument =>
+    observations.get(document.canonicalUrl) ?? document;
   const byView = states.map(state => ({
     label: state.label,
-    documents: [...state.documents.values()].slice(0, PLAN_ITEMS_PER_VIEW),
+    documents: [...state.documents.values()]
+      .slice(0, PLAN_ITEMS_PER_VIEW)
+      .map(richestObservation),
   }));
   const latest = byView.find(view => view.label === '最新');
   if (!latest) {
@@ -603,7 +607,9 @@ export async function collectZsxqApiViews(
   latest.documents = unionZsxqViewDocuments([{
     label: '最新',
     documents: [
-      ...sticky.documents.filter(document => !businessSkips.has(document.canonicalUrl)),
+      ...sticky.documents
+        .filter(document => !businessSkips.has(document.canonicalUrl))
+        .map(richestObservation),
       ...latest.documents,
     ],
   }])

@@ -483,6 +483,57 @@ describe('ZSXQ API fallback', () => {
       document.sourceMetadata?.topicId === '776000000000000020')).toBe(true);
   });
 
+  it('keeps the richest observed copy even when that copy falls outside another view top twenty', async () => {
+    const targetId = '776500000000000000';
+    const shortText = '投资经营短正文';
+    const richText = `${shortText}，这是已核验的完整尾段`;
+    const latest = Array.from({ length: 20 }, (_, index) => topic(
+      index === 19 ? targetId : String(776_500_000_000_000_100n + BigInt(index)),
+      new Date(Date.parse('2026-08-24T22:58:00.000Z') - index * 60 * 1_000).toISOString(),
+      index === 19 ? shortText : undefined,
+    ));
+    const digestFirstPage = Array.from({ length: 20 }, (_, index) => topic(
+      String(776_500_000_000_001_000n + BigInt(index)),
+      new Date(Date.parse('2026-08-24T23:30:00.000Z') - index * 60 * 1_000).toISOString(),
+      index === 0 ? '打新 新股 积极申购' : undefined,
+    ));
+    const digestSecondPage = [
+      topic('776500000000002000', '2026-08-24T23:10:00.000Z'),
+      topic(targetId, '2026-08-24T22:39:00.000Z', richText),
+      ...Array.from({ length: 18 }, (_, index) => topic(
+        String(776_500_000_000_002_100n + BigInt(index)),
+        new Date(Date.parse('2026-08-24T22:38:00.000Z') - index * 60 * 1_000).toISOString(),
+      )),
+    ];
+    const fetcher = async (input: RequestInfo | URL): Promise<Response> => {
+      const url = new URL(String(input));
+      if (url.href === `${API}/groups/${GROUP_ID}`) return groupResponse();
+      if (url.href === `${API}/groups/${GROUP_ID}/menus`) return menuResponse();
+      if (url.pathname.endsWith('/topics/sticky')) return topicResponse([]);
+      const scope = url.searchParams.get('scope');
+      if (scope === 'all') return topicResponse(latest);
+      if (scope === 'digests') {
+        return topicResponse(url.searchParams.has('end_time')
+          ? digestSecondPage
+          : digestFirstPage);
+      }
+      return topicResponse([]);
+    };
+
+    const collection = await collectZsxqApiViews(GROUP_ID, {
+      fetcher,
+      aduid: 'test-device',
+      now: () => new Date('2026-08-25T00:00:00.000Z'),
+      requestId: () => 'test-request',
+    });
+
+    expect(collection.documents.find(document =>
+      document.sourceMetadata?.topicId === targetId)).toMatchObject({
+      text: richText,
+      truncated: false,
+    });
+  });
+
   it('rejects a normal page that exceeds the requested twenty raw topics', async () => {
     const overfull = Array.from({ length: 21 }, (_, index) => topic(
       String(777_000_000_000_000_000n + BigInt(index)),
