@@ -79,6 +79,35 @@ async function fixture(options: {
     synced,
     setConnected(value: boolean) { connected = value; },
     setNow(value: string) { currentNow = value; },
+    async reopen() {
+      const reopenedStore = await CollectionPlanStore.open(store.path, now);
+      const reopenedJobs = await JobStore.open(jobs.path, { now, id: () => crypto.randomUUID() });
+      const reopenedService = new CollectionPlanService({
+        store: reopenedStore,
+        jobs: reopenedJobs,
+        now,
+        extensionConnected: () => connected,
+        discoverNowcoder: discover,
+        dispatch: async job => { dispatched.push(job.id); },
+        collectZsxq: async (batchId, planId) => { planMessages.push({ batchId, planId }); },
+        shouldAutoSync,
+        selectNowcoderJobs: options.selectNowcoderJobs ?? (async planJobs => {
+          const accepted: JobRecord[] = [];
+          const rejected: Array<{ url: string; reason: string }> = [];
+          for (const job of planJobs) {
+            if (await shouldAutoSync(job)) accepted.push(job);
+            else rejected.push({ url: job.url, reason: '证据等级不足' });
+          }
+          return {
+            accepted,
+            coverage: { bytedance: 0, tencent: 0, alibaba: 0, ant: 0 },
+            rejected,
+          };
+        }),
+        syncJob: options.syncJob ?? (async job => { synced.push(job.id); }),
+      });
+      return { store: reopenedStore, jobs: reopenedJobs, service: reopenedService };
+    },
   };
 }
 
@@ -88,6 +117,12 @@ function nowcoderCandidates(count: number, firstId = 10_000) {
     url: `https://www.nowcoder.com/discuss/${firstId + index}`,
     queryCompany: companies[index % companies.length]!,
   }));
+}
+
+function deferred<T>() {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  const promise = new Promise<T>(resolvePromise => { resolve = resolvePromise; });
+  return { promise, resolve };
 }
 
 function acceptAllExcept(excludedUrls: ReadonlySet<string>) {
@@ -159,6 +194,161 @@ describe('CollectionPlanService', () => {
       rounds: 2,
     });
     expect(context.synced).toEqual([]);
+  });
+
+  it('keeps a terminal round running while refill discovery is unresolved', async () => {
+    const initial = nowcoderCandidates(8, 18_000);
+    const refill = nowcoderCandidates(4, 18_100);
+    const refillDiscovery = deferred<typeof refill>();
+    let discoveryRound = 0;
+    const excluded = new Set(initial.slice(0, 2).map(candidate => candidate.url));
+    const context = await fixture({
+      discoverNowcoder: async () => {
+        discoveryRound += 1;
+        return discoveryRound === 1 ? initial : refillDiscovery.promise;
+      },
+      selectNowcoderJobs: acceptAllExcept(excluded),
+    });
+    const batch = await context.service.run('nowcoder-agent-market', { force: true });
+    const firstRound = context.jobs.list().filter(job => job.batchId === batch.id);
+    await saveJobs(context, firstRound.slice(0, -1));
+    const last = firstRound.at(-1)!;
+    await context.jobs.transition(last.id, 'collecting');
+    const saved = await context.jobs.transition(last.id, 'saved', {
+      outputPath: `/tmp/${last.id}/index.md`,
+    });
+
+    const advancing = context.service.onJobTerminal(saved);
+    await vi.waitFor(() => expect(context.discover).toHaveBeenCalledTimes(2));
+
+    expect(context.store.latest('nowcoder-agent-market', 1)[0]).toMatchObject({
+      status: 'running',
+      selectionStatus: 'pending',
+      deliveryIds: [],
+    });
+
+    refillDiscovery.resolve(refill);
+    await advancing;
+    expect(context.store.latest('nowcoder-agent-market', 1)[0]).toMatchObject({
+      status: 'running',
+      rounds: 2,
+    });
+  });
+
+  it('keeps delivery invisible while exact-ten synchronization is unresolved', async () => {
+    const syncStarted = deferred<void>();
+    const releaseSync = deferred<void>();
+    let firstSync = true;
+    const context = await fixture({
+      candidates: nowcoderCandidates(10, 18_200),
+      selectNowcoderJobs: acceptAllExcept(new Set()),
+      syncJob: async job => {
+        if (firstSync) {
+          firstSync = false;
+          syncStarted.resolve();
+        }
+        await releaseSync.promise;
+        context.synced.push(job.id);
+      },
+    });
+    const batch = await context.service.run('nowcoder-agent-market', { force: true });
+    await saveJobs(context, context.jobs.list().filter(job => job.batchId === batch.id));
+    const refill = context.jobs.list().filter(job => job.batchId === batch.id && job.status === 'queued');
+    await saveJobs(context, refill.slice(0, -1));
+    const last = refill.at(-1)!;
+    await context.jobs.transition(last.id, 'collecting');
+    const saved = await context.jobs.transition(last.id, 'saved', {
+      outputPath: `/tmp/${last.id}/index.md`,
+    });
+
+    const advancing = context.service.onJobTerminal(saved);
+    await syncStarted.promise;
+
+    expect(context.store.latest('nowcoder-agent-market', 1)[0]).toMatchObject({
+      status: 'running',
+      selectionStatus: 'pending',
+      deliveryIds: [],
+    });
+
+    releaseSync.resolve();
+    await advancing;
+    expect(context.store.latest('nowcoder-agent-market', 1)[0]).toMatchObject({
+      status: 'completed',
+      selectionStatus: 'completed',
+      deliveryIds: expect.arrayContaining([expect.stringMatching(/^[a-f0-9]{12}$/)]),
+    });
+    expect(context.store.latest('nowcoder-agent-market', 1)[0]!.deliveryIds).toHaveLength(10);
+  });
+
+  it('retries idempotent sink writes after delivery finalization fails', async () => {
+    const sinkUrls = new Set<string>();
+    const syncAttempts: string[] = [];
+    const context = await fixture({
+      candidates: nowcoderCandidates(10, 18_400),
+      selectNowcoderJobs: acceptAllExcept(new Set()),
+      syncJob: async job => {
+        syncAttempts.push(job.url);
+        sinkUrls.add(job.url);
+      },
+    });
+    const batch = await context.service.run('nowcoder-agent-market', { force: true });
+    await saveJobs(context, context.jobs.list().filter(job => job.batchId === batch.id));
+    const refill = context.jobs.list().filter(job => job.batchId === batch.id && job.status === 'queued');
+    await saveJobs(context, refill.slice(0, -1));
+    const last = refill.at(-1)!;
+    await context.jobs.transition(last.id, 'collecting');
+    const saved = await context.jobs.transition(last.id, 'saved', {
+      outputPath: `/tmp/${last.id}/index.md`,
+    });
+    const finalize = vi.spyOn(context.store, 'finalizeSelection');
+    finalize.mockRejectedValueOnce(new Error('计划终态写入失败'));
+
+    await expect(context.service.onJobTerminal(saved)).rejects.toThrow('计划终态写入失败');
+
+    expect(context.store.latest('nowcoder-agent-market', 1)[0]).toMatchObject({
+      status: 'running',
+      selectionStatus: 'pending',
+      deliveryIds: [],
+    });
+    expect(syncAttempts).toHaveLength(10);
+    expect(sinkUrls.size).toBe(10);
+
+    finalize.mockRestore();
+    const reopened = await context.reopen();
+    await reopened.service.onExtensionConnected();
+
+    expect(syncAttempts).toHaveLength(20);
+    expect(sinkUrls.size).toBe(10);
+    const terminal = reopened.store.latest('nowcoder-agent-market', 1)[0]!;
+    expect(terminal).toMatchObject({
+      status: 'completed',
+      selectionStatus: 'completed',
+    });
+    expect(new Set(terminal.deliveryIds).size).toBe(10);
+  });
+
+  it('finalizes candidate exhaustion without a second terminal transition', async () => {
+    const candidates = nowcoderCandidates(2, 18_300);
+    const context = await fixture({
+      candidates,
+      selectNowcoderJobs: acceptAllExcept(new Set()),
+    });
+    vi.spyOn(context.store, 'attention').mockRejectedValue(
+      new Error('shortfall attempted a second terminal write'),
+    );
+    const batch = await context.service.run('nowcoder-agent-market', { force: true });
+
+    await expect(saveJobs(
+      context,
+      context.jobs.list().filter(job => job.batchId === batch.id),
+    )).resolves.toBeUndefined();
+
+    expect(context.store.latest('nowcoder-agent-market', 1)[0]).toMatchObject({
+      status: 'completed_with_attention',
+      selectionStatus: 'completed',
+      deliveryIds: [],
+      error: expect.stringContaining('候选不足'),
+    });
   });
 
   it('synchronizes and finalizes exactly ten deterministic jobs after a refill', async () => {
@@ -265,6 +455,31 @@ describe('CollectionPlanService', () => {
       selectionStatus: 'pending',
       rounds: 2,
     });
+  });
+
+  it('repairs a queued current-batch orphan on reopen as one idempotent round', async () => {
+    const context = await fixture();
+    const batch = await context.store.start('nowcoder-agent-market');
+    await context.store.markSelectionPending(batch.id);
+    await context.jobs.create({
+      id: 'orphan-after-job-create',
+      url: 'https://www.nowcoder.com/discuss/18500',
+      requestedBy: 'codex',
+      batchId: batch.id,
+      planId: 'nowcoder-agent-market',
+    });
+    const reopened = await context.reopen();
+
+    await reopened.service.onExtensionConnected();
+
+    expect(reopened.store.latest('nowcoder-agent-market', 1)[0]).toMatchObject({
+      status: 'running',
+      selectionStatus: 'pending',
+      discovered: 1,
+      accepted: 1,
+      rounds: 1,
+    });
+    expect(context.discover).not.toHaveBeenCalled();
   });
 
   it('retries one cooled historical failure but keeps its second failure known', async () => {

@@ -39,6 +39,25 @@ describe('CollectionPlanStore', () => {
     });
   });
 
+  it('counts recovered orphan jobs as one round without double-incrementing on replay', async () => {
+    const root = await temporaryDirectories.create('plan-store-recovered-jobs-');
+    const path = join(root, 'plans.json');
+    const store = await CollectionPlanStore.open(path, () => '2026-08-23T01:00:00.000Z');
+    const batch = await store.start('nowcoder-agent-market');
+    await store.markDiscovery(batch.id, 1);
+    await store.attachRound(batch.id, ['job-1']);
+
+    await store.attachRecoveredJobs(batch.id, ['job-1', 'orphan-job']);
+    await store.attachRecoveredJobs(batch.id, ['job-1', 'orphan-job']);
+    const reopened = await CollectionPlanStore.open(path);
+
+    expect(reopened.latest('nowcoder-agent-market', 1)[0]).toMatchObject({
+      discovered: 2,
+      accepted: 2,
+      rounds: 2,
+    });
+  });
+
   it('reopens a terminal pending Nowcoder selection and keeps its round count schema-valid', async () => {
     const times = ['2026-08-23T01:00:00.000Z', '2026-08-23T01:03:00.000Z'];
     const root = await temporaryDirectories.create('plan-store-resume-');
@@ -96,7 +115,7 @@ describe('CollectionPlanStore', () => {
     expect(running.finishedAt).toBeUndefined();
   });
 
-  it('reconciles exact terminal saved, skipped, failed, and attention counts', async () => {
+  it('keeps a terminal Nowcoder round running until final selection is committed', async () => {
     const times = ['2026-08-23T01:00:00.000Z', '2026-08-23T01:03:00.000Z'];
     const root = await temporaryDirectories.create('plan-store-terminal-');
     const store = await CollectionPlanStore.open(join(root, 'plans.json'), () => times.shift()!);
@@ -104,23 +123,23 @@ describe('CollectionPlanStore', () => {
     await store.markDiscovery(batch.id, 4);
     for (const id of ['saved', 'skipped', 'failed', 'attention']) await store.attachJob(batch.id, id);
 
-    const terminal = await store.reconcile(batch.id, [
+    const terminalRound = await store.reconcile(batch.id, [
       job('saved', 'saved'),
       job('skipped', 'failed', 'QUALITY_REJECTED'),
       job('failed', 'failed', 'EXTRACTION_FAILED'),
       job('attention', 'needs_attention', 'AUTH_REQUIRED'),
     ]);
 
-    expect(terminal).toMatchObject({
-      status: 'completed_with_attention',
+    expect(terminalRound).toMatchObject({
+      status: 'running',
       discovered: 4,
       accepted: 4,
       saved: 1,
       skipped: 1,
       failed: 1,
       needsAttention: 1,
-      finishedAt: '2026-08-23T01:03:00.000Z',
     });
+    expect(terminalRound.finishedAt).toBeUndefined();
   });
 
   it('persists batches and job membership across reopen', async () => {

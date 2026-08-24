@@ -179,7 +179,15 @@ export class CollectionPlanService {
   }
 
   async onExtensionConnected(options: { runDue?: boolean } = {}): Promise<void> {
-    for (const batch of this.dependencies.store.latest(undefined, 100)) {
+    for (const persisted of this.dependencies.store.latest(undefined, 100)) {
+      const batch = persisted.planId === 'nowcoder-agent-market' && persisted.selectionStatus !== 'completed'
+        ? await this.dependencies.store.attachRecoveredJobs(
+            persisted.id,
+            this.dependencies.jobs.list()
+              .filter(job => job.batchId === persisted.id)
+              .map(job => job.id),
+          )
+        : persisted;
       if (
         batch.planId === 'nowcoder-agent-market' &&
         batch.status !== 'running' &&
@@ -206,8 +214,8 @@ export class CollectionPlanService {
         const reconciled = await this.dependencies.store.reconcile(batch.id, jobs);
         if (
           reconciled.planId === 'nowcoder-agent-market' &&
-          reconciled.status !== 'running' &&
-          reconciled.selectionStatus === 'pending'
+          reconciled.selectionStatus === 'pending' &&
+          this.nowcoderRoundTerminal(reconciled.id)
         ) await this.advanceNowcoderBatch(reconciled);
       } else await this.execute(batch);
     }
@@ -282,7 +290,7 @@ export class CollectionPlanService {
       }
       return;
     }
-    if (reconciled.status === 'running') return;
+    if (!this.nowcoderRoundTerminal(reconciled.id)) return;
     await this.advanceNowcoderBatch(reconciled);
   }
 
@@ -290,7 +298,11 @@ export class CollectionPlanService {
     if (batch.selectionStatus === 'completed' || this.advancingBatches.has(batch.id)) return;
     this.advancingBatches.add(batch.id);
     try {
-      let current = batch;
+      let current = await this.dependencies.store.attachRecoveredJobs(
+        batch.id,
+        this.dependencies.jobs.list().filter(job => job.batchId === batch.id).map(job => job.id),
+      );
+      if (current.status !== 'running') current = await this.dependencies.store.resumeCollection(batch.id);
       while (current.selectionStatus !== 'completed') {
         const jobs = this.dependencies.jobs.list();
         const attached = jobs.filter(job => job.batchId === current.id);
@@ -322,6 +334,9 @@ export class CollectionPlanService {
             0,
             prepared.selection.coverage,
             prepared.rejectionCounts,
+            undefined,
+            0,
+            [],
           );
           this.clearBatchRuntime(current.id);
           return;
@@ -354,7 +369,7 @@ export class CollectionPlanService {
 
         await this.dependencies.store.resumeCollection(current.id);
         current = await this.createAttachAndDispatch(current, attached.length, next);
-        if (current.status === 'running') return;
+        if (!this.nowcoderRoundTerminal(current.id)) return;
       }
     } finally {
       this.advancingBatches.delete(batch.id);
@@ -447,11 +462,9 @@ export class CollectionPlanService {
     const delivered = new Set(batch.deliveryIds);
     for (const job of accepted) {
       const contentId = stableContentId(job.url);
-      if (delivered.has(contentId) || this.syncedJobs.has(job.id)) continue;
-      this.syncedJobs.add(job.id);
+      if (delivered.has(contentId)) continue;
       try {
         await this.dependencies.syncJob(job);
-        await this.dependencies.store.markDelivered(batch.id, contentId);
         delivered.add(contentId);
       } catch (error) {
         this.recordSyncError(batch.id, error);
@@ -465,6 +478,7 @@ export class CollectionPlanService {
       prepared.rejectionCounts,
       syncErrors?.length ? `自动同步失败：${syncErrors.join('；')}` : undefined,
       prepared.contentRejectionFailures.length,
+      [...delivered],
     );
     this.clearBatchRuntime(batch.id);
   }
@@ -479,14 +493,17 @@ export class CollectionPlanService {
       prepared.selection.accepted.length,
       prepared.selection.coverage,
       prepared.rejectionCounts,
-      undefined,
-      prepared.contentRejectionFailures.length,
-    );
-    await this.dependencies.store.attention(
-      batch.id,
       `牛客合格候选不足 10 条（${prepared.selection.accepted.length}/10）：${reason}`,
+      prepared.contentRejectionFailures.length,
+      [],
     );
     this.clearBatchRuntime(batch.id);
+  }
+
+  private nowcoderRoundTerminal(batchId: string): boolean {
+    const attached = this.dependencies.jobs.list().filter(job => job.batchId === batchId);
+    return attached.length > 0 && attached.every(job =>
+      job.status === 'saved' || job.status === 'failed' || job.status === 'needs_attention');
   }
 
   private recordSyncError(batchId: string, error: unknown): void {

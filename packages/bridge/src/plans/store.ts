@@ -142,6 +142,22 @@ export class CollectionPlanStore {
     });
   }
 
+  attachRecoveredJobs(batchId: string, jobIds: readonly string[]): Promise<CollectionBatch> {
+    return this.serializeMutation(async () => {
+      const batch = this.require(batchId);
+      if (batch.planId !== 'nowcoder-agent-market') throw new Error('仅牛客固定计划支持恢复任务归属');
+      const recoveredIds = [...new Set(jobIds)].filter(id => id.length > 0 && !batch.jobIds.includes(id));
+      if (recoveredIds.length > 0) {
+        batch.jobIds.push(...recoveredIds);
+        batch.accepted = batch.jobIds.length;
+        batch.discovered = Math.max(batch.discovered, batch.accepted);
+        batch.rounds = (batch.rounds ?? 0) + 1;
+        await this.persist();
+      }
+      return publicBatch(batch);
+    });
+  }
+
   markDiscovery(
     batchId: string,
     discovered: number,
@@ -195,11 +211,16 @@ export class CollectionPlanStore {
     rejections: Record<string, number>,
     syncError?: string,
     reclassifiedFailureCount = 0,
+    deliveryIds?: readonly string[],
   ): Promise<CollectionBatch> {
     return this.serializeMutation(async () => {
       const batch = this.require(batchId);
       if (!Number.isSafeInteger(reclassifiedFailureCount) || reclassifiedFailureCount < 0) {
         throw new Error('重分类失败数无效');
+      }
+      const uniqueDeliveryIds = deliveryIds ? [...new Set(deliveryIds)] : undefined;
+      if (uniqueDeliveryIds?.some(contentId => !/^[a-f0-9]{12}$/.test(contentId))) {
+        throw new Error('交付内容 ID 无效');
       }
       batch.failed = Math.max(0, batch.failed - reclassifiedFailureCount);
       batch.accepted = accepted;
@@ -210,6 +231,7 @@ export class CollectionPlanStore {
       );
       batch.coverage = { ...coverage };
       batch.rejections = { ...rejections };
+      if (uniqueDeliveryIds) batch.deliveryIds = uniqueDeliveryIds;
       batch.selectionStatus = 'completed';
       if (syncError) {
         batch.status = 'completed_with_attention';
@@ -245,7 +267,7 @@ export class CollectionPlanStore {
 
       const terminal = children.length === batch.jobIds.length && children.every(job =>
         job.status === 'saved' || job.status === 'failed' || job.status === 'needs_attention');
-      if (terminal) {
+      if (terminal && batch.planId !== 'nowcoder-agent-market') {
         batch.status = batch.failed === batch.accepted && batch.accepted > 0
           ? 'failed'
           : batch.failed > 0 || batch.needsAttention > 0
