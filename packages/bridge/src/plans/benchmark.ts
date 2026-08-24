@@ -117,6 +117,20 @@ export async function writePlanBenchmark(
   })));
   measured.sort((left, right) => left.contentId.localeCompare(right.contentId));
 
+  const delivered = new Set(batch.deliveryIds);
+  const contributionMap = new Map<string, Set<string>>();
+  for (const job of jobs) {
+    if (!job.batchId) continue;
+    const contentId = stableContentId(job.url);
+    if (!delivered.has(contentId)) continue;
+    const contentIds = contributionMap.get(job.batchId) ?? new Set<string>();
+    contentIds.add(contentId);
+    contributionMap.set(job.batchId, contentIds);
+  }
+  const deliveryContributions = [...contributionMap]
+    .map(([batchId, contentIds]) => ({ batchId, contentIds: [...contentIds].sort() }))
+    .sort((left, right) => left.batchId.localeCompare(right.batchId));
+
   const durations = measured.map(item => item.durationMs).sort((left, right) => left - right);
   const createdTimes = measured.map(item => Date.parse(item.createdAt));
   const updatedTimes = measured.map(item => Date.parse(item.updatedAt));
@@ -134,6 +148,7 @@ export async function writePlanBenchmark(
     roundCount: batch.rounds ?? 0,
     contentIds: [...new Set(measured.map(item => item.contentId))],
     deliveryIds: [...batch.deliveryIds],
+    deliveryContributions,
     terminalCounts: {
       discovered: batch.discovered,
       accepted: batch.accepted,

@@ -1,6 +1,7 @@
 import {
   canonicalizeUrl,
   parseSupportedUrl,
+  stableContentId,
   type JobRecord,
 } from '@data-collector/shared';
 import { FE_JOURNEY_PRESET } from '../feJourney/preset.js';
@@ -56,4 +57,28 @@ export function knownNowcoderPlanUrls(
     }
   }
   return known;
+}
+
+/** Rehydrate catalog-pending Nowcoder evidence without rediscovering or recollecting it. */
+export function pendingNowcoderPlanJobs(
+  jobs: readonly JobRecord[],
+  pendingContentIds: ReadonlySet<string>,
+): JobRecord[] {
+  const latestByContentId = new Map<string, JobRecord>();
+  for (const job of jobs) {
+    if (
+      job.planId !== 'nowcoder-agent-market'
+      || job.status !== 'saved'
+      || !job.outputPath
+      || !job.batchId
+    ) continue;
+    const canonicalUrl = canonicalJobUrl(job.url);
+    if (!canonicalUrl) continue;
+    const contentId = stableContentId(canonicalUrl);
+    if (!pendingContentIds.has(contentId)) continue;
+    const existing = latestByContentId.get(contentId);
+    if (!existing || job.updatedAt > existing.updatedAt) latestByContentId.set(contentId, job);
+  }
+  return [...latestByContentId.values()].sort((left, right) =>
+    right.updatedAt.localeCompare(left.updatedAt) || left.id.localeCompare(right.id));
 }

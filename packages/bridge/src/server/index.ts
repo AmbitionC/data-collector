@@ -55,6 +55,7 @@ import {
 import {
   CollectionPlanService,
   CollectionPlanStore,
+  pendingNowcoderPlanJobs,
   selectNowcoderPlanCandidates,
   type ExtensionPlanResult,
 } from '../plans/index.js';
@@ -383,6 +384,10 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
           const grade = document.sourceMetadata?.evidenceGrade;
           return grade === 'A' || grade === 'B';
         },
+        pendingNowcoderJobs: async deliveryBatchId => pendingNowcoderPlanJobs(
+          jobs.list(),
+          new Set(await pendingIds(config.libraryRoot, deliveryBatchId)),
+        ),
         selectNowcoderJobs: async (planJobs, now) => {
           const readable: Array<{ job: JobRecord; document: CollectedDocument }> = [];
           const rejected: Array<{ url: string; reason: string }> = [];
@@ -413,13 +418,28 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
             ? company
             : undefined;
         },
-        syncJob: async job => {
+        syncJob: async (job, deliveryBatchId) => {
           const outcome = await syncEntries(
             config.libraryRoot,
             [stableContentId(job.url)],
             source => router.syncTarget(source),
+            undefined,
+            deliveryBatchId ? { deliveryBatchId } : {},
           );
           if (outcome.failed > 0 || outcome.synced === 0) throw new Error('自动同步未送达目标收件箱');
+        },
+        syncNowcoderJobs: async (planJobs, deliveryBatchId) => {
+          const ids = [...new Set(planJobs.map(job => stableContentId(job.url)))];
+          const outcome = await syncEntries(
+            config.libraryRoot,
+            ids,
+            source => router.syncTarget(source),
+            undefined,
+            { deliveryBatchId, atomic: true },
+          );
+          if (outcome.failed > 0 || outcome.synced !== ids.length) {
+            throw new Error('自动同步未送达目标收件箱');
+          }
         },
         writeBenchmark: async (batch, jobs) => {
           await writePlanBenchmark(config.configDir, batch, jobs, {

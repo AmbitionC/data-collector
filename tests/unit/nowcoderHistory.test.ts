@@ -1,6 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import type { JobRecord } from '@data-collector/shared';
-import { knownNowcoderPlanUrls } from '../../packages/bridge/src/plans/nowcoderHistory.js';
+import {
+  knownNowcoderPlanUrls,
+  pendingNowcoderPlanJobs,
+} from '../../packages/bridge/src/plans/nowcoderHistory.js';
 
 const NOW = '2026-08-24T08:00:00.000Z';
 
@@ -67,5 +70,42 @@ describe('knownNowcoderPlanUrls', () => {
     expect(
       knownNowcoderPlanUrls([currentBatchFailure], currentBatchFailure.batchId!, NOW),
     ).toContain(currentBatchFailure.url);
+  });
+});
+
+describe('pendingNowcoderPlanJobs', () => {
+  it('keeps only the latest saved pending copy from a historical Nowcoder batch', () => {
+    const pending = job('2001-old', 'saved', '2026-08-23T07:00:00.000Z', {
+      url: 'https://www.nowcoder.com/discuss/2001',
+      outputPath: '/tmp/2001-old/index.md',
+      batchId: 'old-batch',
+      planId: 'nowcoder-agent-market',
+    });
+    const latest = job('2001-new', 'saved', '2026-08-23T08:00:00.000Z', {
+      url: 'https://nowcoder.com/discuss/2001/?utm_source=duplicate',
+      outputPath: '/tmp/2001-new/index.md',
+      batchId: 'newer-batch',
+      planId: 'nowcoder-agent-market',
+    });
+    const delivered = job('2002', 'saved', '2026-08-23T09:00:00.000Z', {
+      outputPath: '/tmp/2002/index.md',
+      batchId: 'old-batch',
+      planId: 'nowcoder-agent-market',
+    });
+    const failed = job('2003', 'failed', '2026-08-23T10:00:00.000Z', {
+      outputPath: '/tmp/2003/index.md',
+      batchId: 'old-batch',
+      planId: 'nowcoder-agent-market',
+    });
+    const detached = job('2001-detached', 'saved', '2026-08-23T11:00:00.000Z', {
+      url: 'https://www.nowcoder.com/discuss/2001',
+      outputPath: '/tmp/2001-detached/index.md',
+      planId: 'nowcoder-agent-market',
+    });
+
+    expect(pendingNowcoderPlanJobs(
+      [pending, latest, delivered, failed, detached],
+      new Set(['f8bf804d6dfb']),
+    )).toEqual([latest]);
   });
 });

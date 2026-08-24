@@ -26,6 +26,8 @@ export interface LibraryCatalogEntry {
   relativePath: string;
   updatedAt: string;
   publishedAt?: string;
+  /** Fixed-plan delivery intent retained until that delivery batch finalizes. */
+  deliveryBatchId?: string;
   sync?: SyncInfo;
 }
 
@@ -38,6 +40,13 @@ export interface SyncOutcome {
 
 /** 按来源解析同步去向：给不出目标就不是「成功」，而是明确的失败原因。 */
 export type ResolveTarget = (source: string) => ContentSink | undefined;
+
+export interface SyncEntriesOptions {
+  /** Delivery scope for a pooled fixed-plan item; capture scope remains immutable. */
+  deliveryBatchId?: string;
+  /** Persist catalog delivery state only when every requested entry succeeds. */
+  atomic?: boolean;
+}
 
 function catalogPathOf(root: string): string {
   return join(root, '_catalog', 'index.json');
@@ -84,6 +93,7 @@ export async function syncEntries(
   ids: readonly string[],
   resolveTarget: ResolveTarget,
   now: () => string = () => new Date().toISOString(),
+  options: SyncEntriesOptions = {},
 ): Promise<SyncOutcome> {
   if (ids.length === 0) return { synced: 0, failed: 0, entries: [] };
   const catalog = await readCatalog(root);
@@ -105,7 +115,23 @@ export async function syncEntries(
     }
     try {
       const organized = await readOrganized(root, entry);
-      const result = await sink.save(organized);
+      const captureBatchId = organized.document.sourceMetadata?.batchId;
+      const delivered = options.deliveryBatchId
+        ? {
+            ...organized,
+            document: {
+              ...organized.document,
+              sourceMetadata: {
+                ...(organized.document.sourceMetadata ?? {}),
+                ...(typeof captureBatchId === 'string'
+                  ? { sourceBatchId: captureBatchId }
+                  : {}),
+                deliveryBatchId: options.deliveryBatchId,
+              },
+            },
+          }
+        : organized;
+      const result = await sink.save(delivered);
       const detail = (result.detail ?? {}) as {
         committed?: boolean;
         pushed?: boolean;
@@ -135,6 +161,9 @@ export async function syncEntries(
         ...(detail.gitWarning ? { error: detail.gitWarning } : {}),
       };
       entry.sync = sync;
+      if (sync.state === 'synced' && options.deliveryBatchId) {
+        entry.deliveryBatchId = options.deliveryBatchId;
+      }
       results.push({ id: entry.id, title: entry.title, sync });
     } catch (error) {
       const sync: SyncInfo = { state: 'failed', target: sink.id, at: now(), error: messageOf(error) };
@@ -143,7 +172,7 @@ export async function syncEntries(
     }
   }
 
-  if (results.length > 0) {
+  if (results.length > 0 && (!options.atomic || results.every(item => item.sync.state === 'synced'))) {
     await atomicWriteText(root, catalogPathOf(root), `${JSON.stringify(catalog, null, 2)}\n`);
   }
   return {
@@ -172,8 +201,10 @@ export function isDelivered(sync: SyncInfo | undefined): boolean {
 }
 
 /** 尚未送达（未同步、失败、以及已提交但没推上去）的条目 id，供「同步全部未同步」展开使用。 */
-export async function pendingIds(root: string): Promise<string[]> {
+export async function pendingIds(root: string, deliveryBatchId?: string): Promise<string[]> {
   return (await readCatalog(root))
-    .filter(entry => !isDelivered(entry.sync))
+    .filter(entry =>
+      !isDelivered(entry.sync)
+      || (deliveryBatchId !== undefined && entry.deliveryBatchId === deliveryBatchId))
     .map(entry => entry.id);
 }

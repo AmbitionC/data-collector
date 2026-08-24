@@ -25,6 +25,10 @@ async function fixture(options: {
     queryCompany: DiscoveryCompany;
   }>>;
   shouldAutoSync?: (job: JobRecord) => Promise<boolean>;
+  pendingNowcoderJobs?: (
+    jobs: readonly JobRecord[],
+    deliveryBatchId: string,
+  ) => Promise<readonly JobRecord[]>;
   selectNowcoderJobs?: (
     jobs: readonly JobRecord[],
     now: string,
@@ -34,6 +38,7 @@ async function fixture(options: {
       rejected: Array<{ url: string; reason: string }>;
     }>;
   syncJob?: (job: JobRecord) => Promise<void>;
+  syncNowcoderJobs?: (jobs: readonly JobRecord[], deliveryBatchId: string) => Promise<void>;
   writeBenchmark?: (batch: CollectionBatch, jobs: readonly JobRecord[]) => Promise<void>;
 } = {}) {
   const root = await temporaryDirectories.create('collection-plan-service-');
@@ -59,6 +64,8 @@ async function fixture(options: {
     dispatch: async job => { dispatched.push(job.id); },
     collectZsxq: async (batchId, planId) => { planMessages.push({ batchId, planId }); },
     shouldAutoSync,
+    pendingNowcoderJobs: deliveryBatchId =>
+      options.pendingNowcoderJobs?.(jobs.list(), deliveryBatchId) ?? Promise.resolve([]),
     selectNowcoderJobs: options.selectNowcoderJobs ?? (async jobs => {
       const accepted: JobRecord[] = [];
       const rejected: Array<{ url: string; reason: string }> = [];
@@ -73,6 +80,7 @@ async function fixture(options: {
       };
     }),
     syncJob: options.syncJob ?? (async job => { synced.push(job.id); }),
+    ...(options.syncNowcoderJobs ? { syncNowcoderJobs: options.syncNowcoderJobs } : {}),
     writeBenchmark: options.writeBenchmark ?? (async () => undefined),
   });
   return {
@@ -97,6 +105,8 @@ async function fixture(options: {
         dispatch: async job => { dispatched.push(job.id); },
         collectZsxq: async (batchId, planId) => { planMessages.push({ batchId, planId }); },
         shouldAutoSync,
+        pendingNowcoderJobs: deliveryBatchId =>
+          options.pendingNowcoderJobs?.(reopenedJobs.list(), deliveryBatchId) ?? Promise.resolve([]),
         selectNowcoderJobs: options.selectNowcoderJobs ?? (async planJobs => {
           const accepted: JobRecord[] = [];
           const rejected: Array<{ url: string; reason: string }> = [];
@@ -111,6 +121,7 @@ async function fixture(options: {
           };
         }),
         syncJob: options.syncJob ?? (async job => { synced.push(job.id); }),
+        ...(options.syncNowcoderJobs ? { syncNowcoderJobs: options.syncNowcoderJobs } : {}),
         writeBenchmark: options.writeBenchmark ?? (async () => undefined),
       });
       return { store: reopenedStore, jobs: reopenedJobs, service: reopenedService };
@@ -466,6 +477,149 @@ describe('CollectionPlanService', () => {
       selectionStatus: 'completed',
       deliveryIds: [],
     });
+  });
+
+  it('delivers six pending historical saves with four new candidates as one exact-ten batch', async () => {
+    let available = nowcoderCandidates(6, 24_000);
+    let pendingBatchId = '';
+    const benchmarkJobs = new Map<string, readonly JobRecord[]>();
+    const selectionTimes: string[] = [];
+    const syncBatches: Array<{ deliveryBatchId: string; jobs: readonly JobRecord[] }> = [];
+    let context!: Awaited<ReturnType<typeof fixture>>;
+    context = await fixture({
+      discoverNowcoder: async knownUrls => available.filter(candidate => !knownUrls.has(candidate.url)),
+      pendingNowcoderJobs: async jobs => jobs.filter(job =>
+        job.batchId === pendingBatchId && job.status === 'saved'),
+      selectNowcoderJobs: async (jobs, now) => {
+        selectionTimes.push(now);
+        return acceptAllExcept(new Set())(jobs);
+      },
+      syncJob: async () => { throw new Error('Nowcoder 不得逐条提交 catalog 同步状态'); },
+      syncNowcoderJobs: async (jobs, deliveryBatchId) => {
+        syncBatches.push({ deliveryBatchId, jobs: [...jobs] });
+        context.synced.push(...jobs.map(job => job.id));
+      },
+      writeBenchmark: async (batch, jobs) => { benchmarkJobs.set(batch.id, jobs); },
+    });
+    const shortfall = await context.service.run('nowcoder-agent-market', { force: true });
+    pendingBatchId = shortfall.id;
+    await saveJobs(context, context.jobs.list().filter(job => job.batchId === shortfall.id));
+    expect(context.store.latest('nowcoder-agent-market', 1)[0]).toMatchObject({
+      status: 'completed_with_attention',
+      accepted: 6,
+      deliveryIds: [],
+    });
+
+    available = available.concat(nowcoderCandidates(4, 25_000));
+    context.setNow('2026-08-23T01:05:00.001Z');
+    const delivery = await context.service.run('nowcoder-agent-market', { force: true });
+    const currentJobs = context.jobs.list().filter(job => job.batchId === delivery.id);
+    expect(currentJobs).toHaveLength(4);
+    context.setNow('2026-08-24T01:05:00.000Z');
+    await saveJobs(context, currentJobs);
+
+    const terminal = context.store.latest('nowcoder-agent-market', 1)[0]!;
+    expect(terminal).toMatchObject({
+      id: delivery.id,
+      status: 'completed',
+      discovered: 10,
+      accepted: 10,
+      saved: 10,
+      deliveryIds: expect.arrayContaining(Array.from({ length: 10 }, () =>
+        expect.stringMatching(/^[a-f0-9]{12}$/))),
+    });
+    expect(new Set(terminal.deliveryIds).size).toBe(10);
+    expect(context.synced).toHaveLength(10);
+    expect(syncBatches).toEqual([{ deliveryBatchId: delivery.id, jobs: expect.any(Array) }]);
+    expect(syncBatches[0]?.jobs).toHaveLength(10);
+    expect(selectionTimes.at(-1)).toBe(delivery.startedAt);
+    expect(new Set(benchmarkJobs.get(delivery.id)?.map(job => job.batchId))).toEqual(
+      new Set([shortfall.id, delivery.id]),
+    );
+  });
+
+  it('leaves a pooled exact-ten batch retryable when one historical sync fails', async () => {
+    let available = nowcoderCandidates(6, 26_000);
+    let pendingBatchId = '';
+    const context = await fixture({
+      discoverNowcoder: async knownUrls => available.filter(candidate => !knownUrls.has(candidate.url)),
+      pendingNowcoderJobs: async jobs => jobs.filter(job =>
+        job.batchId === pendingBatchId && job.status === 'saved'),
+      selectNowcoderJobs: acceptAllExcept(new Set()),
+      syncNowcoderJobs: async jobs => {
+        context.synced.push(jobs[0]!.id);
+        throw new Error('historical sink unavailable');
+      },
+    });
+    const shortfall = await context.service.run('nowcoder-agent-market', { force: true });
+    pendingBatchId = shortfall.id;
+    await saveJobs(context, context.jobs.list().filter(job => job.batchId === shortfall.id));
+
+    available = available.concat(nowcoderCandidates(4, 27_000));
+    context.setNow('2026-08-23T01:05:00.001Z');
+    const delivery = await context.service.run('nowcoder-agent-market', { force: true });
+    await saveJobs(context, context.jobs.list().filter(job => job.batchId === delivery.id));
+
+    expect(context.store.latest('nowcoder-agent-market', 1)[0]).toMatchObject({
+      id: delivery.id,
+      status: 'completed_with_attention',
+      selectionStatus: 'pending',
+      deliveryIds: [],
+      error: expect.stringContaining('historical sink unavailable'),
+    });
+  });
+
+  it('retries the same pooled exact ten when plan finalization fails after atomic sync', async () => {
+    let available = nowcoderCandidates(6, 28_000);
+    let pendingBatchId = '';
+    const catalogPending = new Set<string>();
+    const deliveryIntent = new Map<string, string>();
+    const syncSelections: string[][] = [];
+    const context = await fixture({
+      discoverNowcoder: async knownUrls => available.filter(candidate => !knownUrls.has(candidate.url)),
+      pendingNowcoderJobs: async (jobs, deliveryBatchId) => jobs.filter(job =>
+        job.batchId === pendingBatchId
+        && job.status === 'saved'
+        && (catalogPending.has(job.id) || deliveryIntent.get(job.id) === deliveryBatchId)),
+      selectNowcoderJobs: acceptAllExcept(new Set()),
+      syncNowcoderJobs: async (jobs, deliveryBatchId) => {
+        syncSelections.push(jobs.map(job => job.url));
+        for (const job of jobs) {
+          catalogPending.delete(job.id);
+          deliveryIntent.set(job.id, deliveryBatchId);
+        }
+      },
+    });
+    const shortfall = await context.service.run('nowcoder-agent-market', { force: true });
+    pendingBatchId = shortfall.id;
+    const historical = context.jobs.list().filter(job => job.batchId === shortfall.id);
+    await saveJobs(context, historical);
+    for (const job of historical) catalogPending.add(job.id);
+
+    available = available.concat(nowcoderCandidates(4, 29_000));
+    context.setNow('2026-08-23T01:05:00.001Z');
+    const delivery = await context.service.run('nowcoder-agent-market', { force: true });
+    const originalFinalize = context.store.finalizeSelection.bind(context.store);
+    vi.spyOn(context.store, 'finalizeSelection')
+      .mockRejectedValueOnce(new Error('plan persistence unavailable'))
+      .mockImplementation(originalFinalize);
+    await expect(saveJobs(
+      context,
+      context.jobs.list().filter(job => job.batchId === delivery.id),
+    )).rejects.toThrow('plan persistence unavailable');
+
+    const retry = await context.reopen();
+    await retry.service.onExtensionConnected();
+
+    expect(syncSelections).toHaveLength(2);
+    expect(syncSelections[1]).toEqual(syncSelections[0]);
+    expect(retry.store.latest('nowcoder-agent-market', 1)[0]).toMatchObject({
+      id: delivery.id,
+      status: 'completed',
+      accepted: 10,
+      deliveryIds: expect.any(Array),
+    });
+    expect(retry.store.latest('nowcoder-agent-market', 1)[0]!.deliveryIds).toHaveLength(10);
   });
 
   it('writes a benchmark only after a Nowcoder attention outcome is persisted', async () => {

@@ -118,6 +118,10 @@ describe('writePlanBenchmark', () => {
       roundCount: 2,
       contentIds: ['7daf7a39e447', '847556c339e8', 'a265fb4ae1a3'],
       deliveryIds: ['a265fb4ae1a3', '7daf7a39e447'],
+      deliveryContributions: [{
+        batchId: 'nowcoder-run-20260825',
+        contentIds: ['7daf7a39e447', 'a265fb4ae1a3'],
+      }],
       terminalCounts: {
         discovered: 3,
         accepted: 2,
@@ -172,6 +176,49 @@ describe('writePlanBenchmark', () => {
     ]) {
       expect(serialized).not.toContain(secret);
     }
+  });
+
+  it('records the contributing batch and content ids without counting pooled jobs as current details', async () => {
+    const root = await temporaryDirectories.create('plan-benchmark-pool-');
+    const currentUrl = 'https://www.nowcoder.com/discuss/92001';
+    const historicalUrl = 'https://www.nowcoder.com/discuss/92002';
+    const batch: CollectionBatch = {
+      id: 'nowcoder-delivery-batch',
+      planId: 'nowcoder-agent-market',
+      status: 'completed',
+      startedAt: '2026-08-25T00:00:00.000Z',
+      finishedAt: '2026-08-25T00:01:00.000Z',
+      discovered: 1,
+      accepted: 1,
+      saved: 1,
+      skipped: 0,
+      failed: 0,
+      needsAttention: 0,
+      deliveryIds: ['7f315fdf4e27', 'de9a61c044d4'],
+      selectionStatus: 'completed',
+    };
+    const jobs = [
+      job('current', currentUrl, 'saved', '2026-08-25T00:00:01.000Z', '2026-08-25T00:00:02.000Z', {
+        batchId: batch.id,
+      }),
+      job('historical', historicalUrl, 'saved', '2026-08-24T00:00:01.000Z', '2026-08-24T00:00:02.000Z', {
+        batchId: 'nowcoder-shortfall-batch',
+      }),
+    ];
+
+    const reportPath = await writePlanBenchmark(root, batch, jobs, { metadataFor: () => undefined });
+    const report = JSON.parse(await readFile(reportPath, 'utf8')) as {
+      contentIds: string[];
+      deliveryContributions: Array<{ batchId: string; contentIds: string[] }>;
+      jobs: unknown[];
+    };
+
+    expect(report.contentIds).toEqual(['7f315fdf4e27']);
+    expect(report.jobs).toHaveLength(1);
+    expect(report.deliveryContributions).toEqual([
+      { batchId: 'nowcoder-delivery-batch', contentIds: ['7f315fdf4e27'] },
+      { batchId: 'nowcoder-shortfall-batch', contentIds: ['de9a61c044d4'] },
+    ]);
   });
 
   it.each([

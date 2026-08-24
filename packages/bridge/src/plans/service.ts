@@ -83,6 +83,7 @@ export interface CollectionPlanServiceDependencies {
   dispatch: (job: JobRecord) => Promise<void>;
   collectZsxq: (batchId: string, planId: 'zsxq-chen-teacher') => Promise<void>;
   shouldAutoSync: (job: JobRecord) => Promise<boolean>;
+  pendingNowcoderJobs?: (deliveryBatchId: string) => Promise<readonly JobRecord[]>;
   selectNowcoderJobs: (
     jobs: readonly JobRecord[],
     now: string,
@@ -92,7 +93,8 @@ export interface CollectionPlanServiceDependencies {
     rejected: Array<{ url: string; reason: string }>;
   }>;
   coverageKey?: (job: JobRecord) => Promise<string | undefined>;
-  syncJob: (job: JobRecord) => Promise<void>;
+  syncJob: (job: JobRecord, deliveryBatchId?: string) => Promise<void>;
+  syncNowcoderJobs?: (jobs: readonly JobRecord[], deliveryBatchId: string) => Promise<void>;
   writeBenchmark?: (batch: CollectionBatch, jobs: readonly JobRecord[]) => Promise<void>;
 }
 
@@ -408,6 +410,13 @@ export class CollectionPlanService {
 
   private async selectSaved(batch: CollectionBatch, attached: readonly JobRecord[]) {
     const saved = attached.filter(candidate => candidate.status === 'saved');
+    const pooled = await this.dependencies.pendingNowcoderJobs?.(batch.id) ?? [];
+    const candidatesByContentId = new Map<string, JobRecord>();
+    for (const candidate of [...saved, ...pooled]) {
+      const contentId = stableContentId(candidate.url);
+      if (!candidatesByContentId.has(contentId)) candidatesByContentId.set(contentId, candidate);
+    }
+    const selectionCandidates = [...candidatesByContentId.values()];
     // 搜索结果会混入求建议、招聘等非面经详情页。只在同批至少有一页成功抽取、
     // 足以证明采集器仍可用时，才把布局不支持降级为内容过滤；整批都失败仍保留故障信号。
     const contentRejectionFailures = saved.length === 0
@@ -415,15 +424,16 @@ export class CollectionPlanService {
       : attached.filter(candidate =>
         candidate.status === 'failed' &&
         NOWCODER_CONTENT_REJECTION_CODES.has(candidate.errorCode ?? ''));
-    const selection = saved.length === 0
+    const selection = selectionCandidates.length === 0
       ? {
           accepted: [],
           coverage: { bytedance: 0, tencent: 0, alibaba: 0, ant: 0, other: 0 },
           rejected: [],
         }
-      : await this.dependencies.selectNowcoderJobs(saved, batch.startedAt);
+      : await this.dependencies.selectNowcoderJobs(selectionCandidates, batch.startedAt);
+    const currentUrls = new Set(saved.map(job => job.url));
     const rejectionCounts: Record<string, number> = { ...(batch.rejections ?? {}) };
-    for (const rejected of selection.rejected) {
+    for (const rejected of selection.rejected.filter(item => currentUrls.has(item.url))) {
       rejectionCounts[rejected.reason] = (rejectionCounts[rejected.reason] ?? 0) + 1;
     }
     for (const rejected of contentRejectionFailures) {
@@ -489,15 +499,20 @@ export class CollectionPlanService {
       0,
       FE_JOURNEY_PRESET.nowcoder.planTargetAccepted,
     );
-    const delivered = new Set<string>();
-    for (const job of accepted) {
-      const contentId = stableContentId(job.url);
-      if (delivered.has(contentId)) continue;
+    const delivered = new Set(accepted.map(job => stableContentId(job.url)));
+    if (this.dependencies.syncNowcoderJobs) {
       try {
-        await this.dependencies.syncJob(job);
-        delivered.add(contentId);
+        await this.dependencies.syncNowcoderJobs(accepted, batch.id);
       } catch (error) {
         this.recordSyncError(batch.id, error);
+      }
+    } else {
+      for (const job of accepted) {
+        try {
+          await this.dependencies.syncJob(job, batch.id);
+        } catch (error) {
+          this.recordSyncError(batch.id, error);
+        }
       }
     }
     const syncErrors = this.batchSyncErrors.get(batch.id);
@@ -510,6 +525,12 @@ export class CollectionPlanService {
       this.clearBatchRuntime(batch.id);
       return;
     }
+    await this.dependencies.store.markDiscovery(
+      batch.id,
+      Math.max(batch.discovered, accepted.length),
+      prepared.selection.coverage,
+      prepared.rejectionCounts,
+    );
     const terminal = await this.dependencies.store.finalizeSelection(
       batch.id,
       accepted.length,
@@ -528,6 +549,12 @@ export class CollectionPlanService {
     prepared: Awaited<ReturnType<CollectionPlanService['selectSaved']>>,
     reason: string,
   ): Promise<void> {
+    await this.dependencies.store.markDiscovery(
+      batch.id,
+      Math.max(batch.discovered, prepared.selection.accepted.length),
+      prepared.selection.coverage,
+      prepared.rejectionCounts,
+    );
     const terminal = await this.dependencies.store.finalizeSelection(
       batch.id,
       prepared.selection.accepted.length,
@@ -566,7 +593,23 @@ export class CollectionPlanService {
       batch.status === 'running' ||
       !this.dependencies.writeBenchmark
     ) return batch;
-    const jobs = this.dependencies.jobs.list().filter(job => job.batchId === batch.id);
+    const allJobs = this.dependencies.jobs.list();
+    const jobs = allJobs.filter(job => job.batchId === batch.id);
+    const delivered = new Set(batch.deliveryIds);
+    const contributorByContentId = new Map<string, JobRecord>();
+    for (const job of allJobs) {
+      const contentId = stableContentId(job.url);
+      if (!delivered.has(contentId) || job.status !== 'saved') continue;
+      const existing = contributorByContentId.get(contentId);
+      if (
+        !existing
+        || job.batchId === batch.id
+        || (existing.batchId !== batch.id && job.updatedAt > existing.updatedAt)
+      ) contributorByContentId.set(contentId, job);
+    }
+    for (const contributor of contributorByContentId.values()) {
+      if (!jobs.some(job => job.id === contributor.id)) jobs.push(contributor);
+    }
     try {
       await this.dependencies.writeBenchmark(batch, jobs);
       return batch;
