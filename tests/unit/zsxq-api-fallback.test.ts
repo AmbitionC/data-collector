@@ -57,7 +57,7 @@ describe('ZSXQ API fallback', () => {
         return response('{"succeeded":true,"resp_data":{"menus":['
           + '{"title":"最新","preset":true,"preset_type":"all"},'
           + '{"title":"精华","preset":true,"preset_type":"digests"},'
-          + '{"title":"只看星主","preset":true,"preset_type":"owner"}'
+          + '{"title":"只看星主","preset":true,"preset_type":"by_owner"}'
           + ']}}');
       }
       if (url === `${API}/groups/${GROUP_ID}/topics/sticky?count=3`) {
@@ -100,6 +100,7 @@ describe('ZSXQ API fallback', () => {
     const firstPage = Array.from({ length: 20 }, (_, index) => topic(
       String(700_000_000_000_000_000n + BigInt(index)),
       new Date(Date.parse('2026-08-24T23:00:00.000Z') - index * 60 * 60 * 1_000).toISOString(),
+      index < 2 ? '打新 新股 积极申购' : undefined,
     ));
     const secondPageTopic = topic(
       '700000000000000020',
@@ -119,7 +120,8 @@ describe('ZSXQ API fallback', () => {
       if (url.href === `${API}/groups/${GROUP_ID}/menus`) {
         return response('{"succeeded":true,"resp_data":{"menus":['
           + '{"title":"最新","preset":true,"preset_type":"all"},'
-          + '{"title":"精华","preset":true,"preset_type":"digests"},'
+          + '{"title":"精华","preset":true,"preset_type":"digests"}'
+          + '],"optional_menus":['
           + '{"title":"只看星主","preset":true,"preset_type":"by_owner"}'
           + ']}}');
       }
@@ -147,7 +149,8 @@ describe('ZSXQ API fallback', () => {
       expect(requests).toHaveLength(2);
       expect(requests[1]?.searchParams.get('end_time')).toBe('2026-08-24T03:59:59.999Z');
     }
-    expect(collection.documents).toHaveLength(22);
+    expect(collection.businessSkips).toHaveLength(2);
+    expect(collection.documents).toHaveLength(20);
     expect(collection.documents.find(item => item.sourceMetadata?.topicId === '799999999999999999'))
       .toMatchObject({ sourceMetadata: { viewLabels: '最新' }, truncated: false });
     expect(collection.documents.find(item => item.sourceMetadata?.topicId === '700000000000000020'))
