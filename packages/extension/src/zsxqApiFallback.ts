@@ -471,6 +471,7 @@ export async function collectZsxqApiViews(
         newRawIds += 1;
       }
       addDocuments(documents, converted.documents);
+      for (const skippedUrl of businessSkips.keys()) documents.delete(skippedUrl);
       const times = converted.entries.map(entry => Date.parse(entry.createTime));
       for (let index = 1; index < times.length; index += 1) {
         if (times[index]! > times[index - 1]!) {
@@ -529,8 +530,10 @@ export async function collectZsxqApiViews(
   }])
     .sort((left, right) => (right.publishedAt ?? '').localeCompare(left.publishedAt ?? ''))
     .slice(0, PLAN_ITEMS_PER_VIEW);
+  const documents = unionZsxqViewDocuments(byView)
+    .filter(document => !businessSkips.has(document.canonicalUrl));
   return {
-    documents: unionZsxqViewDocuments(byView),
+    documents,
     businessSkips: [...businessSkips.values()],
   };
 }
