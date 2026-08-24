@@ -7,6 +7,7 @@ const COMPANY_LABEL = {
   tencent: '腾讯',
   alibaba: '阿里云',
   ant: '蚂蚁',
+  other: '拼多多',
 } as const;
 
 function interview(
@@ -46,7 +47,7 @@ describe('Nowcoder fixed collection plan selection', () => {
     const result = selectNowcoderPlanCandidates(candidates, '2026-08-23T01:00:00.000Z');
 
     expect(result.accepted).toHaveLength(10);
-    expect(result.coverage).toEqual({ bytedance: 1, tencent: 0, alibaba: 9, ant: 0 });
+    expect(result.coverage).toEqual({ bytedance: 1, tencent: 0, alibaba: 9, ant: 0, other: 0 });
     expect(result.accepted).toContainEqual(
       expect.objectContaining({ canonicalUrl: 'https://www.nowcoder.com/discuss/30000' }),
     );
@@ -93,5 +94,36 @@ describe('Nowcoder fixed collection plan selection', () => {
       url: duplicate.canonicalUrl,
       reason: '重复问题簇',
     });
+  });
+
+  it('rejects a recent A-grade interview that is not Agent or AI-application relevant', () => {
+    const genericBackend = {
+      ...interview('tencent', 60_000),
+      title: '腾讯后端开发一面面经',
+      text: '我参加了腾讯后端开发一面。1.数据库隔离级别？2.Java 线程池参数？3.索引为何失效？',
+    };
+
+    const result = selectNowcoderPlanCandidates(
+      [genericBackend],
+      '2026-08-23T01:00:00.000Z',
+    );
+
+    expect(result.accepted).toEqual([]);
+    expect(result.rejected).toContainEqual({
+      url: genericBackend.canonicalUrl,
+      reason: 'Agent 相关性不足',
+    });
+  });
+
+  it('keeps the four primary companies ahead of the supplemental other bucket', () => {
+    const documents = (['bytedance', 'tencent', 'alibaba', 'ant', 'other'] as const)
+      .map((company, index) => interview(company, 61_000 + index));
+
+    const result = selectNowcoderPlanCandidates(documents, '2026-08-23T01:00:00.000Z');
+
+    expect(result.accepted).toHaveLength(5);
+    expect(result.accepted.slice(0, 4).map(item => item.sourceMetadata?.company)).not.toContain('other');
+    expect(result.accepted[4]?.sourceMetadata?.company).toBe('other');
+    expect(result.coverage.other).toBe(1);
   });
 });

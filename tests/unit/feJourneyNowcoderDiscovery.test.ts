@@ -193,6 +193,52 @@ describe('Nowcoder plan discovery query expansion', () => {
     })).toBe(true);
   });
 
+  it('uses supplemental company queries, trusts title company over body vendors, and ranks recent relevant hits first', async () => {
+    const fetcher = vi.fn<typeof fetch>(async (_rawUrl, init) => {
+      const body = JSON.parse(String(init?.body)) as { query: string };
+      if (body.query === '字节 Agent 开发 面经') {
+        return apiRecordResponse([{
+          id: '75101',
+          title: '字节 Agent 开发一面面经',
+          content: 'Agent、RAG、MCP 与大模型应用开发完整复盘',
+          createTime: 100_000,
+        }]);
+      }
+      if (body.query === '字节 AI 应用开发 面经') {
+        return apiRecordResponse([{
+          id: '75102',
+          title: '字节 AI 应用一面面经',
+          content: 'Agent 工具调用复盘',
+          createTime: 200_000,
+        }]);
+      }
+      if (body.query === '拼多多 Agent 面经') {
+        return apiRecordResponse([{
+          id: '75901',
+          title: '拼多多 Agent 开发一面面经',
+          content: '项目中使用阿里云 ASR，面试官继续追问 RAG。',
+          createTime: 300_000,
+        }]);
+      }
+      return apiSearchResponse([]);
+    });
+
+    const candidates = await discoverNowcoderPlanCandidates(fetcher, new Set());
+
+    expect(candidates.filter(item => item.queryCompany === 'bytedance').map(item => item.url)).toEqual([
+      'https://www.nowcoder.com/discuss/75102',
+      'https://www.nowcoder.com/discuss/75101',
+    ]);
+    expect(candidates).toContainEqual({
+      url: 'https://www.nowcoder.com/discuss/75901',
+      queryCompany: 'other',
+    });
+    expect(fetcher.mock.calls.some(([, init]) => {
+      const body = JSON.parse(String(init?.body)) as { query: string };
+      return body.query === '华为 AI 面经';
+    })).toBe(true);
+  });
+
   it('uses fixed public Code Agent, AI engineering, and agent queries and deduplicates URLs', async () => {
     const fetcher = vi.fn<typeof fetch>(async () => apiSearchResponse(['70001', '70001']));
 

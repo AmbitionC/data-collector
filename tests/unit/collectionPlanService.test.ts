@@ -14,13 +14,15 @@ import { createTemporaryDirectoryTracker } from '../helpers/temp.js';
 const temporaryDirectories = createTemporaryDirectoryTracker();
 afterEach(() => temporaryDirectories.cleanup());
 
+type DiscoveryCompany = 'bytedance' | 'tencent' | 'alibaba' | 'ant' | 'other';
+
 async function fixture(options: {
   connected?: boolean;
   now?: string;
-  candidates?: Array<{ url: string; queryCompany: 'bytedance' | 'tencent' | 'alibaba' | 'ant' }>;
+  candidates?: Array<{ url: string; queryCompany: DiscoveryCompany }>;
   discoverNowcoder?: (knownUrls: ReadonlySet<string>) => Promise<Array<{
     url: string;
-    queryCompany: 'bytedance' | 'tencent' | 'alibaba' | 'ant';
+    queryCompany: DiscoveryCompany;
   }>>;
   shouldAutoSync?: (job: JobRecord) => Promise<boolean>;
   selectNowcoderJobs?: (
@@ -178,6 +180,31 @@ describe('CollectionPlanService', () => {
       rounds: 1,
       accepted: 8,
     });
+  });
+
+  it('rotates all four primary companies before using the supplemental other bucket', async () => {
+    const otherUrls = new Set(Array.from(
+      { length: 4 },
+      (_, index) => `https://www.nowcoder.com/discuss/${89_001 + index}`,
+    ));
+    const context = await fixture({
+      candidates: [
+        { url: 'https://www.nowcoder.com/discuss/88001', queryCompany: 'bytedance' },
+        { url: 'https://www.nowcoder.com/discuss/88002', queryCompany: 'tencent' },
+        { url: 'https://www.nowcoder.com/discuss/88003', queryCompany: 'alibaba' },
+        { url: 'https://www.nowcoder.com/discuss/88004', queryCompany: 'ant' },
+        ...[...otherUrls].map(url => ({ url, queryCompany: 'other' as const })),
+      ],
+    });
+
+    const batch = await context.service.run('nowcoder-agent-market', { force: true });
+    const attachedUrls = context.jobs.list()
+      .filter(job => job.batchId === batch.id)
+      .map(job => job.url);
+
+    expect(attachedUrls).toHaveLength(8);
+    expect(attachedUrls.slice(0, 4).some(url => otherUrls.has(url))).toBe(false);
+    expect(attachedUrls.slice(4).every(url => otherUrls.has(url))).toBe(true);
   });
 
   it('dispatches a four-detail refill after only six initial jobs qualify', async () => {

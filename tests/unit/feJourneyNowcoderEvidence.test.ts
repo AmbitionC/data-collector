@@ -39,7 +39,7 @@ describe('Nowcoder interview evidence', () => {
   it('recognizes a first-person Alibaba one-round post without requiring the word 面经', () => {
     const document = nowcoder(
       '阿里云-agent开发-8.18一面（面完秒挂）',
-      `我参加了阿里云 Agent 开发岗位一面，面试官围绕项目继续追问。${numberedQuestions(14)}`,
+      `面试时间：8.18。我参加了阿里云 Agent 开发岗位一面，面试官围绕项目继续追问。${numberedQuestions(14)}`,
     );
 
     expect(analyzeNowcoderEvidence(document)).toMatchObject({
@@ -124,5 +124,71 @@ describe('Nowcoder interview evidence', () => {
       evidenceGrade: 'B',
     });
     expect(evidence.evidenceReasons).toContain('轻度推荐');
+  });
+
+  it('keeps a title-identified PDD interview out of Alibaba when the body mentions Alibaba Cloud ASR', () => {
+    const evidence = analyzeNowcoderEvidence(nowcoder(
+      '拼多多 Agent 开发一面面经',
+      `我参加了拼多多 Agent 开发一面，项目中接入过阿里云 ASR。${numberedQuestions(6)}`,
+    ));
+
+    expect(evidence).toMatchObject({
+      company: 'other',
+      companyLabel: '拼多多',
+      agentRelevant: true,
+      evidenceGrade: 'A',
+    });
+  });
+
+  it('does not parse a model version as an interview date', () => {
+    const evidence = analyzeNowcoderEvidence(nowcoder(
+      '字节 Agent 开发一面：GPT-5.5 与工具调用',
+      `我参加了字节 Agent 开发一面，主要讨论 GPT-5.5。${numberedQuestions(5)}`,
+    ));
+
+    expect(evidence.interviewDate).toBeUndefined();
+  });
+
+  it('accepts only a labelled short interview date or an explicit four-digit year', () => {
+    const labelled = analyzeNowcoderEvidence(nowcoder(
+      '腾讯 Agent 开发一面',
+      `面试时间：5.5。我参加了腾讯 Agent 开发一面。${numberedQuestions(5)}`,
+    ));
+    const fullYear = analyzeNowcoderEvidence(nowcoder(
+      '腾讯 Agent 开发一面',
+      `2026-05-06 我参加了腾讯 Agent 开发一面。${numberedQuestions(5)}`,
+    ));
+
+    expect(labelled.interviewDate).toBe('2026-05-05');
+    expect(fullYear.interviewDate).toBe('2026-05-06');
+  });
+
+  it('downgrades an explicit parody housekeeping interview to C', () => {
+    const evidence = analyzeNowcoderEvidence(nowcoder(
+      '字节保洁岗 Agent 一面面经，只为博君一笑',
+      `我参加了字节 Agent 一面，以下内容纯属戏仿。${numberedQuestions(6)}`,
+    ));
+
+    expect(evidence.evidenceGrade).toBe('C');
+    expect(evidence.evidenceReasons).toContain('戏仿或搬运');
+  });
+
+  it('downgrades a first-person merged compilation to C', () => {
+    const evidence = analyzeNowcoderEvidence(nowcoder(
+      '阿里 Agent 多份面经合并汇编稿',
+      `我参加了阿里 Agent 开发面试，本文把多条网络面经合并整理。${numberedQuestions(8)}`,
+    ));
+
+    expect(evidence.evidenceGrade).toBe('C');
+    expect(evidence.evidenceReasons).toContain('汇编或营销');
+  });
+
+  it('marks a generic backend interview as not Agent relevant despite strong interview evidence', () => {
+    const evidence = analyzeNowcoderEvidence(nowcoder(
+      '腾讯后端开发一面面经',
+      `我参加了腾讯后端开发一面，面试官围绕数据库事务和 Java 并发追问。${numberedQuestions(6)}`,
+    ));
+
+    expect(evidence).toMatchObject({ evidenceGrade: 'A', agentRelevant: false });
   });
 });

@@ -7,13 +7,16 @@ const JSON_SEARCH_URL = 'https://gw-c.nowcoder.com/api/sparta/pc/search';
 const SEARCH_TIMEOUT_MS = 8_000;
 const SEARCH_PAGE_LIMIT = 2;
 const SEARCH_CONCURRENCY = 2;
-const NOWCODER_COMPANIES: readonly NowcoderCompany[] = ['bytedance', 'tencent', 'alibaba', 'ant'];
+const NOWCODER_COMPANIES: readonly NowcoderCompany[] = [
+  'bytedance', 'tencent', 'alibaba', 'ant', 'other',
+];
 
 const COMPANY_SIGNALS: Readonly<Record<NowcoderCompany, RegExp>> = Object.freeze({
   bytedance: /字节跳动|字节|抖音|TikTok|火山引擎/iu,
   tencent: /腾讯|微信支付|微信|\bWXG\b|\bTEG\b/iu,
   alibaba: /阿里云|阿里巴巴|阿里|淘天|淘宝|天猫/iu,
   ant: /蚂蚁集团|蚂蚁|支付宝|Alipay/iu,
+  other: /拼多多|PDD|小红书|REDnote|月之暗面|Moonshot|Kimi|百度|Baidu|华为|Huawei/iu,
 });
 const AGENT_SIGNALS = /Agent|智能体|AI\s*应用|AI\s*工程|大模型|RAG|MCP/iu;
 const INTERVIEW_SIGNALS = /面经|面试|一面|二面|三面|四面|五面|终面|技术面|HR\s*面/iu;
@@ -213,23 +216,33 @@ function hitText(hit: SearchHit): string {
   return `${hit.title}\n${hit.content}`;
 }
 
-function matchingCompanies(hit: SearchHit): NowcoderCompany[] {
-  const text = hitText(hit);
+function matchingCompanies(text: string): NowcoderCompany[] {
   return NOWCODER_COMPANIES.filter(company => COMPANY_SIGNALS[company].test(text));
 }
 
 function relevanceScore(hit: SearchHit, company: NowcoderCompany): number {
+  const titleMatches = matchingCompanies(hit.title);
+  const bodyMatches = matchingCompanies(hit.content);
   const text = hitText(hit);
-  const companyMatches = matchingCompanies(hit);
-  let score = COMPANY_SIGNALS[company].test(text) ? 8 : 0;
-  if (companyMatches.length > 0 && !companyMatches.includes(company)) score -= 8;
+  let score = titleMatches.includes(company) ? 12 : bodyMatches.includes(company) ? 5 : 0;
+  if (titleMatches.length > 0 && !titleMatches.includes(company)) score -= 12;
+  else if (bodyMatches.length > 0 && !bodyMatches.includes(company)) score -= 5;
   if (AGENT_SIGNALS.test(text)) score += 4;
   if (INTERVIEW_SIGNALS.test(text)) score += 2;
   return score;
 }
 
+function qualifiedRelevance(hit: SearchHit, company: NowcoderCompany): boolean {
+  const companyMatched = COMPANY_SIGNALS[company].test(hit.title)
+    || COMPANY_SIGNALS[company].test(hit.content);
+  const text = hitText(hit);
+  return companyMatched && AGENT_SIGNALS.test(text) && INTERVIEW_SIGNALS.test(text);
+}
+
 function bestCompany(hit: PooledSearchHit): NowcoderCompany {
-  const explicit = matchingCompanies(hit);
+  const titleMatches = matchingCompanies(hit.title);
+  const bodyMatches = matchingCompanies(hit.content);
+  const explicit = titleMatches.length > 0 ? titleMatches : bodyMatches;
   const choices = explicit.length > 0 ? explicit : [...hit.queryCompanies];
   return choices.sort((left, right) => {
     const scoreDifference = relevanceScore(hit, right) - relevanceScore(hit, left);
@@ -279,7 +292,9 @@ export async function discoverNowcoderPlanCandidates(
 
   return NOWCODER_COMPANIES.flatMap(company => (grouped.get(company) ?? [])
     .sort((left, right) => (
-      relevanceScore(right, company) - relevanceScore(left, company)
+      Number(qualifiedRelevance(right, company)) - Number(qualifiedRelevance(left, company))
+      || (qualifiedRelevance(left, company) ? right.createTime - left.createTime : 0)
+      || relevanceScore(right, company) - relevanceScore(left, company)
       || right.createTime - left.createTime
       || left.firstSeen - right.firstSeen
       || left.url.localeCompare(right.url)

@@ -95,7 +95,7 @@ describe('fixed fe-journey Nowcoder discovery', () => {
     }
   });
 
-  it('discovers at most 60 company-labelled candidates from fixed company and role queries', async () => {
+  it('discovers at most 75 company-labelled candidates across four primary and one other bucket', async () => {
     let nextId = 20_000;
     const fetcher = vi.fn<typeof fetch>(async () => {
       const links = Array.from({ length: 10 }, () => `<a href="/discuss/${nextId++}">面经</a>`).join('');
@@ -104,10 +104,10 @@ describe('fixed fe-journey Nowcoder discovery', () => {
 
     const candidates = await discoverNowcoderPlanCandidates(fetcher, new Set());
 
-    expect(candidates).toHaveLength(60);
-    expect(new Set(candidates.map(candidate => candidate.url)).size).toBe(60);
+    expect(candidates).toHaveLength(75);
+    expect(new Set(candidates.map(candidate => candidate.url)).size).toBe(75);
     expect(new Set(candidates.map(candidate => candidate.queryCompany))).toEqual(
-      new Set(['bytedance', 'tencent', 'alibaba', 'ant']),
+      new Set(['bytedance', 'tencent', 'alibaba', 'ant', 'other']),
     );
     for (const [rawUrl, init] of fetcher.mock.calls) {
       const query = requestedQuery(rawUrl, init);

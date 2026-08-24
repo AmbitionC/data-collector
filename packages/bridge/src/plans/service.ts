@@ -9,7 +9,11 @@ import type { JobStore } from '../jobs/store.js';
 import type { NowcoderDiscoveryCandidate } from '../feJourney/nowcoderDiscovery.js';
 import { FE_JOURNEY_PRESET } from '../feJourney/preset.js';
 import { knownNowcoderPlanUrls } from './nowcoderHistory.js';
-import { NOWCODER_COMPANIES, type CompanyId } from './nowcoderPlan.js';
+import {
+  NOWCODER_COMPANIES,
+  PRIMARY_NOWCODER_COMPANIES,
+  type CompanyId,
+} from './nowcoderPlan.js';
 import type { CollectionPlanStore } from './store.js';
 
 const PLAN_HOURS: Record<CollectionPlanId, number> = {
@@ -104,8 +108,13 @@ export interface ExtensionPlanResult {
 
 function rotatedCompanies(now: string): CompanyId[] {
   const day = Math.floor(Date.parse(`${shanghaiDay(now)}T00:00:00.000Z`) / 86_400_000);
-  const offset = ((day % NOWCODER_COMPANIES.length) + NOWCODER_COMPANIES.length) % NOWCODER_COMPANIES.length;
-  return NOWCODER_COMPANIES.map((_, index) => NOWCODER_COMPANIES[(index + offset) % 4]!);
+  const offset = ((day % PRIMARY_NOWCODER_COMPANIES.length) + PRIMARY_NOWCODER_COMPANIES.length)
+    % PRIMARY_NOWCODER_COMPANIES.length;
+  return [
+    ...PRIMARY_NOWCODER_COMPANIES.map((_, index) =>
+      PRIMARY_NOWCODER_COMPANIES[(index + offset) % PRIMARY_NOWCODER_COMPANIES.length]!),
+    'other',
+  ];
 }
 
 function selectDiscoveryRound(
@@ -409,7 +418,7 @@ export class CollectionPlanService {
     const selection = saved.length === 0
       ? {
           accepted: [],
-          coverage: { bytedance: 0, tencent: 0, alibaba: 0, ant: 0 },
+          coverage: { bytedance: 0, tencent: 0, alibaba: 0, ant: 0, other: 0 },
           rejected: [],
         }
       : await this.dependencies.selectNowcoderJobs(saved, batch.startedAt);
@@ -454,7 +463,7 @@ export class CollectionPlanService {
     await this.dependencies.store.markDiscovery(
       batch.id,
       Math.max(batch.discovered, attachedCount + staged.length),
-      batch.coverage ?? { bytedance: 0, tencent: 0, alibaba: 0, ant: 0 },
+      batch.coverage ?? { bytedance: 0, tencent: 0, alibaba: 0, ant: 0, other: 0 },
       batch.rejections ?? {},
     );
     await this.dependencies.store.attachRound(batch.id, staged.map(job => job.id));

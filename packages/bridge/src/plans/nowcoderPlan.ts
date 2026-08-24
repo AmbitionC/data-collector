@@ -5,7 +5,8 @@ import {
   type NowcoderCompany,
 } from '../feJourney/nowcoderEvidence.js';
 
-export const NOWCODER_COMPANIES = ['bytedance', 'tencent', 'alibaba', 'ant'] as const;
+export const PRIMARY_NOWCODER_COMPANIES = ['bytedance', 'tencent', 'alibaba', 'ant'] as const;
+export const NOWCODER_COMPANIES = [...PRIMARY_NOWCODER_COMPANIES, 'other'] as const;
 export type CompanyId = NowcoderCompany;
 
 export interface NowcoderPlanRejection {
@@ -30,7 +31,8 @@ function shanghaiDate(iso: string): string {
 
 function rotationOffset(iso: string): number {
   const day = Math.floor(Date.parse(`${shanghaiDate(iso)}T00:00:00.000Z`) / 86_400_000);
-  return ((day % NOWCODER_COMPANIES.length) + NOWCODER_COMPANIES.length) % NOWCODER_COMPANIES.length;
+  return ((day % PRIMARY_NOWCODER_COMPANIES.length) + PRIMARY_NOWCODER_COMPANIES.length)
+    % PRIMARY_NOWCODER_COMPANIES.length;
 }
 
 function companyOf(document: CollectedDocument): CompanyId | undefined {
@@ -41,6 +43,10 @@ function companyOf(document: CollectedDocument): CompanyId | undefined {
 function evidenceGradeOf(document: CollectedDocument): string | undefined {
   const value = document.sourceMetadata?.evidenceGrade;
   return typeof value === 'string' ? value : undefined;
+}
+
+function agentRelevant(document: CollectedDocument): boolean {
+  return document.sourceMetadata?.agentRelevant === true;
 }
 
 function recencyOf(document: CollectedDocument): string | undefined {
@@ -69,6 +75,10 @@ export function selectNowcoderPlanCandidates(
       rejected.push({ url: document.canonicalUrl, reason: '超过30天' });
       continue;
     }
+    if (!agentRelevant(document)) {
+      rejected.push({ url: document.canonicalUrl, reason: 'Agent 相关性不足' });
+      continue;
+    }
     if (!companyOf(document) || !['A', 'B'].includes(evidenceGradeOf(document) ?? '')) {
       rejected.push({ url: document.canonicalUrl, reason: '证据等级不足' });
       continue;
@@ -86,8 +96,11 @@ export function selectNowcoderPlanCandidates(
     ]),
   );
   const offset = rotationOffset(now);
-  const order = NOWCODER_COMPANIES.map((_, index) =>
-    NOWCODER_COMPANIES[(index + offset) % NOWCODER_COMPANIES.length]!);
+  const order: CompanyId[] = [
+    ...PRIMARY_NOWCODER_COMPANIES.map((_, index) =>
+      PRIMARY_NOWCODER_COMPANIES[(index + offset) % PRIMARY_NOWCODER_COMPANIES.length]!),
+    'other',
+  ];
   const accepted: CollectedDocument[] = [];
   const seenClusters = new Set<string>();
   let advanced = true;
