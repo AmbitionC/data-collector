@@ -242,6 +242,21 @@ async function verifiedRevealPath(roots: readonly string[], requestedPath: strin
 
 export async function startBridge(options: StartBridgeOptions = {}): Promise<BridgeHandle> {
   const config = loadConfig(options);
+  const activeOperations = new Set<Promise<unknown>>();
+  let closing = false;
+  const trackOperation = <T>(operation: Promise<T>): Promise<T> => {
+    activeOperations.add(operation);
+    void operation.then(
+      () => activeOperations.delete(operation),
+      () => activeOperations.delete(operation),
+    );
+    return operation;
+  };
+  const drainActiveOperations = async (): Promise<void> => {
+    while (activeOperations.size > 0) {
+      await Promise.allSettled([...activeOperations]);
+    }
+  };
   const access = await AccessTokenManager.open(config.authFile);
   const jobs = await JobStore.open(config.jobsFile);
   await jobs.recover();
@@ -749,12 +764,12 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
   };
 
   const server = createServer((request, response) => {
-    void route(request, response).catch(error => {
+    void trackOperation(route(request, response).catch(error => {
       const status = error instanceof HttpError ? error.status : error instanceof z.ZodError ? 400 : 500;
       const code = error instanceof HttpError ? error.code : error instanceof z.ZodError ? 'INVALID_REQUEST' : 'INTERNAL_ERROR';
       const message = error instanceof Error ? error.message : '未知错误';
       sendJson(response, status, { error: { code, message } });
-    });
+    }));
   });
 
   const websocketServer = attachExtensionWebSocket({
@@ -783,7 +798,7 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
       let messageQueue: Promise<void> = Promise.resolve();
       let policyViolated = false;
       socket.on('message', data => {
-        messageQueue = messageQueue
+        messageQueue = trackOperation(messageQueue
           .then(() => handleSocketMessage(socket, data))
           .catch(error => {
             if (policyViolated) return;
@@ -799,7 +814,7 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
               );
               socket.close(1008, 'invalid protocol message');
             }
-          });
+          }));
       });
       socket.once('close', () => {
         if (extensionSocket === socket) {
@@ -815,9 +830,10 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
   let feJourneyTimer: NodeJS.Timeout | undefined;
   if (options.enableFeJourneyScheduler && feJourneyCollector.status().enabled) {
     const runScheduledCollection = (): void => {
-      void runFeJourney().catch(error => {
+      if (closing) return;
+      void trackOperation(runFeJourney().catch(error => {
         console.warn(`[fe-journey] 定时采集失败：${error instanceof Error ? error.message : error}`);
-      });
+      }));
     };
     runScheduledCollection();
     feJourneyTimer = setInterval(
@@ -829,28 +845,38 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
   let collectionPlanTimer: NodeJS.Timeout | undefined;
   if ((options.enableCollectionPlanScheduler ?? options.enableFeJourneyScheduler) && collectionPlans) {
     collectionPlanTimer = setInterval(() => {
-      void collectionPlans.runDuePlans().catch(error => {
+      if (closing) return;
+      void trackOperation(collectionPlans.runDuePlans().catch(error => {
         console.warn(`[plans] 到期检查失败：${error instanceof Error ? error.message : error}`);
-      });
+      }));
     }, options.collectionPlanCheckIntervalMs ?? 15 * 60_000);
     collectionPlanTimer.unref?.();
   }
   const address = server.address() as AddressInfo;
   const url = `http://${config.host}:${address.port}`;
+  let closePromise: Promise<void> | undefined;
   return {
     url,
     wsUrl: `ws://${config.host}:${address.port}/v1/extension`,
-    async close() {
-      if (updateTimer) clearInterval(updateTimer);
-      // 服务已经明确进入关闭流程，不再等待外部更新命令优雅退出；立即收掉整棵树，
-      // 否则忽略 TERM 的 git/npm 孙进程会反过来卡住 Node 的自然退出。
-      terminateActiveToolProcesses('SIGKILL');
-      if (feJourneyTimer) clearInterval(feJourneyTimer);
-      if (collectionPlanTimer) clearInterval(collectionPlanTimer);
-      extensionSocket?.close(1001, 'server shutdown');
-      websocketServer.close();
-      server.close();
-      await once(server, 'close');
+    close() {
+      closePromise ??= (async () => {
+        closing = true;
+        if (updateTimer) clearInterval(updateTimer);
+        // 服务已经明确进入关闭流程，不再等待外部更新命令优雅退出；立即收掉整棵树，
+        // 否则忽略 TERM 的 git/npm 孙进程会反过来卡住 Node 的自然退出。
+        terminateActiveToolProcesses('SIGKILL');
+        if (feJourneyTimer) clearInterval(feJourneyTimer);
+        if (collectionPlanTimer) clearInterval(collectionPlanTimer);
+        for (const socket of websocketServer.clients) socket.close(1001, 'server shutdown');
+        const websocketClosed = new Promise<void>(resolveClosed => {
+          websocketServer.close(() => resolveClosed());
+        });
+        const serverClosed = server.listening ? once(server, 'close').then(() => undefined) : Promise.resolve();
+        server.close();
+        await Promise.all([serverClosed, websocketClosed]);
+        await drainActiveOperations();
+      })();
+      return closePromise;
     },
   };
 }
