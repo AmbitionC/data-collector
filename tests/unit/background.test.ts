@@ -61,6 +61,7 @@ function topic(id: string): CollectedDocument {
 class InMemoryTabs implements TabsApi {
   readonly created: Array<{ url: string; active: boolean }> = [];
   readonly removed: number[] = [];
+  readonly reloaded: number[] = [];
   readonly updated: Array<{ id: number; active: boolean }> = [];
   readonly handedOff: Array<{ id: number; url: string }> = [];
   /** 内容脚本收到的消息类型顺序（批量采集靠它验证「提取一轮 → 翻一页」的节奏）。 */
@@ -122,6 +123,10 @@ class InMemoryTabs implements TabsApi {
 
   async remove(id: number): Promise<void> {
     this.removed.push(id);
+  }
+
+  async reload(id: number): Promise<void> {
+    this.reloaded.push(id);
   }
 
   async update(id: number, input: { active: boolean }): Promise<void> {
@@ -1924,6 +1929,43 @@ describe('extension job runner', () => {
 
     expect(phases).toEqual([]);
     expect(bridge.createdFor).toEqual([]);
+  });
+
+  it('reloads its fresh plan tab once when the ZSXQ SPA shell stays blank', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-08-25T10:00:00.000Z'));
+    const tabs = new InMemoryTabs();
+    const bridge = new InMemoryBridge();
+    const completedLoads: number[] = [];
+    const candidate = {
+      ...topic('blank-shell-recovery'),
+      title: '陈老师投资与创业复盘',
+      text: '这是陈老师关于投资、创业和经营的完整复盘。',
+      publishedAt: '2026-08-24T10:00:00.000Z',
+      sourceMetadata: { authorRole: 'owner' },
+    } satisfies CollectedDocument;
+    const runner = new JobRunner({
+      tabs,
+      bridge,
+      waitForTabComplete: async tabId => { completedLoads.push(tabId); },
+      delay: async () => undefined,
+    });
+    const collect = vi.spyOn(runner, 'collectZsxqPlanViews')
+      .mockRejectedValueOnce(new Error('页面上找不到「最新」标签（分类栏尚未渲染）'))
+      .mockResolvedValueOnce([candidate]);
+
+    await runner.runZsxqCollectionPlan(
+      'blank-shell-recovery',
+      PLAN_ATTEMPT,
+      undefined,
+      { force: true },
+    );
+
+    expect(collect).toHaveBeenCalledTimes(2);
+    expect(tabs.reloaded).toEqual([42]);
+    expect(completedLoads).toEqual([42, 42]);
+    expect(bridge.createdFor).toEqual([candidate.canonicalUrl]);
+    expect(tabs.removed).toEqual([42]);
   });
 
   it('fails closed when a configured Bridge cannot provide per-URL completeness state', async () => {

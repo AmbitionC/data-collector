@@ -42,6 +42,7 @@ const tabs: TabsApi = {
     return tab;
   },
   remove: id => ownedTabs.close(id),
+  reload: async id => { await chrome.tabs.reload(id); },
   update: async (id, input) => { await chrome.tabs.update(id, input); },
   handoff: (id, url) => ownedTabs.handoff(id, url),
   query: async input => chrome.tabs.query(input as chrome.tabs.QueryInfo) as Promise<BrowserTab[]>,

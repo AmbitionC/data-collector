@@ -246,6 +246,8 @@ export type ExtractionResponse = (
 export interface TabsApi {
   create(input: { url: string; active: boolean; purpose?: OwnedTabPurpose }): Promise<BrowserTab>;
   remove(id: number): Promise<void>;
+  /** Reload is reserved for a newly-created fixed-plan tab whose SPA never mounted. */
+  reload(id: number): Promise<void>;
   update(id: number, input: { active: boolean }): Promise<void>;
   /** 将一个登录页交给用户；实现会从自动清理集合移除，并替换上一个登录提示页。 */
   handoff(id: number, url: string): Promise<void>;
@@ -401,6 +403,11 @@ function isContentScriptNotReady(error: unknown): boolean {
 function isContentScriptOutdated(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error);
   return /CONTENT_SCRIPT_OUTDATED/u.test(message);
+}
+
+function isBlankZsxqPlanShell(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /页面上找不到「最新」标签（分类栏尚未渲染）/u.test(message);
 }
 
 export interface CaptureOverrides {
@@ -808,7 +815,7 @@ export class JobRunner {
       if (tab.id === undefined) throw new Error('浏览器未返回知识星球标签页 ID');
       tabId = tab.id;
       await this.options.waitForTabComplete(tabId, 30_000);
-      const extraction = await retryTransientTabOperation(
+      const collectViews = () => retryTransientTabOperation(
         async () => {
           const audit: ZsxqPlanExtractionAudit = { businessSkips: new Map() };
           const documents = await this.collectZsxqPlanViews(tabId!, ZSXQ_PLAN_VIEWS, audit);
@@ -816,6 +823,17 @@ export class JobRunner {
         },
         milliseconds => this.wait(milliseconds),
       );
+      let extraction: Awaited<ReturnType<typeof collectViews>>;
+      try {
+        extraction = await collectViews();
+      } catch (error) {
+        if (!isBlankZsxqPlanShell(error)) throw error;
+        // This tab was created by the fixed plan and has not selected a view yet, so one bounded
+        // reload is safe. User-owned ZSXQ tabs still use injection only and never lose their view.
+        await this.options.tabs.reload(tabId);
+        await this.options.waitForTabComplete(tabId, 30_000);
+        extraction = await collectViews();
+      }
       const documents = extraction.documents;
       const documentUrls = new Set(documents.map(document => document.canonicalUrl));
       const businessSkips = [...extraction.audit.businessSkips.entries()]
