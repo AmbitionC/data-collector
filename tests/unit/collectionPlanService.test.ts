@@ -1,7 +1,7 @@
 import { mkdir, rename, rmdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import type { CollectionPlanId, JobRecord } from '@data-collector/shared';
+import type { CollectionBatch, CollectionPlanId, JobRecord } from '@data-collector/shared';
 import { JobStore } from '../../packages/bridge/src/jobs/store.js';
 import {
   CollectionPlanService,
@@ -31,6 +31,7 @@ async function fixture(options: {
       rejected: Array<{ url: string; reason: string }>;
     }>;
   syncJob?: (job: JobRecord) => Promise<void>;
+  writeBenchmark?: (batch: CollectionBatch, jobs: readonly JobRecord[]) => Promise<void>;
 } = {}) {
   const root = await temporaryDirectories.create('collection-plan-service-');
   let connected = options.connected ?? true;
@@ -69,6 +70,7 @@ async function fixture(options: {
       };
     }),
     syncJob: options.syncJob ?? (async job => { synced.push(job.id); }),
+    writeBenchmark: options.writeBenchmark ?? (async () => undefined),
   });
   return {
     service,
@@ -106,6 +108,7 @@ async function fixture(options: {
           };
         }),
         syncJob: options.syncJob ?? (async job => { synced.push(job.id); }),
+        writeBenchmark: options.writeBenchmark ?? (async () => undefined),
       });
       return { store: reopenedStore, jobs: reopenedJobs, service: reopenedService };
     },
@@ -435,6 +438,60 @@ describe('CollectionPlanService', () => {
       selectionStatus: 'completed',
       deliveryIds: [],
     });
+  });
+
+  it('writes a benchmark only after a Nowcoder attention outcome is persisted', async () => {
+    const candidates = nowcoderCandidates(2, 14_100);
+    let context!: Awaited<ReturnType<typeof fixture>>;
+    let batchDuringWrite: CollectionBatch | undefined;
+    let jobCountDuringWrite = 0;
+    context = await fixture({
+      candidates,
+      selectNowcoderJobs: acceptAllExcept(new Set(candidates.map(candidate => candidate.url))),
+      writeBenchmark: async (terminal, jobs) => {
+        batchDuringWrite = context.store.latest('nowcoder-agent-market', 1)[0];
+        jobCountDuringWrite = jobs.length;
+        expect(terminal).toEqual(batchDuringWrite);
+      },
+    });
+    const batch = await context.service.run('nowcoder-agent-market', { force: true });
+    const children = context.jobs.list().filter(job => job.batchId === batch.id);
+
+    await saveJobs(context, children.slice(0, 1));
+    expect(batchDuringWrite).toBeUndefined();
+
+    await saveJobs(context, children.slice(1));
+
+    expect(batchDuringWrite).toMatchObject({
+      status: 'completed_with_attention',
+      selectionStatus: 'completed',
+      deliveryIds: [],
+    });
+    expect(jobCountDuringWrite).toBe(2);
+  });
+
+  it('surfaces benchmark write failure without deleting saved evidence or delivery IDs', async () => {
+    const context = await fixture({
+      candidates: nowcoderCandidates(10, 14_200),
+      selectNowcoderJobs: acceptAllExcept(new Set()),
+      writeBenchmark: async () => { throw new Error('benchmark disk unavailable'); },
+    });
+    const batch = await context.service.run('nowcoder-agent-market', { force: true });
+    await saveJobs(context, context.jobs.list().filter(job => job.batchId === batch.id));
+    await saveJobs(context, context.jobs.list().filter(job =>
+      job.batchId === batch.id && job.status === 'queued'));
+
+    const terminal = context.store.latest('nowcoder-agent-market', 1)[0]!;
+    const saved = context.jobs.list().filter(job => job.batchId === batch.id);
+    expect(terminal).toMatchObject({
+      status: 'completed_with_attention',
+      selectionStatus: 'completed',
+      saved: 10,
+      error: expect.stringContaining('基准报告写入失败：benchmark disk unavailable'),
+    });
+    expect(terminal.deliveryIds).toHaveLength(10);
+    expect(saved).toHaveLength(10);
+    expect(saved.every(job => job.status === 'saved' && Boolean(job.outputPath))).toBe(true);
   });
 
   it('resumes a terminal round on reconnect and dispatches only its refill jobs', async () => {

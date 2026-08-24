@@ -81,6 +81,7 @@ export interface CollectionPlanServiceDependencies {
   }>;
   coverageKey?: (job: JobRecord) => Promise<string | undefined>;
   syncJob: (job: JobRecord) => Promise<void>;
+  writeBenchmark?: (batch: CollectionBatch, jobs: readonly JobRecord[]) => Promise<void>;
 }
 
 export interface ExtensionPlanResult {
@@ -232,8 +233,9 @@ export class CollectionPlanService {
       const terminal = await (result.needsAttention
         ? this.dependencies.store.attention(result.batchId, result.error)
         : this.dependencies.store.fail(result.batchId, result.error));
+      const reported = await this.persistTerminalBenchmark(terminal);
       this.clearBatchRuntime(result.batchId);
-      return terminal;
+      return reported;
     }
     await this.dependencies.store.markDiscovery(
       result.batchId,
@@ -314,10 +316,11 @@ export class CollectionPlanService {
         try {
           prepared = await this.selectSaved(current, attached);
         } catch (error) {
-          await this.dependencies.store.attention(
+          const terminal = await this.dependencies.store.attention(
             current.id,
             `牛客真实性筛选失败：${error instanceof Error ? error.message : String(error)}`,
           );
+          await this.persistTerminalBenchmark(terminal);
           this.clearBatchRuntime(current.id);
           return;
         }
@@ -333,7 +336,7 @@ export class CollectionPlanService {
           attached.every(job =>
             job.status === 'failed' && NOWCODER_CONTENT_REJECTION_CODES.has(job.errorCode ?? ''));
         if (wholeBatchLayoutOutage) {
-          await this.dependencies.store.finalizeSelection(
+          const terminal = await this.dependencies.store.finalizeSelection(
             current.id,
             0,
             prepared.selection.coverage,
@@ -342,6 +345,7 @@ export class CollectionPlanService {
             0,
             [],
           );
+          await this.persistTerminalBenchmark(terminal);
           this.clearBatchRuntime(current.id);
           return;
         }
@@ -359,10 +363,11 @@ export class CollectionPlanService {
         try {
           next = await this.discoverRound(current, Math.min(roundSize, budget - attached.length));
         } catch (error) {
-          await this.dependencies.store.fail(
+          const terminal = await this.dependencies.store.fail(
             current.id,
             error instanceof Error ? error.message : '固定采集计划执行失败',
           );
+          await this.persistTerminalBenchmark(terminal);
           this.clearBatchRuntime(current.id);
           return;
         }
@@ -479,11 +484,12 @@ export class CollectionPlanService {
       const message = syncErrors?.length
         ? `自动同步失败：${syncErrors.join('；')}`
         : `自动同步结果不足 ${accepted.length} 条`;
-      await this.dependencies.store.retrySelection(batch.id, message);
+      const terminal = await this.dependencies.store.retrySelection(batch.id, message);
+      await this.persistTerminalBenchmark(terminal);
       this.clearBatchRuntime(batch.id);
       return;
     }
-    await this.dependencies.store.finalizeSelection(
+    const terminal = await this.dependencies.store.finalizeSelection(
       batch.id,
       accepted.length,
       prepared.selection.coverage,
@@ -492,6 +498,7 @@ export class CollectionPlanService {
       prepared.contentRejectionFailures.length,
       [...delivered],
     );
+    await this.persistTerminalBenchmark(terminal);
     this.clearBatchRuntime(batch.id);
   }
 
@@ -500,7 +507,7 @@ export class CollectionPlanService {
     prepared: Awaited<ReturnType<CollectionPlanService['selectSaved']>>,
     reason: string,
   ): Promise<void> {
-    await this.dependencies.store.finalizeSelection(
+    const terminal = await this.dependencies.store.finalizeSelection(
       batch.id,
       prepared.selection.accepted.length,
       prepared.selection.coverage,
@@ -509,6 +516,7 @@ export class CollectionPlanService {
       prepared.contentRejectionFailures.length,
       [],
     );
+    await this.persistTerminalBenchmark(terminal);
     this.clearBatchRuntime(batch.id);
   }
 
@@ -531,6 +539,26 @@ export class CollectionPlanService {
     await this.dependencies.store.attention(batchId, `自动同步失败：${errors.join('；')}`);
   }
 
+  private async persistTerminalBenchmark(batch: CollectionBatch): Promise<CollectionBatch> {
+    if (
+      batch.planId !== 'nowcoder-agent-market' ||
+      batch.status === 'running' ||
+      !this.dependencies.writeBenchmark
+    ) return batch;
+    const jobs = this.dependencies.jobs.list().filter(job => job.batchId === batch.id);
+    try {
+      await this.dependencies.writeBenchmark(batch, jobs);
+      return batch;
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      const prior = batch.error ? `${batch.error}；` : '';
+      return this.dependencies.store.attention(
+        batch.id,
+        `${prior}基准报告写入失败：${detail}`,
+      );
+    }
+  }
+
   private clearBatchRuntime(batchId: string): void {
     for (const job of this.dependencies.jobs.list()) {
       if (job.batchId !== batchId) continue;
@@ -550,10 +578,11 @@ export class CollectionPlanService {
       }
       await this.advanceNowcoderBatch(batch);
     } catch (error) {
-      await this.dependencies.store.fail(
+      const terminal = await this.dependencies.store.fail(
         batch.id,
         error instanceof Error ? error.message : '固定采集计划执行失败',
       );
+      await this.persistTerminalBenchmark(terminal);
     } finally {
       this.executing.delete(batch.id);
     }

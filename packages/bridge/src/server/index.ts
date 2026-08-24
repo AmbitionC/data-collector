@@ -58,6 +58,7 @@ import {
   selectNowcoderPlanCandidates,
   type ExtensionPlanResult,
 } from '../plans/index.js';
+import { writePlanBenchmark } from '../plans/benchmark.js';
 
 /** 删除请求：要么给明确的 id 列表，要么显式 all:true —— 不接受隐式全删。 */
 const deleteLibrarySchema = z.object({
@@ -419,6 +420,20 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
             source => router.syncTarget(source),
           );
           if (outcome.failed > 0 || outcome.synced === 0) throw new Error('自动同步未送达目标收件箱');
+        },
+        writeBenchmark: async (batch, jobs) => {
+          await writePlanBenchmark(config.configDir, batch, jobs, {
+            metadataFor: async job => {
+              const document = await storedDocumentFor(job);
+              if (!document) return undefined;
+              return {
+                company: document.sourceMetadata?.company,
+                evidenceGrade: document.sourceMetadata?.evidenceGrade,
+                questionCount: document.sourceMetadata?.questionCount,
+                clusterId: document.feJourney?.clusterId,
+              };
+            },
+          });
         },
       })
     : undefined;
