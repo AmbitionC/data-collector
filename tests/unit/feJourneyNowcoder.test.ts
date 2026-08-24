@@ -7,6 +7,29 @@ import {
   discoverNowcoderUrls,
 } from '../../packages/bridge/src/feJourney/index.js';
 
+function requestedQuery(rawUrl: RequestInfo | URL, init?: RequestInit): string {
+  const url = new URL(String(rawUrl));
+  if (url.hostname === 'gw-c.nowcoder.com') {
+    expect(url.href).toBe('https://gw-c.nowcoder.com/api/sparta/pc/search');
+    expect(init?.method).toBe('POST');
+    const body = JSON.parse(String(init?.body)) as {
+      type: string;
+      query: string;
+      order: string;
+      page: number;
+    };
+    expect(body.type).toBe('post');
+    expect(body.order).toBe('create');
+    expect(body.page).toBeGreaterThanOrEqual(1);
+    expect(body.page).toBeLessThanOrEqual(2);
+    return body.query;
+  }
+  expect(url.origin).toBe('https://www.nowcoder.com');
+  expect(url.pathname).toBe('/search');
+  expect(url.searchParams.get('type')).toBe('post');
+  return url.searchParams.get('query') ?? '';
+}
+
 describe('fixed fe-journey Nowcoder discovery', () => {
   it('extracts only canonical unseen detail URLs and enforces the fixed run limit', async () => {
     const fixture = await readFile(join(process.cwd(), 'tests/fixtures/nowcoder-search.html'), 'utf8');
@@ -25,12 +48,8 @@ describe('fixed fe-journey Nowcoder discovery', () => {
     // 达到本轮上限就停止继续请求后续固定查询，避免无意义抓取。
     expect(fetcher.mock.calls.length).toBeGreaterThanOrEqual(1);
     expect(fetcher.mock.calls.length).toBeLessThanOrEqual(FE_JOURNEY_PRESET.nowcoder.queries.length);
-    for (const [rawUrl] of fetcher.mock.calls) {
-      const url = new URL(String(rawUrl));
-      expect(url.origin).toBe('https://www.nowcoder.com');
-      expect(url.pathname).toBe('/search');
-      expect(FE_JOURNEY_PRESET.nowcoder.queries).toContain(url.searchParams.get('query'));
-      expect(url.searchParams.get('type')).toBe('post');
+    for (const [rawUrl, init] of fetcher.mock.calls) {
+      expect(FE_JOURNEY_PRESET.nowcoder.queries).toContain(requestedQuery(rawUrl, init));
     }
     expect(urls).toHaveLength(24);
     expect(urls.slice(0, 3)).toEqual([
@@ -90,8 +109,8 @@ describe('fixed fe-journey Nowcoder discovery', () => {
     expect(new Set(candidates.map(candidate => candidate.queryCompany))).toEqual(
       new Set(['bytedance', 'tencent', 'alibaba', 'ant']),
     );
-    for (const [rawUrl] of fetcher.mock.calls) {
-      const query = new URL(String(rawUrl)).searchParams.get('query') ?? '';
+    for (const [rawUrl, init] of fetcher.mock.calls) {
+      const query = requestedQuery(rawUrl, init);
       expect(FE_JOURNEY_PRESET.nowcoder.companyQueries.some(item => item.query === query)).toBe(true);
     }
   });
