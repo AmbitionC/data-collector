@@ -1,4 +1,5 @@
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { spawn } from 'node:child_process';
+import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import WebSocket, { type RawData } from 'ws';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -7,6 +8,8 @@ import {
   EXTENSION_REPLACED_CLOSE_CODE,
   EXTENSION_REPLACED_CLOSE_REASON,
   TRUSTED_EXTENSION_ID,
+  ZSXQ_COMPLETE_CONTENT_CAPABILITY,
+  type CollectionBatch,
   type CollectedDocument,
   type WsEnvelope,
 } from '@data-collector/shared';
@@ -15,6 +18,7 @@ import {
   type BridgeHandle,
 } from '../../packages/bridge/src/index.js';
 import { JobStore } from '../../packages/bridge/src/jobs/store.js';
+import { acquireArtifactLease } from '../../scripts/artifact-lease.mjs';
 import { createTemporaryDirectoryTracker } from '../helpers/temp.js';
 
 const URL = 'https://mp.weixin.qq.com/s/integration-test';
@@ -152,6 +156,197 @@ afterEach(async () => {
 });
 
 describe('local Bridge', () => {
+  it('reports the connected extension version and exact running build only while it is online', async () => {
+    const root = await temporaryDirectory();
+    const bridge = await startBridge({
+      port: 0,
+      libraryRoot: root,
+      configDir: join(root, '.config'),
+    });
+    handles.push(bridge);
+    const { socket } = await authorize(bridge);
+    socket.send(envelope('extension.hello', 'extension-version', {
+      version: '0.4.29',
+      buildId: 'v0.4.29 · abc1234',
+      capabilities: [ZSXQ_COMPLETE_CONTENT_CAPABILITY],
+    }));
+
+    await vi.waitFor(async () => {
+      const health = await requestJson<{
+        extensionConnected: boolean;
+        extensionVersion?: string;
+        extensionBuildId?: string;
+        extensionCapabilities?: string[];
+      }>(bridge.url, '/health');
+      expect(health.body).toMatchObject({
+        extensionConnected: true,
+        extensionVersion: '0.4.29',
+        extensionBuildId: 'v0.4.29 · abc1234',
+        extensionCapabilities: [ZSXQ_COMPLETE_CONTENT_CAPABILITY],
+      });
+    });
+
+    socket.close();
+    await vi.waitFor(async () => {
+      const health = await requestJson<{
+        extensionConnected: boolean;
+        extensionVersion?: string;
+        extensionBuildId?: string;
+        extensionCapabilities?: string[];
+      }>(bridge.url, '/health');
+      expect(health.body.extensionConnected).toBe(false);
+      expect(health.body.extensionVersion).toBeUndefined();
+      expect(health.body.extensionBuildId).toBeUndefined();
+      expect(health.body.extensionCapabilities).toBeUndefined();
+    });
+  });
+
+  it('does not let a replaced socket overwrite the current extension runtime after async recovery', async () => {
+    let releaseRecovery!: () => void;
+    const blockedRecovery = new Promise<void>(resolve => { releaseRecovery = resolve; });
+    const originalRecover = JobStore.prototype.recover;
+    const recoverSpy = vi.spyOn(JobStore.prototype, 'recover')
+      .mockImplementation(function (this: JobStore) { return originalRecover.call(this); })
+      // startBridge 自身先恢复一次；阻塞的是旧 socket 的 hello 恢复。
+      .mockImplementationOnce(function (this: JobStore) { return originalRecover.call(this); })
+      .mockImplementationOnce(() => blockedRecovery);
+    try {
+      const root = await temporaryDirectory();
+      const bridge = await startBridge({
+        port: 0,
+        libraryRoot: root,
+        configDir: join(root, '.config'),
+      });
+      handles.push(bridge);
+      const legacy = await authorize(bridge);
+      legacy.socket.send(envelope('extension.hello', 'blocked-legacy-hello', {
+        version: '0.4.28',
+        buildId: 'v0.4.28 · legacy',
+      }));
+      await vi.waitFor(() => expect(recoverSpy).toHaveBeenCalledTimes(2));
+
+      const current = await connect(bridge, legacy.token);
+      current.send(envelope('extension.hello', 'current-hello', {
+        version: APP_VERSION,
+        buildId: `v${APP_VERSION} · current`,
+      }));
+      await vi.waitFor(async () => {
+        const health = await requestJson<{
+          extensionVersion?: string;
+          extensionBuildId?: string;
+        }>(bridge.url, '/health');
+        expect(health.body).toMatchObject({
+          extensionVersion: APP_VERSION,
+          extensionBuildId: `v${APP_VERSION} · current`,
+        });
+      });
+
+      releaseRecovery();
+      await new Promise(resolve => setTimeout(resolve, 50));
+      const health = await requestJson<{
+        extensionVersion?: string;
+        extensionBuildId?: string;
+      }>(bridge.url, '/health');
+      expect(health.body).toMatchObject({
+        extensionVersion: APP_VERSION,
+        extensionBuildId: `v${APP_VERSION} · current`,
+      });
+    } finally {
+      releaseRecovery();
+      recoverSpy.mockRestore();
+    }
+  });
+
+  it('finishes one slow result exactly once when the extension socket is replaced mid-persist', async () => {
+    let releaseImage!: () => void;
+    let markImageStarted!: () => void;
+    const imageGate = new Promise<void>(resolve => { releaseImage = resolve; });
+    const imageStarted = new Promise<void>(resolve => { markImageStarted = resolve; });
+    const fetcher = vi.fn<typeof fetch>(async () => {
+      markImageStarted();
+      await imageGate;
+      return new Response(new Uint8Array([137, 80, 78, 71]), {
+        headers: { 'content-type': 'image/png', 'content-length': '4' },
+      });
+    });
+    const root = await temporaryDirectory();
+    const bridge = await startBridge({
+      port: 0,
+      libraryRoot: root,
+      configDir: join(root, '.config'),
+      fetch: fetcher,
+      resolveAddresses: async () => ['93.184.216.34'],
+    });
+    handles.push(bridge);
+    const first = await authorize(bridge);
+    first.socket.send(envelope('extension.hello', 'slow-result-first', {
+      version: APP_VERSION,
+      capabilities: [ZSXQ_COMPLETE_CONTENT_CAPABILITY],
+    }));
+    await waitForExtensionReady(bridge);
+    const topicUrl = 'https://wx.zsxq.com/group/1/topic/899999999999999';
+    const created = await requestJson<{ id: string }>(bridge.url, '/v1/jobs', {
+      method: 'POST',
+      token: first.token,
+      body: { url: topicUrl, requestedBy: 'extension' },
+    });
+    first.socket.send(envelope('job.progress', created.body.id, { stage: 'collecting' }));
+    first.socket.send(envelope('job.result', created.body.id, {
+      document: document({
+        source: 'zsxq',
+        kind: 'post',
+        url: topicUrl,
+        canonicalUrl: topicUrl,
+        title: '慢图片入库竞态',
+        html: '<p>完整正文</p><img src="https://images.example/slow.png">',
+        text: '完整正文',
+        images: [{ url: 'https://images.example/slow.png' }],
+        truncated: false,
+        sourceMetadata: {
+          contentCompletenessVersion: ZSXQ_COMPLETE_CONTENT_CAPABILITY,
+        },
+      }),
+    }));
+    await imageStarted;
+
+    const replacement = await connect(bridge, first.token);
+    const replacementMessages: Array<{ type?: string; requestId?: string }> = [];
+    replacement.on('message', data => {
+      replacementMessages.push(JSON.parse(data.toString()) as { type?: string; requestId?: string });
+    });
+    replacement.send(envelope('extension.hello', 'slow-result-replacement', {
+      version: APP_VERSION,
+      capabilities: [ZSXQ_COMPLETE_CONTENT_CAPABILITY],
+    }));
+    await new Promise(resolve => setTimeout(resolve, 100));
+    releaseImage();
+
+    await vi.waitFor(async () => {
+      const job = await requestJson<{ status: string; outputPath?: string }>(
+        bridge.url,
+        `/v1/jobs/${created.body.id}`,
+        { token: first.token },
+      );
+      expect(job.body.status).toBe('saved');
+      expect(job.body.outputPath).toMatch(/index\.md$/);
+    });
+    await waitForExtensionReady(bridge);
+    expect(replacementMessages).not.toContainEqual(expect.objectContaining({
+      type: 'job.collect',
+      requestId: created.body.id,
+    }));
+    await vi.waitFor(() => {
+      expect(replacementMessages).toContainEqual(expect.objectContaining({
+        type: 'job.saved',
+        requestId: created.body.id,
+      }));
+    });
+    const catalog = JSON.parse(
+      await readFile(join(root, '_catalog', 'index.json'), 'utf8'),
+    ) as unknown[];
+    expect(catalog).toHaveLength(1);
+  });
+
   it('does not finish closing while an accepted WebSocket result is still persisting', async () => {
     let releaseImage!: () => void;
     let markImageStarted!: () => void;
@@ -249,6 +444,107 @@ describe('local Bridge', () => {
     }
   });
 
+  it('terminally fails a slow result and informs the replacement extension when the sink rejects', async () => {
+    let releaseImage!: () => void;
+    let markImageStarted!: () => void;
+    const imageGate = new Promise<void>(resolve => { releaseImage = resolve; });
+    const imageStarted = new Promise<void>(resolve => { markImageStarted = resolve; });
+    const fetcher = vi.fn<typeof fetch>(async () => {
+      markImageStarted();
+      await imageGate;
+      return new Response(new Uint8Array([137, 80, 78, 71]), {
+        headers: { 'content-type': 'image/png', 'content-length': '4' },
+      });
+    });
+    const root = await temporaryDirectory();
+    const libraryRoot = join(root, 'library');
+    const repoRoot = join(root, 'broken-repo');
+    const configDir = join(root, '.config');
+    await mkdir(configDir, { recursive: true });
+    await writeFile(join(configDir, 'sinks.json'), JSON.stringify({
+      sinks: {
+        markdown: { type: 'markdown' },
+        broken: { type: 'repo-inbox', repoPath: repoRoot, commit: false, push: false },
+      },
+      routes: {},
+    }), 'utf8');
+    const bridge = await startBridge({
+      port: 0,
+      libraryRoot,
+      configDir,
+      fetch: fetcher,
+      resolveAddresses: async () => ['93.184.216.34'],
+    });
+    handles.push(bridge);
+    const first = await authorize(bridge);
+    first.socket.send(envelope('extension.hello', 'slow-failure-first', {
+      version: APP_VERSION,
+      capabilities: [ZSXQ_COMPLETE_CONTENT_CAPABILITY],
+    }));
+    await waitForExtensionReady(bridge);
+    const topicUrl = 'https://wx.zsxq.com/group/1/topic/877777777777777';
+    const created = await requestJson<{ id: string }>(bridge.url, '/v1/jobs', {
+      method: 'POST',
+      token: first.token,
+      body: { url: topicUrl, requestedBy: 'extension', sinks: ['broken'] },
+    });
+    first.socket.send(envelope('job.result', created.body.id, {
+      document: document({
+        source: 'zsxq',
+        kind: 'post',
+        url: topicUrl,
+        canonicalUrl: topicUrl,
+        title: '慢保存失败竞态',
+        html: '<p>完整正文</p><img src="https://images.example/slow.png">',
+        text: '完整正文',
+        images: [{ url: 'https://images.example/slow.png' }],
+        truncated: false,
+        sourceMetadata: {
+          contentCompletenessVersion: ZSXQ_COMPLETE_CONTENT_CAPABILITY,
+        },
+      }),
+    }));
+    await imageStarted;
+
+    const replacement = await connect(bridge, first.token);
+    const replacementMessages: Array<{ type?: string; requestId?: string; payload?: unknown }> = [];
+    replacement.on('message', data => {
+      replacementMessages.push(JSON.parse(data.toString()) as {
+        type?: string;
+        requestId?: string;
+        payload?: unknown;
+      });
+    });
+    replacement.send(envelope('extension.hello', 'slow-failure-replacement', {
+      version: APP_VERSION,
+      capabilities: [ZSXQ_COMPLETE_CONTENT_CAPABILITY],
+    }));
+    await waitForExtensionReady(bridge);
+    await rm(repoRoot, { recursive: true, force: true });
+    await writeFile(repoRoot, '阻止收件箱写入', 'utf8');
+    releaseImage();
+
+    await vi.waitFor(async () => {
+      const job = await requestJson<{ status: string; errorCode?: string; errorMessage?: string }>(
+        bridge.url,
+        `/v1/jobs/${created.body.id}`,
+        { token: first.token },
+      );
+      expect(job.body).toMatchObject({
+        status: 'failed',
+        errorCode: 'SAVE_FAILED',
+      });
+    }, { timeout: 5_000 });
+    await vi.waitFor(() => expect(replacementMessages).toContainEqual(expect.objectContaining({
+      type: 'job.failed',
+      requestId: created.body.id,
+    })));
+    expect(replacementMessages).not.toContainEqual(expect.objectContaining({
+      type: 'job.collect',
+      requestId: created.body.id,
+    }));
+  });
+
   it('keeps an offline fixed plan pending, dispatches it on extension hello, and records the result', async () => {
     const root = await temporaryDirectory();
     const configDir = join(root, '.config');
@@ -269,15 +565,27 @@ describe('local Bridge', () => {
     );
     expect(pending.body.plans.find(plan => plan.id === 'zsxq-chen-teacher')?.pending).toBe(true);
 
-    socket.send(envelope('extension.hello', 'extension-plan', { version: APP_VERSION }));
-    const command = await nextMessage<{ batchId: string; planId: string }>(socket);
+    socket.send(envelope('extension.hello', 'extension-plan', {
+      version: APP_VERSION,
+      capabilities: [ZSXQ_COMPLETE_CONTENT_CAPABILITY],
+    }));
+    const command = await nextMessage<{ batchId: string; planId: string; attempt: string; force?: boolean }>(socket);
     expect(command).toMatchObject({
       type: 'plan.collect',
-      payload: { batchId: started.body.id, planId: 'zsxq-chen-teacher' },
+      payload: {
+        batchId: started.body.id,
+        planId: 'zsxq-chen-teacher',
+        attempt: expect.stringMatching(/^[a-f0-9]{16}$/),
+        force: true,
+      },
     });
     socket.send(envelope('plan.result', command.requestId, {
       batchId: started.body.id,
+      attempt: command.payload.attempt,
       discovered: 0,
+      prepared: true,
+      rejections: {},
+      rejectionDetails: [],
     }));
 
     await vi.waitFor(async () => {
@@ -287,6 +595,1127 @@ describe('local Bridge', () => {
       expect(status.body.plans.find(plan => plan.id === 'zsxq-chen-teacher')?.latest?.status)
         .toBe('completed');
     });
+  });
+
+  it('keeps ZSXQ pending until a completeness-capable extension connects', async () => {
+    const root = await temporaryDirectory();
+    const configDir = join(root, '.config');
+    const bridge = await startBridge({ port: 0, libraryRoot: root, configDir });
+    handles.push(bridge);
+    const { socket: oldSocket, token } = await authorize(bridge);
+    oldSocket.send(envelope('extension.hello', 'old-extension', {
+      version: '0.4.28',
+      buildId: 'v0.4.28 · legacy',
+    }));
+    await waitForExtensionReady(bridge);
+
+    const noOldCommand = expectNoMessage(oldSocket);
+    const started = await requestJson<{ id: string; status: string }>(bridge.url, '/v1/plans/run', {
+      method: 'POST',
+      token,
+      body: { planId: 'zsxq-chen-teacher', force: true },
+    });
+    expect(started).toMatchObject({ status: 202, body: { status: 'running' } });
+    await noOldCommand;
+
+    const pending = await requestJson<{ plans: Array<{ id: string; pending: boolean }> }>(
+      bridge.url,
+      '/v1/plans/status',
+      { token },
+    );
+    expect(pending.body.plans.find(plan => plan.id === 'zsxq-chen-teacher')?.pending).toBe(true);
+
+    const sameVersionSocket = await connect(bridge, token);
+    const noSameVersionCommand = expectNoMessage(sameVersionSocket);
+    sameVersionSocket.send(envelope('extension.hello', 'same-version-without-capability', {
+      version: APP_VERSION,
+      buildId: `v${APP_VERSION} · old-build`,
+    }));
+    await noSameVersionCommand;
+
+    const currentSocket = await connect(bridge, token);
+    currentSocket.send(envelope('extension.hello', 'current-extension', {
+      version: APP_VERSION,
+      buildId: `v${APP_VERSION} · current`,
+      capabilities: [ZSXQ_COMPLETE_CONTENT_CAPABILITY],
+    }));
+    const command = await nextMessage<{ batchId: string; planId: string; attempt: string }>(currentSocket);
+    expect(command).toMatchObject({
+      type: 'plan.collect',
+      payload: {
+        batchId: started.body.id,
+        planId: 'zsxq-chen-teacher',
+        attempt: expect.stringMatching(/^[a-f0-9]{16}$/),
+      },
+    });
+  });
+
+  it('fences stale ZSXQ plan results and job snapshots after a reconnect rotates the attempt', async () => {
+    const root = await temporaryDirectory();
+    const bridge = await startBridge({
+      port: 0,
+      libraryRoot: root,
+      configDir: join(root, '.config'),
+    });
+    handles.push(bridge);
+    const first = await authorize(bridge);
+    first.socket.send(envelope('extension.hello', 'attempt-A-extension', {
+      version: APP_VERSION,
+      capabilities: [ZSXQ_COMPLETE_CONTENT_CAPABILITY],
+    }));
+    await waitForExtensionReady(bridge);
+
+    const firstCommandPromise = nextMessage<{
+      batchId: string;
+      planId: string;
+      attempt: string;
+    }>(first.socket);
+    const started = await requestJson<{ id: string }>(bridge.url, '/v1/plans/run', {
+      method: 'POST',
+      token: first.token,
+      body: { planId: 'zsxq-chen-teacher', force: true },
+    });
+    const firstCommand = await firstCommandPromise;
+    const firstAttempt = firstCommand.payload.attempt;
+    first.socket.send(envelope('plan.result', firstCommand.requestId, {
+      batchId: started.body.id,
+      attempt: firstAttempt,
+      discovered: 1,
+      prepared: false,
+      rejections: {},
+      rejectionDetails: [],
+    }));
+
+    const topicUrl = 'https://wx.zsxq.com/group/48844584441158/topic/833333333333333';
+    const firstJob = await requestJson<{ id: string }>(bridge.url, '/v1/jobs', {
+      method: 'POST',
+      token: first.token,
+      body: {
+        url: topicUrl,
+        requestedBy: 'extension',
+        batchId: started.body.id,
+        planId: 'zsxq-chen-teacher',
+        attempt: firstAttempt,
+      },
+    });
+    expect(firstJob.status).toBe(202);
+
+    const currentSocket = await connect(bridge, first.token);
+    currentSocket.send(envelope('extension.hello', 'attempt-B-extension', {
+      version: APP_VERSION,
+      capabilities: [ZSXQ_COMPLETE_CONTENT_CAPABILITY],
+    }));
+    const currentCommand = await nextMessage<{
+      batchId: string;
+      planId: string;
+      attempt: string;
+    }>(currentSocket);
+    const currentAttempt = currentCommand.payload.attempt;
+    expect(currentCommand).toMatchObject({
+      type: 'plan.collect',
+      payload: {
+        batchId: started.body.id,
+        attempt: expect.stringMatching(/^[a-f0-9]{16}$/),
+      },
+    });
+    expect(currentAttempt).not.toBe(firstAttempt);
+
+    currentSocket.send(envelope('plan.result', currentCommand.requestId, {
+      batchId: started.body.id,
+      attempt: firstAttempt,
+      discovered: 1,
+      prepared: true,
+      rejections: {},
+      rejectionDetails: [],
+    }));
+    await vi.waitFor(async () => {
+      const status = await requestJson<{
+        plans: Array<{
+          id: string;
+          latest?: {
+            status: string;
+            preparationStatus?: string;
+            preparationAttempt?: string;
+            accepted: number;
+          };
+        }>;
+      }>(bridge.url, '/v1/plans/status', { token: first.token });
+      expect(status.body.plans.find(plan => plan.id === 'zsxq-chen-teacher')?.latest)
+        .toMatchObject({
+          status: 'running',
+          preparationStatus: 'collecting',
+          preparationAttempt: currentAttempt,
+          accepted: 0,
+        });
+    });
+
+    const staleCreation = await requestJson(bridge.url, '/v1/jobs', {
+      method: 'POST',
+      token: first.token,
+      body: {
+        url: 'https://wx.zsxq.com/group/48844584441158/topic/844444444444444',
+        requestedBy: 'extension',
+        batchId: started.body.id,
+        planId: 'zsxq-chen-teacher',
+        attempt: firstAttempt,
+      },
+    });
+    expect(staleCreation.status).toBe(409);
+
+    const currentJob = await requestJson<{ id: string }>(bridge.url, '/v1/jobs', {
+      method: 'POST',
+      token: first.token,
+      body: {
+        url: topicUrl,
+        requestedBy: 'extension',
+        batchId: started.body.id,
+        planId: 'zsxq-chen-teacher',
+        attempt: currentAttempt,
+      },
+    });
+    expect(currentJob.status).toBe(202);
+    expect(currentJob.body.id).not.toBe(firstJob.body.id);
+
+    currentSocket.send(envelope('plan.result', currentCommand.requestId, {
+      batchId: started.body.id,
+      attempt: currentAttempt,
+      discovered: 1,
+      prepared: true,
+      rejections: {},
+      rejectionDetails: [],
+    }));
+    currentSocket.send(envelope('job.result', firstJob.body.id, {
+      document: document({
+        source: 'zsxq',
+        kind: 'post',
+        url: topicUrl,
+        canonicalUrl: topicUrl,
+        title: '旧轮迟到快照',
+        truncated: false,
+        sourceMetadata: {
+          authorRole: 'member',
+          contentCompletenessVersion: ZSXQ_COMPLETE_CONTENT_CAPABILITY,
+        },
+      }),
+    }));
+    currentSocket.send(envelope('job.progress', currentJob.body.id, { stage: 'collecting' }));
+    currentSocket.send(envelope('job.result', currentJob.body.id, {
+      document: document({
+        source: 'zsxq',
+        kind: 'post',
+        url: topicUrl,
+        canonicalUrl: topicUrl,
+        title: '当前轮完整正文',
+        truncated: false,
+        sourceMetadata: {
+          authorRole: 'member',
+          contentCompletenessVersion: ZSXQ_COMPLETE_CONTENT_CAPABILITY,
+        },
+      }),
+    }));
+
+    // job.saved 落盘后，固定计划还要异步核对 attempt、自动同步资格和 durable
+    // delivery manifest；全套件并行时不能拿 waitFor 的 1s 缺省值冒充协议超时。
+    await vi.waitFor(async () => {
+      const current = await requestJson<{ status: string }>(
+        bridge.url,
+        `/v1/jobs/${currentJob.body.id}`,
+        { token: first.token },
+      );
+      expect(current.body.status).toBe('saved');
+      const batches = await requestJson<{
+        batches: Array<{
+          id: string;
+          status: string;
+          accepted: number;
+          saved: number;
+          deliveryIds: string[];
+          error?: string;
+        }>;
+      }>(bridge.url, '/v1/plans/batches?planId=zsxq-chen-teacher', { token: first.token });
+      expect(batches.body.batches.find(batch => batch.id === started.body.id)).toMatchObject({
+        // 这个协议围栏用例故意回传 member，不能成为固定计划的自动交付证明。
+        status: 'completed_with_attention',
+        accepted: 1,
+        saved: 1,
+        deliveryIds: [],
+        error: expect.stringContaining('未确认交付'),
+      });
+    }, { timeout: 10_000 });
+    const library = await requestJson<{ entries: Array<{ title: string }> }>(
+      bridge.url,
+      '/v1/library',
+      { token: first.token },
+    );
+    expect(library.body.entries).toEqual([
+      expect.objectContaining({ title: '当前轮完整正文' }),
+    ]);
+  });
+
+  it('gates recovered ZSXQ jobs and never saves an incomplete or unproven plan result', async () => {
+    const root = await temporaryDirectory();
+    const configDir = join(root, '.config');
+    const options = { port: 0, libraryRoot: root, configDir };
+    const first = await startBridge(options);
+    handles.push(first);
+    const authorized = await authorize(first);
+    authorized.socket.send(envelope('extension.hello', 'prepare-current-extension', {
+      version: APP_VERSION,
+      capabilities: [ZSXQ_COMPLETE_CONTENT_CAPABILITY],
+    }));
+    await waitForExtensionReady(first);
+
+    const planCommandPromise = nextMessage<{
+      batchId: string;
+      planId: string;
+      attempt: string;
+    }>(authorized.socket);
+    const started = await requestJson<{ id: string }>(first.url, '/v1/plans/run', {
+      method: 'POST',
+      token: authorized.token,
+      body: { planId: 'zsxq-chen-teacher', force: true },
+    });
+    const planCommand = await planCommandPromise;
+    const firstAttempt = planCommand.payload.attempt;
+    authorized.socket.send(envelope('plan.result', planCommand.requestId, {
+      batchId: started.body.id,
+      attempt: firstAttempt,
+      discovered: 1,
+      prepared: false,
+      rejections: {},
+      rejectionDetails: [],
+    }));
+    await vi.waitFor(async () => {
+      const status = await requestJson<{
+        plans: Array<{ id: string; latest?: { discovered: number } }>;
+      }>(first.url, '/v1/plans/status', { token: authorized.token });
+      expect(status.body.plans.find(plan => plan.id === 'zsxq-chen-teacher')?.latest?.discovered)
+        .toBe(1);
+    });
+
+    const topicUrl = 'https://wx.zsxq.com/group/48844584441158/topic/855555555555555';
+    const created = await requestJson<{ id: string; status: string }>(first.url, '/v1/jobs', {
+      method: 'POST',
+      token: authorized.token,
+      body: {
+        url: topicUrl,
+        requestedBy: 'extension',
+        batchId: started.body.id,
+        planId: 'zsxq-chen-teacher',
+        attempt: firstAttempt,
+      },
+    });
+    expect(created).toMatchObject({ status: 202, body: { status: 'queued' } });
+    await first.close();
+    handles.splice(handles.indexOf(first), 1);
+
+    const restarted = await startBridge(options);
+    handles.push(restarted);
+    const legacy = await authorize(restarted);
+    expect(legacy.token).toBe(authorized.token);
+    const noLegacyDispatch = expectNoMessage(legacy.socket);
+    legacy.socket.send(envelope('extension.hello', 'legacy-extension', { version: '0.4.28' }));
+    await noLegacyDispatch;
+
+    const rejectedCreation = await requestJson(restarted.url, '/v1/jobs', {
+      method: 'POST',
+      token: legacy.token,
+      body: {
+        url: 'https://wx.zsxq.com/group/48844584441158/topic/866666666666666',
+        requestedBy: 'extension',
+        batchId: started.body.id,
+        planId: 'zsxq-chen-teacher',
+        attempt: firstAttempt,
+      },
+    });
+    expect(rejectedCreation.status).toBe(409);
+
+    const legacyProtocolError = nextMessage(legacy.socket);
+    legacy.socket.send(envelope('job.result', created.body.id, {
+      document: document({
+        source: 'zsxq',
+        kind: 'post',
+        url: topicUrl,
+        canonicalUrl: topicUrl,
+        title: '旧扩展回传的半篇正文',
+        truncated: true,
+        sourceMetadata: { authorRole: 'owner' },
+      }),
+    }));
+    await expect(legacyProtocolError).resolves.toMatchObject({ type: 'protocol.error' });
+    const beforeRecovery = await requestJson<{ entries: unknown[] }>(
+      restarted.url,
+      '/v1/library',
+      { token: legacy.token },
+    );
+    expect(beforeRecovery.body.entries).toEqual([]);
+
+    const current = await connect(restarted, legacy.token);
+    const recoveredPlan = nextMessage<{
+      batchId: string;
+      planId: string;
+      attempt: string;
+    }>(current);
+    current.send(envelope('extension.hello', 'recovery-current-extension', {
+      version: APP_VERSION,
+      capabilities: [ZSXQ_COMPLETE_CONTENT_CAPABILITY],
+    }));
+    const currentPlan = await recoveredPlan;
+    expect(currentPlan).toMatchObject({
+      type: 'plan.collect',
+      payload: {
+        batchId: started.body.id,
+        attempt: expect.stringMatching(/^[a-f0-9]{16}$/),
+      },
+    });
+    expect(currentPlan.payload.attempt).not.toBe(firstAttempt);
+    const recovered = await requestJson<{ id: string; status: string }>(restarted.url, '/v1/jobs', {
+      method: 'POST',
+      token: legacy.token,
+      body: {
+        url: topicUrl,
+        requestedBy: 'extension',
+        batchId: started.body.id,
+        planId: 'zsxq-chen-teacher',
+        attempt: currentPlan.payload.attempt,
+      },
+    });
+    expect(recovered).toMatchObject({ status: 202, body: { status: 'queued' } });
+    current.send(envelope('plan.result', currentPlan.requestId, {
+      batchId: started.body.id,
+      attempt: currentPlan.payload.attempt,
+      discovered: 1,
+      prepared: true,
+      rejections: {},
+      rejectionDetails: [],
+    }));
+    current.send(envelope('job.progress', recovered.body.id, { stage: 'collecting' }));
+    current.send(envelope('job.result', recovered.body.id, {
+      document: document({
+        source: 'zsxq',
+        kind: 'post',
+        url: topicUrl,
+        canonicalUrl: topicUrl,
+        title: '新版扩展未声明完整的正文',
+        sourceMetadata: { authorRole: 'owner' },
+      }),
+    }));
+
+    await vi.waitFor(async () => {
+      const job = await requestJson<{ status: string; outputPath?: string }>(
+        restarted.url,
+        `/v1/jobs/${recovered.body.id}`,
+        { token: legacy.token },
+      );
+      expect(job.body.status).toBe('needs_attention');
+      expect(job.body.outputPath).toBeUndefined();
+      const library = await requestJson<{ entries: unknown[] }>(
+        restarted.url,
+        '/v1/library',
+        { token: legacy.token },
+      );
+      expect(library.body.entries).toEqual([]);
+      const status = await requestJson<{
+        plans: Array<{
+          id: string;
+          latest?: {
+            status: string;
+            deliveryIds: string[];
+            needsAttention: number;
+            rejections?: Record<string, number>;
+            rejectionDetails?: Array<{ url: string; reason: string }>;
+          };
+        }>;
+      }>(restarted.url, '/v1/plans/status', { token: legacy.token });
+      expect(status.body.plans.find(plan => plan.id === 'zsxq-chen-teacher')?.latest)
+        .toMatchObject({
+          status: 'completed_with_attention',
+          deliveryIds: [],
+          needsAttention: 1,
+          rejections: { '正文不完整': 1 },
+          rejectionDetails: [{ url: topicUrl, reason: '正文不完整' }],
+        });
+    });
+  });
+
+  it('requires the completeness capability and explicit complete content for ordinary ZSXQ jobs', async () => {
+    const root = await temporaryDirectory();
+    const bridge = await startBridge({
+      port: 0,
+      libraryRoot: root,
+      configDir: join(root, '.config'),
+    });
+    handles.push(bridge);
+    const legacy = await authorize(bridge);
+    legacy.socket.send(envelope('extension.hello', 'ordinary-without-capability', {
+      version: APP_VERSION,
+    }));
+    await waitForExtensionReady(bridge);
+    const firstUrl = 'https://wx.zsxq.com/group/1/topic/877777777777777';
+
+    const blocked = await requestJson(bridge.url, '/v1/jobs', {
+      method: 'POST',
+      token: legacy.token,
+      body: { url: firstUrl, requestedBy: 'extension' },
+    });
+    expect(blocked.status).toBe(409);
+
+    const current = await connect(bridge, legacy.token);
+    current.send(envelope('extension.hello', 'ordinary-capable-extension', {
+      version: APP_VERSION,
+      capabilities: [ZSXQ_COMPLETE_CONTENT_CAPABILITY],
+    }));
+    await waitForExtensionReady(bridge);
+    const unproven = await requestJson<{ id: string }>(bridge.url, '/v1/jobs', {
+      method: 'POST',
+      token: legacy.token,
+      body: { url: firstUrl, requestedBy: 'extension' },
+    });
+    expect(unproven.status).toBe(202);
+    current.send(envelope('job.progress', unproven.body.id, { stage: 'collecting' }));
+    current.send(envelope('job.result', unproven.body.id, {
+      document: document({
+        source: 'zsxq',
+        kind: 'post',
+        url: firstUrl,
+        canonicalUrl: firstUrl,
+        title: '未证明完整的普通采集',
+      }),
+    }));
+    await vi.waitFor(async () => {
+      const job = await requestJson<{ status: string; outputPath?: string }>(
+        bridge.url,
+        `/v1/jobs/${unproven.body.id}`,
+        { token: legacy.token },
+      );
+      expect(job.body).toMatchObject({ status: 'needs_attention' });
+      expect(job.body.outputPath).toBeUndefined();
+    });
+    expect((await requestJson<{ entries: unknown[] }>(
+      bridge.url,
+      '/v1/library',
+      { token: legacy.token },
+    )).body.entries).toEqual([]);
+
+    const falseOnlyUrl = 'https://wx.zsxq.com/group/1/topic/878787878787878';
+    const falseOnly = await requestJson<{ id: string }>(bridge.url, '/v1/jobs', {
+      method: 'POST',
+      token: legacy.token,
+      body: { url: falseOnlyUrl, requestedBy: 'extension' },
+    });
+    current.send(envelope('job.progress', falseOnly.body.id, { stage: 'collecting' }));
+    current.send(envelope('job.result', falseOnly.body.id, {
+      document: document({
+        source: 'zsxq',
+        kind: 'post',
+        url: falseOnlyUrl,
+        canonicalUrl: falseOnlyUrl,
+        title: '只有 truncated false、没有协议证明',
+        truncated: false,
+      }),
+    }));
+    await vi.waitFor(async () => {
+      const job = await requestJson<{ status: string; outputPath?: string }>(
+        bridge.url,
+        `/v1/jobs/${falseOnly.body.id}`,
+        { token: legacy.token },
+      );
+      expect(job.body).toMatchObject({ status: 'needs_attention' });
+      expect(job.body.outputPath).toBeUndefined();
+    });
+    expect((await requestJson<{ entries: unknown[] }>(
+      bridge.url,
+      '/v1/library',
+      { token: legacy.token },
+    )).body.entries).toEqual([]);
+
+    const completeUrl = 'https://wx.zsxq.com/group/1/topic/888888888888888';
+    const complete = await requestJson<{ id: string }>(bridge.url, '/v1/jobs', {
+      method: 'POST',
+      token: legacy.token,
+      body: { url: completeUrl, requestedBy: 'extension' },
+    });
+    current.send(envelope('job.progress', complete.body.id, { stage: 'collecting' }));
+    current.send(envelope('job.result', complete.body.id, {
+      document: document({
+        source: 'zsxq',
+        kind: 'post',
+        url: completeUrl,
+        canonicalUrl: completeUrl,
+        title: '已明确验证完整的普通采集',
+        truncated: false,
+        sourceMetadata: {
+          contentCompletenessVersion: ZSXQ_COMPLETE_CONTENT_CAPABILITY,
+        },
+      }),
+    }));
+    await vi.waitFor(async () => {
+      const job = await requestJson<{ status: string }>(
+        bridge.url,
+        `/v1/jobs/${complete.body.id}`,
+        { token: legacy.token },
+      );
+      expect(job.body.status).toBe('saved');
+    });
+    const catalog = JSON.parse(
+      await readFile(join(root, '_catalog', 'index.json'), 'utf8'),
+    ) as Array<{ contentComplete?: boolean }>;
+    expect(catalog).toEqual([expect.objectContaining({ contentComplete: true })]);
+  });
+
+  it('requires a ZSXQ sink attestation to match the exact artifact build when one is known', async () => {
+    const root = await temporaryDirectory();
+    const expectedBuild = `v${APP_VERSION} · sink-attestation-build`;
+    await mkdir(join(root, 'artifacts', 'data-collector-extension'), { recursive: true });
+    await writeFile(
+      join(root, 'artifacts', 'data-collector-extension', 'build-id.txt'),
+      `${expectedBuild}\n`,
+      'utf8',
+    );
+    const bridge = await startBridge({
+      port: 0,
+      libraryRoot: join(root, 'library'),
+      configDir: join(root, '.config'),
+      repoRoot: root,
+      runUpdate: async () => ({
+        changed: false,
+        commit: 'sink-attestation-build',
+        message: '已是最新。',
+        checkedAt: '2026-08-25T00:00:00.000Z',
+      }),
+    });
+    handles.push(bridge);
+    const { socket, token } = await authorize(bridge);
+    socket.send(envelope('extension.hello', 'sink-attestation-extension', {
+      version: APP_VERSION,
+      buildId: expectedBuild,
+      capabilities: [ZSXQ_COMPLETE_CONTENT_CAPABILITY],
+    }));
+    await waitForExtensionReady(bridge);
+
+    const mismatchedUrl = 'https://wx.zsxq.com/group/1/topic/898989898989898';
+    const mismatched = await requestJson<{ id: string }>(bridge.url, '/v1/jobs', {
+      method: 'POST',
+      token,
+      body: { url: mismatchedUrl, requestedBy: 'extension' },
+    });
+    socket.send(envelope('job.result', mismatched.body.id, {
+      document: document({
+        source: 'zsxq',
+        kind: 'post',
+        url: mismatchedUrl,
+        canonicalUrl: mismatchedUrl,
+        title: '构建证明不匹配',
+        truncated: false,
+        sourceMetadata: {
+          contentCompletenessVersion: ZSXQ_COMPLETE_CONTENT_CAPABILITY,
+          contentCompletenessBuildId: `v${APP_VERSION} · stale-build`,
+        },
+      }),
+    }));
+    await vi.waitFor(async () => {
+      const job = await requestJson<{ status: string; outputPath?: string }>(
+        bridge.url,
+        `/v1/jobs/${mismatched.body.id}`,
+        { token },
+      );
+      expect(job.body).toMatchObject({ status: 'needs_attention' });
+      expect(job.body.outputPath).toBeUndefined();
+    });
+
+    const exactUrl = 'https://wx.zsxq.com/group/1/topic/909090909090909';
+    const exact = await requestJson<{ id: string }>(bridge.url, '/v1/jobs', {
+      method: 'POST',
+      token,
+      body: { url: exactUrl, requestedBy: 'extension' },
+    });
+    socket.send(envelope('job.result', exact.body.id, {
+      document: document({
+        source: 'zsxq',
+        kind: 'post',
+        url: exactUrl,
+        canonicalUrl: exactUrl,
+        title: '构建证明精确匹配',
+        truncated: false,
+        sourceMetadata: {
+          contentCompletenessVersion: ZSXQ_COMPLETE_CONTENT_CAPABILITY,
+          contentCompletenessBuildId: expectedBuild,
+        },
+      }),
+    }));
+    await vi.waitFor(async () => {
+      const job = await requestJson<{ status: string }>(
+        bridge.url,
+        `/v1/jobs/${exact.body.id}`,
+        { token },
+      );
+      expect(job.body.status).toBe('saved');
+    });
+    const catalog = JSON.parse(
+      await readFile(join(root, 'library', '_catalog', 'index.json'), 'utf8'),
+    ) as Array<{ contentComplete?: boolean }>;
+    expect(catalog).toEqual([expect.objectContaining({ contentComplete: true })]);
+  });
+
+  it('serializes an artifact replacement with ZSXQ persistence so build A cannot write after B lands', async () => {
+    const root = await temporaryDirectory();
+    const libraryRoot = join(root, 'library');
+    const artifacts = join(root, 'artifacts', 'data-collector-extension');
+    const buildA = `v${APP_VERSION} · persistence-build-a`;
+    const buildB = `v${APP_VERSION} · persistence-build-b`;
+    await mkdir(artifacts, { recursive: true });
+    await writeFile(join(artifacts, 'build-id.txt'), `${buildA}\n`, 'utf8');
+
+    let markUpdateStarted!: () => void;
+    let releaseUpdate!: () => void;
+    let releaseImage!: () => void;
+    const updateStarted = new Promise<void>(resolve => { markUpdateStarted = resolve; });
+    const updateGate = new Promise<void>(resolve => { releaseUpdate = resolve; });
+    const imageGate = new Promise<void>(resolve => { releaseImage = resolve; });
+    const fetcher = vi.fn<typeof fetch>(async () => {
+      await imageGate;
+      return new Response(new Uint8Array([137, 80, 78, 71]), {
+        headers: { 'content-type': 'image/png', 'content-length': '4' },
+      });
+    });
+    const bridge = await startBridge({
+      port: 0,
+      libraryRoot,
+      configDir: join(root, '.config'),
+      repoRoot: root,
+      updateIntervalMs: 60 * 60_000,
+      exit: vi.fn(),
+      fetch: fetcher,
+      resolveAddresses: async () => ['93.184.216.34'],
+      runUpdate: async () => {
+        markUpdateStarted();
+        await updateGate;
+        await writeFile(join(artifacts, 'build-id.txt'), `${buildB}\n`, 'utf8');
+        return {
+          changed: true,
+          commit: 'persistence-build-b',
+          message: '已更新并完成构建。',
+          checkedAt: '2026-08-25T00:00:00.000Z',
+        };
+      },
+    });
+    handles.push(bridge);
+    await updateStarted;
+
+    const { socket, token } = await authorize(bridge);
+    socket.send(envelope('extension.hello', 'persistence-build-a', {
+      version: APP_VERSION,
+      buildId: buildA,
+      capabilities: [ZSXQ_COMPLETE_CONTENT_CAPABILITY],
+    }));
+    await waitForExtensionReady(bridge);
+    const topicUrl = 'https://wx.zsxq.com/group/1/topic/909191919191919';
+    const created = await requestJson<{ id: string }>(bridge.url, '/v1/jobs', {
+      method: 'POST',
+      token,
+      body: { url: topicUrl, requestedBy: 'extension' },
+    });
+    socket.send(envelope('job.result', created.body.id, {
+      document: document({
+        source: 'zsxq',
+        kind: 'post',
+        url: topicUrl,
+        canonicalUrl: topicUrl,
+        title: '构建切换期间的旧正文',
+        html: '<p>构建 A 的正文</p><img src="https://images.example/build-race.png">',
+        text: '构建 A 的正文',
+        images: [{ url: 'https://images.example/build-race.png' }],
+        truncated: false,
+        sourceMetadata: {
+          contentCompletenessVersion: ZSXQ_COMPLETE_CONTENT_CAPABILITY,
+          contentCompletenessBuildId: buildA,
+        },
+      }),
+    }));
+
+    // 旧实现会在 updater 仍持有 A→B 切换窗口时直接进入 sink，并卡在图片下载。
+    await new Promise(resolve => setTimeout(resolve, 100));
+    const sinkStartedBeforeUpdateFinished = fetcher.mock.calls.length > 0;
+    releaseUpdate();
+    releaseImage();
+
+    await vi.waitFor(async () => {
+      const job = await requestJson<{ status: string; outputPath?: string }>(
+        bridge.url,
+        `/v1/jobs/${created.body.id}`,
+        { token },
+      );
+      expect(job.body.status).toBe('needs_attention');
+      expect(job.body.outputPath).toBeUndefined();
+    });
+    expect(sinkStartedBeforeUpdateFinished).toBe(false);
+    expect(fetcher).not.toHaveBeenCalled();
+    expect((await requestJson<{ entries: unknown[] }>(
+      bridge.url,
+      '/v1/library',
+      { token },
+    )).body.entries).toEqual([]);
+  });
+
+  it('holds the cross-process artifact lease until a slow ZSXQ sink reaches its saved terminal state', async () => {
+    const root = await temporaryDirectory();
+    const libraryRoot = join(root, 'library');
+    const artifacts = join(root, 'artifacts', 'data-collector-extension');
+    const buildA = `v${APP_VERSION} · external-package-a`;
+    const buildB = `v${APP_VERSION} · external-package-b`;
+    await mkdir(artifacts, { recursive: true });
+    await writeFile(join(artifacts, 'build-id.txt'), `${buildA}\n`, 'utf8');
+    let markImageStarted!: () => void;
+    let releaseImage!: () => void;
+    const imageStarted = new Promise<void>(resolve => { markImageStarted = resolve; });
+    const imageGate = new Promise<void>(resolve => { releaseImage = resolve; });
+    const fetcher = vi.fn<typeof fetch>(async () => {
+      markImageStarted();
+      await imageGate;
+      return new Response(new Uint8Array([137, 80, 78, 71]), {
+        headers: { 'content-type': 'image/png', 'content-length': '4' },
+      });
+    });
+    const bridge = await startBridge({
+      port: 0,
+      libraryRoot,
+      configDir: join(root, '.config'),
+      repoRoot: root,
+      enableAutoUpdate: false,
+      fetch: fetcher,
+      resolveAddresses: async () => ['93.184.216.34'],
+      runUpdate: async () => ({
+        changed: false,
+        commit: 'external-package-a',
+        message: '已是最新。',
+        checkedAt: '2026-08-25T00:00:00.000Z',
+      }),
+    });
+    handles.push(bridge);
+    const { socket, token } = await authorize(bridge);
+    socket.send(envelope('extension.hello', 'external-package-a', {
+      version: APP_VERSION,
+      buildId: buildA,
+      capabilities: [ZSXQ_COMPLETE_CONTENT_CAPABILITY],
+    }));
+    await waitForExtensionReady(bridge);
+    const topicUrl = 'https://wx.zsxq.com/group/1/topic/939191919191919';
+    const created = await requestJson<{ id: string }>(bridge.url, '/v1/jobs', {
+      method: 'POST',
+      token,
+      body: { url: topicUrl, requestedBy: 'extension' },
+    });
+    socket.send(envelope('job.result', created.body.id, {
+      document: document({
+        source: 'zsxq',
+        kind: 'post',
+        url: topicUrl,
+        canonicalUrl: topicUrl,
+        title: '外部打包必须等待慢图片落库',
+        html: '<p>构建 A 完整正文</p><img src="https://images.example/external-package.png">',
+        text: '构建 A 完整正文',
+        images: [{ url: 'https://images.example/external-package.png' }],
+        truncated: false,
+        sourceMetadata: {
+          contentCompletenessVersion: ZSXQ_COMPLETE_CONTENT_CAPABILITY,
+          contentCompletenessBuildId: buildA,
+        },
+      }),
+    }));
+    await imageStarted;
+
+    let packageAcquired = false;
+    let packageError = '';
+    const leaseModule = new globalThis.URL('../../scripts/artifact-lease.mjs', import.meta.url).href;
+    const externalPackage = spawn(process.execPath, [
+      '--input-type=module',
+      '--eval',
+      `
+        import { writeFile } from 'node:fs/promises';
+        import { acquireArtifactLease } from ${JSON.stringify(leaseModule)};
+        const lease = await acquireArtifactLease(${JSON.stringify(root)}, {
+          role: 'package', timeoutMs: 3_000, pollIntervalMs: 5,
+        });
+        process.stdout.write('acquired\\n');
+        await writeFile(${JSON.stringify(join(artifacts, 'build-id.txt'))}, ${JSON.stringify(`${buildB}\n`)}, 'utf8');
+        await lease.release();
+      `,
+    ], { stdio: ['ignore', 'pipe', 'pipe'], timeout: 5_000 });
+    externalPackage.stdout.on('data', data => {
+      if (data.toString().includes('acquired')) packageAcquired = true;
+    });
+    externalPackage.stderr.on('data', data => { packageError += data.toString(); });
+    const externalPackageExited = new Promise<void>((resolve, reject) => {
+      externalPackage.once('error', reject);
+      externalPackage.once('exit', (code, signal) => {
+        if (code === 0) resolve();
+        else reject(new Error(`external package lease failed: code=${code} signal=${signal} ${packageError}`));
+      });
+    });
+    await new Promise(resolve => setTimeout(resolve, 75));
+    expect(packageAcquired).toBe(false);
+    expect(await readFile(join(artifacts, 'build-id.txt'), 'utf8')).toBe(`${buildA}\n`);
+
+    releaseImage();
+    await vi.waitFor(async () => {
+      const saved = await requestJson<{ status: string; outputPath?: string }>(
+        bridge.url,
+        `/v1/jobs/${created.body.id}`,
+        { token },
+      );
+      expect(saved.body.status).toBe('saved');
+      expect(saved.body.outputPath).toMatch(/index\.md$/u);
+    });
+    await externalPackageExited;
+    expect(packageAcquired).toBe(true);
+    expect(await readFile(join(artifacts, 'build-id.txt'), 'utf8')).toBe(`${buildB}\n`);
+  });
+
+  it('waits behind a package lease, then rereads build B and rejects build A before any ZSXQ sink', async () => {
+    const root = await temporaryDirectory();
+    const artifacts = join(root, 'artifacts', 'data-collector-extension');
+    const buildA = `v${APP_VERSION} · package-first-a`;
+    const buildB = `v${APP_VERSION} · package-first-b`;
+    await mkdir(artifacts, { recursive: true });
+    await writeFile(join(artifacts, 'build-id.txt'), `${buildA}\n`, 'utf8');
+    const packageLease = await acquireArtifactLease(root, {
+      role: 'package',
+      timeoutMs: 1_000,
+      pollIntervalMs: 5,
+    });
+    const fetcher = vi.fn<typeof fetch>();
+    const bridge = await startBridge({
+      port: 0,
+      libraryRoot: join(root, 'library'),
+      configDir: join(root, '.config'),
+      repoRoot: root,
+      enableAutoUpdate: false,
+      fetch: fetcher,
+      runUpdate: async () => ({
+        changed: false,
+        commit: 'package-first-a',
+        message: '已是最新。',
+        checkedAt: '2026-08-25T00:00:00.000Z',
+      }),
+    });
+    handles.push(bridge);
+    const { socket, token } = await authorize(bridge);
+    socket.send(envelope('extension.hello', 'package-first-a', {
+      version: APP_VERSION,
+      buildId: buildA,
+      capabilities: [ZSXQ_COMPLETE_CONTENT_CAPABILITY],
+    }));
+    await waitForExtensionReady(bridge);
+    const topicUrl = 'https://wx.zsxq.com/group/1/topic/949191919191919';
+    const created = await requestJson<{ id: string }>(bridge.url, '/v1/jobs', {
+      method: 'POST',
+      token,
+      body: { url: topicUrl, requestedBy: 'extension' },
+    });
+    await writeFile(join(artifacts, 'build-id.txt'), `${buildB}\n`, 'utf8');
+    socket.send(envelope('job.result', created.body.id, {
+      document: document({
+        source: 'zsxq',
+        kind: 'post',
+        url: topicUrl,
+        canonicalUrl: topicUrl,
+        title: '打包先持锁时的旧构建正文',
+        truncated: false,
+        sourceMetadata: {
+          contentCompletenessVersion: ZSXQ_COMPLETE_CONTENT_CAPABILITY,
+          contentCompletenessBuildId: buildA,
+        },
+      }),
+    }));
+
+    await new Promise(resolve => setTimeout(resolve, 75));
+    const waiting = await requestJson<{ status: string }>(
+      bridge.url,
+      `/v1/jobs/${created.body.id}`,
+      { token },
+    );
+    expect(['queued', 'dispatched', 'collecting']).toContain(waiting.body.status);
+    expect(fetcher).not.toHaveBeenCalled();
+
+    await packageLease.release();
+    await vi.waitFor(async () => {
+      const rejected = await requestJson<{
+        status: string;
+        errorCode?: string;
+        outputPath?: string;
+      }>(bridge.url, `/v1/jobs/${created.body.id}`, { token });
+      expect(rejected.body).toMatchObject({
+        status: 'needs_attention',
+        errorCode: 'EXTENSION_UPDATE_REQUIRED',
+      });
+      expect(rejected.body.outputPath).toBeUndefined();
+    });
+    expect(fetcher).not.toHaveBeenCalled();
+    const afterRejection = await acquireArtifactLease(root, {
+      role: 'package',
+      timeoutMs: 250,
+      pollIntervalMs: 5,
+    });
+    await afterRejection.release();
+  });
+
+  it('does not make a non-ZSXQ result wait for the artifact lease', async () => {
+    const root = await temporaryDirectory();
+    const packageLease = await acquireArtifactLease(root, {
+      role: 'package',
+      timeoutMs: 1_000,
+      pollIntervalMs: 5,
+    });
+    const bridge = await startBridge({
+      port: 0,
+      libraryRoot: join(root, 'library'),
+      configDir: join(root, '.config'),
+      repoRoot: root,
+      runUpdate: async () => ({
+        changed: false,
+        commit: 'non-zsxq',
+        message: '已是最新。',
+        checkedAt: '2026-08-25T00:00:00.000Z',
+      }),
+    });
+    handles.push(bridge);
+    const { socket, token } = await authorize(bridge);
+    socket.send(envelope('extension.hello', 'non-zsxq-result', { version: APP_VERSION }));
+    await waitForExtensionReady(bridge);
+    const created = await requestJson<{ id: string }>(bridge.url, '/v1/jobs', {
+      method: 'POST',
+      token,
+      body: { url: URL, requestedBy: 'extension' },
+    });
+    socket.send(envelope('job.result', created.body.id, { document: document() }));
+
+    await vi.waitFor(async () => {
+      const saved = await requestJson<{ status: string }>(
+        bridge.url,
+        `/v1/jobs/${created.body.id}`,
+        { token },
+      );
+      expect(saved.body.status).toBe('saved');
+    });
+    await packageLease.release();
+  });
+
+  it('immediately fences a connected old extension when the artifact build changes on disk', async () => {
+    const root = await temporaryDirectory();
+    const artifacts = join(root, 'artifacts', 'data-collector-extension');
+    const buildA = `v${APP_VERSION} · runtime-artifact-a`;
+    const buildB = `v${APP_VERSION} · runtime-artifact-b`;
+    await mkdir(artifacts, { recursive: true });
+    await writeFile(join(artifacts, 'build-id.txt'), `${buildA}\n`, 'utf8');
+    const runUpdate = vi.fn(async () => ({
+      changed: false,
+      commit: 'runtime-artifact-a',
+      message: '已是最新。',
+      checkedAt: '2026-08-25T00:00:00.000Z',
+    }));
+    const bridge = await startBridge({
+      port: 0,
+      libraryRoot: join(root, 'library'),
+      configDir: join(root, '.config'),
+      repoRoot: root,
+      enableAutoUpdate: false,
+      runUpdate,
+    });
+    handles.push(bridge);
+    const { socket, token } = await authorize(bridge);
+    socket.send(envelope('extension.hello', 'runtime-artifact-a', {
+      version: APP_VERSION,
+      buildId: buildA,
+      capabilities: [ZSXQ_COMPLETE_CONTENT_CAPABILITY],
+    }));
+    await waitForExtensionReady(bridge);
+
+    const inFlightUrl = 'https://wx.zsxq.com/group/1/topic/919191919191919';
+    const dispatched = nextMessage<{ url: string }>(socket);
+    const inFlight = await requestJson<{ id: string }>(bridge.url, '/v1/jobs', {
+      method: 'POST',
+      token,
+      body: { url: inFlightUrl, requestedBy: 'cli' },
+    });
+    expect(inFlight.status).toBe(202);
+    await expect(dispatched).resolves.toMatchObject({
+      type: 'job.collect',
+      requestId: inFlight.body.id,
+    });
+    const queuedUrl = 'https://wx.zsxq.com/group/1/topic/919292929292929';
+    const queued = await requestJson<{ id: string }>(bridge.url, '/v1/jobs', {
+      method: 'POST',
+      token,
+      body: { url: queuedUrl, requestedBy: 'extension' },
+    });
+    expect(queued.status).toBe(202);
+
+    // Bridge 进程仍是启动时的 A，但磁盘 artifact 已被打包流程原地替换为 B。
+    await writeFile(join(artifacts, 'build-id.txt'), `${buildB}\n`, 'utf8');
+
+    const blocked = await requestJson<{ code?: string }>(bridge.url, '/v1/jobs', {
+      method: 'POST',
+      token,
+      body: {
+        url: 'https://wx.zsxq.com/group/1/topic/929292929292929',
+        requestedBy: 'extension',
+      },
+    });
+    expect(blocked).toMatchObject({
+      status: 409,
+      body: { error: { code: 'EXTENSION_UPDATE_REQUIRED' } },
+    });
+
+    // A 已经拿到的任务即使迟到回传完整性证明，也不能写进 sink。
+    socket.send(envelope('job.result', inFlight.body.id, {
+      document: document({
+        source: 'zsxq',
+        kind: 'post',
+        url: inFlightUrl,
+        canonicalUrl: inFlightUrl,
+        title: '磁盘切换后旧构建迟到的正文',
+        truncated: false,
+        sourceMetadata: {
+          contentCompletenessVersion: ZSXQ_COMPLETE_CONTENT_CAPABILITY,
+          contentCompletenessBuildId: buildA,
+        },
+      }),
+    }));
+    await vi.waitFor(async () => {
+      const job = await requestJson<{
+        status: string;
+        errorCode?: string;
+        outputPath?: string;
+      }>(bridge.url, `/v1/jobs/${inFlight.body.id}`, { token });
+      expect(job.body).toMatchObject({
+        status: 'needs_attention',
+        errorCode: 'EXTENSION_UPDATE_REQUIRED',
+      });
+      expect(job.body.outputPath).toBeUndefined();
+    });
+    expect((await requestJson<{ entries: unknown[] }>(
+      bridge.url,
+      '/v1/library',
+      { token },
+    )).body.entries).toEqual([]);
+    expect(runUpdate).not.toHaveBeenCalled();
+
+    // 重连仍是旧 A 时，启动前已经排队的任务也不得被 dispatch。
+    const staleReplacement = await connect(bridge, token);
+    const noStaleDispatch = expectNoMessage(staleReplacement);
+    staleReplacement.send(envelope('extension.hello', 'runtime-artifact-a-replacement', {
+      version: APP_VERSION,
+      buildId: buildA,
+      capabilities: [ZSXQ_COMPLETE_CONTENT_CAPABILITY],
+    }));
+    await waitForExtensionReady(bridge);
+    await noStaleDispatch;
+    const stillQueued = await requestJson<{ status: string }>(
+      bridge.url,
+      `/v1/jobs/${queued.body.id}`,
+      { token },
+    );
+    expect(stillQueued.body.status).toBe('queued');
   });
 
   it('protects and validates fixed plan status, run, and batch history routes', async () => {
@@ -324,15 +1753,22 @@ describe('local Bridge', () => {
     const bridge = await startBridge({ port: 0, libraryRoot: root, configDir });
     handles.push(bridge);
     const { socket, token } = await authorize(bridge);
-    socket.send(envelope('extension.hello', 'extension-plan-metadata', { version: APP_VERSION }));
+    socket.send(envelope('extension.hello', 'extension-plan-metadata', {
+      version: APP_VERSION,
+      capabilities: [ZSXQ_COMPLETE_CONTENT_CAPABILITY],
+    }));
 
-    const planCommand = nextMessage(socket);
+    const planCommandPromise = nextMessage<{
+      batchId: string;
+      planId: string;
+      attempt: string;
+    }>(socket);
     const started = await requestJson<{ id: string }>(bridge.url, '/v1/plans/run', {
       method: 'POST',
       token,
       body: { planId: 'zsxq-chen-teacher', force: true },
     });
-    await planCommand;
+    const planCommand = await planCommandPromise;
     const topicUrl = 'https://wx.zsxq.com/group/48844584441158/topic/844444444444444';
     const dispatchedPlanJob = nextMessage<{ url: string; interactive: boolean }>(socket);
     const created = await requestJson<{ id: string }>(bridge.url, '/v1/jobs', {
@@ -343,6 +1779,7 @@ describe('local Bridge', () => {
         requestedBy: 'codex',
         batchId: started.body.id,
         planId: 'zsxq-chen-teacher',
+        attempt: planCommand.payload.attempt,
       },
     });
     await expect(dispatchedPlanJob).resolves.toMatchObject({
@@ -357,7 +1794,11 @@ describe('local Bridge', () => {
         url: topicUrl,
         canonicalUrl: topicUrl,
         title: '批次元数据测试',
-        sourceMetadata: { authorRole: 'member' },
+        truncated: false,
+        sourceMetadata: {
+          authorRole: 'member',
+          contentCompletenessVersion: ZSXQ_COMPLETE_CONTENT_CAPABILITY,
+        },
       }),
     }));
 
@@ -472,8 +1913,14 @@ describe('local Bridge', () => {
     });
     await expectNoMessage(socket);
 
+    const zsxqSocket = await connect(bridge, token);
+    zsxqSocket.send(envelope('extension.hello', 'complete-content-extension', {
+      version: APP_VERSION,
+      capabilities: [ZSXQ_COMPLETE_CONTENT_CAPABILITY],
+    }));
+    await waitForExtensionReady(bridge);
     const zsxqUrl = 'https://wx.zsxq.com/group/1/topic/533333333333333';
-    const dispatchedPromise = nextMessage<{ url: string; interactive: boolean }>(socket);
+    const dispatchedPromise = nextMessage<{ url: string; interactive: boolean }>(zsxqSocket);
     const zsxq = await requestJson<{ id: string }>(bridge.url, '/v1/jobs', {
       method: 'POST',
       token,
@@ -484,14 +1931,18 @@ describe('local Bridge', () => {
       requestId: zsxq.body.id,
       payload: { url: zsxqUrl, interactive: true },
     });
-    socket.send(envelope('job.progress', zsxq.body.id, { stage: 'collecting' }));
-    socket.send(envelope('job.result', zsxq.body.id, {
+    zsxqSocket.send(envelope('job.progress', zsxq.body.id, { stage: 'collecting' }));
+    zsxqSocket.send(envelope('job.result', zsxq.body.id, {
       document: document({
         source: 'zsxq',
         kind: 'post',
         url: zsxqUrl,
         canonicalUrl: zsxqUrl,
         title: '索引损坏时仍可采集的知识星球帖子',
+        truncated: false,
+        sourceMetadata: {
+          contentCompletenessVersion: ZSXQ_COMPLETE_CONTENT_CAPABILITY,
+        },
       }),
     }));
     await vi.waitFor(async () => {
@@ -502,7 +1953,7 @@ describe('local Bridge', () => {
       );
       expect(saved.body.status).toBe('saved');
     });
-    expect(socket.readyState).toBe(WebSocket.OPEN);
+    expect(zsxqSocket.readyState).toBe(WebSocket.OPEN);
   });
 
   it.each([
@@ -1161,6 +2612,43 @@ describe('health 里的产物构建标记', () => {
     const health = await requestJson<{ buildId?: string }>(bridge.url, '/health');
     expect(health.body.buildId).toBeUndefined();
   });
+
+  it('does not run a ZSXQ plan until the connected extension build exactly matches the artifact', async () => {
+    const expectedBuild = `v${APP_VERSION} · final-build`;
+    const bridge = await bridgeWithArtifacts(expectedBuild);
+    const { socket: staleSocket, token } = await authorize(bridge);
+    staleSocket.send(envelope('extension.hello', 'stale-same-version', {
+      version: APP_VERSION,
+      buildId: `v${APP_VERSION} · earlier-dirty-build`,
+      capabilities: [ZSXQ_COMPLETE_CONTENT_CAPABILITY],
+    }));
+    await waitForExtensionReady(bridge);
+
+    const noStalePlan = expectNoMessage(staleSocket);
+    const started = await requestJson<{ id: string }>(bridge.url, '/v1/plans/run', {
+      method: 'POST',
+      token,
+      body: { planId: 'zsxq-chen-teacher', force: true },
+    });
+    expect(started.status).toBe(202);
+    await noStalePlan;
+
+    const currentSocket = await connect(bridge, token);
+    currentSocket.send(envelope('extension.hello', 'exact-artifact-build', {
+      version: APP_VERSION,
+      buildId: expectedBuild,
+      capabilities: [ZSXQ_COMPLETE_CONTENT_CAPABILITY],
+    }));
+    const command = await nextMessage<{ batchId: string; planId: string; attempt: string }>(currentSocket);
+    expect(command).toMatchObject({
+      type: 'plan.collect',
+      payload: {
+        batchId: started.body.id,
+        planId: 'zsxq-chen-teacher',
+        attempt: expect.stringMatching(/^[a-f0-9]{16}$/),
+      },
+    });
+  });
 });
 
 /**
@@ -1204,6 +2692,36 @@ describe('自更新后的重启时机', () => {
     expect(exit).not.toHaveBeenCalled();
   });
 
+  it('上一轮更新检查未结束时不会并发启动下一轮', async () => {
+    const root = await temporaryDirectory();
+    let releaseUpdate!: () => void;
+    const updateGate = new Promise<void>(resolve => { releaseUpdate = resolve; });
+    const runUpdate = vi.fn(async () => {
+      await updateGate;
+      return {
+        changed: false,
+        commit: 'abc1234',
+        message: '已是最新。',
+        checkedAt: '2026-08-25T00:00:00.000Z',
+      };
+    });
+    const bridge = await startBridge({
+      port: 0,
+      libraryRoot: join(root, 'library'),
+      configDir: join(root, '.config'),
+      repoRoot: root,
+      updateIntervalMs: 20,
+      runUpdate,
+    });
+    handles.push(bridge);
+
+    await vi.waitFor(() => expect(runUpdate).toHaveBeenCalledOnce());
+    await new Promise(resolve => setTimeout(resolve, 100));
+    expect(runUpdate).toHaveBeenCalledOnce();
+
+    releaseUpdate();
+  });
+
   it('扩展连着时绝不重启，等它断开再说', async () => {
     // 采集途中断掉 WebSocket，正在跑的那一批当场失败——绝不为了更新打断用户手头的事。
     const exit = vi.fn();
@@ -1219,6 +2737,462 @@ describe('自更新后的重启时机', () => {
 
     socket.close();
     await vi.waitFor(() => expect(exit).toHaveBeenCalled());
+  });
+
+  it.each([
+    { failure: 'target socket is replaced', mode: 'replace' as const },
+    { failure: 'target socket disconnects', mode: 'disconnect' as const },
+    { failure: 'artifact build drifts', mode: 'build-drift' as const },
+  ])('fails the active ZSXQ attempt if $failure during artifact attestation', async ({ mode }) => {
+    const root = await temporaryDirectory();
+    const buildId = `v${APP_VERSION} · guarded-plan-dispatch-${mode}`;
+    let currentBuildId = buildId;
+    await mkdir(join(root, 'artifacts', 'data-collector-extension'), { recursive: true });
+    await writeFile(
+      join(root, 'artifacts', 'data-collector-extension', 'build-id.txt'),
+      `${buildId}\n`,
+      'utf8',
+    );
+    let dispatchReadsArmed = false;
+    let armedReads = 0;
+    let dispatchReadBlocked = false;
+    let releaseDispatchRead!: () => void;
+    const dispatchReadGate = new Promise<void>(resolve => { releaseDispatchRead = resolve; });
+    let blockUpdate = false;
+    let resumedUpdateFinished = false;
+    let releaseUpdate!: () => void;
+    const updateGate = new Promise<void>(resolve => { releaseUpdate = resolve; });
+    const runUpdate = vi.fn(async () => {
+      if (blockUpdate) {
+        await updateGate;
+        resumedUpdateFinished = true;
+      }
+      return {
+        changed: false,
+        commit: 'abc1234',
+        message: '已是最新。',
+        checkedAt: '2026-08-25T00:00:00.000Z',
+      };
+    });
+    const bridge = await startBridge({
+      port: 0,
+      libraryRoot: join(root, 'library'),
+      configDir: join(root, '.config'),
+      repoRoot: root,
+      updateIntervalMs: 20,
+      runUpdate,
+      readArtifactBuildId: async () => {
+        if (dispatchReadsArmed && ++armedReads === 2) {
+          dispatchReadBlocked = true;
+          await dispatchReadGate;
+        }
+        return currentBuildId;
+      },
+    });
+    handles.push(bridge);
+    try {
+      await vi.waitFor(() => expect(runUpdate).toHaveBeenCalled());
+      const first = await authorize(bridge);
+      first.socket.send(envelope('extension.hello', `guarded-plan-dispatch-${mode}-a`, {
+        version: APP_VERSION,
+        buildId,
+        capabilities: [ZSXQ_COMPLETE_CONTENT_CAPABILITY],
+      }));
+      await waitForExtensionReady(bridge);
+      const firstMessages: Array<{ type?: string }> = [];
+      first.socket.on('message', data => {
+        firstMessages.push(JSON.parse(data.toString()) as { type?: string });
+      });
+
+      dispatchReadsArmed = true;
+      const runRequest = requestJson<CollectionBatch>(bridge.url, '/v1/plans/run', {
+        method: 'POST',
+        token: first.token,
+        body: { planId: 'zsxq-chen-teacher', force: true },
+      });
+      await vi.waitFor(() => expect(dispatchReadBlocked).toBe(true));
+      blockUpdate = true;
+      const updateCallsAtAttemptStart = runUpdate.mock.calls.length;
+      await new Promise(resolve => setTimeout(resolve, 60));
+      expect(runUpdate).toHaveBeenCalledTimes(updateCallsAtAttemptStart);
+
+      const replacementMessages: Array<{ type?: string }> = [];
+      if (mode === 'replace') {
+        const replacement = await connect(bridge, first.token);
+        replacement.on('message', data => {
+          replacementMessages.push(JSON.parse(data.toString()) as { type?: string });
+        });
+        replacement.send(envelope('extension.hello', 'guarded-plan-dispatch-replacement', {
+          version: APP_VERSION,
+          buildId,
+          capabilities: [ZSXQ_COMPLETE_CONTENT_CAPABILITY],
+        }));
+        await waitForExtensionReady(bridge);
+      } else if (mode === 'disconnect') {
+        const closed = new Promise<void>(resolve => first.socket.once('close', () => resolve()));
+        first.socket.close();
+        await closed;
+      } else {
+        currentBuildId = `v${APP_VERSION} · drifted-before-plan-dispatch`;
+      }
+      releaseDispatchRead();
+
+      const started = await runRequest;
+      expect(started.status).toBe(202);
+      await vi.waitFor(async () => {
+        const batches = await requestJson<{ batches: CollectionBatch[] }>(
+          bridge.url,
+          '/v1/plans/batches?planId=zsxq-chen-teacher&limit=10',
+          { token: first.token },
+        );
+        expect(batches.body.batches.find(batch => batch.id === started.body.id)).toMatchObject({
+          status: 'failed',
+          error: expect.stringContaining('未派发'),
+        });
+      });
+      expect(firstMessages.some(message => message.type === 'plan.collect')).toBe(false);
+      expect(replacementMessages.some(message => message.type === 'plan.collect')).toBe(false);
+      await vi.waitFor(() => {
+        expect(runUpdate).toHaveBeenCalledTimes(updateCallsAtAttemptStart + 1);
+      });
+      releaseUpdate();
+      await vi.waitFor(() => expect(resumedUpdateFinished).toBe(true));
+    } finally {
+      releaseDispatchRead();
+      releaseUpdate();
+    }
+  });
+
+  it('defers artifact updates for the whole active ZSXQ attempt', async () => {
+    const root = await temporaryDirectory();
+    const buildId = `v${APP_VERSION} · attempt-wide-guard`;
+    await mkdir(join(root, 'artifacts', 'data-collector-extension'), { recursive: true });
+    await writeFile(
+      join(root, 'artifacts', 'data-collector-extension', 'build-id.txt'),
+      `${buildId}\n`,
+      'utf8',
+    );
+    let releaseInitialUpdate!: () => void;
+    const initialUpdateGate = new Promise<void>(resolve => { releaseInitialUpdate = resolve; });
+    let blockResumedUpdate = false;
+    let releaseResumedUpdate!: () => void;
+    const resumedUpdateGate = new Promise<void>(resolve => { releaseResumedUpdate = resolve; });
+    let resumedUpdateFinished = false;
+    let updateRun = 0;
+    const runUpdate = vi.fn(async () => {
+      updateRun += 1;
+      if (updateRun === 1) await initialUpdateGate;
+      else if (blockResumedUpdate) {
+        await resumedUpdateGate;
+        resumedUpdateFinished = true;
+      }
+      return {
+        changed: false,
+        commit: 'abc1234',
+        message: '已是最新。',
+        checkedAt: '2026-08-25T00:00:00.000Z',
+      };
+    });
+    const bridge = await startBridge({
+      port: 0,
+      libraryRoot: join(root, 'library'),
+      configDir: join(root, '.config'),
+      repoRoot: root,
+      updateIntervalMs: 20,
+      runUpdate,
+    });
+    handles.push(bridge);
+    try {
+      await vi.waitFor(() => expect(runUpdate).toHaveBeenCalledOnce());
+
+      const authorized = await authorize(bridge);
+      authorized.socket.send(envelope('extension.hello', 'attempt-wide-guard', {
+        version: APP_VERSION,
+        buildId,
+        capabilities: [ZSXQ_COMPLETE_CONTENT_CAPABILITY],
+      }));
+      await waitForExtensionReady(bridge);
+      const commandPromise = nextMessage<{
+        batchId: string;
+        attempt: string;
+      }>(authorized.socket);
+      const queued = await requestJson<CollectionBatch>(bridge.url, '/v1/plans/run', {
+        method: 'POST',
+        token: authorized.token,
+        body: { planId: 'zsxq-chen-teacher', force: true },
+      });
+      expect(queued.body).toMatchObject({ status: 'running' });
+      expect(queued.body.preparationAttempt).toBeUndefined();
+      expect(runUpdate).toHaveBeenCalledOnce();
+
+      releaseInitialUpdate();
+      const command = await commandPromise;
+      blockResumedUpdate = true;
+      const updateCallsAtAttemptStart = runUpdate.mock.calls.length;
+      await new Promise(resolve => setTimeout(resolve, 100));
+      expect(runUpdate).toHaveBeenCalledTimes(updateCallsAtAttemptStart);
+
+      authorized.socket.send(envelope('plan.result', command.requestId, {
+        batchId: command.payload.batchId,
+        attempt: command.payload.attempt,
+        discovered: 0,
+        error: '测试主动结束当前 attempt',
+      }));
+      await vi.waitFor(() => {
+        expect(runUpdate).toHaveBeenCalledTimes(updateCallsAtAttemptStart + 1);
+      });
+      releaseResumedUpdate();
+      await vi.waitFor(() => expect(resumedUpdateFinished).toBe(true));
+    } finally {
+      releaseInitialUpdate();
+      releaseResumedUpdate();
+    }
+  });
+
+  it('disconnect triggers the pending restart immediately even when a durable queued job remains', async () => {
+    const root = await temporaryDirectory();
+    let releaseUpdate!: () => void;
+    const updateGate = new Promise<void>(resolve => { releaseUpdate = resolve; });
+    const exit = vi.fn();
+    const bridge = await startBridge({
+      port: 0,
+      libraryRoot: join(root, 'library'),
+      configDir: join(root, '.config'),
+      repoRoot: root,
+      updateIntervalMs: 60 * 60_000,
+      exit,
+      runUpdate: async () => {
+        await updateGate;
+        return {
+          changed: true,
+          commit: 'abc1234',
+          message: '已更新并完成构建。',
+          checkedAt: '2026-08-25T00:00:00.000Z',
+        };
+      },
+    });
+    handles.push(bridge);
+    const authorized = await authorize(bridge);
+    authorized.socket.send(envelope('extension.hello', 'restart-with-queued-job', {
+      version: APP_VERSION,
+    }));
+    await waitForExtensionReady(bridge);
+    await requestJson(bridge.url, '/v1/jobs', {
+      method: 'POST',
+      token: authorized.token,
+      body: { url: URL, requestedBy: 'extension' },
+    });
+
+    releaseUpdate();
+    await new Promise(resolve => setTimeout(resolve, 50));
+    expect(exit).not.toHaveBeenCalled();
+    authorized.socket.close();
+
+    await vi.waitFor(() => expect(exit).toHaveBeenCalledOnce());
+  });
+
+  it('waits for an active sink persistence after disconnect, then performs the pending restart', async () => {
+    let releaseImage!: () => void;
+    let markImageStarted!: () => void;
+    const imageGate = new Promise<void>(resolve => { releaseImage = resolve; });
+    const imageStarted = new Promise<void>(resolve => { markImageStarted = resolve; });
+    const root = await temporaryDirectory();
+    let releaseUpdate!: () => void;
+    const updateGate = new Promise<void>(resolve => { releaseUpdate = resolve; });
+    const exit = vi.fn();
+    const bridge = await startBridge({
+      port: 0,
+      libraryRoot: join(root, 'library'),
+      configDir: join(root, '.config'),
+      repoRoot: root,
+      updateIntervalMs: 60 * 60_000,
+      exit,
+      runUpdate: async () => {
+        await updateGate;
+        return {
+          changed: true,
+          commit: 'abc1234',
+          message: '已更新并完成构建。',
+          checkedAt: '2026-08-25T00:00:00.000Z',
+        };
+      },
+      fetch: async () => {
+        markImageStarted();
+        await imageGate;
+        return new Response(new Uint8Array([137, 80, 78, 71]), {
+          headers: { 'content-type': 'image/png', 'content-length': '4' },
+        });
+      },
+      resolveAddresses: async () => ['93.184.216.34'],
+    });
+    handles.push(bridge);
+    const authorized = await authorize(bridge);
+    authorized.socket.send(envelope('extension.hello', 'restart-after-persist', {
+      version: APP_VERSION,
+    }));
+    await waitForExtensionReady(bridge);
+    const created = await requestJson<{ id: string }>(bridge.url, '/v1/jobs', {
+      method: 'POST',
+      token: authorized.token,
+      body: { url: URL, requestedBy: 'extension' },
+    });
+    authorized.socket.send(envelope('job.result', created.body.id, {
+      document: document({
+        images: [{ url: 'https://images.example/restart.png' }],
+        html: '<p>正文完整</p><img src="https://images.example/restart.png">',
+      }),
+    }));
+    await imageStarted;
+    releaseUpdate();
+    await new Promise(resolve => setTimeout(resolve, 50));
+    authorized.socket.close();
+    await new Promise(resolve => setTimeout(resolve, 100));
+    expect(exit).not.toHaveBeenCalled();
+
+    releaseImage();
+    await vi.waitFor(() => expect(exit).toHaveBeenCalledOnce());
+  });
+
+  it('uses an updated extension replacement as a restart handoff only after sink persistence drains', async () => {
+    let releaseImage!: () => void;
+    let markImageStarted!: () => void;
+    const imageGate = new Promise<void>(resolve => { releaseImage = resolve; });
+    const imageStarted = new Promise<void>(resolve => { markImageStarted = resolve; });
+    let releaseUpdate!: () => void;
+    const updateGate = new Promise<void>(resolve => { releaseUpdate = resolve; });
+    const root = await temporaryDirectory();
+    const exit = vi.fn();
+    const bridge = await startBridge({
+      port: 0,
+      libraryRoot: join(root, 'library'),
+      configDir: join(root, '.config'),
+      repoRoot: root,
+      updateIntervalMs: 60 * 60_000,
+      exit,
+      runUpdate: async () => {
+        await updateGate;
+        return {
+          changed: true,
+          commit: 'updated-build',
+          message: '已更新并完成构建。',
+          checkedAt: '2026-08-25T00:00:00.000Z',
+        };
+      },
+      fetch: async () => {
+        markImageStarted();
+        await imageGate;
+        return new Response(new Uint8Array([137, 80, 78, 71]), {
+          headers: { 'content-type': 'image/png', 'content-length': '4' },
+        });
+      },
+      resolveAddresses: async () => ['93.184.216.34'],
+    });
+    handles.push(bridge);
+    const first = await authorize(bridge);
+    first.socket.send(envelope('extension.hello', 'restart-handoff-a', {
+      version: APP_VERSION,
+    }));
+    await waitForExtensionReady(bridge);
+    const created = await requestJson<{ id: string }>(bridge.url, '/v1/jobs', {
+      method: 'POST',
+      token: first.token,
+      body: { url: URL, requestedBy: 'extension' },
+    });
+    first.socket.send(envelope('job.result', created.body.id, {
+      document: document({
+        images: [{ url: 'https://images.example/restart-handoff.png' }],
+        html: '<p>正文完整</p><img src="https://images.example/restart-handoff.png">',
+      }),
+    }));
+    await imageStarted;
+
+    releaseUpdate();
+    await vi.waitFor(async () => {
+      const health = await requestJson<{ update?: { changed: boolean } }>(bridge.url, '/health');
+      expect(health.body.update?.changed).toBe(true);
+    });
+    expect(exit).not.toHaveBeenCalled();
+
+    const firstClosed = new Promise<{ code: number; reason: string }>(resolve => {
+      first.socket.once('close', (code, reason) => resolve({ code, reason: reason.toString() }));
+    });
+    const replacement = await connect(bridge, first.token);
+    replacement.send(envelope('extension.hello', 'restart-handoff-b', {
+      version: APP_VERSION,
+    }));
+    await expect(firstClosed).resolves.toEqual({
+      code: EXTENSION_REPLACED_CLOSE_CODE,
+      reason: EXTENSION_REPLACED_CLOSE_REASON,
+    });
+    await waitForExtensionReady(bridge);
+    await new Promise(resolve => setTimeout(resolve, 100));
+    expect(exit).not.toHaveBeenCalled();
+
+    releaseImage();
+    await vi.waitFor(async () => {
+      const job = await requestJson<{ status: string }>(
+        bridge.url,
+        `/v1/jobs/${created.body.id}`,
+        { token: first.token },
+      );
+      expect(job.body.status).toBe('saved');
+    });
+    await vi.waitFor(() => expect(exit).toHaveBeenCalledOnce());
+    await new Promise(resolve => setTimeout(resolve, 50));
+    expect(exit).toHaveBeenCalledOnce();
+  });
+
+  it('recognizes a replacement matching a newly packaged artifact even before update checking returns', async () => {
+    const root = await temporaryDirectory();
+    const artifacts = join(root, 'artifacts', 'data-collector-extension');
+    await mkdir(artifacts, { recursive: true });
+    const oldBuild = `v${APP_VERSION} · old-build`;
+    const newBuild = `v${APP_VERSION} · newly-packaged-build`;
+    await writeFile(join(artifacts, 'build-id.txt'), `${oldBuild}\n`, 'utf8');
+
+    let releaseUpdate!: () => void;
+    const updateGate = new Promise<void>(resolve => { releaseUpdate = resolve; });
+    const exit = vi.fn();
+    const bridge = await startBridge({
+      port: 0,
+      libraryRoot: join(root, 'library'),
+      configDir: join(root, '.config'),
+      repoRoot: root,
+      updateIntervalMs: 60 * 60_000,
+      exit,
+      runUpdate: async () => {
+        await updateGate;
+        return {
+          // Dirty-tree/manual-package paths legitimately report no git change.
+          changed: false,
+          commit: 'unchanged-git-head',
+          message: '已是最新。',
+          checkedAt: '2026-08-25T00:00:00.000Z',
+        };
+      },
+    });
+    handles.push(bridge);
+    const first = await authorize(bridge);
+    first.socket.send(envelope('extension.hello', 'manual-package-old', {
+      version: APP_VERSION,
+      buildId: oldBuild,
+    }));
+    await waitForExtensionReady(bridge);
+
+    await writeFile(join(artifacts, 'build-id.txt'), `${newBuild}\n`, 'utf8');
+    const replacement = await connect(bridge, first.token);
+    replacement.send(envelope('extension.hello', 'manual-package-new', {
+      version: APP_VERSION,
+      buildId: newBuild,
+    }));
+    await waitForExtensionReady(bridge);
+    await new Promise(resolve => setTimeout(resolve, 50));
+    expect(exit).not.toHaveBeenCalled();
+
+    releaseUpdate();
+    await vi.waitFor(() => expect(exit).toHaveBeenCalledOnce());
+    await new Promise(resolve => setTimeout(resolve, 50));
+    expect(exit).toHaveBeenCalledOnce();
   });
 
   it('定时采集运行时不重启，采集完成后再退出', async () => {

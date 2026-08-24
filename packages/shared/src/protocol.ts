@@ -2,7 +2,12 @@ import { z } from 'zod';
 import { CONTENT_KINDS, FE_JOURNEY_CANDIDATE_KINDS, SOURCES } from './model.js';
 import { descriptorForHost } from './sources.js';
 import { canonicalizeUrl, parseSupportedUrl } from './url.js';
-import { collectionBatchSchema, collectionPlanIdSchema } from './plans.js';
+import {
+  collectionBatchSchema,
+  collectionPlanAttemptSchema,
+  collectionPlanIdSchema,
+  collectionPlanRejectionSchema,
+} from './plans.js';
 
 export const EXTENSION_REPLACED_CLOSE_CODE = 4009;
 export const EXTENSION_REPLACED_CLOSE_REASON = 'replaced';
@@ -102,6 +107,12 @@ export const bridgeAuthorizedPayloadSchema = z.object({
   token: z.string().min(32).max(512),
 });
 
+export const extensionHelloPayloadSchema = z.object({
+  version: z.string().trim().regex(/^\d+\.\d+\.\d+$/).max(50),
+  buildId: z.string().trim().min(1).max(200).optional(),
+  capabilities: z.array(z.string().trim().min(1).max(100)).max(20).optional(),
+}).strict();
+
 export const collectJobPayloadSchema = z.object({
   url: z.string().url().max(4096),
   userCategory: z.string().trim().max(100).optional(),
@@ -120,17 +131,36 @@ export const jobResultPayloadSchema = z.object({
   document: collectedDocumentSchema,
 });
 
+/** Bridge 已把内容及任务终态持久化后的成功回执。 */
+export const jobSavedPayloadSchema = z.object({
+  outputPath: z.string().trim().min(1).max(4_096).optional(),
+  results: z.array(z.unknown()).max(20).optional(),
+  /** 固定计划任务必须回显所属尝试，扩展据此拒绝跨代回执。 */
+  attempt: collectionPlanAttemptSchema.optional(),
+}).strict();
+
+/** Bridge 已接收正文、但落地或任务状态持久化失败后的终态回执。 */
+export const jobFailedPayloadSchema = z.object({
+  code: z.string().trim().min(1).max(100),
+  message: z.string().trim().min(1).max(2_000),
+  /** 固定计划任务必须回显所属尝试，扩展据此拒绝跨代回执。 */
+  attempt: collectionPlanAttemptSchema.optional(),
+}).strict();
+
 export const planCollectPayloadSchema = z.object({
   planId: collectionPlanIdSchema,
   batchId: z.string().trim().min(1).max(200),
+  attempt: collectionPlanAttemptSchema,
   force: z.boolean().optional(),
 }).strict();
 
 export const extensionPlanResultPayloadSchema = z.object({
   batchId: z.string().trim().min(1).max(200),
+  attempt: collectionPlanAttemptSchema,
   discovered: z.number().int().min(0),
   coverage: z.record(z.string().trim().min(1).max(100), z.number().int().min(0)).optional(),
   rejections: z.record(z.string().trim().min(1).max(100), z.number().int().min(0)).optional(),
+  rejectionDetails: z.array(collectionPlanRejectionSchema).max(500).optional(),
   error: z.string().trim().min(1).max(2_000).optional(),
   needsAttention: z.boolean().optional(),
   prepared: z.boolean().optional(),

@@ -11,7 +11,11 @@ import { buildStampCommit, updateWorkspace } from './autoUpdate.js';
 import { rebuildFeJourneyCandidateIndex } from './feJourney/index.js';
 import { runTool } from './git.js';
 import { loadConfig, type ConfigOverrides } from './config.js';
-import { discoverRepoRoot, startBridge } from './server/index.js';
+import {
+  discoverRepoRoot,
+  startBridge,
+  type StartBridgeOptions,
+} from './server/index.js';
 import { COLLECTION_PLAN_IDS, type CollectionPlanId } from '@data-collector/shared';
 
 export interface CliIo {
@@ -408,6 +412,20 @@ async function bridgeUpdate(io: CliIo): Promise<number> {
   return outcome.message.includes('失败') ? 1 : 0;
 }
 
+export function bridgeStartOptions(
+  args: string[],
+  artifactRepoRoot: string | null = discoverRepoRoot() ?? null,
+): StartBridgeOptions {
+  return {
+    ...configOverrides(args),
+    enableFeJourneyScheduler: true,
+    // --no-update 只关闭 git/npm updater。artifact root 仍是 build-id 权威来源，也承载
+    // package 与知识星球 sink 的跨进程租约，生产启动绝不能把它一并抹掉。
+    repoRoot: artifactRepoRoot,
+    enableAutoUpdate: !args.includes('--no-update'),
+  };
+}
+
 async function bridge(args: string[], io: CliIo): Promise<number> {
   if (args[1] === 'update') return bridgeUpdate(io);
   if (args[1] === 'install') return installAutostart(args, io);
@@ -420,11 +438,7 @@ async function bridge(args: string[], io: CliIo): Promise<number> {
   }
   // 只有真正常驻的服务才开自更新：拉新代码 + 重新构建，用户只剩「重新加载插件」。
   // --no-update 可关掉。
-  const handle = await startBridge({
-    ...configOverrides(args),
-    enableFeJourneyScheduler: true,
-    ...(args.includes('--no-update') ? {} : { repoRoot: discoverRepoRoot() ?? null }),
-  });
+  const handle = await startBridge(bridgeStartOptions(args));
   io.stderr(`Data Collector Bridge: ${handle.url}\n`);
   io.stderr('等待受信任的 Data Collector 扩展自动连接\n');
   await new Promise<void>(resolveSignal => {

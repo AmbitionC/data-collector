@@ -91,6 +91,11 @@ describe('「正在采集」怎么判', () => {
     expect(isCollecting({ batch: { phase: 'running', updatedAt: now - 1_000 }, now })).toBe(true);
   });
 
+  it('固定计划仍在发现和创建子任务时也算在跑', () => {
+    expect(isCollecting({ activePlanCollections: 1, now })).toBe(true);
+    expect(isCollecting({ activePlanCollections: 0, now })).toBe(false);
+  });
+
   it('单页任务跑到一半也算', () => {
     expect(isCollecting({ lastJobStatus: 'collecting', lastJobUpdatedAt: now - 1_000, now })).toBe(true);
     expect(isCollecting({ lastJobStatus: 'saved', now })).toBe(false);

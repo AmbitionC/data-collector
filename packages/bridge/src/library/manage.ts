@@ -22,6 +22,10 @@ export interface LibraryEntry {
   relativePath: string;
   updatedAt: string;
   publishedAt?: string;
+  /** 来源正文是否已验证完整；旧目录没有该字段时表示未知，需要一次性修复。 */
+  contentComplete?: boolean;
+  contentCompletenessVersion?: string;
+  contentCompletenessBuildId?: string;
 }
 
 function catalogPathOf(root: string): string {

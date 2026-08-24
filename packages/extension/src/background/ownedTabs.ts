@@ -76,12 +76,19 @@ export class OwnedTabRegistry {
     private readonly now: () => number = () => Date.now(),
   ) {}
 
-  track(tab: BrowserTab, purpose: OwnedTabPurpose): Promise<void> {
-    if (tab.id === undefined || !tab.url) return Promise.resolve();
-    return this.mutate(async state => {
-      state.owned = state.owned.filter(item => item.id !== tab.id);
-      state.owned.push({ id: tab.id!, url: tab.url!, purpose, createdAt: this.now() });
-    });
+  async track(tab: BrowserTab, purpose: OwnedTabPurpose): Promise<void> {
+    const { id, url } = tab;
+    if (id === undefined || !url) return;
+    try {
+      await this.mutate(async state => {
+        state.owned = state.owned.filter(item => item.id !== id);
+        state.owned.push({ id, url, purpose, createdAt: this.now() });
+      });
+    } catch (error) {
+      // create 已经成功、但 session 账本没写进去时，调用方还拿不到 id，finally 无法回收。
+      await this.tabs.remove(id).catch(() => undefined);
+      throw error;
+    }
   }
 
   async close(tabId: number): Promise<void> {

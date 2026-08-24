@@ -17,7 +17,7 @@ const WORKSPACE = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const EXTENSION_PATH = join(WORKSPACE, 'packages', 'extension', 'dist');
 const TARGET_URL = 'https://mp.weixin.qq.com/s/uW5gUigjslVY24YmCYhg0g';
 const LIST_URL = 'https://wx.zsxq.com/group/48844584441158';
-const TOPICS_API = 'https://wx.zsxq.com/v2/groups/48844584441158/topics';
+const TOPICS_API = 'https://api.zsxq.com/v2/groups/48844584441158/topics';
 let browser: Browser | undefined;
 let bridge: BridgeHandle | undefined;
 let bridgePort: number | undefined;
@@ -186,6 +186,12 @@ async function serveArticleFixture(
       void request.respond({
         status: 200,
         contentType: 'application/json; charset=utf-8',
+        // ZSXQ 页面从 wx.zsxq.com 请求 api.zsxq.com；夹具响应也要保留
+        // 真实的跨域边界，否则浏览器会在主世界钩子观测前拒绝该响应。
+        headers: {
+          'access-control-allow-origin': 'https://wx.zsxq.com',
+          'access-control-allow-credentials': 'true',
+        },
         body: JSON.stringify(route.json),
       });
       return;
@@ -443,7 +449,14 @@ describe('built Chrome extension', () => {
   it('batch-saves a zsxq list page into one library entry per post, without reloading it', async () => {
     const { libraryRoot } = await startStack();
 
-    const fixture = await readFile(join(WORKSPACE, 'tests', 'fixtures', 'zsxq-list.html'), 'utf8');
+    const excludedBody = '明日打新提醒：北交所一只，谨慎申购。';
+    const fixture = (await readFile(
+      join(WORKSPACE, 'tests', 'fixtures', 'zsxq-list.html'),
+      'utf8',
+    )).replace(
+      '第三条帖子的正文内容，同样足够长以便通过长度校验。',
+      excludedBody,
+    );
     const listPage = await browser!.newPage();
     // 帖子号不在 DOM 上，只能从应用自己的接口响应里旁观得到。
     // 这里让夹具页真的发一次接口请求，走完整条「主世界捕获 → 隔离世界索引 → 对号」链路。
@@ -451,10 +464,14 @@ describe('built Chrome extension', () => {
       {
         match: TOPICS_API,
         json: {
+          // 真实成功响应会显式带 succeeded=true；缺它时正文索引必须
+          // fail-closed，不能把错误回显或未知响应当成完整正文证明。
+          succeeded: true,
           resp_data: {
             topics: [
               { topic_id: 511111111111111, talk: { text: '第一条帖子的正文内容，足够长以便通过长度校验判断。' } },
               { topic_id: 522222222222222, talk: { text: '第二条帖子的正文内容，同样足够长以便通过长度校验。' } },
+              { topic_id: 533333333333333, talk: { text: excludedBody } },
             ],
           },
         },
@@ -483,11 +500,12 @@ describe('built Chrome extension', () => {
 
     await clickSidePanel(sidePanel, '#capture-button');
     await waitForVisiblePanel(sidePanel, '#batch-panel', 10_000);
-    // 采完最后一屏还要滚动确认没有新内容（约 6s），所以给足等待。
-    await waitForText(sidePanel, '#batch-heading', '本轮批量归档完成', 30_000);
+    // 入库前要先确认正文连续稳定 24s，采完最后一屏还要滚动并连续观察
+    // 24s 证明没有新内容；这两段证明窗口不能被 E2E 自己的等待预算截断。
+    await waitForText(sidePanel, '#batch-heading', '本轮批量归档完成', 75_000);
     await sidePanel.screenshot({ path: join(screenshotDirectory, 'sidepanel-batch-done.png') });
 
-    // 接口响应里给了两条帖子号，这两条入库；第三条对不上号，如实跳过。
+    // 三条都有可复核的帖子号；前两条入库，第三条明确命中打新选题而跳过。
     expect(await elementText(sidePanel, '#batch-collected')).toBe('2');
     expect(await elementText(sidePanel, '#batch-skipped')).toBe('1');
     expect(await elementText(sidePanel, '#batch-failed')).toBe('0');
@@ -557,7 +575,8 @@ describe('built Chrome extension', () => {
       sidePanel,
       `document.querySelector('#batch-heading').textContent`,
       value => value !== '正在批量归档' && value !== '',
-      20_000,
+      // 空页也必须经过正文稳定和列表耗尽证明，不能因为没有产出就缩短等待。
+      75_000,
       '批量进入终态',
     );
 

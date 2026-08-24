@@ -1,8 +1,13 @@
 import {
+  canonicalizeUrl,
+  mergeZsxqDocumentCopies,
   parseSupportedUrl,
   unionZsxqViewDocuments,
+  ZSXQ_COMPLETE_CONTENT_CAPABILITY,
   ZSXQ_PLAN_VIEWS,
   type CollectedDocument,
+  type CollectionPlanAttempt,
+  type CollectionPlanRejection,
   type CollectionPlanId,
   type ZsxqPlanView,
 } from '@data-collector/shared';
@@ -10,6 +15,11 @@ import { linkedArticleUrl } from '../extractors/index.js';
 import type { HookStats } from '../topicIndex.js';
 import type { OwnedTabPurpose } from './ownedTabs.js';
 import { RemoteJobScheduler } from './remoteJobScheduler.js';
+import {
+  CONTENT_BUILD_ID,
+  CONTENT_EXTRACTION_PROTOCOL,
+  contentRequestType,
+} from '../contentProtocol.js';
 
 export interface BrowserTab {
   id?: number;
@@ -21,10 +31,16 @@ export interface BrowserTab {
 export interface ListItem {
   /** 稳定标识，侧栏点它就能滚回页面上的那一条并高亮。 */
   key: string;
+  /** 当前 content bundle 对 DOM 节点实例 + 语义正文 revision 的精确绑定。 */
+  observationId?: string;
   title: string;
   document?: CollectedDocument;
   /** 无法采集的原因。 */
   reason?: string;
+  /** 有自身 URL 的业务过滤可审计且不阻断；缺省按覆盖风险 fail-closed。 */
+  skipKind?: 'coverage-risk' | 'business-filter';
+  /** 业务过滤项仍保留规范 URL，供固定计划逐条审计与跨视图去重。 */
+  url?: string;
 }
 
 export interface ListPayload {
@@ -33,6 +49,172 @@ export interface ListPayload {
   total: number;
   /** 已捕获到的帖子号条数；为 0 说明还没截到应用的接口响应。 */
   captured?: number;
+}
+
+interface ZsxqPlanExtractionAudit {
+  businessSkips: Map<string, { reason: string; url?: string }>;
+}
+
+/**
+ * ZSXQ 的 SPA 正文会在首帧“看似完整”后继续增长。完整证明必须从最后一次正文变化起，
+ * 连续观察满 24 秒；最多取 11 帧（约 44.5 秒），持续增长则 fail-closed。
+ */
+const ZSXQ_STABLE_FOR_MS = 24_000;
+const ZSXQ_MIN_STABILITY_SAMPLES = 8;
+const ZSXQ_MAX_STABILITY_SAMPLES = 11;
+
+function zsxqSampleDelayMs(attempt: number): number {
+  return attempt > 0 ? 600 + attempt * 700 : 0;
+}
+
+/** `collectedAt` 每次提取天然变化，不属于页面语义；其余正文与身份字段变化都重启稳定窗口。 */
+function zsxqDocumentSignature(document: CollectedDocument): string {
+  return JSON.stringify([
+    document.canonicalUrl,
+    document.title,
+    document.author ?? null,
+    document.publishedAt ?? null,
+    document.questioner ?? null,
+    document.text,
+    document.html,
+    document.images,
+    document.sourceMetadata?.authorRole ?? null,
+  ]);
+}
+
+function businessSkipReason(reason: string | undefined): string {
+  if (reason?.includes('按选题偏好')) return '选题偏好过滤';
+  if (reason?.includes('按硬证据')) return '硬证据广告过滤';
+  return '内容脚本业务过滤';
+}
+
+function mergeStableListDocuments(items: readonly ListItem[]): {
+  items: ListItem[];
+  collapsedDocuments: number;
+} {
+  const merged: ListItem[] = [];
+  const byCanonicalUrl = new Map<string, number>();
+  const conflictUrls = new Set<string>();
+  let collapsedDocuments = 0;
+  for (const item of items) {
+    const document = item.document;
+    if (!document) {
+      merged.push(item);
+      continue;
+    }
+    const existingIndex = byCanonicalUrl.get(document.canonicalUrl);
+    if (existingIndex === undefined) {
+      byCanonicalUrl.set(document.canonicalUrl, merged.length);
+      merged.push(item);
+      continue;
+    }
+    collapsedDocuments += 1;
+    const existing = merged[existingIndex]!;
+    const existingDocument = existing.document!;
+    const result = mergeZsxqDocumentCopies(existingDocument, document);
+    merged[existingIndex] = {
+      ...existing,
+      title: result.document.title,
+      document: result.document,
+    };
+    if (!result.conflict || conflictUrls.has(document.canonicalUrl)) continue;
+    conflictUrls.add(document.canonicalUrl);
+    merged.push({
+      key: `${existing.key}:content-conflict`,
+      title: result.document.title,
+      url: document.canonicalUrl,
+      skipKind: 'coverage-risk',
+      reason: result.conflict === 'identity'
+        ? '同一规范 URL 出现互相冲突的帖子身份，无法证明对应的是同一帖。'
+        : '同一规范 URL 出现互不兼容的正文，无法证明哪一份属于该帖。',
+    });
+  }
+  return { items: merged, collapsedDocuments };
+}
+
+/** URL 身份只在双方都能按支持站点规则解析并规范化后精确相等时成立。 */
+function sameCanonicalUrl(candidate: string, expected: string): boolean {
+  try {
+    return canonicalizeUrl(parseSupportedUrl(candidate)).href
+      === canonicalizeUrl(parseSupportedUrl(expected)).href;
+  } catch {
+    return false;
+  }
+}
+
+const HTML_RESOURCE_TAG = /<(?:a|img|video|audio|source|track|iframe|embed|object)\b[^>]*>/giu;
+const HTML_RESOURCE_ATTRIBUTE = /\s(href|src|data-src|data|poster|srcset)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+))/giu;
+
+function normalizedDocumentAssetUrl(value: string, base: string): string | undefined {
+  try {
+    const url = new URL(value.replaceAll('&amp;', '&'), base);
+    if (url.protocol !== 'https:' && url.protocol !== 'http:') return undefined;
+    url.hash = '';
+    return url.href;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * 详情完整证明只能清除与列表资产集合一致的观察；虚拟列表复用时，正文已经切到 B，
+ * 但图片/长文链接仍可能属于 A。这里同时核对归档图片数组和正文内所有链接/图片 URL。
+ */
+function zsxqDocumentAssetUrls(document: CollectedDocument): Set<string> {
+  const urls = new Set<string>();
+  for (const image of document.images) {
+    const normalized = normalizedDocumentAssetUrl(image.url, document.canonicalUrl);
+    if (normalized) urls.add(normalized);
+  }
+  for (const tag of document.html.match(HTML_RESOURCE_TAG) ?? []) {
+    const name = /^<([a-z]+)/iu.exec(tag)?.[1]?.toLowerCase();
+    const attributes = new Map<string, string>();
+    HTML_RESOURCE_ATTRIBUTE.lastIndex = 0;
+    for (const match of tag.matchAll(HTML_RESOURCE_ATTRIBUTE)) {
+      const attribute = match[1]?.toLowerCase();
+      const value = match[2] ?? match[3] ?? match[4];
+      if (attribute && value !== undefined && !attributes.has(attribute)) {
+        attributes.set(attribute, value);
+      }
+    }
+    const candidates: string[] = [];
+    if (name === 'a') {
+      candidates.push(attributes.get('href') ?? '');
+    } else if (name === 'img') {
+      candidates.push(attributes.get('data-src') ?? attributes.get('src') ?? '');
+    } else if (name === 'object') {
+      candidates.push(attributes.get('data') ?? '');
+    } else {
+      candidates.push(attributes.get('src') ?? '', attributes.get('poster') ?? '');
+    }
+    for (const value of (attributes.get('srcset') ?? '').split(',')) {
+      candidates.push(value.trim().split(/\s+/u)[0] ?? '');
+    }
+    for (const candidate of candidates) {
+      if (candidate) {
+        const normalized = normalizedDocumentAssetUrl(candidate, document.canonicalUrl);
+        if (normalized) urls.add(normalized);
+      }
+    }
+  }
+  return urls;
+}
+
+function sameUrlSet(left: ReadonlySet<string>, right: ReadonlySet<string>): boolean {
+  return left.size === right.size && [...left].every(url => right.has(url));
+}
+
+function hasAuthoritativeSourceMedia(document: CollectedDocument): boolean {
+  return document.sourceMetadata?.sourceMediaProven === true
+    && document.sourceMetadata.sourceCoversDom === true;
+}
+
+/** Fail-closed 结果不能继续跟随任何一侧未经证明的资源链接。 */
+function withoutUnprovenHtmlAssets(html: string): string {
+  return html
+    .replace(/<(video|audio|iframe|object)\b[^>]*>[\s\S]*?<\/\1\s*>/giu, '')
+    .replace(/<(?:img|video|audio|source|track|iframe|embed|object)\b[^>]*>/giu, '')
+    .replace(/<a\b[^>]*>([\s\S]*?)<\/a\s*>/giu, '$1');
 }
 
 /** 逐条结果：侧栏的「本轮明细」列表就是它，用户据此逐条核对。 */
@@ -45,16 +227,21 @@ export interface BatchItem {
   url?: string;
 }
 
-export type ExtractionResponse =
+export type ExtractionResponse = (
   | { ok: true; document: CollectedDocument }
   | { ok: true; list: ListPayload }
-  | { ok: true; advance: { collapsed: number; loaded: number; scroll?: string } }
+  | { ok: true; advance: { collapsed: number; loaded: number; uncertain?: boolean; scroll?: string } }
   | { ok: true; diagnostics: string }
   | { ok: true; highlight: { found: boolean } }
   | { ok: true; hook: HookStats }
   | { ok: true; refresh: { toggled: boolean; category?: string } }
   | { ok: true; selected: { label: ZsxqPlanView; topicIds: string[] } }
-  | { ok: false; error: { code: string; message: string } };
+  | { ok: false; error: { code: string; message: string } }
+) & {
+  /** 旧内容脚本没有这两个字段；生产采集必须验证它们。 */
+  contentProtocol?: string;
+  contentBuildId?: string;
+};
 
 export interface TabsApi {
   create(input: { url: string; active: boolean; purpose?: OwnedTabPurpose }): Promise<BrowserTab>;
@@ -84,15 +271,22 @@ export interface BridgeClient {
       sinks?: string[];
       batchId?: string;
       planId?: CollectionPlanId;
+      attempt?: CollectionPlanAttempt;
     },
   ): Promise<{ id: string }>;
+  /** 只有 Bridge 已落地 sink 并持久化任务终态后才会完成。 */
+  waitForJobTerminal(
+    jobId: string,
+    attempt?: CollectionPlanAttempt,
+    timeoutMs?: number,
+  ): Promise<void>;
 }
 
 interface PayloadMap {
   document: CollectedDocument;
   list: ListPayload;
   /** scroll：这一轮到底滚了哪个元素、位移多少，写进运行记录用。 */
-  advance: { collapsed: number; loaded: number; scroll?: string };
+  advance: { collapsed: number; loaded: number; uncertain?: boolean; scroll?: string };
   diagnostics: string;
   highlight: { found: boolean };
   hook: HookStats;
@@ -172,6 +366,10 @@ export interface JobRunnerOptions {
   waitForTabComplete: (tabId: number, timeoutMs?: number) => Promise<void>;
   /** 可注入的延时（测试用）；缺省用 setTimeout。 */
   delay?: (ms: number) => Promise<void>;
+  /** 生产环境开启：拒绝仍在应答但不具备当前完整性协议的旧内容脚本。 */
+  requireContentProtocol?: boolean;
+  /** 当前后台 bundle 的 build-id；设置后要求内容脚本来自完全相同的 bundle。 */
+  expectedContentBuildId?: string;
   /** 批量采集的进度回调（写入 storage 供侧栏轮询）。 */
   reportBatch?: (progress: BatchProgress) => void;
   /** 逐条结果回调（写入 storage 供侧栏的「本轮明细」列表使用）。 */
@@ -187,12 +385,22 @@ export interface JobRunnerOptions {
    * 取不到时按空集合处理：宁可重复采一遍，也不能因为查不到库就不采。
    */
   knownUrls?: () => Promise<ReadonlySet<string>>;
+  /**
+   * 本机库逐 URL 的正文完整状态；`undefined` 表示旧目录尚未记录，需要一次性修复。
+   * 固定计划优先使用它，避免完整长文每天重抓，同时允许修复历史半篇内容。
+   */
+  knownContent?: () => Promise<ReadonlyMap<string, boolean | undefined> | undefined>;
 }
 
 /** 内容脚本在标签页 complete 后可能仍未注册消息监听，这类错误可短暂重试。 */
 function isContentScriptNotReady(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error);
   return /Receiving end does not exist|Could not establish connection/i.test(message);
+}
+
+function isContentScriptOutdated(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /CONTENT_SCRIPT_OUTDATED/u.test(message);
 }
 
 export interface CaptureOverrides {
@@ -202,8 +410,24 @@ export interface CaptureOverrides {
   sinks?: string[];
 }
 
+/** 旧目录里的 `true` 没有协议证明，必须按未知处理并让日常计划自愈重采。 */
+export function trustedZsxqContentCompleteness(entry: {
+  contentComplete?: unknown;
+  contentCompletenessVersion?: unknown;
+}): boolean | undefined {
+  if (entry.contentComplete === false) return false;
+  if (
+    entry.contentComplete === true
+    && entry.contentCompletenessVersion === ZSXQ_COMPLETE_CONTENT_CAPABILITY
+  ) return true;
+  return undefined;
+}
+
 const ZSXQ_PLAN_ITEMS_PER_VIEW = 20;
-const CONTENT_SCRIPT_REQUEST_TIMEOUT_MS = 45_000;
+const ZSXQ_PLAN_MAX_ROUNDS = 12;
+// 内容侧最长会用 44.5 秒证明列表耗尽；给消息派发/事件循环留下足够余量，不能让
+// background 的超时先抢跑，把一个合法的稳定性证明误报成页面脚本失联。
+const CONTENT_SCRIPT_REQUEST_TIMEOUT_MS = 60_000;
 const CURRENT_PAGE_NEEDS_ATTENTION = new Set(['AUTH_REQUIRED', 'UNSUPPORTED_LAYOUT']);
 
 function lifeTeacherCategory(document: CollectedDocument): string {
@@ -226,27 +450,285 @@ export class JobRunner {
 
   constructor(private readonly options: JobRunnerOptions) {}
 
+  /** requireContentProtocol=false 只用于旧单测/兼容路径；生产请求名必须绑定精确 bundle。 */
+  private contentMessageType(legacyType: string): string {
+    return this.options.requireContentProtocol
+      ? contentRequestType(
+          legacyType,
+          this.options.expectedContentBuildId ?? CONTENT_BUILD_ID,
+        )
+      : legacyType;
+  }
+
+  /**
+   * 所有知识星球任务只有在正文显式完整时才能进入 Bridge 的整理阶段。
+   * 扩展自己先回报可见的 needs_attention；Bridge 仍保留同样的 sink 前硬门禁。
+   */
+  private sendDocumentResult(requestId: string, document: CollectedDocument): boolean {
+    if (document.source === 'zsxq' && document.truncated !== false) {
+      this.options.bridge.send('job.error', requestId, {
+        code: 'INCOMPLETE_CONTENT',
+        message: '知识星球正文补取后仍不完整，已拒绝入库和交付',
+        needsAttention: true,
+      });
+      return false;
+    }
+    const attestedDocument = document.source === 'zsxq' && this.options.requireContentProtocol
+      ? {
+          ...document,
+          sourceMetadata: {
+            ...(document.sourceMetadata ?? {}),
+            contentCompletenessVersion: ZSXQ_COMPLETE_CONTENT_CAPABILITY,
+            ...(this.options.expectedContentBuildId
+              ? { contentCompletenessBuildId: this.options.expectedContentBuildId }
+              : {}),
+          },
+        }
+      : document;
+    this.options.bridge.send('job.result', requestId, { document: attestedDocument });
+    return true;
+  }
+
+  /**
+   * 列表也是 SPA：首帧即使已有 topic id、正文非空且 `truncated:false`，尾段仍可能
+   * 在数秒后继续挂载。固定采集与侧栏批量共用同一稳定窗口，避免其中一条路径回退成半篇。
+   */
+  private async extractStableList(tabId: number): Promise<ExtractionResponse> {
+    interface StableItem {
+      order: number;
+      latest: ListItem;
+      richest?: CollectedDocument;
+      tainted: boolean;
+      stableSignature: string | undefined;
+      stableForMs: number;
+      seenInLastSample: boolean;
+      /** 一旦绑定规范 URL，DOM key 后续被虚拟列表复用时不得把另一帖并进来。 */
+      canonicalUrl?: string;
+      /** 无 URL 阶段只能凭 content 端的节点 generation + 正文 revision 绑定跨帧身份。 */
+      observationId?: string;
+    }
+    const states = new Map<string, StableItem>();
+    const aliases = new Map<string, StableItem>();
+    let order = 0;
+    let lastResponse: Extract<ExtractionResponse, { ok: true }> | undefined;
+    let maximumTotal = 0;
+    let maximumCaptured = 0;
+    let samples = 0;
+    let emptyStableForMs = 0;
+    let emptyInPreviousSample = false;
+    for (let attempt = 0; attempt < ZSXQ_MAX_STABILITY_SAMPLES; attempt += 1) {
+      const delayMs = zsxqSampleDelayMs(attempt);
+      if (delayMs > 0) await this.wait(delayMs);
+      const response = await this.ask(tabId, {
+        type: this.contentMessageType('extract.list'),
+      });
+      if (!response.ok) return response;
+      samples += 1;
+      lastResponse = response;
+      const list = payloadOf(response, 'list');
+      const emptyNow = list.total === 0 && list.items.length === 0;
+      emptyStableForMs = emptyNow && emptyInPreviousSample
+        ? emptyStableForMs + delayMs
+        : 0;
+      emptyInPreviousSample = emptyNow;
+      maximumTotal = Math.max(maximumTotal, list.total);
+      maximumCaptured = Math.max(maximumCaptured, list.captured ?? 0);
+      for (const state of states.values()) state.seenInLastSample = false;
+      for (const item of list.items) {
+        // DOM key 会在虚拟列表节点回收后变化；规范 URL / topic id 才是跨帧主身份。
+        // key 仍用于把“首帧没 URL → 后续对上 topic id”的同一节点串起来。
+        const canonicalUrl = item.document?.canonicalUrl ?? item.url;
+        const keyAlias = item.key ? `key:${item.key}` : undefined;
+        const urlAlias = canonicalUrl ? `url:${canonicalUrl}` : undefined;
+        const key = urlAlias ?? keyAlias;
+        if (!key) continue;
+        const urlState = urlAlias ? aliases.get(urlAlias) : undefined;
+        const keyState = keyAlias ? aliases.get(keyAlias) : undefined;
+        const keyIdentityMatches = keyState
+          && (
+            canonicalUrl && keyState.canonicalUrl
+              ? keyState.canonicalUrl === canonicalUrl
+              : !this.options.requireContentProtocol
+                || (
+                  item.observationId !== undefined
+                  && keyState.observationId === item.observationId
+                )
+          );
+        // 同一帧里两个不同节点若被错误对成同一 URL，必须保留两条供上层审计；
+        // 只有上一帧节点消失、这一帧新 key 出现时，URL alias 才代表虚拟 DOM 重建。
+        let state = keyIdentityMatches
+          ? keyState
+          : urlState && !urlState.seenInLastSample
+            ? urlState
+            : undefined;
+        if (!state) {
+          state = {
+            order,
+            latest: item,
+            tainted: false,
+            stableSignature: undefined,
+            stableForMs: 0,
+            seenInLastSample: true,
+            ...(canonicalUrl ? { canonicalUrl } : {}),
+            ...(item.observationId ? { observationId: item.observationId } : {}),
+          };
+          order += 1;
+          states.set(`${key}#${state.order}`, state);
+        }
+        if (canonicalUrl && !state.canonicalUrl) state.canonicalUrl = canonicalUrl;
+        if (item.observationId) state.observationId = item.observationId;
+        if (keyAlias) aliases.set(keyAlias, state);
+        if (urlAlias && !aliases.has(urlAlias)) aliases.set(urlAlias, state);
+        state.latest = item;
+        state.seenInLastSample = true;
+        const document = item.document;
+        if (!document) {
+          const businessSignature = item.skipKind === 'business-filter' && canonicalUrl
+            ? JSON.stringify([canonicalUrl, item.title, item.reason ?? null])
+            : undefined;
+          if (businessSignature && businessSignature === state.stableSignature) {
+            state.stableForMs += delayMs;
+          } else {
+            state.stableSignature = businessSignature;
+            state.stableForMs = 0;
+          }
+          continue;
+        }
+        if (document.truncated === true) state.tainted = true;
+        if (!state.richest) {
+          state.richest = document;
+        } else {
+          const merged = mergeZsxqDocumentCopies(state.richest, document);
+          state.richest = merged.document;
+          if (merged.conflict) state.tainted = true;
+        }
+        const signature = zsxqDocumentSignature(document);
+        const isCurrentRichest = document.truncated === false
+          && document.text === state.richest.text;
+        if (isCurrentRichest && signature === state.stableSignature) {
+          state.stableForMs += delayMs;
+        } else {
+          state.stableSignature = isCurrentRichest ? signature : undefined;
+          state.stableForMs = 0;
+        }
+      }
+      for (const state of states.values()) {
+        if (state.seenInLastSample) continue;
+        state.stableSignature = undefined;
+        state.stableForMs = 0;
+      }
+      if (
+        samples >= ZSXQ_MIN_STABILITY_SAMPLES
+        && (
+          states.size === 0
+            ? maximumTotal === 0 && emptyStableForMs >= ZSXQ_STABLE_FOR_MS
+            : [...states.values()].every(state => {
+                if (!state.seenInLastSample) return false;
+                if (!state.richest) {
+                  return state.latest.skipKind === 'business-filter'
+                    && state.stableForMs >= ZSXQ_STABLE_FOR_MS;
+                }
+                if (state.tainted) return true;
+                const latest = state.latest.document;
+                return latest?.truncated === false
+                  && latest.text === state.richest.text
+                  && state.stableForMs >= ZSXQ_STABLE_FOR_MS;
+              })
+        )
+      ) break;
+    }
+    if (!lastResponse) throw new Error('CONTENT_EMPTY：未取得知识星球列表稳定样本');
+    const stableItems = [...states.values()]
+      .sort((left, right) => left.order - right.order)
+      .map(state => {
+        if (!state.richest) {
+          const businessComplete = state.latest.skipKind === 'business-filter'
+            && state.seenInLastSample
+            && state.stableForMs >= ZSXQ_STABLE_FOR_MS;
+          return businessComplete
+            ? state.latest
+            : { ...state.latest, skipKind: 'coverage-risk' as const };
+        }
+        const latest = state.latest.document;
+        const complete = !state.tainted
+          && latest?.truncated === false
+          && latest.text === state.richest.text
+          && state.seenInLastSample
+          && state.stableForMs >= ZSXQ_STABLE_FOR_MS;
+        return {
+          ...state.latest,
+          document: { ...state.richest, truncated: !complete },
+        };
+      });
+    const { items, collapsedDocuments } = mergeStableListDocuments(stableItems);
+    return {
+      ...lastResponse,
+      list: {
+        items,
+        skipped: items.filter(item => !item.document).length,
+        total: Math.max(items.length, maximumTotal - collapsedDocuments),
+        captured: maximumCaptured,
+      },
+    };
+  }
+
   /** 先完成三个视图的只读提取与 URL 合并，再把结果交给调用方创建保存任务。 */
   async collectZsxqPlanViews(
     tabId: number,
     views: readonly ZsxqPlanView[] = ZSXQ_PLAN_VIEWS,
+    audit?: ZsxqPlanExtractionAudit,
   ): Promise<CollectedDocument[]> {
     const byView: Array<{ label: ZsxqPlanView; documents: CollectedDocument[] }> = [];
     for (const label of views) {
       const documents: CollectedDocument[] = [];
       const viewUrls = new Set<string>();
-      const selected = await this.ask(tabId, { type: 'list.selectView', label });
+      const selected = await this.ask(tabId, {
+        type: this.contentMessageType('list.selectView'),
+        label,
+      });
       if (!selected.ok) throw new Error(selected.error.message);
       payloadOf(selected, 'selected');
-      await this.ask(tabId, { type: 'list.restore' }).catch(() => undefined);
+      await this.ask(tabId, {
+        type: this.contentMessageType('list.restore'),
+      }).catch(() => undefined);
       for (
         let round = 0;
-        round < 12 && viewUrls.size < ZSXQ_PLAN_ITEMS_PER_VIEW;
+        round < ZSXQ_PLAN_MAX_ROUNDS && viewUrls.size < ZSXQ_PLAN_ITEMS_PER_VIEW;
         round += 1
       ) {
-        const extracted = await this.ask(tabId, { type: 'extract.list' });
+        const extracted = await this.extractStableList(tabId);
         if (!extracted.ok) throw new Error(extracted.error.message);
-        for (const item of payloadOf(extracted, 'list').items) {
+        const list = payloadOf(extracted, 'list');
+        const unresolved = list.items.filter(item => !item.document);
+        const coverageRisks = unresolved.filter(item => item.skipKind !== 'business-filter');
+        const hiddenRisks = Math.max(
+          0,
+          list.skipped - unresolved.length,
+          list.total - list.items.length,
+        );
+        const riskCount = coverageRisks.length + hiddenRisks;
+        if (list.total > 0 && riskCount > 0) {
+          const reasons = [...new Set(coverageRisks
+            .map(item => item.reason?.trim())
+            .filter((reason): reason is string => Boolean(reason)))]
+            .slice(0, 3)
+            .join('；');
+          throw new Error(
+            `CONTENT_COVERAGE_INCOMPLETE：知识星球必采视图「${label}」本轮可见 ${list.total} 条，`
+            + `其中 ${riskCount} 条无法形成可验证文档`
+            + `${reasons ? `（${reasons}）` : ''}，已取满 ${ZSXQ_MAX_STABILITY_SAMPLES} 个有界样本仍未恢复`,
+          );
+        }
+        for (const item of list.items) {
+          if (item.document || item.skipKind !== 'business-filter') continue;
+          const reason = businessSkipReason(item.reason);
+          const key = item.url ?? `${label}:${item.key}`;
+          audit?.businessSkips.set(key, {
+            reason,
+            ...(item.url ? { url: item.url } : {}),
+          });
+        }
+        for (const item of list.items) {
           if (!item.document) continue;
           if (viewUrls.has(item.document.canonicalUrl)) continue;
           documents.push(item.document);
@@ -254,9 +736,25 @@ export class JobRunner {
           if (viewUrls.size >= ZSXQ_PLAN_ITEMS_PER_VIEW) break;
         }
         if (viewUrls.size >= ZSXQ_PLAN_ITEMS_PER_VIEW) break;
-        const advanced = await this.ask(tabId, { type: 'list.advance' });
+        const advanced = await this.ask(tabId, {
+          type: this.contentMessageType('list.advance'),
+        });
         if (!advanced.ok) throw new Error(advanced.error.message);
-        if (payloadOf(advanced, 'advance').loaded === 0) break;
+        const outcome = payloadOf(advanced, 'advance');
+        if (outcome.uncertain === true) {
+          throw new Error(
+            `CONTENT_ADVANCE_UNCERTAIN：知识星球必采视图「${label}」在有界观察内仍在变化，`
+            + '无法证明已经加载完所有帖子，已停止防止漏采',
+          );
+        }
+        if (outcome.loaded === 0) break;
+        if (round === ZSXQ_PLAN_MAX_ROUNDS - 1) {
+          throw new Error(
+            `CONTENT_COVERAGE_INCOMPLETE：知识星球必采视图「${label}」已提取 ${ZSXQ_PLAN_MAX_ROUNDS} 轮，`
+            + `第 ${ZSXQ_PLAN_MAX_ROUNDS} 次翻页仍加载出 ${outcome.loaded} 条，且尚未取满每视图 `
+            + `${ZSXQ_PLAN_ITEMS_PER_VIEW} 条；无法证明该视图已经耗尽，已停止防止漏采`,
+          );
+        }
       }
       byView.push({ label, documents });
     }
@@ -284,19 +782,20 @@ export class JobRunner {
   ): Promise<string> {
     const job = await this.options.bridge.createJob(document.canonicalUrl, context);
     this.options.bridge.send('job.progress', job.id, { stage: 'collecting' });
-    this.options.bridge.send('job.result', job.id, {
-      document: await this.withLinkedArticle(document),
-    });
+    this.sendDocumentResult(job.id, await this.withLinkedArticle(document));
     return job.id;
   }
 
   async runZsxqCollectionPlan(
     batchId: string,
+    attempt: CollectionPlanAttempt,
     reportPhase?: (result: {
       discovered: number;
       prepared: boolean;
       rejections?: Record<string, number>;
+      rejectionDetails?: CollectionPlanRejection[];
     }) => Promise<void> | void,
+    options: { force?: boolean } = {},
   ): Promise<{ discovered: number }> {
     const groupUrl = 'https://wx.zsxq.com/group/48844584441158';
     let tabId: number | undefined;
@@ -309,58 +808,115 @@ export class JobRunner {
       if (tab.id === undefined) throw new Error('浏览器未返回知识星球标签页 ID');
       tabId = tab.id;
       await this.options.waitForTabComplete(tabId, 30_000);
-      const documents = await retryTransientTabOperation(
-        () => this.collectZsxqPlanViews(tabId!),
+      const extraction = await retryTransientTabOperation(
+        async () => {
+          const audit: ZsxqPlanExtractionAudit = { businessSkips: new Map() };
+          const documents = await this.collectZsxqPlanViews(tabId!, ZSXQ_PLAN_VIEWS, audit);
+          return { documents, audit };
+        },
         milliseconds => this.wait(milliseconds),
       );
+      const documents = extraction.documents;
+      const documentUrls = new Set(documents.map(document => document.canonicalUrl));
+      const businessSkips = [...extraction.audit.businessSkips.entries()]
+        .filter(([key, item]) => !documentUrls.has(item.url ?? key))
+        .map(([, item]) => item);
+      const discovered = documents.length + businessSkips.length;
+      if (discovered === 0) {
+        throw new Error('CONTENT_EMPTY：知识星球三个视图均未采集到任何帖子，已停止防止假绿');
+      }
       const now = Date.now();
       const cutoff = now - 15 * 24 * 60 * 60 * 1_000;
       let known: ReadonlySet<string> = new Set();
-      try {
-        known = (await this.options.knownUrls?.()) ?? new Set();
-      } catch {
-        known = new Set();
+      let knownContent: ReadonlyMap<string, boolean | undefined> = new Map();
+      let contentStatusesAvailable = false;
+      if (this.options.knownContent) {
+        try {
+          const content = await this.options.knownContent();
+          if (!content) {
+            throw new Error('Bridge 未提供逐条正文完整状态');
+          }
+          contentStatusesAvailable = true;
+          knownContent = content;
+          known = new Set(content.keys());
+        } catch (error) {
+          throw new Error(
+            `BRIDGE_UPDATE_REQUIRED：无法读取本机库正文完整状态，已停止知识星球计划，避免把历史半篇误当完整：${error instanceof Error ? error.message : error}`,
+          );
+        }
+      } else {
+        try {
+          known = (await this.options.knownUrls?.()) ?? new Set();
+        } catch {
+          known = new Set();
+        }
       }
       const relevant: CollectedDocument[] = [];
       const rejections: Record<string, number> = {};
-      const reject = (reason: string): void => {
+      const rejectionDetails: CollectionPlanRejection[] = [];
+      for (const item of businessSkips) {
+        rejections[item.reason] = (rejections[item.reason] ?? 0) + 1;
+        if (item.url) rejectionDetails.push({ url: item.url, reason: item.reason });
+      }
+      const reject = (document: CollectedDocument, reason: string): void => {
         rejections[reason] = (rejections[reason] ?? 0) + 1;
+        rejectionDetails.push({ url: document.canonicalUrl, reason });
       };
       for (const document of documents) {
-        if (document.sourceMetadata?.authorRole !== 'owner') {
-          reject('非星主');
-          continue;
+        const authorRole = document.sourceMetadata?.authorRole;
+        if (authorRole !== 'owner' && authorRole !== 'member') {
+          throw new Error(
+            `AUTHOR_IDENTITY_UNPROVEN：无法证明知识星球帖子作者身份，已停止防止漏采星主内容：${document.canonicalUrl}`,
+          );
         }
-        if (document.truncated) {
-          reject('正文不完整');
+        if (authorRole === 'member') {
+          reject(document, '非星主');
           continue;
         }
         const publishedAt = document.publishedAt ? Date.parse(document.publishedAt) : Number.NaN;
         if (!Number.isFinite(publishedAt)) {
-          reject('缺少可信日期');
-          continue;
+          throw new Error(
+            `PUBLISHED_AT_UNPROVEN：无法证明知识星球帖子发布时间，已停止防止漏采近15天内容：${document.canonicalUrl}`,
+          );
         }
         if (publishedAt < cutoff || publishedAt > now) {
-          reject('超出15天');
+          reject(document, '超出15天');
           continue;
         }
-        if (!/投资|创业|商业模式|经营|财富|职业|职场|认知/u.test(`${document.title}\n${document.text}`)) {
-          reject('非投资创业主题');
+        // 能读到完整状态时，只跳过明确完整项；未知/不完整的历史普通帖与长文都修复一次。
+        // 老 Bridge 没有状态字段时退回旧语义：已知 URL 全部跳过，避免每天重复覆盖。
+        if (
+          options.force !== true
+          &&
+          known.has(document.canonicalUrl)
+          && (!contentStatusesAvailable || knownContent.get(document.canonicalUrl) === true)
+        ) {
+          reject(document, '本机库已有');
           continue;
         }
-        if (known.has(document.canonicalUrl)) {
-          reject('本机库已有');
+        const completedDocument = await this.withLinkedArticle(document);
+        // 主题判断必须看补齐后的正文：列表导语本身可能没有投资/创业关键词。
+        if (!/投资|创业|商业模式|经营|财富|职业|职场|认知/u.test(
+          `${completedDocument.title}\n${completedDocument.text}`,
+        )) {
+          reject(document, '非投资创业主题');
           continue;
         }
-        relevant.push(document);
+        if (completedDocument.truncated) {
+          reject(document, '正文不完整');
+          continue;
+        }
+        // 走到这里表示本轮已检查过所有明确截断信号；写成 false 让目录三态一次收敛为“完整”。
+        relevant.push({ ...completedDocument, truncated: false });
       }
       relevant.sort((left, right) => (right.publishedAt ?? '').localeCompare(left.publishedAt ?? ''));
       relevant.splice(60);
-      if (documents.length > 0 && !documents.some(document =>
-        document.sourceMetadata?.authorRole === 'owner' || document.sourceMetadata?.authorRole === 'member')) {
-        throw new Error('UNSUPPORTED_LAYOUT：无法验证知识星球作者是否为星主');
-      }
-      await reportPhase?.({ discovered: documents.length, prepared: false, rejections });
+      await reportPhase?.({
+        discovered,
+        prepared: false,
+        rejections,
+        rejectionDetails,
+      });
       const staged: Array<{ id: string; document: CollectedDocument }> = [];
       for (const document of relevant) {
         const plannedDocument: CollectedDocument = {
@@ -376,17 +932,21 @@ export class JobRunner {
         const job = await this.options.bridge.createJob(plannedDocument.canonicalUrl, {
           batchId,
           planId: 'zsxq-chen-teacher',
+          attempt,
         });
         staged.push({ id: job.id, document: plannedDocument });
       }
-      await reportPhase?.({ discovered: documents.length, prepared: true, rejections });
+      await reportPhase?.({
+        discovered,
+        prepared: true,
+        rejections,
+        rejectionDetails,
+      });
       for (const item of staged) {
         this.options.bridge.send('job.progress', item.id, { stage: 'collecting' });
-        this.options.bridge.send('job.result', item.id, {
-          document: await this.withLinkedArticle(item.document),
-        });
+        this.sendDocumentResult(item.id, item.document);
       }
-      return { discovered: documents.length };
+      return { discovered };
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       if (/AUTH_REQUIRED|登录/u.test(message)) {
@@ -420,20 +980,40 @@ export class JobRunner {
       try {
         let timeout: ReturnType<typeof setTimeout> | undefined;
         try {
-          return await Promise.race([
+          const rawResponse = await Promise.race([
             this.options.tabs.sendMessage(tabId, message),
             new Promise<never>((_resolve, reject) => {
               timeout = setTimeout(
-                () => reject(new Error(`页面交互「${requestType}」超时（45 秒）`)),
+                () => reject(new Error(`页面交互「${requestType}」超时（60 秒）`)),
                 CONTENT_SCRIPT_REQUEST_TIMEOUT_MS,
               );
             }),
           ]);
+          if (typeof rawResponse !== 'object' || rawResponse === null) {
+            throw new Error(
+              'CONTENT_SCRIPT_OUTDATED：页面内容脚本未识别当前版本请求',
+            );
+          }
+          const response = rawResponse as ExtractionResponse;
+          if (
+            this.options.requireContentProtocol
+            && (
+              response.contentProtocol !== CONTENT_EXTRACTION_PROTOCOL
+              || response.contentBuildId
+                !== (this.options.expectedContentBuildId ?? CONTENT_BUILD_ID)
+            )
+          ) {
+            throw new Error(
+              'CONTENT_SCRIPT_OUTDATED：页面仍在运行旧版内容脚本，无法证明正文完整性',
+            );
+          }
+          return response;
         } finally {
           if (timeout !== undefined) clearTimeout(timeout);
         }
       } catch (error) {
-        if (!isContentScriptNotReady(error) || attempt === 3) throw error;
+        const recoverable = isContentScriptNotReady(error) || isContentScriptOutdated(error);
+        if (!recoverable || attempt === 3) throw error;
         lastError = error;
         if (attempt === 0) {
           try {
@@ -463,21 +1043,132 @@ export class JobRunner {
     tabId: number,
     overrides?: CaptureOverrides,
     retryUnsupportedLayout = false,
+    stabilizeZsxq = false,
+    maxAttempts = 5,
   ): Promise<ExtractionResponse> {
     let last: ExtractionResponse | undefined;
-    for (let attempt = 0; attempt < 5; attempt += 1) {
-      if (attempt > 0) await this.wait(600 + attempt * 700);
+    let bestDocument: CollectedDocument | undefined;
+    let stableSignature: string | undefined;
+    let stableForMs = 0;
+    let tainted = false;
+    for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+      const delayMs = zsxqSampleDelayMs(attempt);
+      if (delayMs > 0) await this.wait(delayMs);
       const response = await this.ask(tabId, {
-        type: 'extract.document',
+        type: this.contentMessageType('extract.document'),
         ...(overrides ? { overrides } : {}),
       });
-      if (response.ok) return response;
+      if (response.ok) {
+        if (!stabilizeZsxq) return response;
+        const candidate = payloadOf(response, 'document');
+        if (candidate.truncated === true) tainted = true;
+        if (!bestDocument || candidate.text.length >= bestDocument.text.length) {
+          bestDocument = candidate;
+        }
+        // `truncated:false` 只说明这一帧没有看到折叠控件；SPA 可能刚挂首段。
+        // 同一份最丰富正文必须从最后一次变化起连续稳定 24 秒，且任一正向截断证据都粘住。
+        const signature = zsxqDocumentSignature(candidate);
+        const canProveStable = !tainted
+          && candidate.truncated === false
+          && candidate.canonicalUrl === bestDocument?.canonicalUrl
+          && candidate.text === bestDocument.text;
+        if (canProveStable && signature === stableSignature) {
+          stableForMs += delayMs;
+        } else {
+          stableSignature = canProveStable ? signature : undefined;
+          stableForMs = 0;
+        }
+        if (canProveStable && stableForMs >= ZSXQ_STABLE_FOR_MS) return response;
+        last = response;
+        continue;
+      }
       const retryable = response.error.code === 'CONTENT_EMPTY'
         || (retryUnsupportedLayout && response.error.code === 'UNSUPPORTED_LAYOUT');
       if (!retryable) return response;
+      stableSignature = undefined;
+      stableForMs = 0;
       last = response;
     }
+    if (stabilizeZsxq && bestDocument) {
+      return { ok: true, document: { ...bestDocument, truncated: true } };
+    }
     return last as ExtractionResponse;
+  }
+
+  /**
+   * 列表 API 命中本地全文上限、或展开未能证明完成时，改开该 topic 的详情页取稳定全文。
+   * 详情正文必须显式完整、不短于列表正文且与其兼容，才足以清除列表上的瞬态风险。
+   */
+  private async withTopicDetail(document: CollectedDocument): Promise<CollectedDocument> {
+    let tabId: number | undefined;
+    try {
+      const tab = await this.options.tabs.create({
+        url: document.canonicalUrl,
+        active: false,
+        purpose: 'remote-job',
+      });
+      if (tab.id === undefined) return { ...document, truncated: true };
+      tabId = tab.id;
+      await this.options.waitForTabComplete(tabId, 30_000);
+      const response = await this.extractWithRetry(
+        tabId,
+        undefined,
+        false,
+        true,
+        ZSXQ_MAX_STABILITY_SAMPLES,
+      );
+      if (!response.ok) return { ...document, truncated: true };
+      const detail = payloadOf(response, 'document');
+      if (
+        detail.source !== 'zsxq'
+        || detail.canonicalUrl !== document.canonicalUrl
+        || detail.truncated !== false
+        || detail.text.length < document.text.length
+      ) return { ...document, truncated: true };
+      const comparison = mergeZsxqDocumentCopies(document, detail);
+      if (comparison.conflict) return { ...document, truncated: true };
+      const sourceMetadata = {
+        ...(document.sourceMetadata ?? {}),
+        ...(detail.sourceMetadata ?? {}),
+      };
+      const assetsAgree = sameUrlSet(
+        zsxqDocumentAssetUrls(document),
+        zsxqDocumentAssetUrls(detail),
+      );
+      if (!assetsAgree && !hasAuthoritativeSourceMedia(detail)) {
+        // 等长正文 + 成功展开只能证明文字；若两视图的资源集合不同且接口未给出权威
+        // 媒体清单，任何一侧都可能是虚拟节点残留。保留详情正文便于诊断，但移除所有
+        // 可跟随资源并维持 incomplete，绝不打开或归档上一帖的图片/附件/长文。
+        return {
+          ...detail,
+          html: withoutUnprovenHtmlAssets(detail.html),
+          images: [],
+          ...(detail.author
+            ? { author: detail.author }
+            : document.author ? { author: document.author } : {}),
+          ...(detail.publishedAt
+            ? { publishedAt: detail.publishedAt }
+            : document.publishedAt ? { publishedAt: document.publishedAt } : {}),
+          sourceMetadata,
+          truncated: true,
+        };
+      }
+      return {
+        ...comparison.document,
+        ...(detail.author
+          ? { author: detail.author }
+          : document.author ? { author: document.author } : {}),
+        ...(detail.publishedAt
+          ? { publishedAt: detail.publishedAt }
+          : document.publishedAt ? { publishedAt: document.publishedAt } : {}),
+        sourceMetadata,
+        truncated: false,
+      };
+    } catch {
+      return { ...document, truncated: true };
+    } finally {
+      if (tabId !== undefined) await this.options.tabs.remove(tabId).catch(() => undefined);
+    }
   }
 
   /**
@@ -487,11 +1178,27 @@ export class JobRunner {
    * 投递里 54 条（70%）是这形态，其中 43 条正文不足 400 字，归档侧拿到的基本是空壳。
    * 长文页是单页应用，接口还要登录态，所以只能开一个后台标签页让内容脚本去读。
    *
-   * 取不到就**原样保留导语**：长文没抓到不该让整条采集失败。
+   * 取不到就保留导语并标记为截断；Bridge 会在任何知识星球入库之前据此拒绝半篇内容。
    */
   private async withLinkedArticle(document: CollectedDocument): Promise<CollectedDocument> {
-    const articleUrl = linkedArticleUrl(document.html);
-    if (!articleUrl) return document;
+    if (document.source !== 'zsxq') return document;
+    if (document.kind === 'article') {
+      return { ...document, truncated: document.truncated === true };
+    }
+    // 列表首帧可能连长文 anchor 都还没挂出来。若列表已经给出截断正向证据，先恢复
+    // 原帖详情，再以恢复后的 HTML 重新判断有没有链接长文；否则会把“详情完整但仍引用
+    // 一篇长文”的帖子错当作已经全部补齐。
+    const topicDocument = document.truncated === true
+      ? await this.withTopicDetail(document)
+      : document;
+    const articleUrl = linkedArticleUrl(topicDocument.html);
+    if (!articleUrl) {
+      // Bridge 以显式 `false` 作为「已经新版完整性检查」的凭据。
+      // 无长文链接时也必须收敛三态：保留明确 true，其余标记为完整。
+      return { ...topicDocument, truncated: topicDocument.truncated === true };
+    }
+    // 长文页只能证明“链接出去的文章”完整，不能反证原帖自身没有残留折叠尾段。
+    // 详情页仍不完整或取证失败时，后面即使拿到完整文章也只能保留正文，不能清除 taint。
     let tabId: number | undefined;
     try {
       const tab = await this.options.tabs.create({
@@ -499,7 +1206,7 @@ export class JobRunner {
         active: false,
         purpose: 'linked-article',
       });
-      if (tab.id === undefined) return document;
+      if (tab.id === undefined) return { ...document, truncated: true };
       tabId = tab.id;
       await this.options.waitForTabComplete(tabId, 30_000);
       /*
@@ -513,28 +1220,42 @@ export class JobRunner {
       /*
        * 等的总时长要够。实测按 URL 重采 42 条，仍有 9 条（21%）没能拿到长文——
        * 时间点散落在整轮里，不是集中在某一刻，是典型的「渲染没赶上」而非页面形态问题。
-       * 原先 4 轮共约 8.4 秒偏紧（同一时间还有别的标签页在churn），放宽到 6 轮约 24 秒。
+       * 固定总观察窗仍会被尾段晚增绕过：现在与列表/详情统一为“最后一次变化后连续
+       * 24 秒”，最多 11 帧（约 44.5 秒）；到上限仍未稳定就保守标记不完整。
        */
-      for (let attempt = 0; attempt < 6; attempt += 1) {
-        await this.wait(1_000 + attempt * 1_200);
-        const response = await this.ask(tabId, { type: 'extract.document' });
-        if (!response.ok) continue;
+      const response = await this.extractWithRetry(
+        tabId,
+        undefined,
+        false,
+        true,
+        ZSXQ_MAX_STABILITY_SAMPLES,
+      );
+      if (response.ok) {
         const article = payloadOf(response, 'document');
-        if (article.text.length <= document.text.length) continue;
+        if (
+          article.source !== 'zsxq'
+          || article.kind !== 'article'
+          || !sameCanonicalUrl(article.canonicalUrl, articleUrl)
+          || article.truncated !== false
+          || article.text.length <= topicDocument.text.length
+        ) {
+          return { ...topicDocument, truncated: true };
+        }
         return {
-          ...document,
+          ...topicDocument,
           // 导语留着（有时交代了背景），长文正文接在后面。
-          html: `${document.html}\n<hr />\n${article.html}`,
-          text: `${document.text}\n\n${article.text}`,
-          images: [...document.images, ...article.images],
-          // 全文补上了，这条就不再是截断的。
-          truncated: false,
+          html: `${topicDocument.html}\n<hr />\n${article.html}`,
+          text: `${topicDocument.text}\n\n${article.text}`,
+          images: [...topicDocument.images, ...article.images],
+          // 链接正文即使已经完整，也只能在原帖详情同时给出完整证明时清除列表 taint。
+          // 详情失败时仍把取得的长文带回，便于诊断/重试，但最终状态必须保持 true。
+          truncated: topicDocument.truncated === true,
         };
       }
       // 试满还是没拿到长文：如实标成截断，归档侧才知道这条不完整。
-      return { ...document, truncated: true };
+      return { ...topicDocument, truncated: true };
     } catch {
-      return document;
+      return { ...topicDocument, truncated: true };
     } finally {
       if (tabId !== undefined) await this.options.tabs.remove(tabId).catch(() => undefined);
     }
@@ -562,6 +1283,10 @@ export class JobRunner {
         tabId,
         undefined,
         parsedUrl.hostname === 'www.nowcoder.com',
+        parsedUrl.hostname === 'wx.zsxq.com' || parsedUrl.hostname === 'articles.zsxq.com',
+        parsedUrl.hostname === 'wx.zsxq.com' || parsedUrl.hostname === 'articles.zsxq.com'
+          ? ZSXQ_MAX_STABILITY_SAMPLES
+          : 5,
       );
       if (!response.ok) {
         const needsAttention = response.error.code === 'AUTH_REQUIRED';
@@ -578,16 +1303,20 @@ export class JobRunner {
         return;
       }
       // 单条采集同样要补长文：按 URL 定向重采（收件箱那 48 条）走的就是这条路。
-      this.options.bridge.send('job.result', requestId, {
-        document: await this.withLinkedArticle(payloadOf(response, 'document')),
-      });
+      this.sendDocumentResult(
+        requestId,
+        await this.withLinkedArticle(payloadOf(response, 'document')),
+      );
     } catch (error) {
+      const outdated = isContentScriptOutdated(error);
       this.options.bridge.send('job.error', requestId, {
-        code: error instanceof Error && error.message.includes('不支持的采集地址')
-          ? 'UNSUPPORTED_URL'
-          : 'COLLECTION_FAILED',
+        code: outdated
+          ? 'CONTENT_SCRIPT_OUTDATED'
+          : error instanceof Error && error.message.includes('不支持的采集地址')
+            ? 'UNSUPPORTED_URL'
+            : 'COLLECTION_FAILED',
         message: error instanceof Error ? error.message : '浏览器采集失败',
-        needsAttention: false,
+        needsAttention: outdated,
       });
     } finally {
       if (tabId !== undefined && !keepTab) await this.options.tabs.remove(tabId).catch(() => undefined);
@@ -597,26 +1326,40 @@ export class JobRunner {
   async captureCurrent(overrides: CaptureOverrides = {}): Promise<string> {
     const [tab] = await this.options.tabs.query({ active: true, lastFocusedWindow: true });
     if (tab?.id === undefined || !tab.url) throw new Error('当前没有可采集的浏览器页面');
-    const url = parseSupportedUrl(tab.url).href;
+    const parsedUrl = parseSupportedUrl(tab.url);
+    const url = parsedUrl.href;
     const job = await this.options.bridge.createJob(url, overrides);
     this.options.bridge.send('job.progress', job.id, { stage: 'collecting' });
     let response: ExtractionResponse;
     try {
-      response = await this.extractWithRetry(tab.id, overrides);
+      response = await this.extractWithRetry(
+        tab.id,
+        overrides,
+        false,
+        parsedUrl.hostname === 'wx.zsxq.com' || parsedUrl.hostname === 'articles.zsxq.com',
+        parsedUrl.hostname === 'wx.zsxq.com' || parsedUrl.hostname === 'articles.zsxq.com'
+          ? ZSXQ_MAX_STABILITY_SAMPLES
+          : 5,
+      );
     } catch (error) {
       // 内容脚本不在该标签页（常见于扩展刚安装/重载，而标签页是之前打开的）。
       // 必须显式回报，否则任务会永远停在 collecting，侧栏一直显示「清理正文」。
       const notReady = isContentScriptNotReady(error);
+      const outdated = isContentScriptOutdated(error);
       this.options.bridge.send('job.error', job.id, {
-        code: notReady ? 'CONTENT_SCRIPT_MISSING' : 'COLLECTION_FAILED',
-        message: notReady
+        code: outdated
+          ? 'CONTENT_SCRIPT_OUTDATED'
+          : notReady ? 'CONTENT_SCRIPT_MISSING' : 'COLLECTION_FAILED',
+        message: outdated
+          ? '页面仍在运行旧版内容脚本，无法证明正文完整性。请确认扩展已重载后重试。'
+          : notReady
           // 绝不建议刷新：刷新会把知识星球的「精华」退回「最新」，采到的就不是用户要的内容。
           // 自动补注入已经试过并失败，所以这里只剩「确认扩展启用后重试」这一条路。
           ? '页面脚本未就绪，且自动注入没有成功。请在 edge://extensions 确认 Data Collector 已启用后重试；不必刷新页面。'
           : error instanceof Error
             ? error.message
             : '浏览器采集失败',
-        needsAttention: notReady,
+        needsAttention: notReady || outdated,
       });
       return job.id;
     }
@@ -633,7 +1376,8 @@ export class JobRunner {
       ...(overrides.userCategory ? { userCategory: overrides.userCategory } : {}),
       ...(overrides.userTags ? { userTags: overrides.userTags } : {}),
     };
-    this.options.bridge.send('job.result', job.id, { document });
+    // 当前页也可能只是长文导语；与远程单条/批量走同一补全与显式完整性路径。
+    this.sendDocumentResult(job.id, await this.withLinkedArticle(document));
     return job.id;
   }
 
@@ -656,7 +1400,8 @@ export class JobRunner {
    * 尽力而为，失败不影响任何结论。
    */
   private async focusLast(tabId: number): Promise<void> {
-    await this.ask(tabId, { type: 'list.focusLast' }).catch(() => undefined);
+    await this.ask(tabId, { type: this.contentMessageType('list.focusLast') })
+      .catch(() => undefined);
   }
 
   /** 用户点了「停止」：在条与条、轮与轮之间检查，尽快收尾并如实汇报已入库条数。 */
@@ -666,7 +1411,8 @@ export class JobRunner {
 
   /** 问页面里的主世界钩子要一份运行统计；拿不到就按「没在运行」处理。 */
   private async hookStats(tabId: number): Promise<HookStats> {
-    const response = await this.ask(tabId, { type: 'list.hookStats' }).catch(() => undefined);
+    const response = await this.ask(tabId, { type: this.contentMessageType('list.hookStats') })
+      .catch(() => undefined);
     if (response?.ok) {
       try {
         return payloadOf(response, 'hook');
@@ -691,7 +1437,10 @@ export class JobRunner {
   async itemDiagnostics(key: string): Promise<string> {
     const [tab] = await this.options.tabs.query({ active: true, lastFocusedWindow: true });
     if (tab?.id === undefined) throw new Error('当前没有可采集的浏览器页面');
-    const response = await this.ask(tab.id, { type: 'list.itemDiagnose', key });
+    const response = await this.ask(tab.id, {
+      type: this.contentMessageType('list.itemDiagnose'),
+      key,
+    });
     if (!response.ok) throw new Error(response.error.message);
     return payloadOf(response, 'diagnostics');
   }
@@ -700,7 +1449,10 @@ export class JobRunner {
   async highlight(key: string): Promise<boolean> {
     const [tab] = await this.options.tabs.query({ active: true, lastFocusedWindow: true });
     if (tab?.id === undefined) return false;
-    const response = await this.ask(tab.id, { type: 'list.highlight', key }).catch(() => undefined);
+    const response = await this.ask(tab.id, {
+      type: this.contentMessageType('list.highlight'),
+      key,
+    }).catch(() => undefined);
     return Boolean(response?.ok && payloadOf(response, 'highlight').found);
   }
 
@@ -708,7 +1460,9 @@ export class JobRunner {
   async diagnoseList(): Promise<string> {
     const [tab] = await this.options.tabs.query({ active: true, lastFocusedWindow: true });
     if (tab?.id === undefined) throw new Error('当前没有可诊断的浏览器页面');
-    const response = await this.ask(tab.id, { type: 'list.diagnose' });
+    const response = await this.ask(tab.id, {
+      type: this.contentMessageType('list.diagnose'),
+    });
     if (!response.ok) throw new Error(response.error.message);
     return payloadOf(response, 'diagnostics');
   }
@@ -735,7 +1489,9 @@ export class JobRunner {
    */
   private async restorePage(tabId: number): Promise<void> {
     try {
-      await this.options.tabs.sendMessage(tabId, { type: 'list.restore' });
+      await this.options.tabs.sendMessage(tabId, {
+        type: this.contentMessageType('list.restore'),
+      });
     } catch {
       // 页面已关闭或脚本不在，无需处理。
     }
@@ -828,14 +1584,34 @@ export class JobRunner {
       // 「继续采下一批」：本屏都处理过了，得先滚动把下一页加载出来再提取，
       // 否则一上来就是「没有待采内容」。
       note('继续采下一批：先滚动加载下一页');
-      const advanced = await this.ask(tabId, { type: 'list.advance' }).catch(() => undefined);
-      const outcome = advanced?.ok
-        ? payloadOf(advanced, 'advance')
-        : { loaded: 0, collapsed: 0, scroll: undefined };
+      let advanced: ExtractionResponse;
+      try {
+        advanced = await this.ask(tabId, {
+          type: this.contentMessageType('list.advance'),
+        });
+      } catch (error) {
+        return fail(
+          'CONTENT_ADVANCE_FAILED',
+          `无法确认续采是否已经加载完所有帖子：${error instanceof Error ? error.message : error}`,
+        );
+      }
+      if (!advanced.ok) {
+        return fail(
+          'CONTENT_ADVANCE_FAILED',
+          `无法确认续采是否已经加载完所有帖子：${advanced.error.message}`,
+        );
+      }
+      const outcome = payloadOf(advanced, 'advance');
       const loaded = outcome.loaded;
       // 滚没滚动必须写下来：只报「新增 0 条」时，分不清是到底了还是压根没滚。
       if (outcome.scroll) note(outcome.scroll);
       note(`滚动后新加载出 ${loaded} 条待采内容`);
+      if (outcome.uncertain === true) {
+        return fail(
+          'CONTENT_ADVANCE_UNCERTAIN',
+          '列表在有界观察内仍在变化，无法证明已经加载完所有帖子；已停止续采以防漏采。',
+        );
+      }
       if (loaded === 0) {
         progress.phase = 'done';
         progress.error = '滚动到底也没有加载出新内容，本页应该已经采完了。';
@@ -850,12 +1626,15 @@ export class JobRunner {
 
     let sawAnyPost = false;
     let captured = 0;
+    // 明确业务过滤可以正常跳过；结构、身份或稳定性证明缺失是覆盖缺口。
+    // 即使同屏另一条成功入库，也不能把这种混合批次报成完成。
+    let coverageRiskCount = 0;
     /** 是否已经替用户切过一次分类来触发接口请求（最多一次）。 */
     let refreshedFeed = false;
     for (let round = 0; round < maxRounds; round += 1) {
       let response: ExtractionResponse;
       try {
-        response = await this.ask(tabId, { type: 'extract.list' });
+        response = await this.extractStableList(tabId);
       } catch (error) {
         // E1：扩展刚安装/更新时，之前打开的标签页里没有内容脚本。
         if (isContentScriptNotReady(error)) {
@@ -883,7 +1662,9 @@ export class JobRunner {
         note('本页一个帖子号都没截到：切走分类再切回来，让站点重新请求一次');
         // 全程尽力而为：这一步失败（页面里是旧版内容脚本、答不上这个字段等）
         // 绝不能把整批采集带下水——它只是个「省得用户自己动手」的便利。
-        const refresh = await this.ask(tabId, { type: 'list.refreshTopics' })
+        const refresh = await this.ask(tabId, {
+          type: this.contentMessageType('list.refreshTopics'),
+        })
           .then(response => (response.ok ? payloadOf(response, 'refresh') : { toggled: false }))
           .catch(() => ({ toggled: false as boolean, category: undefined }));
         if (refresh.toggled) {
@@ -906,6 +1687,7 @@ export class JobRunner {
         if (this.batchStopped) break;
         if (progress.collected >= maxItems) break;
         if (!item.document) {
+          if (item.skipKind !== 'business-filter') coverageRiskCount += 1;
           items.push({ key: item.key, title: item.title, status: 'skipped', ...(item.reason ? { reason: item.reason } : {}) });
           tally();
           continue;
@@ -937,7 +1719,20 @@ export class JobRunner {
           tally();
           continue;
         }
-        const saved = await this.saveCollected(await this.withLinkedArticle(document), overrides);
+        const completed = await this.withLinkedArticle(document);
+        if (completed.source === 'zsxq' && completed.truncated !== false) {
+          items.push({
+            key: item.key,
+            title: item.title,
+            status: 'failed',
+            reason: '正文不完整，未入库',
+            url: document.canonicalUrl,
+          });
+          tally();
+          report();
+          continue;
+        }
+        const saved = await this.saveCollected(completed, overrides);
         if (saved === 'ok') {
           items.push({ key: item.key, title: item.title, status: 'saved', url: document.canonicalUrl });
           tally();
@@ -965,23 +1760,51 @@ export class JobRunner {
         // **必须先把这一屏标记掉**：否则「继续采下一批」上来第一件事是滚动，
         // 而这一屏还都是「待采」状态，滚完立刻就有「新内容」，于是又把同一屏
         // 提取一遍——表现就是点了继续毫无进展，永远卡在原地。
-        const marked = await this.ask(tabId, { type: 'list.restore', mark: true })
+        const marked = await this.ask(tabId, {
+          type: this.contentMessageType('list.restore'),
+          mark: true,
+        })
           .then(response => (response.ok ? payloadOf(response, 'advance').collapsed : 0))
           .catch(() => 0);
         note(`已采够目标条数 ${maxItems} 条，收工（已标记本屏 ${marked} 条，续采从下一屏开始）`);
         await this.focusLast(tabId);
-        progress.phase = 'capped';
+        progress.phase = coverageRiskCount > 0 ? 'failed' : 'capped';
+        if (coverageRiskCount > 0) {
+          progress.code = 'CONTENT_COVERAGE_INCOMPLETE';
+          progress.error = `本轮虽已入库 ${progress.collected} 条，但另有 ${coverageRiskCount} 条可见帖子`
+            + '无法形成可验证文档，本轮未全部完成。';
+        }
         report();
         return { ...progress };
       }
 
-      const advanced = await this.ask(tabId, { type: 'list.advance' }).catch(() => undefined);
-      const nextPage = advanced?.ok
-        ? payloadOf(advanced, 'advance')
-        : { loaded: 0, collapsed: 0, scroll: undefined };
+      let advanced: ExtractionResponse;
+      try {
+        advanced = await this.ask(tabId, {
+          type: this.contentMessageType('list.advance'),
+        });
+      } catch (error) {
+        return fail(
+          'CONTENT_ADVANCE_FAILED',
+          `无法确认下一页是否已经加载完所有帖子：${error instanceof Error ? error.message : error}`,
+        );
+      }
+      if (!advanced.ok) {
+        return fail(
+          'CONTENT_ADVANCE_FAILED',
+          `无法确认下一页是否已经加载完所有帖子：${advanced.error.message}`,
+        );
+      }
+      const nextPage = payloadOf(advanced, 'advance');
       const loaded = nextPage.loaded;
       if (nextPage.scroll) note(nextPage.scroll);
       note(`滚动加载下一页：新增待采 ${loaded} 条`);
+      if (nextPage.uncertain === true) {
+        return fail(
+          'CONTENT_ADVANCE_UNCERTAIN',
+          '列表在有界观察内仍在变化，无法证明已经加载完所有帖子；本轮已停止并标记失败。',
+        );
+      }
       if (loaded === 0) break;
       report();
     }
@@ -995,7 +1818,7 @@ export class JobRunner {
       // 一条都没入库、却有写入失败：这是失败，不是「完成」。
       // 之前 failed 完全没参与终态判定，全军覆没会渲染成绿色的「本轮批量归档完成」，
       // 说明文字还写着「内容已落到本机库」——那是假的。
-      : progress.collected === 0 && progress.failed > 0
+      : progress.failed > 0 || (progress.collected > 0 && coverageRiskCount > 0)
         ? 'failed'
         : progress.collected === 0 && progress.skipped > 0
           ? 'skipped_all'
@@ -1003,9 +1826,25 @@ export class JobRunner {
             ? 'capped'
             : 'done';
     if (progress.phase === 'failed') {
-      progress.error = `本轮 ${progress.failed} 条全部写入失败，一条都没入库。`
-        + '多半是本机服务写不了知识库目录（磁盘满、目录被占用或权限变更）。';
-      progress.code = 'ALL_WRITES_FAILED';
+      const failedItems = items.filter(item => item.status === 'failed');
+      const allIncomplete = failedItems.length > 0
+        && failedItems.every(item => item.reason === '正文不完整，未入库');
+      progress.error = coverageRiskCount > 0
+        ? `本轮已入库 ${progress.collected} 条；另有 ${coverageRiskCount} 条可见帖子的结构、身份或完整性`
+          + '无法证明，已停止假报全部完成。'
+        : allIncomplete
+        ? `本轮已入库 ${progress.collected} 条；另有 ${progress.failed} 条知识星球正文补取后仍不完整，已拒绝入库。`
+        : progress.collected > 0
+          ? `本轮已入库 ${progress.collected} 条，但仍有 ${progress.failed} 条写入失败，本轮未全部完成。`
+          : `本轮 ${progress.failed} 条全部写入失败，一条都没入库。`
+            + '多半是本机服务写不了知识库目录（磁盘满、目录被占用或权限变更）。';
+      progress.code = coverageRiskCount > 0
+        ? 'CONTENT_COVERAGE_INCOMPLETE'
+        : allIncomplete
+        ? 'INCOMPLETE_CONTENT'
+        : progress.collected > 0
+          ? 'PARTIAL_FAILURE'
+          : 'ALL_WRITES_FAILED';
     }
     if (progress.phase === 'skipped_all') {
       // 区分两种「全部跳过」：还没截到接口响应（用户能自己解决），
@@ -1052,17 +1891,22 @@ export class JobRunner {
     }
     try {
       this.options.bridge.send('job.progress', job.id, { stage: 'collecting' });
-      this.options.bridge.send('job.result', job.id, {
-        document: {
-          ...document,
-          ...(overrides.userCategory ? { userCategory: overrides.userCategory } : {}),
-          ...(overrides.userTags ? { userTags: overrides.userTags } : {}),
-        },
+      this.sendDocumentResult(job.id, {
+        ...document,
+        ...(overrides.userCategory ? { userCategory: overrides.userCategory } : {}),
+        ...(overrides.userTags ? { userTags: overrides.userTags } : {}),
       });
-      return 'ok';
     } catch {
       // WebSocket 断了，后面每条都会一样失败。
       return 'bridge-down';
+    }
+    try {
+      // job.result 只表示正文送进 Bridge；job.saved 才表示 sink 与 JobStore 都已落盘。
+      // BridgeConnection 会缓存抢先到达的终态，并在 notice 丢失时查询 JobStore 兜底。
+      await this.options.bridge.waitForJobTerminal(job.id);
+      return 'ok';
+    } catch {
+      return 'failed';
     }
   }
 }

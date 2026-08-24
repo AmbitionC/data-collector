@@ -1,5 +1,12 @@
 import { isListPage } from '@data-collector/shared';
-import { inlineMarkupToHtml, stripInlineMarkup, type TopicIndex } from '../topicIndex.js';
+import {
+  inlineMarkupToHtml,
+  normalizeForMatch,
+  stripInlineMarkup,
+  type TopicRecordAttachment,
+  type TopicRecordImage,
+  type TopicIndex,
+} from '../topicIndex.js';
 import { advertisementIn } from '../adFilter.js';
 import { excludedBy } from '../topicFilter.js';
 import { buildDocument, cleanText, elementText, parsePublishedAt } from './common.js';
@@ -50,7 +57,7 @@ const CONTENT_SELECTORS = [
   '.talk-content-container',
   '.article-content-container',
   '.q-content-container',
-  '.content',
+  '.answer-content-container',
 ];
 
 /**
@@ -93,7 +100,9 @@ function firstWithin(root: ParentNode, selectors: string[]): Element | null {
 function authorRoleOf(container: Element): 'owner' | 'member' | undefined {
   const role = container.querySelector('.author .role');
   if (!role) return undefined;
-  return role.classList.contains('owner') ? 'owner' : 'member';
+  if (role.classList.contains('owner')) return 'owner';
+  if (role.classList.contains('member')) return 'member';
+  return undefined;
 }
 
 function activeViewOf(document: Document): string | undefined {
@@ -105,18 +114,17 @@ function activeViewOf(document: Document): string | undefined {
 /**
  * 一条帖子里的全部正文块。
  *
- * 问答帖有**两块**（问题、回答），只取第一块会有两个后果：归档时丢掉回答，
- * 对号时也只拿着半段去比。按选择器分组取，同一组内全取，避免 `.content` 这类
- * 宽泛选择器把外层容器和内层正文重复算两次。
+ * 问答帖有**两块**（问题、回答），而且两块可能分别使用
+ * `.q-content-container` 与 `.talk-content-container`。必须一次取齐所有语义选择器，
+ * 再按 DOM 顺序归档；逐个选择器命中即返回会稳定丢掉其中一半。
+ * 不能用裸 `.content` 兜底：评论和推荐也使用这个通用类名；没有语义容器时应 fail-closed。
+ * 语义容器仍可能互相嵌套，重叠组只保留最外层，避免正文重复。
  */
 function contentBlocks(container: Element): Element[] {
-  for (const selector of CONTENT_SELECTORS) {
-    const found = [...container.querySelectorAll(selector)];
-    // 嵌套的只留最外层：`.talk-content-container .content` 会命中两次同一段文字。
-    const outermost = found.filter(node => !found.some(other => other !== node && other.contains(node)));
-    if (outermost.length > 0) return outermost;
-  }
-  return [];
+  const found = [...container.querySelectorAll(CONTENT_SELECTORS.join(', '))];
+  // querySelectorAll(selector-list) 天然按 DOM 顺序返回；嵌套的只留最外层：
+  // 语义容器嵌套时只保留最外层，避免同一段正文归档两次。
+  return found.filter(node => !found.some(other => other !== node && other.contains(node)));
 }
 
 /**
@@ -125,19 +133,24 @@ function contentBlocks(container: Element): Element[] {
  * 用克隆拼装，**绝不改动页面本身**：用户正在肉眼核对采到的内容。
  * 只有一块时直接返回那一块，不做无谓包装。
  */
-function contentRoot(document: Document, blocks: Element[], container: Element): Element {
-  if (blocks.length === 0) return container;
+function contentRoot(document: Document, blocks: Element[]): Element | undefined {
+  if (blocks.length === 0) return undefined;
   if (blocks.length === 1) return blocks[0]!;
   const merged = document.createElement('div');
   for (const block of blocks) merged.append(block.cloneNode(true));
   return merged;
 }
 
+function sourceImageVariantUrls(image: TopicRecordImage): readonly string[] {
+  return [image.url, ...(image.aliases ?? [])];
+}
+
 /**
  * 归档用的正文：页面那份被折叠截断时，用接口那份补齐。
  *
- * 判据是长度——接口正文明显更长，就说明页面上还是折叠态。留一点余量（15% 且至少 120 字），
- * 免得因为页面多了「赞」「评论」这类零星文案就误判。
+ * 这里的 apiText 已经靠 topicId / 正文匹配严格对到同一篇；因此只要接口正文更长，
+ * 多出的哪怕只是短尾巴也必须采用。旧的“15% 且至少 120 字”余量会稳定丢掉
+ * 1–119 字结尾，而正文容器本身并不包含赞、评论等外围文案。
  *
  * 补齐时图片要从页面那份搬过来：接口正文里图片只是占位标记，真地址在 DOM 上。
  * 全程只操作**克隆**，绝不改动页面本身——用户正在肉眼核对。
@@ -146,16 +159,170 @@ export function completeContent(
   document: Document,
   domContent: Element,
   apiText: string | undefined,
+  sourceCoversDom = false,
+  sourceImages: readonly TopicRecordImage[] = [],
+  sourceAttachments: readonly TopicRecordAttachment[] = [],
+  sourceMediaProven = false,
 ): Element {
   const domText = elementText(domContent);
-  if (!apiText) return domContent;
+  if (apiText === undefined) return domContent;
   const apiLength = stripInlineMarkup(apiText).replace(/\s+/g, '').length;
   const domLength = domText.replace(/\s+/g, '').length;
-  if (apiLength < domLength * 1.15 || apiLength < domLength + 120) return domContent;
+  const apiContent = document.createElement('div');
+  apiContent.innerHTML = inlineMarkupToHtml(apiText);
 
-  const merged = document.createElement('div');
-  merged.innerHTML = inlineMarkupToHtml(apiText);
-  for (const image of domContent.querySelectorAll('img')) merged.append(image.cloneNode(true));
+  for (const image of sourceImages) {
+    const variants = new Set(sourceImageVariantUrls(image));
+    const matching = [...apiContent.querySelectorAll<HTMLImageElement>('img[src]')]
+      .filter(candidate => variants.has(candidate.src));
+    const element = matching.shift() ?? document.createElement('img');
+    // DOM/API 可能渲染 large/thumbnail；归档始终收敛到来源声明的最高质量 original。
+    element.src = image.url;
+    if (image.alt) element.alt = image.alt;
+    for (const duplicate of matching) duplicate.remove();
+    if (!element.parentElement) apiContent.append(element);
+  }
+  for (const attachment of sourceAttachments) {
+    if ([...apiContent.querySelectorAll<HTMLAnchorElement>('a[href]')]
+      .some(candidate => candidate.href === attachment.url)) continue;
+    const element = document.createElement('a');
+    element.href = attachment.url;
+    element.textContent = attachment.title ?? '附件';
+    apiContent.append(element);
+  }
+
+  if (sourceCoversDom || apiLength > domLength) {
+    // 来源正文覆盖当前 DOM 且资源 schema 也已证明时，来源就是权威副本；绝不能再把
+    // 虚拟列表上一帖残留的 DOM 图片/链接无条件粘回去。
+    if (sourceCoversDom && sourceMediaProven) return apiContent;
+    // 未证明媒体 schema 的兼容旧路径仍保留 DOM 资源，但上游只能标 unknown。
+    for (const image of domContent.querySelectorAll('img')) {
+      apiContent.append(image.cloneNode(true));
+    }
+    return withMissingLinkedArticleUrls(document, apiContent, domContent);
+  }
+
+  // 可见文字相等并不代表结构等价：DOM 的 web-card 可能只渲染标题、不带 href，
+  // API 同一段 `<e type="web">` 却是发现并补取链接长文的唯一入口。保留较丰富 DOM，
+  // 只以空导航节点补上 exact article URL，既不重复标题文字，也不丢 DOM 排版/图片。
+  return withMissingLinkedArticleUrls(document, domContent, apiContent);
+}
+
+/**
+ * 无 data-topic-id 的详情容器必须与 URL 对应的来源正文兼容。
+ * 允许 DOM 是 API 正文的同起点首段（SPA 尚未挂尾段），但不允许 DOM 更长或无关；
+ * 一旦通过，归档仍以来源正文为主，避免把上一页残留 DOM 挂到新 URL 上。
+ */
+function detailDomMatchesSourceBody(content: Element, sourceBody: string): boolean {
+  const clone = content.cloneNode(true) as Element;
+  // 提问者标签是页面渲染元信息，接口正文只含问题/回答本身；不剥掉会让合法问答
+  // 永远与来源正文“不兼容”。提问者另由 questioner 字段保留。
+  for (const label of clone.querySelectorAll('.question-owner')) label.remove();
+  for (const candidate of clone.querySelectorAll(ZSXQ_EXPAND_CONTROL_SELECTOR)) {
+    if (isZsxqBodyUiControl(candidate)) candidate.remove();
+  }
+  const dom = normalizeForMatch(elementText(clone), 200_000);
+  const source = normalizeForMatch(sourceBody, 200_000);
+  if (!dom || !source) return dom === source;
+  // 完整相等本身就是精确证据，短帖不受前缀推断的最短长度限制。
+  if (dom === source) return true;
+  return dom.length >= 20 && source.startsWith(dom);
+}
+
+function canonicalBodyAssetUrl(value: string, base: string): string | undefined {
+  try {
+    const url = new URL(value, base);
+    if (url.protocol !== 'https:' && url.protocol !== 'http:') return undefined;
+    url.hash = '';
+    return url.href;
+  } catch {
+    return undefined;
+  }
+}
+
+/** 当前 DOM 只能缺少尚未挂载的来源资源，不能多出来源没有的上一帖图片/链接。 */
+function sourceAssetsCoverDom(
+  content: Element,
+  sourceBody: string,
+  sourceImages: readonly TopicRecordImage[],
+  sourceAttachments: readonly TopicRecordAttachment[],
+): boolean {
+  const base = content.ownerDocument.baseURI;
+  const expected = new Set<string>();
+  for (const image of sourceImages) {
+    for (const variant of sourceImageVariantUrls(image)) {
+      const url = canonicalBodyAssetUrl(variant, base);
+      if (url) expected.add(url);
+    }
+  }
+  for (const attachment of sourceAttachments) {
+    const url = canonicalBodyAssetUrl(attachment.url, base);
+    if (url) expected.add(url);
+  }
+  const api = content.ownerDocument.createElement('div');
+  api.innerHTML = inlineMarkupToHtml(sourceBody);
+  for (const candidate of api.querySelectorAll<HTMLAnchorElement>('a[href]')) {
+    const url = canonicalBodyAssetUrl(candidate.getAttribute('href') ?? '', base);
+    if (url) expected.add(url);
+  }
+
+  const observed: string[] = [];
+  const rememberObserved = (raw: string): void => {
+    if (!raw.trim()) return;
+    const url = canonicalBodyAssetUrl(raw, base);
+    if (url) observed.push(url);
+  };
+  const rememberSrcset = (raw: string): void => {
+    for (const candidate of raw.split(',')) {
+      const value = candidate.trim().split(/\s+/u)[0];
+      if (value) rememberObserved(value);
+    }
+  };
+  for (const image of content.querySelectorAll<HTMLImageElement>('img')) {
+    const raw = image.getAttribute('data-src') ?? image.getAttribute('src') ?? '';
+    rememberObserved(raw);
+    rememberSrcset(image.getAttribute('srcset') ?? '');
+  }
+  for (const anchor of content.querySelectorAll<HTMLAnchorElement>('a[href]')) {
+    rememberObserved(anchor.getAttribute('href') ?? '');
+  }
+  for (const media of content.querySelectorAll<HTMLElement>(
+    'video, audio, source, track, iframe, embed',
+  )) {
+    rememberObserved(media.getAttribute('src') ?? '');
+    rememberSrcset(media.getAttribute('srcset') ?? '');
+    rememberObserved(media.getAttribute('poster') ?? '');
+  }
+  for (const object of content.querySelectorAll<HTMLElement>('object[data]')) {
+    rememberObserved(object.getAttribute('data') ?? '');
+  }
+  return observed.every(url => expected.has(url));
+}
+
+function linkedArticleUrlsIn(root: Element): Set<string> {
+  const urls = new Set<string>();
+  for (const anchor of root.querySelectorAll<HTMLAnchorElement>('a[href]')) {
+    const normalized = normalizedLinkedArticleHref(anchor.getAttribute('href') ?? '');
+    if (normalized) urls.add(normalized);
+  }
+  return urls;
+}
+
+function withMissingLinkedArticleUrls(
+  document: Document,
+  primary: Element,
+  secondary: Element,
+): Element {
+  const present = linkedArticleUrlsIn(primary);
+  const missing = [...linkedArticleUrlsIn(secondary)].filter(url => !present.has(url));
+  if (missing.length === 0) return primary;
+  const merged = primary.cloneNode(true) as Element;
+  for (const url of missing) {
+    const anchor = document.createElement('a');
+    anchor.setAttribute('href', url);
+    // URL 是恢复链路的结构证据；可见标题已经存在于 primary，空节点避免正文重复。
+    merged.append(anchor);
+  }
   return merged;
 }
 
@@ -166,6 +333,105 @@ export function completeContent(
  * 不是作者写的内容，下游还得再洗一遍。
  */
 const UI_NOISE = /(^|\n)\s*(展开全部|展开全文|收起|阅读全文|显示全部|全文)\s*(?=\n|$)/g;
+const TRUNCATION_CONTROL_LABELS = new Set([
+  '展开', '展开全部', '展开全文', '全文', '阅读全文', '显示全部',
+]);
+const BODY_UI_CONTROL_LABELS = new Set([...TRUNCATION_CONTROL_LABELS, '收起']);
+export const ZSXQ_EXPAND_CONTROL_SELECTOR = 'button, [role="button"], a, span, div, p, em, i';
+
+/** 点击器与完整性门禁共用同一套文案归一，避免「点了却不检查」的漂移。 */
+export function zsxqExpandLabel(element: Element): string {
+  return (element.textContent ?? '')
+    .replace(/^[\s.。·・…]+/u, '')
+    .replace(/[\s.。·・…]+$/u, '');
+}
+
+function normalizedLinkedArticleHref(value: string): string | undefined {
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    return undefined;
+  }
+  if (
+    url.protocol !== 'https:'
+    || url.hostname.toLowerCase() !== 'articles.zsxq.com'
+    || url.username
+    || url.password
+    || url.port
+    || !/^\/id_[A-Za-z0-9]+\.html\/?$/u.test(url.pathname)
+  ) return undefined;
+  url.hostname = 'articles.zsxq.com';
+  url.pathname = url.pathname.replace(/\/+$/u, '');
+  url.search = '';
+  url.hash = '';
+  return url.href;
+}
+
+function isLinkedArticleHref(value: string): boolean {
+  return normalizedLinkedArticleHref(value) !== undefined;
+}
+
+function isLinkedArticleNavigation(element: Element): boolean {
+  // 带显式展开语义的节点本身就是控件。即使它内部恰好包着长文链接，也不能把
+  // 外层控件当作“纯布局包装”豁免，否则尚未展开的正文会被误报为完整。
+  if (element.matches('button, [role="button"], [aria-expanded], [aria-controls]')) {
+    return false;
+  }
+
+  const anchor = element.closest('a[href]');
+  if (anchor && isLinkedArticleHref(anchor.getAttribute('href') ?? '')) return true;
+
+  /*
+   * 真实页面会在长文链接外再套纯布局节点：
+   * `<div><a href="..."><span>全文</span></a></div>`。span / a 能靠 closest 豁免，
+   * 外层 div 却没有 anchor 祖先，而且 textContent 仍恰好是“全文”，此前会被误判为
+   * 展开控件。只有“至少包含一个合法长文链接，且移除这些链接后不剩任何可见文字”
+   * 才把包装节点也视为导航；夹带真正按钮或其他文案的容器不会被放行。
+   */
+  const clone = element.cloneNode(true) as Element;
+  let linked = 0;
+  for (const candidate of clone.querySelectorAll<HTMLAnchorElement>('a[href]')) {
+    if (!isLinkedArticleHref(candidate.getAttribute('href') ?? '')) continue;
+    linked += 1;
+    candidate.remove();
+  }
+  return linked > 0 && elementText(clone).trim().length === 0;
+}
+
+/** 合法长文链接是导航，不是 DOM 展开控件；其可见文案可能是“全文/阅读全文/展开全文”等。 */
+export function isZsxqExpandControl(element: Element): boolean {
+  const label = zsxqExpandLabel(element);
+  if (!TRUNCATION_CONTROL_LABELS.has(label)) return false;
+  return !isLinkedArticleNavigation(element);
+}
+
+/** 展开后的“收起”仍是 UI 噪声，但不是正文被截断的证据。 */
+function isZsxqBodyUiControl(element: Element): boolean {
+  const label = zsxqExpandLabel(element);
+  if (!BODY_UI_CONTROL_LABELS.has(label)) return false;
+  return !isLinkedArticleNavigation(element);
+}
+
+/** 页面仍有可展开控件就说明当前 DOM 不是可归档全文；长文链接本身的“全文”不算。 */
+export function hasTruncationControl(content: Element): boolean {
+  const candidates = [
+    ...(content.matches(ZSXQ_EXPAND_CONTROL_SELECTOR) ? [content] : []),
+    ...content.querySelectorAll(ZSXQ_EXPAND_CONTROL_SELECTOR),
+  ];
+  for (const candidate of candidates) {
+    if (isZsxqExpandControl(candidate)) return true;
+  }
+  // 兜底正则用于“控件文案没有独立节点”的页面，但合法长文导航也可能正好位于正文末尾。
+  // 在克隆上移除这些导航后再判，避免 fallback 把刚刚豁免的链接重新判回截断。
+  const withoutArticleLinks = content.cloneNode(true) as Element;
+  for (const anchor of withoutArticleLinks.querySelectorAll<HTMLAnchorElement>('a[href]')) {
+    if (isLinkedArticleHref(anchor.getAttribute('href') ?? '')) anchor.remove();
+  }
+  return /(?:展开|展开全部|展开全文|阅读全文|显示全部)\s*$/u.test(
+    elementText(withoutArticleLinks),
+  );
+}
 
 /** 归档正文里剔掉 UI 文案；只去整行，正文里正常出现的这些词不动。 */
 export function stripUiNoise(value: string): string {
@@ -239,7 +505,8 @@ function deriveTitle(content: Element, document: Document): string {
  *
  * 实测这个站点的 DOM 上**没有**帖子号：没有 <a>、没有 data-*、整棵子树找不到长数字。
  * 因此主要来源是 topicIndex（旁观应用自己的接口响应得到的「正文 → 帖子号」对照表）；
- * DOM 上的链接/属性仍然照查一遍，将来页面结构变了也能直接用上。
+ * 任意后代链接/长数字不能当本帖身份：正文可能引用另一帖，评论和作者组件也有长 ID。
+ * 只有严格正文索引，或容器自身语义明确的 `data-topic-id`，才能作为本帖证据。
  */
 export function topicUrlOf(
   container: Element,
@@ -251,29 +518,12 @@ export function topicUrlOf(
    */
   bodyText?: string | readonly string[],
 ): URL | undefined {
-  const link = container.querySelector<HTMLAnchorElement>('a[href*="/topic/"]');
-  const href = link?.getAttribute('href');
-  if (href) {
-    try {
-      const resolved = new URL(href, pageUrl);
-      if (isTopicDetail(resolved)) return resolved;
-    } catch {
-      // 继续尝试其它策略。
-    }
-  }
-
   const groupId = pageUrl.pathname.match(/\/group\/(\d+)/)?.[1];
   if (!groupId) return undefined;
-
-  // 兜底：万一哪天页面把 id 放回了 DOM（长数字串最像帖子号）。
-  const elements = [container, ...container.querySelectorAll('*')];
-  for (const element of elements.slice(0, 200)) {
-    for (const attribute of element.getAttributeNames()) {
-      if (!/^(id|data-|ng-reflect-)/.test(attribute)) continue;
-      const topicId = (element.getAttribute(attribute) ?? '').match(/\b(\d{15,25})\b/)?.[1];
-      if (topicId) return new URL(`/group/${groupId}/topic/${topicId}`, pageUrl);
-    }
-  }
+  const directTopicId = container.getAttribute('data-topic-id');
+  const validDirectTopicId = directTopicId && /^\d{15,25}$/.test(directTopicId)
+    ? directTopicId
+    : undefined;
 
   // 主路径：用正文把这条帖子对回接口响应里的 topic_id。逐个候选试，第一个对上就用它。
   const candidates = bodyText === undefined
@@ -281,7 +531,28 @@ export function topicUrlOf(
     : typeof bodyText === 'string' ? [bodyText] : [...bodyText];
   for (const candidate of candidates) {
     const fromIndex = topics?.find(candidate);
-    if (fromIndex) return new URL(`/group/${groupId}/topic/${fromIndex}`, pageUrl);
+    if (fromIndex) {
+      // 虚拟列表会先把根 id 切到 B、稍后才把 A 的正文换掉；两份显式身份冲突时
+      // 当前帧不可归档，也不能先按 A 的正文替 B 做业务过滤。
+      if (validDirectTopicId && validDirectTopicId !== fromIndex) return undefined;
+      return new URL(`/group/${groupId}/topic/${fromIndex}`, pageUrl);
+    }
+  }
+  // 图片-only 身份也只能看正文块；评论头像/评论配图命中另一帖 source image 不能认号。
+  const imageUrls = contentBlocks(container)
+    .flatMap(block => [...block.querySelectorAll<HTMLImageElement>('img')])
+    .map(image => image.getAttribute('data-src') ?? image.getAttribute('src') ?? '')
+    .map(value => canonicalBodyAssetUrl(value, pageUrl.href))
+    .filter((value): value is string => value !== undefined);
+  const fromImages = topics?.findByImageUrls(imageUrls);
+  if (fromImages?.status === 'unique') {
+    if (validDirectTopicId && validDirectTopicId !== fromImages.topicId) return undefined;
+    return new URL(`/group/${groupId}/topic/${fromImages.topicId}`, pageUrl);
+  }
+  if (fromImages?.status === 'ambiguous') return undefined;
+  // 若站点未来把本帖 id 明确放在帖子根节点上，可作为保守兜底；绝不扫描后代。
+  if (validDirectTopicId) {
+    return new URL(`/group/${groupId}/topic/${validDirectTopicId}`, pageUrl);
   }
   return undefined;
 }
@@ -297,6 +568,10 @@ export interface ListEntry {
   document?: ReturnType<typeof buildDocument>;
   /** 无法采集的原因，如实展示给用户。 */
   reason?: string;
+  /** 已能确定自身 URL 的业务过滤项仍要跨边界保留，供固定计划审计。 */
+  url?: string;
+  /** DOM/API 仍可能补齐；推进列表时不能把该节点永久标成已处理。 */
+  retryable?: boolean;
 }
 
 export interface ListExtraction {
@@ -313,9 +588,7 @@ export interface ListExtraction {
  */
 export function listBodyText(container: Element): string {
   const blocks = contentBlocks(container);
-  return blocks.length > 0
-    ? blocks.map(block => elementText(block)).join(' ')
-    : elementText(container);
+  return blocks.map(block => elementText(block)).join(' ');
 }
 
 /**
@@ -357,16 +630,90 @@ export function extractZsxqList(
     // 问答帖有「问题」「回答」两块正文：两块都要归档（丢掉回答等于丢掉一半内容），
     // 对号时也要一块块单独试。
     const blocks = contentBlocks(container);
-    const content = contentRoot(document, blocks, container);
-    const text = listBodyText(container);
-    const title = deriveTitle(blocks[0] ?? content, document);
-    // 用正文（而不是整个节点）去对号：整个节点还带着作者名、时间、点赞数这些外围文案。
-    const topicUrl = topicUrlOf(container, url, topics, matchTexts(container, blocks));
-    if (!text || text.length < 20) {
+    if (blocks.length === 0) {
       skipped += 1;
-      entries.push({ container, key, title: title || '（空内容）', reason: '正文太短或为空' });
+      entries.push({
+        container,
+        key,
+        title: titleFromText(elementText(container)) || '（无法识别正文）',
+        reason: '未识别到这条帖子的正文结构，页面可能已改版；为避免把作者、评论和操作栏冒充完整正文，本条已跳过。',
+        retryable: true,
+      });
       continue;
     }
+    const content = contentRoot(document, blocks)!;
+    const text = listBodyText(container);
+    let title = deriveTitle(blocks[0] ?? content, document);
+    // 用正文（而不是整个节点）去对号：整个节点还带着作者名、时间、点赞数这些外围文案。
+    const topicUrl = topicUrlOf(container, url, topics, matchTexts(container, blocks));
+    if (!topicUrl) {
+      skipped += 1;
+      // 没有本帖身份时，任何选题/广告命中都不能算“可审计的业务排除”：正文可能属于另一条，
+      // 也没有规范 URL 可供复核。保留为 retryable，等 API topic id 到达后再做终局判断。
+      entries.push({
+        container,
+        key,
+        title,
+        reason: '这条帖子的编号没截到（编号只出现在站点接口响应里，不在页面上），'
+          + '所以无法确定它自己的网址，只能跳过。多半是它在插件启动前就已经加载在页面上了；'
+          + '把分类切走再切回来，让站点重新请求一次即可。',
+        retryable: true,
+      });
+      continue;
+    }
+    const topicId = topicUrl.pathname.match(/\/topic\/(\d+)/)?.[1];
+    if (topicId && topics?.sourceBodyConflicted(topicId)) {
+      skipped += 1;
+      entries.push({
+        container,
+        key,
+        title,
+        url: topicUrl.href,
+        reason: '同一帖子编号捕获到互不兼容的来源正文或资源版本，无法证明当前版本；将刷新后重试。',
+        retryable: true,
+      });
+      continue;
+    }
+    const sourceBody = topicId ? topics?.sourceBodyOf(topicId) : undefined;
+    const sourceBodyProven = Boolean(topicId && topics?.hasSourceBody(topicId));
+    const sourceMediaProven = Boolean(topicId && topics?.sourceMediaProvenOf(topicId));
+    const sourceImages = topicId ? topics?.sourceImagesOf(topicId) ?? [] : [];
+    const sourceAttachments = topicId ? topics?.sourceAttachmentsOf(topicId) ?? [] : [];
+    const sourceBodyCoversDom = sourceBody !== undefined
+      && detailDomMatchesSourceBody(content, sourceBody);
+    const sourceCoversDom = sourceBodyCoversDom && (
+      !sourceMediaProven
+      || sourceAssetsCoverDom(content, sourceBody, sourceImages, sourceAttachments)
+    );
+    if (sourceBodyProven && !sourceCoversDom) {
+      skipped += 1;
+      entries.push({
+        container,
+        key,
+        title,
+        url: topicUrl.href,
+        reason: '帖子根编号与当前 DOM 正文/资源尚未同步，可能仍是虚拟列表上一帖残留；将继续等待。',
+        retryable: true,
+      });
+      continue;
+    }
+    const sourceContentProven = sourceBodyProven && sourceCoversDom && sourceMediaProven;
+    if ((!text || text.length < 20) && !sourceContentProven) {
+      skipped += 1;
+      entries.push({
+        container,
+        key,
+        title: title || '（空内容）',
+        url: topicUrl.href,
+        reason: '正文太短或为空，且当前来源尚未证明所有正文组件与媒体都已完整',
+        retryable: true,
+      });
+      continue;
+    }
+    title = title
+      || sourceImages.find(image => image.alt)?.alt
+      || sourceAttachments.find(attachment => attachment.title)?.title
+      || `图片/附件内容 ${topicId?.slice(-6) ?? ''}`.trim();
     // 选题过滤：用户明确不看的类别（如打新）不入库，但**照样出现在明细里**，
     // 状态是已跳过、原因写明类别——绝不静默丢弃。
     const excluded = excludedBy(text);
@@ -376,6 +723,7 @@ export function extractZsxqList(
         container,
         key,
         title,
+        ...(topicUrl ? { url: topicUrl.href } : {}),
         // 命中的词一并报出来：误伤时不报就只能靠猜（「香港保险」被判成楼市那次就卡在这）。
         reason: `${excluded.label}（按选题偏好跳过，命中：${excluded.hits.join('、')}）`,
       });
@@ -392,20 +740,8 @@ export function extractZsxqList(
         container,
         key,
         title,
+        ...(topicUrl ? { url: topicUrl.href } : {}),
         reason: `${advertisement.label}（按硬证据跳过，依据：${advertisement.hits.join('；')}）`,
-      });
-      continue;
-    }
-    if (!topicUrl) {
-      skipped += 1;
-      // 说清是什么、为什么、怎么办——「没能对上帖子号」六个字用户根本无从下手。
-      entries.push({
-        container,
-        key,
-        title,
-        reason: '这条帖子的编号没截到（编号只出现在站点接口响应里，不在页面上），'
-          + '所以无法确定它自己的网址，只能跳过。多半是它在插件启动前就已经加载在页面上了；'
-          + '把分类切走再切回来，让站点重新请求一次即可。',
       });
       continue;
     }
@@ -415,7 +751,6 @@ export function extractZsxqList(
     // 「23年06月18日」甚至「3天前」，解析不出来就只能退回采集时间——
     // 实测一篇 2023-06-18 的帖子被记成了采集当天的 2026-08-01。
     // 既然已经靠接口响应对上了帖子号，同一条记录里的发布时间当然也该用上。
-    const topicId = topicUrl.pathname.match(/\/topic\/(\d+)/)?.[1];
     const publishedAt =
       (topicId ? topics?.publishedAtOf(topicId) : undefined)
       ?? parsePublishedAt(elementText(time), time?.getAttribute('datetime'));
@@ -425,11 +760,19 @@ export function extractZsxqList(
     const archived = completeContent(
       document,
       content,
-      topicId ? topics?.fullTextOf(topicId) : undefined,
+      sourceBody,
+      sourceCoversDom,
+      sourceImages,
+      sourceAttachments,
+      sourceMediaProven,
     );
     // 正文里还挂着「展开全部」= 这一条**确定是截断的**。如实标出来，
     // 让归档侧读字段跳过，而不是靠字数猜（实测字数启发式误报率 78%）。
-    const truncated = /展开全部|展开全文|阅读全文/.test(elementText(archived));
+    const sourceBodyTruncated = Boolean(topicId && topics?.sourceBodyTruncatedOf(topicId));
+    const visibleControl = hasTruncationControl(archived);
+    const truncated = sourceBodyTruncated || visibleControl
+      ? true
+      : sourceContentProven ? false : undefined;
     // 问答帖的提问者：`<div class="question-owner"><span>依依</span> 提问：</div>`
     const questioner = elementText(container.querySelector('.question-owner span'));
     const authorRole = authorRoleOf(container);
@@ -447,11 +790,14 @@ export function extractZsxqList(
         now,
         ...(author ? { author } : {}),
         ...(publishedAt ? { publishedAt } : {}),
-        ...(truncated ? { truncated: true } : {}),
+        ...(truncated !== undefined ? { truncated } : {}),
         ...(questioner ? { questioner } : {}),
         sourceMetadata: {
           ...(authorRole ? { authorRole } : {}),
           ...(topicId ? { topicId } : {}),
+          sourceBodyProven,
+          sourceMediaProven,
+          sourceCoversDom,
           ...(viewLabel ? { viewLabels: viewLabel } : {}),
         },
       }),
@@ -460,15 +806,140 @@ export function extractZsxqList(
   return { entries, skipped, total: containers.length };
 }
 
-/** 长文页的正文容器候选（Angular 应用，类名可能变，所以还留了兜底）。 */
-const ARTICLE_SELECTORS = [
+/** 长文页的强语义正文容器；命中任一时绝不再看裸 `.content` 或密度兜底。 */
+const ARTICLE_STRONG_SELECTORS = [
   '.article-content',
   '.article-container .content',
+  '.article-container article',
+  'app-article article',
+  'main article',
+  'body > article',
   'app-article .content',
   '.rich_media_content',
-  'article',
-  '.content',
 ];
+/** 裸 `.content` 只能说明“可能是内容”，无法排除推荐、评论等页面区域。 */
+const ARTICLE_WEAK_SELECTORS = ['.content'];
+const ARTICLE_ROOT_SELECTOR = 'app-article, article, main, .article-container, .rich_media_content';
+/** 这些区域即使复用正文类名，也明确不是当前 URL 的可见主体。 */
+const ARTICLE_NON_BODY_SELECTOR = [
+  'aside',
+  'nav',
+  'footer',
+  '[hidden]',
+  '[aria-hidden="true"]',
+  '[role="complementary"]',
+  '[role="navigation"]',
+  '[class*="recommend" i]',
+  '[class*="related" i]',
+  '[class*="comment" i]',
+  '[style*="display:none" i]',
+  '[style*="display: none" i]',
+].join(', ');
+
+function articleElementHidden(element: Element): boolean {
+  const view = element.ownerDocument.defaultView;
+  if (!view) return false;
+  try {
+    const style = view.getComputedStyle(element);
+    return style.display === 'none'
+      || style.visibility === 'hidden'
+      || style.visibility === 'collapse'
+      || style.contentVisibility === 'hidden'
+      || style.opacity === '0';
+  } catch {
+    return false;
+  }
+}
+
+/** 候选自身可见不够；旧 SPA pane 常由祖先 class 在样式表里隐藏。 */
+function articleCandidateVisible(element: Element): boolean {
+  for (let current: Element | null = element; current; current = current.parentElement) {
+    if (current.matches(ARTICLE_NON_BODY_SELECTOR) || articleElementHidden(current)) return false;
+  }
+  return true;
+}
+
+/**
+ * 强正文根内也可能嵌着推荐、评论或隐藏旧快照。在克隆上删除它们，
+ * 绝不改用户正在查看的页面；原节点和克隆按前序一一对应。
+ */
+function sanitizedArticleBlock(block: Element): Element {
+  const clone = block.cloneNode(true) as Element;
+  const originals = [block, ...block.querySelectorAll('*')];
+  const clones = [clone, ...clone.querySelectorAll('*')];
+  for (let index = 1; index < originals.length; index += 1) {
+    const original = originals[index]!;
+    if (!original.matches(ARTICLE_NON_BODY_SELECTOR) && !articleElementHidden(original)) continue;
+    clones[index]?.remove();
+  }
+  return clone;
+}
+
+/**
+ * 从同一可靠性层级里挑正文。
+ *
+ * - DOM 祖先/后代或文本包含的是同一份正文的重复表示，只留信息更完整的一份；
+ * - 同一文章根下、命中同一选择器的并列块有明确“分章节渲染”证据，按 DOM 顺序合并；
+ * - 其它候选可能是“摘要 + 正文”或隐藏的旧版本，只选文字最丰富的一组。
+ */
+function articleContentForSelectors(
+  document: Document,
+  selectors: readonly string[],
+): { content: Element; ambiguous: boolean } | undefined {
+  const found = [...document.querySelectorAll(selectors.join(', '))]
+    .filter(articleCandidateVisible);
+  const outermost = found.filter(
+    node => !found.some(other => other !== node && other.contains(node)),
+  );
+  const sanitized = new Map(outermost.map(node => [node, sanitizedArticleBlock(node)]));
+  const normalized = new Map(
+    outermost.map(node => [
+      node,
+      stripUiNoise(elementText(sanitized.get(node)!)).replace(/\s+/g, ''),
+    ]),
+  );
+  const distinct = outermost.filter((node) => {
+    const text = normalized.get(node) ?? '';
+    if (!text) return false;
+    return !outermost.some((other) => {
+      if (other === node) return false;
+      const otherText = normalized.get(other) ?? '';
+      return otherText.length > text.length && otherText.includes(text);
+    });
+  });
+
+  const groups: Array<{
+    scope: Element | null;
+    selector: string;
+    blocks: Element[];
+  }> = [];
+  for (const block of distinct) {
+    const selector = selectors.find(candidate => block.matches(candidate))!;
+    const root = block.closest(ARTICLE_ROOT_SELECTOR);
+    const parent = block.parentElement;
+    // 未知文章根下的同类直接兄弟仍是明确的分块证据；但 body/html 太宽，不能据此拼全页。
+    const scope = root
+      ?? (parent && parent.tagName !== 'BODY' && parent.tagName !== 'HTML' ? parent : null);
+    const group = scope
+      ? groups.find(candidate => candidate.scope === scope && candidate.selector === selector)
+      : undefined;
+    const cleanBlock = sanitized.get(block)!;
+    if (group) group.blocks.push(cleanBlock);
+    else groups.push({ scope, selector, blocks: [cleanBlock] });
+  }
+
+  let richest: Element | undefined;
+  let richestLength = 0;
+  for (const group of groups) {
+    const content = contentRoot(document, group.blocks)!;
+    const length = stripUiNoise(elementText(content)).replace(/\s+/g, '').length;
+    if (length > richestLength) {
+      richest = content;
+      richestLength = length;
+    }
+  }
+  return richest ? { content: richest, ambiguous: groups.length > 1 } : undefined;
+}
 
 /**
  * 正文密度兜底：选择器全落空时，挑文字最多的那个块。
@@ -507,14 +978,26 @@ export function extractZsxqArticle(document: Document, url: URL, now: Clock) {
   if (LOGIN_SELECTORS.some(selector => document.querySelector(selector))) {
     throw new ExtractionError('AUTH_REQUIRED', '请先登录知识星球，再采集这篇长文');
   }
-  const content = firstWithin(document, ARTICLE_SELECTORS) ?? densestBlock(document);
+  const strongChoice = articleContentForSelectors(document, ARTICLE_STRONG_SELECTORS);
+  const weakChoice = strongChoice
+    ? undefined
+    : articleContentForSelectors(document, ARTICLE_WEAK_SELECTORS);
+  const content = strongChoice?.content ?? weakChoice?.content ?? densestBlock(document);
   if (!content) {
     throw new ExtractionError(
       'CONTENT_EMPTY',
       '长文正文还没渲染出来（这一页是单页应用，内容要等接口返回）。稍等片刻再试。',
     );
   }
-  const text = stripUiNoise(elementText(content));
+  const rawText = elementText(content);
+  const text = stripUiNoise(rawText);
+  // 展开控件才是正文被截断的正向证据。裸 `.content`、密度兜底和歧义强候选
+  // 都只能说明完整性未知；交给有界重试继续观察，最终仍会按不完整处理。
+  const truncated = hasTruncationControl(content)
+    ? true
+    : strongChoice && !strongChoice.ambiguous
+      ? false
+      : undefined;
   if (text.length < 100) {
     throw new ExtractionError('CONTENT_EMPTY', '长文正文过短，多半是还没加载完');
   }
@@ -528,12 +1011,19 @@ export function extractZsxqArticle(document: Document, url: URL, now: Clock) {
     content,
     url,
     now,
+    ...(truncated === undefined ? {} : { truncated }),
     ...(author ? { author } : {}),
     ...(publishedAt ? { publishedAt } : {}),
   });
 }
 
-export function extractZsxq(document: Document, url: URL, now: Clock) {
+export function extractZsxq(
+  document: Document,
+  url: URL,
+  now: Clock,
+  topics?: TopicIndex,
+  requireTopicEvidence = false,
+) {
   if (LOGIN_SELECTORS.some(selector => document.querySelector(selector))) {
     throw new ExtractionError('AUTH_REQUIRED', '请先登录知识星球，再打开需要保存的单条内容');
   }
@@ -551,10 +1041,86 @@ export function extractZsxq(document: Document, url: URL, now: Clock) {
     );
   }
 
-  const container = containers[0] ?? document.body;
-  const content = firstWithin(container, CONTENT_SELECTORS) ?? container;
-  const text = elementText(content);
-  if (!text || text.length < 20) {
+  const targetTopicId = url.pathname.match(/\/topic\/(\d+)/)?.[1];
+  const semanticContainers = containers
+    .filter(isPost)
+    .filter(candidate => contentBlocks(candidate).length > 0);
+  const explicitTopicId = (candidate: Element): string | undefined => {
+    const value = candidate.getAttribute('data-topic-id');
+    return value && /^\d{15,25}$/.test(value) ? value : undefined;
+  };
+  const exactMatches = targetTopicId
+    ? semanticContainers.filter(candidate => explicitTopicId(candidate) === targetTopicId)
+    : [];
+  let container: Element;
+  if (exactMatches.length === 1) {
+    container = exactMatches[0]!;
+  } else {
+    const hasExplicitMismatch = semanticContainers.some(
+      candidate => explicitTopicId(candidate) !== undefined,
+    );
+    if (exactMatches.length > 1 || hasExplicitMismatch || semanticContainers.length > 1) {
+      throw new ExtractionError(
+        'UNSUPPORTED_LAYOUT',
+        '当前详情页同时存在多条帖子，无法证明哪个正文属于 URL 中的目标帖子身份；为避免串帖，本次未保存。',
+      );
+    }
+    container = semanticContainers[0]
+      ?? containers.filter(isPost)[0]
+      ?? document.body;
+  }
+  const blocks = contentBlocks(container);
+  const content = contentRoot(document, blocks);
+  if (!content) {
+    throw new ExtractionError(
+      'UNSUPPORTED_LAYOUT',
+      '未识别到帖子正文结构，页面可能已改版；为避免把作者、评论和操作栏冒充完整正文，本次未保存。',
+    );
+  }
+  if (targetTopicId && topics?.sourceBodyConflicted(targetTopicId)) {
+    throw new ExtractionError(
+      'CONTENT_EMPTY',
+      '同一帖子编号捕获到互不兼容的来源正文或资源版本，无法证明当前详情属于哪一版；将刷新后重试。',
+    );
+  }
+  if (requireTopicEvidence && (!targetTopicId || !topics?.hasSourceBody(targetTopicId))) {
+    throw new ExtractionError(
+      'CONTENT_EMPTY',
+      '当前构建尚未捕获该详情页经核验的精确正文来源记录，无法证明稳定 DOM 就是完整正文；将继续有界等待。',
+    );
+  }
+  // 详情页 URL 已精确给出 topic id；主世界钩子若已经捕获同 id 的 API 全文，必须像
+  // 列表路径一样用它补齐。DOM 可能永久只挂首段且没有展开控件，单看稳定 DOM 会把
+  // 这种半篇误证为完整；API 留存上限也同样是正向截断证据。
+  const sourceBody = targetTopicId ? topics?.sourceBodyOf(targetTopicId) : undefined;
+  const sourceBodyProven = Boolean(targetTopicId && topics?.hasSourceBody(targetTopicId));
+  const sourceImages = targetTopicId ? topics?.sourceImagesOf(targetTopicId) ?? [] : [];
+  const sourceAttachments = targetTopicId ? topics?.sourceAttachmentsOf(targetTopicId) ?? [] : [];
+  const sourceMediaProven = Boolean(targetTopicId && topics?.sourceMediaProvenOf(targetTopicId));
+  const sourceBodyCoversDom = sourceBody !== undefined
+    && detailDomMatchesSourceBody(content, sourceBody);
+  const sourceCoversDom = sourceBodyCoversDom && (
+    !sourceMediaProven
+    || sourceAssetsCoverDom(content, sourceBody, sourceImages, sourceAttachments)
+  );
+  if (sourceBody !== undefined && !sourceCoversDom) {
+    throw new ExtractionError(
+      'CONTENT_EMPTY',
+      '详情页当前 DOM 正文与 URL 对应来源正文不兼容，可能仍是上一帖残留；将继续等待页面切换完成。',
+    );
+  }
+  const archived = completeContent(
+    document,
+    content,
+    sourceBody,
+    sourceCoversDom,
+    sourceImages,
+    sourceAttachments,
+    sourceMediaProven,
+  );
+  const text = elementText(archived);
+  const sourceContentProven = sourceBodyProven && sourceCoversDom && sourceMediaProven;
+  if ((!text || text.length < 20) && !sourceContentProven) {
     throw new ExtractionError(
       'CONTENT_EMPTY',
       '未读到帖子正文：请确认页面已加载完成（必要时先点开「展开全文」）后重试',
@@ -563,27 +1129,37 @@ export function extractZsxq(document: Document, url: URL, now: Clock) {
 
   const time = firstWithin(container, TIME_SELECTORS);
   const author = elementText(firstWithin(container, AUTHOR_SELECTORS));
-  const publishedAt = parsePublishedAt(elementText(time), time?.getAttribute('datetime'));
+  const publishedAt = (targetTopicId ? topics?.publishedAtOf(targetTopicId) : undefined)
+    ?? parsePublishedAt(elementText(time), time?.getAttribute('datetime'));
   // 截断标志和提问者：**单条采集这条路原先没设**，于是按 URL 重采出来的 48 条
   // 一个 truncated 都没有，归档侧只能回去靠字数猜。两条路径必须给同样的字段。
-  const truncated = /展开全部|展开全文|阅读全文/.test(text);
+  const sourceBodyTruncated = Boolean(targetTopicId && topics?.sourceBodyTruncatedOf(targetTopicId));
+  const visibleControl = hasTruncationControl(archived);
+  const truncated = sourceBodyTruncated || visibleControl
+    ? true
+    : sourceContentProven ? false : undefined;
   const questioner = elementText(container.querySelector('.question-owner span'));
-  const topicId = url.pathname.match(/\/topic\/(\d+)/)?.[1];
   const authorRole = authorRoleOf(container);
   return buildDocument({
     source: 'zsxq',
     kind: 'post',
-    title: deriveTitle(content, document),
-    content,
+    title: deriveTitle(archived, document)
+      || sourceImages.find(image => image.alt)?.alt
+      || sourceAttachments.find(attachment => attachment.title)?.title
+      || `图片/附件内容 ${targetTopicId?.slice(-6) ?? ''}`.trim(),
+    content: archived,
     url,
     now,
     ...(author ? { author } : {}),
     ...(publishedAt ? { publishedAt } : {}),
-    ...(truncated ? { truncated: true } : {}),
+    ...(truncated !== undefined ? { truncated } : {}),
     ...(questioner ? { questioner } : {}),
     sourceMetadata: {
       ...(authorRole ? { authorRole } : {}),
-      ...(topicId ? { topicId } : {}),
+      ...(targetTopicId ? { topicId: targetTopicId } : {}),
+      sourceBodyProven,
+      sourceMediaProven,
+      sourceCoversDom,
     },
   });
 }

@@ -11,14 +11,18 @@ import {
   EXTENSION_REPLACED_CLOSE_CODE,
   EXTENSION_REPLACED_CLOSE_REASON,
   TRUSTED_EXTENSION_ID,
+  ZSXQ_COMPLETE_CONTENT_CAPABILITY,
   bridgeAuthorizedPayloadSchema,
   COLLECTION_PLAN_IDS,
+  collectionPlanAttemptSchema,
   descriptorForHost,
+  extensionHelloPayloadSchema,
   extensionPlanResultPayloadSchema,
   jobResultPayloadSchema,
   wsEnvelopeSchema,
   stableContentId,
   type CollectedDocument,
+  type CollectionPlanAttempt,
   type JobRecord,
   type WsEnvelope,
 } from '@data-collector/shared';
@@ -26,7 +30,7 @@ import { AccessTokenManager } from '../auth.js';
 import { loadConfig, type ConfigOverrides } from '../config.js';
 import { JobStore } from '../jobs/store.js';
 import type { ResolveAddresses } from '../library/assets.js';
-import { loadSinksConfig, SinkRouter } from '../sinks/index.js';
+import { loadSinksConfig, SinkRouter, type SinkResult } from '../sinks/index.js';
 import { attachExtensionWebSocket } from './websocket.js';
 import { bearerToken, HttpError, isLoopback, readJson, sendJson } from './http.js';
 import { existsSync } from 'node:fs';
@@ -60,12 +64,31 @@ import {
   type ExtensionPlanResult,
 } from '../plans/index.js';
 import { writePlanBenchmark } from '../plans/benchmark.js';
+import {
+  acquireArtifactLease,
+  type ArtifactLease,
+} from '../../../../scripts/artifact-lease.mjs';
 
 /** 删除请求：要么给明确的 id 列表，要么显式 all:true —— 不接受隐式全删。 */
 const deleteLibrarySchema = z.object({
   ids: z.array(z.string().min(1).max(200)).max(2_000).optional(),
   all: z.boolean().optional(),
 });
+
+const ZSXQ_COMPLETE_CONTENT_MINIMUM_EXTENSION_VERSION = '0.4.29';
+
+function versionAtLeast(actual: string | undefined, minimum: string): boolean {
+  if (!actual) return false;
+  const parse = (value: string): number[] =>
+    value.split('.').slice(0, 3).map(part => Number.parseInt(part, 10));
+  const left = parse(actual);
+  const right = parse(minimum);
+  if (left.length !== 3 || right.length !== 3 || [...left, ...right].some(Number.isNaN)) return false;
+  for (let index = 0; index < 3; index += 1) {
+    if (left[index] !== right[index]) return left[index]! > right[index]!;
+  }
+  return true;
+}
 
 
 const createJobSchema = z.object({
@@ -76,9 +99,16 @@ const createJobSchema = z.object({
   sinks: z.array(z.string().trim().min(1).max(100)).max(10).optional(),
   batchId: z.string().trim().min(1).max(200).optional(),
   planId: z.enum(COLLECTION_PLAN_IDS).optional(),
+  attempt: collectionPlanAttemptSchema.optional(),
 }).superRefine((input, context) => {
   if (Boolean(input.batchId) !== Boolean(input.planId)) {
     context.addIssue({ code: 'custom', path: ['batchId'], message: 'batchId 与 planId 必须同时提供' });
+  }
+  if (input.planId === 'zsxq-chen-teacher' && !input.attempt) {
+    context.addIssue({ code: 'custom', path: ['attempt'], message: '知识星球计划子任务必须绑定尝试令牌' });
+  }
+  if (input.attempt && input.planId !== 'zsxq-chen-teacher') {
+    context.addIssue({ code: 'custom', path: ['attempt'], message: '只有知识星球计划支持尝试令牌' });
   }
 });
 const progressSchema = z.object({ stage: z.enum(['collecting']) });
@@ -104,17 +134,20 @@ export interface StartBridgeOptions extends ConfigOverrides {
   resolveAddresses?: ResolveAddresses;
   reveal?: (path: string) => Promise<void>;
   /**
-   * 自更新：仓库根目录。服务常驻在用户机器上，顺手把代码拉新并重新构建，
-   * 用户只剩「重新加载插件」一步。
+   * artifact authority：稳定扩展产物所在的仓库根目录。知识星球 build-id 精确门禁与
+   * package/sink 跨进程租约始终依赖它，不能因为关闭自动更新而一起关闭。
    *
-   * **缺省关闭**：库函数被调用不该顺带跑 git / npm（测试、嵌入使用都会被殃及）。
-   * 只有 CLI 的 `bridge start` 会显式打开它。
+   * **缺省不发现**：库函数被调用时不会猜仓库；生产 CLI 会显式传 discoverRepoRoot。
    */
   repoRoot?: string | null;
+  /** 是否周期拉新并重新构建；repoRoot 存在时默认开启，`--no-update` 显式关闭。 */
+  enableAutoUpdate?: boolean;
   /** 自更新检查间隔（毫秒），默认 10 分钟。 */
   updateIntervalMs?: number;
   /** 可注入的更新实现（测试用）。 */
   runUpdate?: (repoRoot: string) => Promise<UpdateOutcome>;
+  /** 可注入的 artifact build-id 读取实现（测试竞态用）。 */
+  readArtifactBuildId?: (repoRoot: string) => Promise<string | undefined>;
   /** 更新完成后怎么退出（默认 process.exit(0)，交给登录项拉起来）。测试用。 */
   exit?: () => void;
   /** 只有常驻 CLI 服务显式开启固定周期；嵌入式/测试启动不产生后台网络请求。 */
@@ -257,6 +290,18 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
       await Promise.allSettled([...activeOperations]);
     }
   };
+  const repoRoot = options.repoRoot ?? undefined;
+  const enableAutoUpdate = options.enableAutoUpdate ?? repoRoot !== undefined;
+  const readArtifactBuildId = options.readArtifactBuildId ?? readBuildId;
+  // semver + capability 无法区分同一版本号下较早的 dirty bundle；固定计划只能由
+  // 与本机 artifact 完全同一 build-id 的扩展执行。
+  const startupExtensionBuildId = repoRoot ? await readArtifactBuildId(repoRoot) : undefined;
+  let currentArtifactBuildId = startupExtensionBuildId;
+  const refreshArtifactBuildId = async (): Promise<string | undefined> => {
+    if (!repoRoot) return undefined;
+    currentArtifactBuildId = await readArtifactBuildId(repoRoot);
+    return currentArtifactBuildId;
+  };
   const access = await AccessTokenManager.open(config.authFile);
   const jobs = await JobStore.open(config.jobsFile);
   await jobs.recover();
@@ -291,15 +336,116 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
   // 本次进程内的「任务 → 用户选定去向」覆盖表。Bridge 重启后该覆盖丢失，
   // 任务回退到来源默认路由（安全的降级，不会写到未选定的目标）。
   const sinkOverrides = new Map<string, string[]>();
+  /** 结果已进入本 Bridge 的 sink，扩展换连时不得把它回滚重派。 */
+  const persistingJobIds = new Set<string>();
+  /**
+   * 知识星球 sink 与 artifact 生成必须互斥。同一进程的 updater 若在完整性校验后、
+   * Markdown 原子写完成前把 A 替换成 B，A 的旧正文会先污染磁盘，再被错误报成 saved。
+   */
+  const zsxqPersistingJobIds = new Set<string>();
+  const persistenceDrainWaiters = new Set<() => void>();
+  const waitForPersistenceDrain = (): Promise<void> => {
+    if (persistingJobIds.size === 0) return Promise.resolve();
+    return new Promise(resolveDrain => persistenceDrainWaiters.add(resolveDrain));
+  };
+  type PendingJobNotice =
+    | {
+        type: 'job.saved';
+        payload: {
+          outputPath: string;
+          results: SinkResult[];
+          attempt?: CollectionPlanAttempt;
+        };
+        zsxq: boolean;
+      }
+    | {
+        type: 'job.failed';
+        payload: {
+          code: string;
+          message: string;
+          attempt?: CollectionPlanAttempt;
+        };
+        zsxq: boolean;
+      };
+  const pendingJobNotices = new Map<string, PendingJobNotice>();
   let extensionSocket: WebSocket | undefined;
   let extensionReady = false;
+  let extensionVersion: string | undefined;
+  let extensionBuildId: string | undefined;
+  const extensionRuntime = new WeakMap<WebSocket, {
+    version: string;
+    buildId?: string;
+    capabilities: string[];
+  }>();
+  const extensionHasZsxqProtocol = (socket = extensionSocket): boolean => {
+    const runtime = socket ? extensionRuntime.get(socket) : undefined;
+    return versionAtLeast(runtime?.version, ZSXQ_COMPLETE_CONTENT_MINIMUM_EXTENSION_VERSION)
+      && runtime?.capabilities.includes(ZSXQ_COMPLETE_CONTENT_CAPABILITY) === true;
+  };
+  const extensionMatchesArtifact = (
+    socket = extensionSocket,
+    artifactBuildId = currentArtifactBuildId,
+  ): boolean => {
+    const runtime = socket ? extensionRuntime.get(socket) : undefined;
+    return repoRoot === undefined
+      || (
+        artifactBuildId !== undefined
+        && runtime?.buildId === artifactBuildId
+      );
+  };
+  const extensionCanCollectZsxq = (
+    socket = extensionSocket,
+    artifactBuildId = currentArtifactBuildId,
+  ): boolean => extensionHasZsxqProtocol(socket)
+    && extensionMatchesArtifact(socket, artifactBuildId);
+  const flushPendingJobNotices = (socket = extensionSocket): void => {
+    if (
+      !socket ||
+      socket !== extensionSocket ||
+      !extensionReady ||
+      socket.readyState !== WebSocket.OPEN
+    ) return;
+    for (const [jobId, notice] of pendingJobNotices) {
+      if (notice.zsxq && !extensionCanCollectZsxq(socket)) continue;
+      socket.send(JSON.stringify(envelope(notice.type, jobId, notice.payload)));
+      pendingJobNotices.delete(jobId);
+    }
+  };
+  const publishJobNotice = (job: JobRecord, notice: PendingJobNotice): void => {
+    pendingJobNotices.set(job.id, notice);
+    flushPendingJobNotices();
+  };
+  const isZsxqJob = (job: Pick<JobRecord, 'url'>): boolean =>
+    descriptorForHost(new URL(job.url).hostname)?.id === 'zsxq';
+  let collectionPlans: CollectionPlanService | undefined;
+  const hasActiveZsxqAttempt = (): boolean => planStore?.active('zsxq-chen-teacher')
+    .some(batch => batch.preparationAttempt !== undefined) === true;
 
   // ── 自更新 ───────────────────────────────────────────────────────────
   // 失败一律只记录、不抛：更新是附加能力，绝不能把采集服务带下水。
   let update: UpdateOutcome | undefined;
   let restartPending = false;
+  // 更新完成后，新扩展会因加载新产物而换连。它完成 hello 且旧 sink 写入排空后，
+  // 这条连接本身就是安全交接点；不能再等它主动断开，否则旧 Bridge 会永久驻留。
+  let restartHandoffSocket: WebSocket | undefined;
+  let restartHandoffReady = false;
+  let updateCheckInFlight = false;
+  let updateCheckDeferred = false;
+  const updateDrainWaiters = new Set<() => void>();
+  const waitForUpdateDrain = (): Promise<void> => {
+    if (!updateCheckInFlight) return Promise.resolve();
+    return new Promise(resolveDrain => updateDrainWaiters.add(resolveDrain));
+  };
+  const acquireZsxqPersistenceLease = (jobId: string): Promise<void> | undefined => {
+    // 必须同步置位，调用者随后才允许第一次 await 文件租约。已经在跑的 updater 无法
+    // 中断，就等它排空；新的 updater 一看到 Set 非空会延期，不能从两层租约间穿过。
+    zsxqPersistingJobIds.add(jobId);
+    if (!updateCheckInFlight) return undefined;
+    return (async () => {
+      while (updateCheckInFlight) await waitForUpdateDrain();
+    })();
+  };
   let feJourneyRuns = 0;
-  const repoRoot = options.repoRoot ?? undefined;
   const runUpdate = options.runUpdate ?? (root => updateWorkspace(root, processUpdateHost));
   const exit = options.exit ?? ((): void => process.exit(0));
 
@@ -308,40 +454,107 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
    * 登录项（launchd 的 KeepAlive / systemd 的 Restart=always）会立刻把它拉起来，
    * 用户什么都不用做。
    *
-   * 只在**没有扩展连着、也没有任务在跑**的时候退出。采集途中退出会把 WebSocket 断掉，
-   * 正在跑的那一批当场失败——绝不能为了更新去打断用户手头的事。浏览器一关就是安全窗口。
+   * 只在**没有扩展连着、也没有本进程 sink 写入**的时候退出。queued/dispatched/collecting
+   * 都是磁盘上的 durable 状态，新进程启动会 recover；拿它们挡重启会让离线任务永久锁死升级。
    */
   const maybeRestart = (): void => {
     if (!restartPending) return;
-    if (extensionReady && extensionSocket?.readyState === WebSocket.OPEN) return;
-    const inFlight = ['queued', 'dispatched', 'collecting'] as const;
-    if (inFlight.some(status => jobs.list(status).length > 0)) return;
+    // 新 build-id 可能已经落盘，但打包子进程还在收尾。先记住交接，
+    // 等 runUpdate 真正返回后再退出，避免杀掉尚未完成的更新。
+    if (updateCheckInFlight) return;
+    if (
+      extensionSocket?.readyState === WebSocket.OPEN
+      && !(restartHandoffReady && extensionSocket === restartHandoffSocket)
+    ) return;
+    if (persistingJobIds.size > 0) return;
     if (feJourneyRuns > 0) return;
     restartPending = false;
+    restartHandoffSocket = undefined;
+    restartHandoffReady = false;
     console.warn('[update] 新版本已构建，本机服务重启以生效');
     exit();
   };
 
   const checkForUpdate = async (): Promise<void> => {
-    if (!repoRoot) return;
-    try {
-      update = await runUpdate(repoRoot);
-      if (update.changed) console.warn(`[update] ${update.message}`);
-      // 构建失败时产物还是旧的，重启只会把好好的服务换成同一份代码——没有意义。
-      if (update.changed && !update.buildFailed) restartPending = true;
-    } catch (error) {
-      console.warn(`[update] 检查更新失败：${error instanceof Error ? error.message : error}`);
+    if (closing || !repoRoot || !enableAutoUpdate || updateCheckInFlight) return;
+    if (zsxqPersistingJobIds.size > 0 || hasActiveZsxqAttempt()) {
+      updateCheckDeferred = true;
+      return;
     }
-    maybeRestart();
+    updateCheckDeferred = false;
+    updateCheckInFlight = true;
+    try {
+      try {
+        update = await runUpdate(repoRoot);
+        if (update.changed) console.warn(`[update] ${update.message}`);
+        // 构建失败时产物还是旧的，重启只会把好好的服务换成同一份代码——没有意义。
+        if (update.changed && !update.buildFailed) restartPending = true;
+      } catch (error) {
+        console.warn(`[update] 检查更新失败：${error instanceof Error ? error.message : error}`);
+      }
+    } finally {
+      updateCheckInFlight = false;
+      for (const resolveDrain of updateDrainWaiters) resolveDrain();
+      updateDrainWaiters.clear();
+      maybeRestart();
+      // A plan may have been queued while this update was already in flight. Resume it only after
+      // the updater has completely released its package process and the exact artifact can be read.
+      setImmediate(() => {
+        if (closing) return;
+        const pending = planStore?.active('zsxq-chen-teacher')
+          .find(batch => batch.preparationAttempt === undefined);
+        if (!pending || !collectionPlans) return;
+        void trackOperation(collectionPlans.run('zsxq-chen-teacher').catch(error => {
+          console.warn(`[plans] 更新后恢复知识星球采集失败：${error instanceof Error ? error.message : error}`);
+        }));
+      });
+    }
   };
-  const updateTimer = repoRoot
-    ? setInterval(() => void checkForUpdate(), options.updateIntervalMs ?? 10 * 60_000)
+  const resumeDeferredUpdate = (): void => {
+    setImmediate(() => {
+      if (closing) return;
+      if (
+        updateCheckDeferred
+        && zsxqPersistingJobIds.size === 0
+        && !hasActiveZsxqAttempt()
+      ) void trackOperation(checkForUpdate());
+    });
+  };
+  const updateTimer = repoRoot && enableAutoUpdate
+    ? setInterval(() => void trackOperation(checkForUpdate()), options.updateIntervalMs ?? 10 * 60_000)
     : undefined;
   updateTimer?.unref?.();
-  void checkForUpdate();
+  void trackOperation(checkForUpdate());
 
-  const dispatch = async (job: JobRecord): Promise<void> => {
-    if (!extensionReady || extensionSocket?.readyState !== WebSocket.OPEN || job.status !== 'queued') return;
+  const dispatch = async (job: JobRecord, targetSocket = extensionSocket): Promise<void> => {
+    if (
+      !targetSocket ||
+      targetSocket !== extensionSocket ||
+      !extensionReady ||
+      targetSocket.readyState !== WebSocket.OPEN ||
+      job.status !== 'queued'
+    ) return;
+    const zsxqJob = isZsxqJob(job);
+    // 恢复中的子任务也必须服从完整正文能力门禁。artifact 可能在 Bridge 运行中
+    // 被打包流程原地替换，所以每次 dispatch 都重新读磁盘，不能信启动时快照。
+    if (zsxqJob) {
+      const artifactBuildId = await refreshArtifactBuildId();
+      if (
+        targetSocket !== extensionSocket
+        || targetSocket.readyState !== WebSocket.OPEN
+        || !extensionCanCollectZsxq(targetSocket, artifactBuildId)
+      ) return;
+    }
+    if (
+      job.planId === 'zsxq-chen-teacher'
+      && !collectionPlans?.isCurrentJobAttempt(job)
+    ) {
+      await jobs.transition(job.id, 'failed', {
+        errorCode: 'STALE_PLAN_ATTEMPT',
+        errorMessage: '知识星球采集尝试已过期',
+      });
+      return;
+    }
     const jobSource = descriptorForHost(new URL(job.url).hostname)?.id;
     if (
       !candidateIndex &&
@@ -354,14 +567,30 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
       return;
     }
     await jobs.transition(job.id, 'dispatched');
-    extensionSocket.send(JSON.stringify(envelope('job.collect', job.id, {
+    // 状态落盘期间连接或磁盘 artifact 都可能已被替换；发送前再做最后一道 fence。
+    if (targetSocket !== extensionSocket || targetSocket.readyState !== WebSocket.OPEN) {
+      if (jobs.get(job.id)?.status === 'dispatched') await jobs.transition(job.id, 'queued');
+      return;
+    }
+    if (zsxqJob) {
+      const artifactBuildId = await refreshArtifactBuildId();
+      if (
+        targetSocket !== extensionSocket
+        || targetSocket.readyState !== WebSocket.OPEN
+        || !extensionCanCollectZsxq(targetSocket, artifactBuildId)
+      ) {
+        await jobs.transition(job.id, 'queued');
+        return;
+      }
+    }
+    targetSocket.send(JSON.stringify(envelope('job.collect', job.id, {
       url: job.url,
       interactive: !job.batchId,
     })));
   };
 
-  const dispatchQueued = async (): Promise<void> => {
-    for (const job of jobs.list('queued')) await dispatch(job);
+  const dispatchQueued = async (targetSocket = extensionSocket): Promise<void> => {
+    for (const job of jobs.list('queued')) await dispatch(job, targetSocket);
   };
   const collectorFetcher = options.fetch ?? fetch;
 
@@ -377,24 +606,41 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
     }
   };
 
-  const collectionPlans = planStore
+  collectionPlans = planStore
     ? new CollectionPlanService({
         store: planStore,
         jobs,
         extensionConnected: () => extensionReady && extensionSocket?.readyState === WebSocket.OPEN,
+        canCollectZsxq: extensionCanCollectZsxq,
+        canStartZsxqAttempt: () => persistingJobIds.size === 0 && !updateCheckInFlight,
         discoverNowcoder: knownUrls => discoverNowcoderPlanCandidates(collectorFetcher, knownUrls),
         dispatch,
-        collectZsxq: async (batchId, planId) => {
-          if (!extensionReady || extensionSocket?.readyState !== WebSocket.OPEN) {
-            throw new Error('Edge 扩展当前离线');
+        collectZsxq: async (batchId, planId, attempt, force) => {
+          const targetSocket = extensionSocket;
+          const artifactBuildId = await refreshArtifactBuildId();
+          if (
+            !targetSocket ||
+            !extensionReady ||
+            targetSocket.readyState !== WebSocket.OPEN ||
+            targetSocket !== extensionSocket ||
+            !extensionCanCollectZsxq(targetSocket, artifactBuildId)
+          ) {
+            throw new Error('知识星球采集命令未派发：扩展连接或构建证明已变化');
           }
-          extensionSocket.send(JSON.stringify(envelope('plan.collect', batchId, { batchId, planId })));
+          targetSocket.send(JSON.stringify(envelope('plan.collect', batchId, {
+            batchId,
+            planId,
+            attempt,
+            ...(force ? { force: true } : {}),
+          })));
+          return true;
         },
+        onZsxqAttemptTerminal: () => resumeDeferredUpdate(),
         shouldAutoSync: async job => {
           const document = await storedDocumentFor(job);
           if (!document) return false;
           if (job.planId === 'zsxq-chen-teacher') {
-            return document.sourceMetadata?.authorRole === 'owner';
+            return document.sourceMetadata?.authorRole === 'owner' && document.truncated === false;
           }
           const grade = document.sourceMetadata?.evidenceGrade;
           return grade === 'A' || grade === 'B';
@@ -520,16 +766,52 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
   };
 
   const handleSocketMessage = async (socket: WebSocket, data: RawData): Promise<void> => {
+    if (socket !== extensionSocket) throw new Error('扩展连接已被替换');
     const parsedEnvelope = wsEnvelopeSchema.parse(JSON.parse(messageText(data)));
     if (parsedEnvelope.type === 'extension.hello') {
-      if (!extensionReady) await jobs.recover();
+      const hello = extensionHelloPayloadSchema.parse(parsedEnvelope.payload);
+      if (!extensionReady) await jobs.recover(persistingJobIds);
+      // recover 会触发文件 I/O；等待期间这个 socket 可能已被新版连接替换。
+      if (socket !== extensionSocket) return;
+      // /health 动态读磁盘 build-id：手工 package 或自更新收尾时，新扩展可能在
+      // runUpdate 置位 restartPending 前先换连。若 hello 精确匹配新产物且不再是
+      // Bridge 启动时那份，这条连接本身就是可验证的重启交接点。
+      const helloArtifactBuildId = await refreshArtifactBuildId();
+      if (socket !== extensionSocket) return;
+      if (
+        hello.buildId !== undefined
+        && hello.buildId === helloArtifactBuildId
+        && helloArtifactBuildId !== startupExtensionBuildId
+      ) {
+        restartPending = true;
+        restartHandoffSocket = socket;
+      }
+      extensionRuntime.set(socket, {
+        version: hello.version,
+        ...(hello.buildId ? { buildId: hello.buildId } : {}),
+        capabilities: [...(hello.capabilities ?? [])],
+      });
       extensionReady = true;
-      await dispatchQueued();
-      void collectionPlans?.onExtensionConnected({
+      extensionVersion = hello.version;
+      extensionBuildId = hello.buildId;
+      // 旧连接可能已完成了一个 sink 写入；先把终态回执交给当前扩展，再下发新任务。
+      flushPendingJobNotices(socket);
+      // sink 写入与 attempt 换代必须串行：否则旧轮结果可在新轮开始后落盘。
+      await waitForPersistenceDrain();
+      if (socket !== extensionSocket) return;
+      if (socket === restartHandoffSocket) {
+        restartHandoffReady = true;
+        maybeRestart();
+        // 若还有定时采集在收尾，保留空闲连接等它排空；不要在待重启进程里再派新任务。
+        return;
+      }
+      await collectionPlans?.onExtensionConnected({
         runDue: options.enableCollectionPlanScheduler ?? options.enableFeJourneyScheduler ?? false,
       }).catch(error => {
         console.warn(`[plans] 扩展重连补跑失败：${error instanceof Error ? error.message : error}`);
       });
+      if (socket !== extensionSocket) return;
+      await dispatchQueued(socket);
       return;
     }
     if (parsedEnvelope.type === 'bridge.ping') {
@@ -539,11 +821,43 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
     if (parsedEnvelope.type === 'plan.result') {
       if (!collectionPlans) throw new Error(planStoreError ?? '固定采集计划不可用');
       const result = extensionPlanResultPayloadSchema.parse(parsedEnvelope.payload);
+      const batch = planStore?.get(result.batchId);
+      if (batch?.planId === 'zsxq-chen-teacher') {
+        const artifactBuildId = await refreshArtifactBuildId();
+        if (socket !== extensionSocket) return;
+        if (!extensionCanCollectZsxq(socket, artifactBuildId)) {
+          throw new Error('当前扩展版本或构建产物不具备知识星球完整正文采集能力');
+        }
+      }
       await collectionPlans.onExtensionPlanResult(result as ExtensionPlanResult);
+      resumeDeferredUpdate();
       return;
     }
     const job = jobs.get(parsedEnvelope.requestId);
     if (!job) throw new Error(`任务不存在：${parsedEnvelope.requestId}`);
+    const zsxqJob = isZsxqJob(job);
+    let artifactBuildId: string | undefined;
+    if (zsxqJob) {
+      artifactBuildId = await refreshArtifactBuildId();
+      if (socket !== extensionSocket) return;
+    }
+    const zsxqRuntimeAuthorized = !zsxqJob
+      || extensionCanCollectZsxq(socket, artifactBuildId);
+    const artifactDrifted = zsxqJob
+      && extensionHasZsxqProtocol(socket)
+      && !extensionMatchesArtifact(socket, artifactBuildId);
+    if (
+      !zsxqRuntimeAuthorized
+      && !(parsedEnvelope.type === 'job.result' && artifactDrifted)
+    ) {
+      throw new Error('当前扩展版本或构建产物不具备知识星球完整正文采集能力');
+    }
+    // requestId 只能驱动它创建时所属的当前 attempt。换代后旧轮的
+    // progress/result/error 全部丢弃，避免旧快照先把新轮同 URL 任务置为 saved。
+    if (
+      job.planId === 'zsxq-chen-teacher'
+      && !collectionPlans?.isCurrentJobAttempt(job)
+    ) return;
     if (parsedEnvelope.type === 'job.progress') {
       progressSchema.parse(parsedEnvelope.payload);
       if (
@@ -555,13 +869,75 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
       return;
     }
     if (parsedEnvelope.type === 'job.result') {
+      const result = jobResultPayloadSchema.parse(parsedEnvelope.payload);
+      if (result.document.canonicalUrl !== job.url) {
+        throw new Error('回传内容 URL 与采集任务不一致');
+      }
+      if (job.status === 'saved' || job.status === 'failed' || job.status === 'needs_attention') return;
+      // 必须在第一个 await 前打标；否则换连 hello 可以在状态落盘间隙把它重派。
+      persistingJobIds.add(job.id);
+      let holdsZsxqPersistenceLease = false;
+      let artifactLease: ArtifactLease | undefined;
       try {
-        if (job.status === 'saved') return;
-        const result = jobResultPayloadSchema.parse(parsedEnvelope.payload);
-        if (result.document.canonicalUrl !== job.url) {
-          throw new Error('回传内容 URL 与采集任务不一致');
+        if (zsxqJob) {
+          // updater 已经在跑时先等它完整结束；随后下面会重新读取 artifact 并拒绝旧 A。
+          // 反过来一旦拿到租约，checkForUpdate 会延后到本次 sink 全部结束。
+          const updateDrain = acquireZsxqPersistenceLease(job.id);
+          holdsZsxqPersistenceLease = true;
+          if (updateDrain) await updateDrain;
+          // 进程内租约必须先落位，再发生文件系统上的第一次 await；这样本进程 updater
+          // 与手工/另一 Bridge 进程的 package 都不可能从两层租约之间穿过去。
+          if (repoRoot) {
+            artifactLease = await acquireArtifactLease(repoRoot, { role: 'zsxq-sink' });
+          }
         }
-        if (job.status === 'dispatched') await jobs.transition(job.id, 'collecting');
+        let current = job;
+        if (job.status === 'queued' || job.status === 'dispatched') {
+          current = await jobs.transition(job.id, 'collecting');
+        }
+        // artifact 可在任务已经下发后被原地覆盖。结果进入 sink 前再次现读磁盘；
+        // 旧构建即使带着对 A 的完整性证明，也不能在当前 artifact 已是 B 时落库。
+        let sinkArtifactBuildId: string | undefined;
+        if (zsxqJob) {
+          sinkArtifactBuildId = await refreshArtifactBuildId();
+          if (!extensionCanCollectZsxq(socket, sinkArtifactBuildId)) {
+            const terminal = await jobs.transition(current.id, 'needs_attention', {
+              errorCode: 'EXTENSION_UPDATE_REQUIRED',
+              errorMessage: '扩展构建已落后于当前磁盘产物，已拒绝知识星球正文入库',
+            });
+            try {
+              await collectionPlans?.onJobRejected(terminal, '扩展构建已过期');
+            } catch (error) {
+              console.warn(`[plans] 过期扩展终态同步失败：${error instanceof Error ? error.message : error}`);
+            }
+            return;
+          }
+        }
+        // 所有知识星球入库都必须带新版扩展给出的显式完整证明。
+        // 固定计划、侧栏单条/批量与恢复重派全部走同一条 sink 前防线。
+        const zsxqCompletenessProven = result.document.truncated === false
+          && result.document.sourceMetadata?.contentCompletenessVersion
+            === ZSXQ_COMPLETE_CONTENT_CAPABILITY
+          && (
+            repoRoot === undefined
+            || (
+              sinkArtifactBuildId !== undefined
+              && result.document.sourceMetadata?.contentCompletenessBuildId
+                === sinkArtifactBuildId
+            )
+          );
+        if (zsxqJob && !zsxqCompletenessProven) {
+          const terminal = await jobs.transition(current.id, 'needs_attention', {
+            errorCode: 'INCOMPLETE_CONTENT',
+            errorMessage: '知识星球正文不完整，已拒绝归档和交付',
+          });
+          try {
+            await collectionPlans?.onJobRejected(terminal, '正文不完整');
+          } catch (error) {
+            console.warn(`[plans] 正文不完整终态同步失败：${error instanceof Error ? error.message : error}`);
+          }
+          return;
+        }
         const override = sinkOverrides.get(job.id);
         const document: CollectedDocument = job.batchId && job.planId
           ? {
@@ -588,15 +964,72 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
         }
         const primary = succeeded[0]!;
         const saved = await jobs.transition(job.id, 'saved', { outputPath: primary.outputRef });
-        socket.send(
-          JSON.stringify(
-            envelope('job.saved', job.id, { outputPath: primary.outputRef, results: sinkResults }),
-          ),
-        );
-        await collectionPlans?.onJobTerminal(saved);
+        publishJobNotice(saved, {
+          type: 'job.saved',
+          payload: {
+            outputPath: primary.outputRef,
+            results: sinkResults,
+            ...(saved.planAttempt ? { attempt: saved.planAttempt } : {}),
+          },
+          zsxq: isZsxqJob(saved),
+        });
+        try {
+          await collectionPlans?.onJobTerminal(saved);
+        } catch (error) {
+          // job 已经持久化为 saved；批次会在连接恢复时从子任务重新 reconcile。
+          console.warn(`[plans] 已保存任务终态同步失败：${error instanceof Error ? error.message : error}`);
+        }
         return;
+      } catch (error) {
+        const latest = jobs.get(job.id);
+        if (
+          latest &&
+          latest.status !== 'saved' &&
+          latest.status !== 'failed' &&
+          latest.status !== 'needs_attention'
+        ) {
+          const message = error instanceof Error ? error.message : '内容落地失败';
+          console.warn(`[jobs] 任务 ${latest.id} 落地失败：${message}`);
+          const failed = await jobs.transition(latest.id, 'failed', {
+            errorCode: 'SAVE_FAILED',
+            errorMessage: message,
+          });
+          publishJobNotice(failed, {
+            type: 'job.failed',
+            payload: {
+              code: 'SAVE_FAILED',
+              message,
+              ...(failed.planAttempt ? { attempt: failed.planAttempt } : {}),
+            },
+            zsxq: isZsxqJob(failed),
+          });
+          try {
+            await collectionPlans?.onJobTerminal(failed);
+          } catch (planError) {
+            console.warn(`[plans] 保存失败终态同步失败：${planError instanceof Error ? planError.message : planError}`);
+          }
+          return;
+        }
+        throw error;
       } finally {
-        sinkOverrides.delete(job.id);
+        try {
+          // 直到所有 sink 与 job/plan 终态都完成才放开 stable artifact；package 随后
+          // 才能把 A 原子替成 B。release 自身会复核 token，不会误删后来者的锁。
+          if (artifactLease) await artifactLease.release();
+        } finally {
+          if (holdsZsxqPersistenceLease) zsxqPersistingJobIds.delete(job.id);
+          persistingJobIds.delete(job.id);
+          if (persistingJobIds.size === 0) {
+            for (const resolveDrain of persistenceDrainWaiters) resolveDrain();
+            persistenceDrainWaiters.clear();
+          }
+          sinkOverrides.delete(job.id);
+          // 扩展可能在 sink 写入期间为加载新产物而断开；写完这一刻才是真正安全窗口。
+          setImmediate(() => {
+            maybeRestart();
+            resumeDeferredUpdate();
+          });
+        }
       }
     }
     if (parsedEnvelope.type === 'job.error') {
@@ -607,7 +1040,12 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
         errorCode: error.code,
         errorMessage: error.message,
       });
-      await collectionPlans?.onJobTerminal(terminal);
+      if (isZsxqJob(job) && error.code === 'INCOMPLETE_CONTENT') {
+        await collectionPlans?.onJobRejected(terminal, '正文不完整');
+      } else {
+        await collectionPlans?.onJobTerminal(terminal);
+      }
+      resumeDeferredUpdate();
       return;
     }
     throw new Error(`不支持的 WebSocket 消息：${parsedEnvelope.type}`);
@@ -618,12 +1056,17 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
     const requestUrl = new URL(request.url ?? '/', 'http://127.0.0.1');
     if (request.method === 'GET' && requestUrl.pathname === '/health') {
       // 每次都现读：用户自己跑一次 npm run package 也该立刻算数，不用等下一轮自更新。
-      const buildId = repoRoot ? await readBuildId(repoRoot) : undefined;
+      const buildId = await refreshArtifactBuildId();
       return sendJson(response, 200, {
         ok: true,
         version: APP_VERSION,
         trustedExtensionId: TRUSTED_EXTENSION_ID,
         extensionConnected: extensionReady && extensionSocket?.readyState === WebSocket.OPEN,
+        ...(extensionReady && extensionVersion ? { extensionVersion } : {}),
+        ...(extensionReady && extensionBuildId ? { extensionBuildId } : {}),
+        ...(extensionReady && extensionSocket ? {
+          extensionCapabilities: extensionRuntime.get(extensionSocket)?.capabilities ?? [],
+        } : {}),
         routing: router.describeRouting(),
         // 同步去向：采集只落本机库，这里说明「之后会同步到哪」。
         syncTargets: router.describeSyncTargets(),
@@ -651,18 +1094,64 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
 
     if (request.method === 'POST' && requestUrl.pathname === '/v1/jobs') {
       const input = createJobSchema.parse(await readJson(request));
+      const inputSource = descriptorForHost(new URL(input.url).hostname)?.id;
+      const artifactBuildId = inputSource === 'zsxq'
+        ? await refreshArtifactBuildId()
+        : undefined;
+      if (
+        inputSource === 'zsxq'
+        && !extensionCanCollectZsxq(extensionSocket, artifactBuildId)
+      ) {
+        throw new HttpError(
+          409,
+          'EXTENSION_UPDATE_REQUIRED',
+          `知识星球完整正文采集要求扩展版本至少为 ${ZSXQ_COMPLETE_CONTENT_MINIMUM_EXTENSION_VERSION}、具备完整性能力标识，且构建与当前磁盘产物一致`,
+        );
+      }
+      if (input.batchId && input.planId) {
+        try {
+          await collectionPlans?.assertJobAttempt(input.batchId, input.planId, input.attempt);
+        } catch (error) {
+          throw new HttpError(
+            409,
+            'STALE_PLAN_ATTEMPT',
+            error instanceof Error ? error.message : '固定采集计划尝试已过期',
+          );
+        }
+      }
       const job = await jobs.create({
         url: input.url,
         requestedBy: input.requestedBy,
         ...(input.id
           ? { id: input.id }
           : input.batchId
-            ? { id: `${input.batchId}-${stableContentId(input.url)}` }
+            ? {
+                id: input.attempt
+                  ? `${input.batchId}-${input.attempt}-${stableContentId(input.url)}`
+                  : `${input.batchId}-${stableContentId(input.url)}`,
+              }
             : {}),
         ...(input.batchId ? { batchId: input.batchId } : {}),
         ...(input.planId ? { planId: input.planId } : {}),
+        ...(input.attempt ? { planAttempt: input.attempt } : {}),
       });
-      await collectionPlans?.onJobCreated(job);
+      try {
+        await collectionPlans?.onJobCreated(job);
+      } catch (error) {
+        // 在计划预检与 JobStore 落盘之间可能恰好发生重连换代。
+        // 二次原子校验是最终权威；旧代任务绝不回传 202。
+        if (job.status === 'queued') {
+          await jobs.transition(job.id, 'failed', {
+            errorCode: 'STALE_PLAN_ATTEMPT',
+            errorMessage: error instanceof Error ? error.message : '固定采集计划尝试已过期',
+          }).catch(() => undefined);
+        }
+        throw new HttpError(
+          409,
+          'STALE_PLAN_ATTEMPT',
+          error instanceof Error ? error.message : '固定采集计划尝试已过期',
+        );
+      }
       if (input.sinks?.length) sinkOverrides.set(job.id, input.sinks);
       sendJson(response, 202, job);
       if (job.requestedBy !== 'extension') await dispatch(job);
@@ -695,6 +1184,7 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
         planId: z.enum(COLLECTION_PLAN_IDS),
         force: z.boolean().optional(),
       }).strict().parse(await readJson(request));
+      if (input.planId === 'zsxq-chen-teacher') await refreshArtifactBuildId();
       return sendJson(response, 202, await collectionPlans.run(
         input.planId,
         input.force === undefined ? {} : { force: input.force },
@@ -794,7 +1284,11 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
         );
       }
       extensionSocket = socket;
+      restartHandoffSocket = restartPending ? socket : undefined;
+      restartHandoffReady = false;
       extensionReady = false;
+      extensionVersion = undefined;
+      extensionBuildId = undefined;
       let messageQueue: Promise<void> = Promise.resolve();
       let policyViolated = false;
       socket.on('message', data => {
@@ -819,7 +1313,13 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
       socket.once('close', () => {
         if (extensionSocket === socket) {
           extensionSocket = undefined;
+          if (restartHandoffSocket === socket) restartHandoffSocket = undefined;
+          restartHandoffReady = false;
           extensionReady = false;
+          extensionVersion = undefined;
+          extensionBuildId = undefined;
+          // 不等下一轮（生产默认 10 分钟）更新检查；短暂断连就是旧进程退出的窗口。
+          setImmediate(maybeRestart);
         }
       });
     },
@@ -873,6 +1373,7 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
         });
         const serverClosed = server.listening ? once(server, 'close').then(() => undefined) : Promise.resolve();
         server.close();
+        // 先等所有入口彻底关闭，保证不会再登记新操作；再排空关闭前已经接收的工作。
         await Promise.all([serverClosed, websocketClosed]);
         await drainActiveOperations();
       })();

@@ -20,6 +20,24 @@ export function normalizeContent(content: Element, baseUrl: URL): {
   const clone = content.cloneNode(true) as Element;
   const images: CollectedImage[] = [];
 
+  // iframe 不能原样进入归档，但它的 src 往往就是正文里的视频/演示内容。直接删除会让
+  // 长文仍被标成完整却永久丢资源；转成普通绝对链接，既保留内容入口也不执行嵌入页面。
+  for (const frame of clone.querySelectorAll<HTMLIFrameElement>('iframe')) {
+    const rawUrl = frame.getAttribute('data-src') || frame.getAttribute('src') || '';
+    try {
+      const absolute = new URL(rawUrl, baseUrl);
+      if (!['https:', 'http:'].includes(absolute.protocol)) throw new Error('unsafe iframe URL');
+      const link = clone.ownerDocument.createElement('a');
+      link.href = absolute.href;
+      link.textContent = cleanText(
+        frame.getAttribute('title') || frame.getAttribute('aria-label'),
+      ) || '嵌入内容';
+      frame.replaceWith(link);
+    } catch {
+      frame.remove();
+    }
+  }
+
   for (const image of clone.querySelectorAll('img')) {
     const width = Number(image.getAttribute('width') ?? 0);
     const height = Number(image.getAttribute('height') ?? 0);
@@ -71,7 +89,7 @@ export function buildDocument(input: BuildDocumentInput): CollectedDocument {
     images: normalized.images,
     ...(input.author ? { author: cleanText(input.author) } : {}),
     ...(input.publishedAt ? { publishedAt: input.publishedAt } : {}),
-    ...(input.truncated ? { truncated: true } : {}),
+    ...(input.truncated === undefined ? {} : { truncated: input.truncated }),
     ...(input.questioner ? { questioner: cleanText(input.questioner) } : {}),
     ...(input.sourceMetadata ? { sourceMetadata: input.sourceMetadata } : {}),
   };

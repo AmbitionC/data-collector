@@ -2,6 +2,8 @@ import {
   COLLECTION_PLAN_IDS,
   stableContentId,
   type CollectionBatch,
+  type CollectionPlanAttempt,
+  type CollectionPlanRejection,
   type CollectionPlanId,
   type JobRecord,
 } from '@data-collector/shared';
@@ -79,9 +81,20 @@ export interface CollectionPlanServiceDependencies {
   jobs: JobStore;
   now?: () => string;
   extensionConnected: () => boolean;
+  /** 当前扩展是否具备知识星球完整正文采集与审计能力。 */
+  canCollectZsxq?: () => boolean;
+  /** sink 正在保存当前轮结果时不得换代 attempt。 */
+  canStartZsxqAttempt?: () => boolean;
   discoverNowcoder: (knownUrls: ReadonlySet<string>) => Promise<NowcoderDiscoveryCandidate[]>;
   dispatch: (job: JobRecord) => Promise<void>;
-  collectZsxq: (batchId: string, planId: 'zsxq-chen-teacher') => Promise<void>;
+  collectZsxq: (
+    batchId: string,
+    planId: 'zsxq-chen-teacher',
+    attempt: CollectionPlanAttempt,
+    force: boolean,
+  ) => Promise<true>;
+  /** 当前知识星球 attempt 已可靠写入终态，可释放外部互斥门禁。 */
+  onZsxqAttemptTerminal?: (batch: CollectionBatch) => void;
   shouldAutoSync: (job: JobRecord) => Promise<boolean>;
   pendingNowcoderJobs?: (deliveryBatchId: string) => Promise<readonly JobRecord[]>;
   selectNowcoderJobs: (
@@ -100,9 +113,11 @@ export interface CollectionPlanServiceDependencies {
 
 export interface ExtensionPlanResult {
   batchId: string;
+  attempt: CollectionPlanAttempt;
   discovered: number;
   coverage?: Record<string, number>;
   rejections?: Record<string, number>;
+  rejectionDetails?: CollectionPlanRejection[];
   error?: string;
   needsAttention?: boolean;
   prepared?: boolean;
@@ -168,7 +183,7 @@ export class CollectionPlanService {
         return {
           id,
           due: due.due,
-          pending: latest?.status === 'running' && !this.dependencies.extensionConnected(),
+          pending: latest?.status === 'running' && !this.canExecute(id),
           nextRunAt: due.nextRunAt,
           ...(latest ? { latest } : {}),
         };
@@ -183,10 +198,20 @@ export class CollectionPlanService {
   async run(planId: CollectionPlanId, options: { force?: boolean } = {}): Promise<CollectionBatch> {
     const running = this.dependencies.store.active(planId)[0];
     if (running && !options.force) {
-      if (this.dependencies.extensionConnected()) await this.execute(running);
+      if (this.dependencies.extensionConnected()) {
+        if (
+          running.planId === 'zsxq-chen-teacher'
+          && running.preparationStatus === 'completed'
+        ) {
+          await this.reconcileZsxqBatch(running.id);
+        } else await this.execute(running);
+      }
       return this.dependencies.store.get(running.id) ?? running;
     }
-    const batch = await this.dependencies.store.start(planId);
+    const batch = await this.dependencies.store.start(
+      planId,
+      options.force === undefined ? {} : { force: options.force },
+    );
     if (this.dependencies.extensionConnected()) await this.execute(batch);
     return this.dependencies.store.get(batch.id) ?? batch;
   }
@@ -223,6 +248,13 @@ export class CollectionPlanService {
       if (batch.status !== 'running') continue;
       const jobs = this.dependencies.jobs.list();
       const attached = jobs.filter(job => job.batchId === batch.id);
+      if (batch.planId === 'zsxq-chen-teacher') {
+        // 旧运行中批次没有 preparationStatus，也按未完成处理。即使已经创建了
+        // 部分子任务，也必须重跑发现/staging；任务 ID 稳定，重放是幂等的。
+        if (batch.preparationStatus !== 'completed') await this.execute(batch);
+        else await this.reconcileZsxqBatch(batch.id);
+        continue;
+      }
       if (
         batch.planId === 'nowcoder-agent-market' &&
         batch.selectionStatus === 'pending' &&
@@ -246,68 +278,134 @@ export class CollectionPlanService {
     if (options.runDue) await this.runDuePlans();
   }
 
+  async assertJobAttempt(
+    batchId: string,
+    planId: CollectionPlanId,
+    attempt?: CollectionPlanAttempt,
+  ): Promise<void> {
+    if (planId !== 'zsxq-chen-teacher') return;
+    if (!attempt) throw new Error('知识星球采集任务缺少尝试令牌');
+    await this.dependencies.store.assertPreparationAttempt(batchId, attempt);
+  }
+
+  isCurrentJobAttempt(job: Pick<JobRecord, 'batchId' | 'planId' | 'planAttempt'>): boolean {
+    if (!job.batchId || job.planId !== 'zsxq-chen-teacher' || !job.planAttempt) return false;
+    const batch = this.dependencies.store.get(job.batchId);
+    return batch?.status === 'running' && batch.preparationAttempt === job.planAttempt;
+  }
+
   async onJobCreated(job: JobRecord): Promise<void> {
     if (!job.batchId || !job.planId) return;
-    await this.dependencies.store.attachJob(job.batchId, job.id);
+    await this.dependencies.store.attachJob(job.batchId, job.id, job.planAttempt);
   }
 
   async onExtensionPlanResult(result: ExtensionPlanResult): Promise<CollectionBatch> {
-    const persisted = this.dependencies.store.latest(undefined, Number.MAX_SAFE_INTEGER)
-      .find(batch => batch.id === result.batchId);
+    const persisted = this.dependencies.store.get(result.batchId);
     if (!persisted) throw new Error(`采集批次不存在：${result.batchId}`);
     if (persisted.status !== 'running' || persisted.planId !== 'zsxq-chen-teacher') return persisted;
     if (result.error) {
-      const terminal = await (result.needsAttention
-        ? this.dependencies.store.attention(result.batchId, result.error)
-        : this.dependencies.store.fail(result.batchId, result.error));
+      const terminal = await this.dependencies.store.finishPreparationWithError(
+        result.batchId,
+        result.attempt,
+        result.error,
+        result.needsAttention === true,
+      );
+      if (terminal.status === 'running') return terminal;
       const reported = await this.persistTerminalBenchmark(terminal);
       this.clearBatchRuntime(result.batchId);
       return reported;
     }
-    await this.dependencies.store.markDiscovery(
-      result.batchId,
-      result.discovered,
-      result.coverage,
-      result.rejections,
-    );
-    if (result.prepared === false) {
-      return this.dependencies.store.latest(undefined, 100)
-        .find(batch => batch.id === result.batchId)!;
+    // 重连可能让旧一轮和新一轮 staging 短暂并行；迟到的 prepared:false
+    // 既不能回退完成态，也不能覆盖已完成轮次的发现/拒绝统计。
+    if (persisted.preparationStatus === 'completed' && result.prepared !== true) {
+      return this.reconcileZsxqBatch(result.batchId);
     }
-    const batch = await this.dependencies.store.reconcile(result.batchId, this.dependencies.jobs.list());
-    if (batch.status !== 'running') this.clearBatchRuntime(batch.id);
-    return batch;
+    const prepared = await this.dependencies.store.recordPreparationResult(
+      result.batchId,
+      result.attempt,
+      {
+        discovered: result.discovered,
+        prepared: result.prepared === true,
+        ...(result.coverage ? { coverage: result.coverage } : {}),
+        ...(result.rejections ? { rejections: result.rejections } : {}),
+        ...(result.rejectionDetails ? { rejectionDetails: result.rejectionDetails } : {}),
+      },
+    );
+    // 成功结果必须显式证明 staging 已完成；省略 prepared 的旧消息只能保持运行，
+    // 由能力门禁/下一次重连重新采集，不能把半批任务结算成成功。
+    if (prepared.preparationStatus !== 'completed') return prepared;
+    return this.reconcileZsxqBatch(result.batchId);
+  }
+
+  /**
+   * `saved` 只证明本机 sink 已落盘；固定计划的交付确认必须另行持久化。
+   * deliveryIds 是跨进程幂等事实，内存 Set 只负责抑制同一进程里的重复回调。
+   */
+  private async syncSavedPlanJob(job: JobRecord): Promise<void> {
+    if (!job.batchId || !job.planId || job.planId === 'nowcoder-agent-market' || job.status !== 'saved') return;
+    const batch = this.dependencies.store.get(job.batchId);
+    if (!batch || batch.status !== 'running') return;
+    const contentId = stableContentId(job.url);
+    if (batch.deliveryIds.includes(contentId)) {
+      this.syncedJobs.add(job.id);
+      return;
+    }
+    if (this.syncedJobs.has(job.id)) return;
+    this.syncedJobs.add(job.id);
+    try {
+      if (!await this.dependencies.shouldAutoSync(job)) return;
+      await this.dependencies.syncJob(job);
+      await this.dependencies.store.markDelivered(job.batchId, contentId);
+    } catch (error) {
+      this.recordSyncError(job.batchId, error);
+    }
+  }
+
+  /** 重连前先补齐当前 attempt 的所有 saved 交付，再做唯一一次终态结算。 */
+  private async reconcileZsxqBatch(batchId: string): Promise<CollectionBatch> {
+    const batch = this.dependencies.store.get(batchId);
+    const jobs = this.dependencies.jobs.list();
+    if (batch?.status === 'running') {
+      for (const job of jobs) {
+        if (
+          job.batchId === batchId
+          && job.planId === 'zsxq-chen-teacher'
+          && job.planAttempt === batch.preparationAttempt
+          && job.status === 'saved'
+        ) await this.syncSavedPlanJob(job);
+      }
+    }
+    let reconciled = await this.dependencies.store.reconcile(batchId, jobs);
+    if (reconciled.status !== 'running') {
+      await this.surfaceSyncErrors(batchId);
+      reconciled = this.dependencies.store.get(batchId) ?? reconciled;
+      this.clearBatchRuntime(batchId);
+    }
+    return reconciled;
   }
 
   async onJobTerminal(job: JobRecord): Promise<void> {
     if (!job.batchId || !job.planId) return;
-    const currentBatch = this.dependencies.store.latest(job.planId, 100)
-      .find(batch => batch.id === job.batchId);
+    const currentBatch = this.dependencies.store.get(job.batchId);
     if (currentBatch?.status !== 'running') return;
+    if (job.planId === 'zsxq-chen-teacher' && !this.isCurrentJobAttempt(job)) return;
     if (job.planId !== 'nowcoder-agent-market' && job.status === 'saved' && !this.coveredJobs.has(job.id)) {
       this.coveredJobs.add(job.id);
       const key = await this.dependencies.coverageKey?.(job);
       if (key) {
-        const batch = this.dependencies.store.latest(job.planId, 100)
-          .find(item => item.id === job.batchId);
+        const batch = this.dependencies.store.get(job.batchId);
         if (batch) {
           const coverage = { ...(batch.coverage ?? {}), [key]: (batch.coverage?.[key] ?? 0) + 1 };
           await this.dependencies.store.markDiscovery(batch.id, batch.discovered, coverage);
         }
       }
     }
-    if (job.planId !== 'nowcoder-agent-market' && job.status === 'saved' && !this.syncedJobs.has(job.id)) {
-      this.syncedJobs.add(job.id);
-      if (await this.dependencies.shouldAutoSync(job)) {
-        try {
-          await this.dependencies.syncJob(job);
-          await this.dependencies.store.markDelivered(job.batchId, stableContentId(job.url));
-        } catch (error) {
-          this.recordSyncError(job.batchId, error);
-        }
-      }
-    }
+    await this.syncSavedPlanJob(job);
     if (job.status !== 'saved' && job.status !== 'failed' && job.status !== 'needs_attention') return;
+    if (job.planId === 'zsxq-chen-teacher') {
+      await this.reconcileZsxqBatch(job.batchId);
+      return;
+    }
     const reconciled = await this.dependencies.store.reconcile(
       job.batchId,
       this.dependencies.jobs.list(),
@@ -321,6 +419,15 @@ export class CollectionPlanService {
     }
     if (!this.nowcoderRoundTerminal(reconciled.id)) return;
     await this.advanceNowcoderBatch(reconciled);
+  }
+
+  /** 记录 Bridge 运行期防线拒绝的计划子任务，再按终态推进批次。 */
+  async onJobRejected(job: JobRecord, reason: string): Promise<void> {
+    if (job.batchId && job.planId) {
+      if (job.planId === 'zsxq-chen-teacher' && !this.isCurrentJobAttempt(job)) return;
+      await this.dependencies.store.recordRejection(job.batchId, { url: job.url, reason });
+    }
+    await this.onJobTerminal(job);
   }
 
   async advanceNowcoderBatch(batch: CollectionBatch): Promise<void> {
@@ -635,22 +742,48 @@ export class CollectionPlanService {
   }
 
   private async execute(batch: CollectionBatch): Promise<void> {
-    if (this.executing.has(batch.id) || !this.dependencies.extensionConnected()) return;
+    if (this.executing.has(batch.id) || !this.canExecute(batch.planId)) return;
     this.executing.add(batch.id);
+    let zsxqAttempt: CollectionPlanAttempt | undefined;
     try {
       if (batch.planId === 'zsxq-chen-teacher') {
-        await this.dependencies.collectZsxq(batch.id, batch.planId);
+        const preparing = await this.dependencies.store.beginPreparation(batch.id);
+        zsxqAttempt = preparing.preparationAttempt;
+        if (!zsxqAttempt) throw new Error('知识星球采集尝试未生成');
+        const dispatched = await this.dependencies.collectZsxq(
+          batch.id,
+          batch.planId,
+          zsxqAttempt,
+          batch.force === true,
+        );
+        if (dispatched !== true) throw new Error('知识星球采集命令未派发');
         return;
       }
       await this.advanceNowcoderBatch(batch);
     } catch (error) {
-      const terminal = await this.dependencies.store.fail(
-        batch.id,
-        error instanceof Error ? error.message : '固定采集计划执行失败',
-      );
-      await this.persistTerminalBenchmark(terminal);
+      const message = error instanceof Error ? error.message : '固定采集计划执行失败';
+      const terminal = zsxqAttempt
+        ? await this.dependencies.store.finishPreparationWithError(
+            batch.id,
+            zsxqAttempt,
+            message,
+            false,
+          )
+        : await this.dependencies.store.fail(batch.id, message);
+      const reported = await this.persistTerminalBenchmark(terminal);
+      if (zsxqAttempt && reported.status !== 'running') {
+        this.dependencies.onZsxqAttemptTerminal?.(reported);
+      }
     } finally {
       this.executing.delete(batch.id);
     }
+  }
+
+  private canExecute(planId: CollectionPlanId): boolean {
+    if (!this.dependencies.extensionConnected()) return false;
+    return planId !== 'zsxq-chen-teacher' || (
+      this.dependencies.canCollectZsxq?.() !== false
+      && this.dependencies.canStartZsxqAttempt?.() !== false
+    );
   }
 }

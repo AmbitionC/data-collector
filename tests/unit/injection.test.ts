@@ -9,25 +9,23 @@ const TOPIC_URL = 'https://wx.zsxq.com/topic/511111111111111';
 const WECHAT_URL = 'https://mp.weixin.qq.com/s/abc';
 
 describe('自愈注入清单', () => {
-  it('星球页两个脚本都补，主世界钩子排在内容脚本之后', () => {
+  it('星球页两个脚本都补，主世界钩子先留存再由内容脚本 replay', () => {
     // 这是本文件存在的理由：曾经只补 content.js，主世界钩子一次都没补过。
     // 结果是「装扩展之前就打开的标签页」永远捕获不到帖子号 → 批量必然全部跳过，
     // 而面板还在让用户滚动页面——钩子都不在，滚多久都等不到结果。
     expect(injectionPlan(LIST_URL)).toEqual([
+      { files: ['inject.js'], world: 'MAIN', required: true },
       { files: ['content.js'], required: true },
-      { files: ['inject.js'], world: 'MAIN', required: false },
     ]);
-    // 帖子详情页同样要补：单页保存不需要帖子号，但用户随时会退回列表继续批量。
+    // 帖子详情页同样靠 exact API 记录证明正文完整，不能只补 content。
     expect(injectionPlan(TOPIC_URL).map(step => step.files[0]))
-      .toEqual(['content.js', 'inject.js']);
+      .toEqual(['inject.js', 'content.js']);
   });
 
-  it('内容脚本是必需项，主世界钩子是可选项', () => {
-    const [content, hook] = injectionPlan(LIST_URL);
-    // 内容脚本注入失败必须抛出去（整页都采不了）；
-    // 钩子失败只影响批量对号，不该连累单页保存。
+  it('内容脚本和主世界钩子都是知识星球完整采集的必需项', () => {
+    const [hook, content] = injectionPlan(LIST_URL);
+    expect(hook?.required).toBe(true);
     expect(content?.required).toBe(true);
-    expect(hook?.required).toBe(false);
   });
 
   it('其它来源只补内容脚本，不往页面主世界塞东西', () => {

@@ -67,4 +67,21 @@ describe('owned browser tabs', () => {
     await expect(registry.close(30)).resolves.toBeUndefined();
     expect(storage.values[OWNED_TABS_STORAGE_KEY]).toMatchObject({ owned: [] });
   });
+
+  it('best-effort closes a newly created tab when session tracking cannot be persisted', async () => {
+    const persistenceError = new Error('session storage unavailable');
+    const storage: OwnedTabsStorage = {
+      get: async () => ({}),
+      set: async () => { throw persistenceError; },
+    };
+    const remove = vi.fn(async () => { throw new Error('tab already disappeared'); });
+    const registry = new OwnedTabRegistry(storage, { remove }, () => 4_000);
+
+    await expect(registry.track(
+      { id: 40, url: 'https://wx.zsxq.com/group/48844584441158' },
+      'zsxq-plan',
+    )).rejects.toBe(persistenceError);
+    expect(remove).toHaveBeenCalledOnce();
+    expect(remove).toHaveBeenCalledWith(40);
+  });
 });

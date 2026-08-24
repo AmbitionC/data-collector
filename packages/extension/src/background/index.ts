@@ -13,6 +13,7 @@ import {
 } from './connection.js';
 import {
   JobRunner,
+  trustedZsxqContentCompleteness,
   type BrowserTab,
   type ExtractionResponse,
   type TabsApi,
@@ -108,10 +109,13 @@ const connection = new BridgeConnection({
   setTimeout: (callback, milliseconds) => setTimeout(callback, milliseconds),
   clearTimeout: handle => clearTimeout(handle as number),
 });
+const expectedContentBuildId = runningBuildId();
 const runner = new JobRunner({
   tabs,
   bridge: connection,
   waitForTabComplete,
+  requireContentProtocol: true,
+  ...(expectedContentBuildId ? { expectedContentBuildId } : {}),
   // 批量采集会跑很久，进度写进 storage 由侧栏轮询展示。
   reportBatch: progress => { void chrome.storage.local.set({ batch: progress }); },
   // 逐条结果单独存：明细列表要用，也方便出问题时直接看每条的判定。
@@ -121,29 +125,62 @@ const runner = new JobRunner({
     const entries = (await connection.library()) as { url?: unknown }[];
     return new Set(entries.map(entry => String(entry.url ?? '')).filter(Boolean));
   },
+  knownContent: async () => {
+    // 旧 Bridge 的目录没有 contentComplete；此时退回 knownUrls，不能把所有旧条目每天重投。
+    if (!connection.supportsVersion('0.4.29')) return undefined;
+    const entries = (await connection.library()) as Array<{
+      url?: unknown;
+      contentComplete?: unknown;
+      contentCompletenessVersion?: unknown;
+    }>;
+    return new Map(entries
+      .map(entry => {
+        const url = String(entry.url ?? '');
+        const complete = trustedZsxqContentCompleteness(entry);
+        return [url, complete] as const;
+      })
+      .filter(([url]) => Boolean(url)));
+  },
 });
+let activePlanCollections = 0;
 connection.onCollect((requestId, url, interactive) => runner.runRemoteJob(requestId, url, interactive));
 connection.onPlanCollect(async (requestId, payload) => {
   if (payload.planId !== 'zsxq-chen-teacher') {
     connection.send('plan.result', requestId, {
       batchId: payload.batchId,
+      attempt: payload.attempt,
       discovered: 0,
       error: `扩展不支持计划：${payload.planId}`,
     });
     return;
   }
+  activePlanCollections += 1;
   try {
-    await runner.runZsxqCollectionPlan(payload.batchId, result => {
-      connection.send('plan.result', requestId, { batchId: payload.batchId, ...result });
-    });
+    await runner.runZsxqCollectionPlan(
+      payload.batchId,
+      payload.attempt,
+      result => {
+        connection.send('plan.result', requestId, {
+          batchId: payload.batchId,
+          attempt: payload.attempt,
+          ...result,
+        });
+      },
+      { force: payload.force === true },
+    );
   } catch (error) {
     const message = error instanceof Error ? error.message : '知识星球计划采集失败';
     connection.send('plan.result', requestId, {
       batchId: payload.batchId,
+      attempt: payload.attempt,
       discovered: 0,
       error: message,
-      ...(/AUTH_REQUIRED|登录/u.test(message) ? { needsAttention: true } : {}),
+      ...(/AUTH_REQUIRED|BRIDGE_UPDATE_REQUIRED|CONTENT_EMPTY|CONTENT_COVERAGE_INCOMPLETE|AUTHOR_IDENTITY_UNPROVEN|PUBLISHED_AT_UNPROVEN|登录|完整状态/u.test(message)
+        ? { needsAttention: true }
+        : {}),
     });
+  } finally {
+    activePlanCollections = Math.max(0, activePlanCollections - 1);
   }
 });
 
@@ -178,6 +215,7 @@ function updateSignal(values: Record<string, unknown>): UpdateSignal {
       batch: values.batch as { phase?: string; updatedAt?: number } | undefined,
       lastJobStatus: values.lastJobStatus as string | undefined,
       lastJobUpdatedAt: values.lastJobUpdatedAt as number | undefined,
+      activePlanCollections,
       now: Date.now(),
     }),
   };

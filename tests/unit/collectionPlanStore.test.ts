@@ -21,6 +21,112 @@ function job(id: string, status: JobRecord['status'], errorCode?: string): JobRe
 }
 
 describe('CollectionPlanStore', () => {
+  it('persists a new ZSXQ attempt and rejects stale or terminal child attachments', async () => {
+    const root = await temporaryDirectories.create('plan-store-zsxq-attempt-');
+    const path = join(root, 'plans.json');
+    const store = await CollectionPlanStore.open(path, () => '2026-08-25T00:00:00.000Z');
+    const batch = await store.start('zsxq-chen-teacher');
+    const first = await store.beginPreparation(batch.id);
+    const current = await store.beginPreparation(batch.id);
+
+    expect(first.preparationAttempt).toMatch(/^[a-f0-9]{16}$/);
+    expect(current.preparationAttempt).toMatch(/^[a-f0-9]{16}$/);
+    expect(current.preparationAttempt).not.toBe(first.preparationAttempt);
+    await expect(store.attachJob(batch.id, 'stale-topic', first.preparationAttempt))
+      .rejects.toThrow('采集尝试已过期');
+
+    await store.attachJob(batch.id, 'current-topic', current.preparationAttempt);
+    expect((await CollectionPlanStore.open(path)).latest('zsxq-chen-teacher', 1)[0]).toMatchObject({
+      discovered: 1,
+      accepted: 1,
+    });
+    await store.recordPreparationResult(batch.id, current.preparationAttempt!, {
+      discovered: 0,
+      prepared: false,
+    });
+    expect(store.latest('zsxq-chen-teacher', 1)[0]).toMatchObject({
+      discovered: 1,
+      accepted: 1,
+    });
+    await store.recordPreparationResult(batch.id, current.preparationAttempt!, {
+      discovered: 1,
+      prepared: true,
+    });
+    await store.markDelivered(batch.id, '9fa6e4766912');
+    const completed = await store.reconcile(batch.id, [{
+      ...job('current-topic', 'saved'),
+      url: 'https://wx.zsxq.com/group/48844584441158/topic/844444444444441',
+    }]);
+    expect(completed.status).toBe('completed');
+
+    await expect(store.attachJob(batch.id, 'late-topic', current.preparationAttempt))
+      .rejects.toThrow('采集批次已结束');
+    expect((await CollectionPlanStore.open(path)).latest('zsxq-chen-teacher', 1)[0]).toMatchObject({
+      status: 'completed',
+      accepted: 1,
+      saved: 1,
+    });
+  });
+
+  it('persists ZSXQ preparation and never regresses a completed staging phase', async () => {
+    const root = await temporaryDirectories.create('plan-store-zsxq-preparation-');
+    const path = join(root, 'plans.json');
+    const store = await CollectionPlanStore.open(path, () => '2026-08-25T00:00:00.000Z');
+    const batch = await store.start('zsxq-chen-teacher');
+
+    expect(batch).toMatchObject({ preparationStatus: 'collecting' });
+
+    await store.markPreparation(batch.id, false);
+    const collecting = await CollectionPlanStore.open(path);
+    expect(collecting.latest('zsxq-chen-teacher', 1)[0]).toMatchObject({
+      preparationStatus: 'collecting',
+    });
+
+    await collecting.markPreparation(batch.id, true);
+    await collecting.markPreparation(batch.id, false);
+    const completed = await CollectionPlanStore.open(path);
+    expect(completed.latest('zsxq-chen-teacher', 1)[0]).toMatchObject({
+      preparationStatus: 'completed',
+    });
+  });
+
+  it('does not finalize a partial ZSXQ child set before staging is prepared', async () => {
+    const root = await temporaryDirectories.create('plan-store-zsxq-partial-');
+    const store = await CollectionPlanStore.open(
+      join(root, 'plans.json'),
+      () => '2026-08-25T00:00:00.000Z',
+    );
+    const batch = await store.start('zsxq-chen-teacher');
+    const preparing = await store.beginPreparation(batch.id);
+    await store.markDiscovery(batch.id, 2);
+    await store.attachJob(batch.id, 'topic-1', preparing.preparationAttempt);
+
+    const partial = await store.reconcile(batch.id, [job('topic-1', 'saved')]);
+
+    expect(partial).toMatchObject({
+      status: 'running',
+      preparationStatus: 'collecting',
+      accepted: 1,
+      saved: 1,
+    });
+    expect(partial.finishedAt).toBeUndefined();
+
+    await store.recordPreparationResult(batch.id, preparing.preparationAttempt!, {
+      discovered: 2,
+      prepared: true,
+    });
+    await store.markDelivered(batch.id, '9fa6e4766912');
+    const completed = await store.reconcile(batch.id, [{
+      ...job('topic-1', 'saved'),
+      url: 'https://wx.zsxq.com/group/48844584441158/topic/844444444444441',
+    }]);
+    expect(completed).toMatchObject({
+      status: 'completed',
+      preparationStatus: 'completed',
+      skipped: 1,
+    });
+  });
+
   it('persists one round while atomically attaching all jobs in that round', async () => {
     const root = await temporaryDirectories.create('plan-store-round-');
     const path = join(root, 'plans.json');
@@ -127,21 +233,29 @@ describe('CollectionPlanStore', () => {
       reopened.latest('nowcoder-agent-market', 1)[0])).resolves.toEqual(before);
   });
 
-
   it('rolls back a reconciled terminal batch when its atomic persistence fails', async () => {
     const root = await temporaryDirectories.create('plan-store-reconcile-rollback-');
     const path = join(root, 'plans.json');
     const backupPath = join(root, 'plans.persisted.json');
     const store = await CollectionPlanStore.open(path, () => '2026-08-25T00:00:00.000Z');
     const batch = await store.start('zsxq-chen-teacher');
-    await store.markDiscovery(batch.id, 1);
-    await store.attachJob(batch.id, 'topic-1');
+    const preparing = await store.beginPreparation(batch.id);
+    await store.attachJob(batch.id, 'topic-1', preparing.preparationAttempt);
+    await store.recordPreparationResult(batch.id, preparing.preparationAttempt!, {
+      discovered: 1,
+      prepared: true,
+    });
+    await store.markDelivered(batch.id, '9fa6e4766912');
     const before = store.latest('zsxq-chen-teacher', 1)[0]!;
     await rename(path, backupPath);
     await mkdir(path);
 
     try {
-      await expect(store.reconcile(batch.id, [job('topic-1', 'saved')])).rejects.toThrow();
+      await expect(store.reconcile(batch.id, [{
+        ...job('topic-1', 'saved'),
+        url: 'https://wx.zsxq.com/group/48844584441158/topic/844444444444441',
+      }])).rejects.toThrow();
+
       expect(store.latest('zsxq-chen-teacher', 1)[0]).toEqual(before);
     } finally {
       await rmdir(path);
@@ -170,6 +284,7 @@ describe('CollectionPlanStore', () => {
       await rename(backupPath, path);
     }
   });
+
   it('keeps a batch running until every attached child is terminal', async () => {
     const root = await temporaryDirectories.create('plan-store-');
     const store = await CollectionPlanStore.open(
@@ -222,17 +337,103 @@ describe('CollectionPlanStore', () => {
     const path = join(root, 'plans.json');
     const first = await CollectionPlanStore.open(path, () => '2026-08-23T01:00:00.000Z');
     const batch = await first.start('zsxq-chen-teacher');
+    const preparing = await first.beginPreparation(batch.id);
     await first.markDiscovery(batch.id, 1);
-    await first.attachJob(batch.id, 'topic-1');
-    await first.markDelivered(batch.id, 'a1b2c3d4e5f6');
-    await first.markDelivered(batch.id, 'a1b2c3d4e5f6');
+    await first.attachJob(batch.id, 'topic-1', preparing.preparationAttempt);
+    await first.recordPreparationResult(batch.id, preparing.preparationAttempt!, {
+      discovered: 1,
+      prepared: true,
+    });
+    await first.markDelivered(batch.id, '9fa6e4766912');
+    await first.markDelivered(batch.id, '9fa6e4766912');
 
     const reopened = await CollectionPlanStore.open(path, () => '2026-08-23T01:05:00.000Z');
-    const completed = await reopened.reconcile(batch.id, [job('topic-1', 'saved')]);
+    const completed = await reopened.reconcile(batch.id, [{
+      ...job('topic-1', 'saved'),
+      url: 'https://wx.zsxq.com/group/48844584441158/topic/844444444444441',
+    }]);
 
     expect(completed.status).toBe('completed');
-    expect(completed.deliveryIds).toEqual(['a1b2c3d4e5f6']);
+    expect(completed.deliveryIds).toEqual(['9fa6e4766912']);
     expect(reopened.latest('zsxq-chen-teacher', 1)[0]).toEqual(completed);
+  });
+
+  it('refuses to complete a ZSXQ batch while a saved child lacks its durable delivery ID', async () => {
+    const root = await temporaryDirectories.create('plan-store-zsxq-delivery-gate-');
+    const store = await CollectionPlanStore.open(
+      join(root, 'plans.json'),
+      () => '2026-08-25T00:00:00.000Z',
+    );
+    const batch = await store.start('zsxq-chen-teacher');
+    const preparing = await store.beginPreparation(batch.id);
+    await store.attachJob(batch.id, 'saved-without-delivery', preparing.preparationAttempt);
+    await store.recordPreparationResult(batch.id, preparing.preparationAttempt!, {
+      discovered: 1,
+      prepared: true,
+    });
+
+    const terminal = await store.reconcile(batch.id, [{
+      ...job('saved-without-delivery', 'saved'),
+      url: 'https://wx.zsxq.com/group/48844584441158/topic/844444444444441',
+      batchId: batch.id,
+      planId: 'zsxq-chen-teacher',
+      planAttempt: preparing.preparationAttempt,
+    }]);
+
+    expect(terminal).toMatchObject({
+      status: 'completed_with_attention',
+      saved: 1,
+      deliveryIds: [],
+      error: expect.stringContaining('未确认交付'),
+    });
+  });
+
+  it('persists per-item plan rejection details across reopen', async () => {
+    const root = await temporaryDirectories.create('plan-store-rejections-');
+    const path = join(root, 'plans.json');
+    const store = await CollectionPlanStore.open(path, () => '2026-08-25T00:00:00.000Z');
+    const batch = await store.start('zsxq-chen-teacher');
+    const rejectionDetails = [{
+      url: 'https://wx.zsxq.com/group/48844584441158/topic/844444444444444',
+      reason: '正文不完整',
+    }];
+
+    await store.markDiscovery(
+      batch.id,
+      1,
+      undefined,
+      { '正文不完整': 1 },
+      rejectionDetails,
+    );
+    rejectionDetails[0]!.reason = '外部数组已修改';
+
+    const reopened = await CollectionPlanStore.open(path);
+    const persisted = reopened.latest('zsxq-chen-teacher', 1)[0]!;
+    expect(persisted.rejectionDetails).toEqual([{
+      url: 'https://wx.zsxq.com/group/48844584441158/topic/844444444444444',
+      reason: '正文不完整',
+    }]);
+    expect(collectionBatchSchema.safeParse(persisted).success).toBe(true);
+  });
+
+  it('records a runtime rejection exactly once across retries', async () => {
+    const root = await temporaryDirectories.create('plan-store-runtime-rejection-');
+    const path = join(root, 'plans.json');
+    const store = await CollectionPlanStore.open(path, () => '2026-08-25T00:00:00.000Z');
+    const batch = await store.start('zsxq-chen-teacher');
+    const rejection = {
+      url: 'https://wx.zsxq.com/group/48844584441158/topic/855555555555555',
+      reason: '正文不完整',
+    };
+
+    await store.recordRejection(batch.id, rejection);
+    await store.recordRejection(batch.id, rejection);
+
+    const reopened = await CollectionPlanStore.open(path);
+    expect(reopened.latest('zsxq-chen-teacher', 1)[0]).toMatchObject({
+      rejections: { '正文不完整': 1 },
+      rejectionDetails: [rejection],
+    });
   });
 
   it('does not overwrite a corrupt state file', async () => {

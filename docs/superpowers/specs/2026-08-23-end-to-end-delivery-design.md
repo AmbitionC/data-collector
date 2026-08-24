@@ -129,7 +129,7 @@ CLI 的等待模式返回一个 JSON 结果，至少包含：
 
 - `id`、`planId`、`status`、`startedAt`、`finishedAt`；
 - `discovered`、`accepted`、`saved`、`skipped`、`failed`、`needsAttention`；
-- `coverage`、`rejections`、`error`；
+- `coverage`、`rejections`、逐条 `rejectionDetails`（URL 与原因）、`error`；
 - `deliverable`：目标收件箱和当前批次可消费 ID。
 
 重复触发时：

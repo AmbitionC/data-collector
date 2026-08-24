@@ -109,8 +109,9 @@ export async function updateWorkspace(
    * 构建失败过一次，HEAD 就不会再动了，下一轮直接答「已是最新」——而磁盘上的产物
    * 一直是旧的，插件那边永远等不到新版本，还没人说得出为什么。用户自己 pull 了
    * 却没构建也是同一回事。
-   * 读不出产物是哪一版时按「不落后」处理：宁可不构建，也不能每 10 分钟盲目跑一次
-   * npm run package。
+   * 只有调用方根本没有提供产物读取能力时，才按「不知道」且不构建处理。生产 Bridge
+   * 明确提供了读取器却返回空，说明 stable artifact 缺失或损坏；这时必须按落后处理，
+   * 否则精确 build-id 门禁会永久拒绝知识星球任务。失败后的重试由外层 10 分钟周期限流。
    */
   const built = await host.builtCommit?.(repoRoot);
   const stale = host.builtCommit !== undefined
@@ -124,16 +125,29 @@ export async function updateWorkspace(
     };
   }
 
-  const moved = target !== before;
-  if (moved) {
+  let current = before;
+  let moved = false;
+  if (target !== before) {
     try {
       // 只快进：本地领先或分叉时宁可不动，也不要替用户决定怎么合。
       await git('merge', '--ff-only', `origin/${branch}`);
+      // `merge --ff-only` 在“本地领先、远端是祖先”时也会成功，但 HEAD 不会移动。
+      // 必须重读 HEAD，不能仅凭 target 与 before 不同就声称更新成功并反复构建。
+      current = (await git('rev-parse', 'HEAD')).trim().slice(0, SHORT);
+      moved = current !== before;
     } catch (error) {
       return {
         changed: false,
         commit: before,
         message: `本地与远端已分叉，无法快进更新：${message(error)}`,
+        checkedAt: host.now(),
+      };
+    }
+    if (!moved && !stale) {
+      return {
+        changed: false,
+        commit: before,
+        message: '本地分支领先远端，已保留本地提交。',
         checkedAt: host.now(),
       };
     }
@@ -144,21 +158,21 @@ export async function updateWorkspace(
   } catch (error) {
     return {
       changed: moved,
-      commit: target,
+      commit: current,
       buildFailed: true,
       message: moved
-        ? `代码已更新到 ${target}，但构建失败：${message(error)}`
-        : `产物落后于代码（${built} → ${target}），重新构建失败：${message(error)}`,
+        ? `代码已更新到 ${current}，但构建失败：${message(error)}`
+        : `产物落后于代码（${built} → ${current}），重新构建失败：${message(error)}`,
       checkedAt: host.now(),
     };
   }
 
   return {
     changed: true,
-    commit: target,
+    commit: current,
     message: moved
-      ? `已更新到 ${target} 并完成构建，重新加载插件即可生效。`
-      : `产物落后于代码，已按 ${target} 重新构建，重新加载插件即可生效。`,
+      ? `已更新到 ${current} 并完成构建，重新加载插件即可生效。`
+      : `产物落后于代码，已按 ${current} 重新构建，重新加载插件即可生效。`,
     checkedAt: host.now(),
   };
 }
@@ -166,7 +180,8 @@ export async function updateWorkspace(
 /**
  * 从构建标记里取出提交号：`v0.4.6 · abc1234` → `abc1234`。
  *
- * 有未提交改动时构建标记会写成 `abc1234+本地改动`，那个后缀不属于提交号。
+ * 有未提交改动时构建标记会写成 `abc1234+dirty.<内容指纹>`，
+ * 那个后缀不属于提交号。为兼容旧产物，`+本地改动` 也会被同样去掉。
  * 拿不到 git 信息时标记是 `unknown`，返回 undefined——**绝不编一个假的**，
  * 上游据此按「不知道产物是哪一版」处理，而不是按「落后了」去反复重建。
  */

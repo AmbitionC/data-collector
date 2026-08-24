@@ -8,18 +8,21 @@ import {
 const REPO = '/Users/chenhao/code/data-collector';
 
 function host(
-  responses: Record<string, string | Error>,
+  responses: Record<string, string | Error | Array<string | Error>>,
   builtCommit?: string | null,
 ): UpdateHost & { ran: string[] } {
   const ran: string[] = [];
   return {
     ran,
     now: () => '2026-07-25T00:00:00.000Z',
-    ...(builtCommit === undefined ? {} : { builtCommit: async () => builtCommit ?? undefined }),
+    ...(builtCommit === undefined
+      ? {}
+      : { builtCommit: async () => builtCommit ?? undefined }),
     async run(command, args) {
       const key = `${command} ${args.join(' ')}`;
       ran.push(key);
-      const response = responses[key];
+      const configured = responses[key];
+      const response = Array.isArray(configured) ? configured.shift() : configured;
       if (response instanceof Error) throw response;
       if (response === undefined) throw new Error(`未预期的命令：${key}`);
       return response;
@@ -33,6 +36,7 @@ describe('bridge auto update', () => {
   it('fast-forwards and rebuilds when the remote moved ahead', async () => {
     const target = host({
       ...AT_OLD,
+      'git rev-parse HEAD': ['aaaaaaaaaaaabbbb\n', 'ccccccccccccdddd\n'],
       'git fetch origin master': '',
       'git rev-parse origin/master': 'ccccccccccccdddd\n',
       'git merge --ff-only origin/master': 'Fast-forward',
@@ -100,6 +104,7 @@ describe('bridge auto update', () => {
     const target = host(
       {
         ...AT_OLD,
+        'git rev-parse HEAD': ['aaaaaaaaaaaabbbb\n', 'aaaaaaaaaaaabbbb\n'],
         'git fetch origin master': '',
         'git rev-parse origin/master': 'aaaaaaaaaaaabbbb\n',
         'npm run package': '/path/to.zip',
@@ -114,7 +119,6 @@ describe('bridge auto update', () => {
     expect(target.ran).not.toContain('git merge --ff-only origin/master');
     expect(outcome.message).toContain('产物落后于代码');
   });
-
 
   it('rebuilds when production artifact identity is missing or corrupt', async () => {
     const target = host(
@@ -134,6 +138,7 @@ describe('bridge auto update', () => {
     expect(outcome).toMatchObject({ changed: true, commit: 'aaaaaaaaaaaa' });
     expect(outcome.message).toContain('产物落后于代码');
   });
+
   it('stays quiet when the artifacts already match HEAD', async () => {
     const target = host(
       {
@@ -152,9 +157,29 @@ describe('bridge auto update', () => {
     expect(target.ran).not.toContain('npm run package');
   });
 
+  it('preserves a clean local branch that is ahead of origin without rebuilding forever', async () => {
+    const target = host(
+      {
+        ...AT_OLD,
+        'git fetch origin master': '',
+        'git rev-parse origin/master': '9999999999990000\n',
+        // 合并祖先分支会成功返回，但 HEAD 根本没有移动。
+        'git merge --ff-only origin/master': 'Already up to date.',
+      },
+      'aaaaaaa',
+    );
+
+    const outcome = await updateWorkspace(REPO, target);
+
+    expect(outcome).toMatchObject({ changed: false, commit: 'aaaaaaaaaaaa' });
+    expect(outcome.message).toContain('领先远端');
+    expect(target.ran).not.toContain('npm run package');
+  });
+
   it('reports a build failure honestly instead of claiming the update landed', async () => {
     const target = host({
       ...AT_OLD,
+      'git rev-parse HEAD': ['aaaaaaaaaaaabbbb\n', 'ccccccccccccdddd\n'],
       'git fetch origin master': '',
       'git rev-parse origin/master': 'ccccccccccccdddd\n',
       'git merge --ff-only origin/master': '',
@@ -230,6 +255,10 @@ describe('从构建标记里认出提交号', () => {
 
   it('去掉「本地改动」后缀——那不是提交号的一部分', () => {
     expect(buildStampCommit('v0.4.6 · 815a450+本地改动')).toBe('815a450');
+  });
+
+  it('去掉可区分本地内容的 dirty 指纹后缀', () => {
+    expect(buildStampCommit('v0.4.29 · 815a450+dirty.91d8f0c2aa17')).toBe('815a450');
   });
 
   it('拿不到 git 信息时返回 undefined，绝不编一个假的', () => {

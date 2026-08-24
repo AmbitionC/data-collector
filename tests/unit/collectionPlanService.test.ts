@@ -1,7 +1,12 @@
-import { mkdir, readFile, rename, rmdir } from 'node:fs/promises';
+import { mkdir, readFile, rename, rmdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import type { CollectionBatch, CollectionPlanId, JobRecord } from '@data-collector/shared';
+import type {
+  CollectionBatch,
+  CollectionPlanAttempt,
+  CollectionPlanId,
+  JobRecord,
+} from '@data-collector/shared';
 import { JobStore } from '../../packages/bridge/src/jobs/store.js';
 import {
   CollectionPlanService,
@@ -40,6 +45,12 @@ async function fixture(options: {
   syncJob?: (job: JobRecord) => Promise<void>;
   syncNowcoderJobs?: (jobs: readonly JobRecord[], deliveryBatchId: string) => Promise<void>;
   writeBenchmark?: (batch: CollectionBatch, jobs: readonly JobRecord[]) => Promise<void>;
+  collectZsxq?: (
+    batchId: string,
+    planId: 'zsxq-chen-teacher',
+    attempt: CollectionPlanAttempt,
+    force: boolean,
+  ) => Promise<true>;
 } = {}) {
   const root = await temporaryDirectories.create('collection-plan-service-');
   let connected = options.connected ?? true;
@@ -48,13 +59,32 @@ async function fixture(options: {
   const store = await CollectionPlanStore.open(join(root, 'plans.json'), now);
   const jobs = await JobStore.open(join(root, 'jobs.json'), { now, id: () => crypto.randomUUID() });
   const dispatched: string[] = [];
-  const planMessages: Array<{ batchId: string; planId: CollectionPlanId }> = [];
+  const planMessages: Array<{
+    batchId: string;
+    planId: CollectionPlanId;
+    attempt?: string;
+    force?: boolean;
+  }> = [];
   const synced: string[] = [];
   const shouldAutoSync = options.shouldAutoSync ?? (async () => false);
   const discover = vi.fn(options.discoverNowcoder ?? (async knownUrls => (options.candidates ?? [
     { url: 'https://www.nowcoder.com/discuss/8001', queryCompany: 'bytedance' as const },
     { url: 'https://www.nowcoder.com/discuss/8002', queryCompany: 'tencent' as const },
   ]).filter(candidate => !knownUrls.has(candidate.url))));
+  const collectZsxq = options.collectZsxq ?? (async (
+    batchId: string,
+    planId: 'zsxq-chen-teacher',
+    attempt: CollectionPlanAttempt,
+    force: boolean,
+  ) => {
+    planMessages.push({
+      batchId,
+      planId,
+      attempt,
+      ...(force ? { force: true } : {}),
+    });
+    return true as const;
+  });
   const service = new CollectionPlanService({
     store,
     jobs,
@@ -62,7 +92,7 @@ async function fixture(options: {
     extensionConnected: () => connected,
     discoverNowcoder: discover,
     dispatch: async job => { dispatched.push(job.id); },
-    collectZsxq: async (batchId, planId) => { planMessages.push({ batchId, planId }); },
+    collectZsxq,
     shouldAutoSync,
     pendingNowcoderJobs: deliveryBatchId =>
       options.pendingNowcoderJobs?.(jobs.list(), deliveryBatchId) ?? Promise.resolve([]),
@@ -103,7 +133,7 @@ async function fixture(options: {
         extensionConnected: () => connected,
         discoverNowcoder: discover,
         dispatch: async job => { dispatched.push(job.id); },
-        collectZsxq: async (batchId, planId) => { planMessages.push({ batchId, planId }); },
+        collectZsxq,
         shouldAutoSync,
         pendingNowcoderJobs: deliveryBatchId =>
           options.pendingNowcoderJobs?.(reopenedJobs.list(), deliveryBatchId) ?? Promise.resolve([]),
@@ -141,6 +171,42 @@ function deferred<T>() {
   let resolve!: (value: T | PromiseLike<T>) => void;
   const promise = new Promise<T>(resolvePromise => { resolve = resolvePromise; });
   return { promise, resolve };
+}
+
+function currentZsxqAttempt(store: CollectionPlanStore, batchId: string): CollectionPlanAttempt {
+  const attempt = store.latest('zsxq-chen-teacher', 100)
+    .find(batch => batch.id === batchId)?.preparationAttempt;
+  if (!attempt) throw new Error(`批次 ${batchId} 没有当前采集尝试`);
+  return attempt;
+}
+
+async function stageSavedZsxqJob(
+  context: Awaited<ReturnType<typeof fixture>>,
+  id: string,
+  url: string,
+): Promise<{ batch: CollectionBatch; saved: JobRecord }> {
+  const batch = await context.service.run('zsxq-chen-teacher', { force: true });
+  const attempt = currentZsxqAttempt(context.store, batch.id);
+  const child = await context.jobs.create({
+    id,
+    url,
+    requestedBy: 'extension',
+    batchId: batch.id,
+    planId: 'zsxq-chen-teacher',
+    planAttempt: attempt,
+  });
+  await context.service.onJobCreated(child);
+  await context.service.onExtensionPlanResult({
+    batchId: batch.id,
+    attempt,
+    discovered: 1,
+    prepared: true,
+  });
+  await context.jobs.transition(child.id, 'collecting');
+  const saved = await context.jobs.transition(child.id, 'saved', {
+    outputPath: `/tmp/${child.id}/index.md`,
+  });
+  return { batch, saved };
 }
 
 function acceptAllExcept(excludedUrls: ReadonlySet<string>) {
@@ -878,7 +944,13 @@ describe('CollectionPlanService', () => {
   it('starts ZSXQ collection through the extension and records discovery after its union pass', async () => {
     const context = await fixture();
     const batch = await context.service.run('zsxq-chen-teacher', { force: true });
-    expect(context.planMessages).toEqual([{ batchId: batch.id, planId: 'zsxq-chen-teacher' }]);
+    const attempt = currentZsxqAttempt(context.store, batch.id);
+    expect(context.planMessages).toEqual([{
+      batchId: batch.id,
+      planId: 'zsxq-chen-teacher',
+      attempt,
+      force: true,
+    }]);
 
     const ownerJob = await context.jobs.create({
       id: 'owner-topic',
@@ -886,23 +958,318 @@ describe('CollectionPlanService', () => {
       requestedBy: 'extension',
       batchId: batch.id,
       planId: 'zsxq-chen-teacher',
+      planAttempt: attempt,
     });
     await context.service.onJobCreated(ownerJob);
-    await context.service.onExtensionPlanResult({ batchId: batch.id, discovered: 3 });
+    await context.service.onExtensionPlanResult({
+      batchId: batch.id,
+      attempt,
+      discovered: 3,
+      prepared: true,
+      rejections: { '正文不完整': 1 },
+      rejectionDetails: [{
+        url: 'https://wx.zsxq.com/group/48844584441158/topic/822222222222222',
+        reason: '正文不完整',
+      }],
+    });
 
     expect(context.store.latest('zsxq-chen-teacher', 1)[0]).toMatchObject({
       discovered: 3,
       accepted: 1,
       skipped: 2,
+      rejections: { '正文不完整': 1 },
+      rejectionDetails: [{
+        url: 'https://wx.zsxq.com/group/48844584441158/topic/822222222222222',
+        reason: '正文不完整',
+      }],
+    });
+  });
+
+  it('fails a ZSXQ attempt when its dispatcher resolves without an explicit delivery acknowledgement', async () => {
+    const context = await fixture({
+      collectZsxq: (async () => undefined) as unknown as (
+        batchId: string,
+        planId: 'zsxq-chen-teacher',
+        attempt: CollectionPlanAttempt,
+        force: boolean,
+      ) => Promise<true>,
+    });
+
+    const started = await context.service.run('zsxq-chen-teacher', { force: true });
+
+    expect(started).toMatchObject({
+      status: 'failed',
+      error: expect.stringContaining('未派发'),
+    });
+    expect(context.store.latest('zsxq-chen-teacher', 1)[0]).toMatchObject({
+      id: started.id,
+      status: 'failed',
+      error: expect.stringContaining('未派发'),
+    });
+  });
+
+  it('restarts incomplete ZSXQ staging on reconnect even when one child was already attached', async () => {
+    const context = await fixture();
+    const batch = await context.service.run('zsxq-chen-teacher', { force: true });
+    const firstAttempt = currentZsxqAttempt(context.store, batch.id);
+    await context.service.onExtensionPlanResult({
+      batchId: batch.id,
+      attempt: firstAttempt,
+      discovered: 3,
+      prepared: false,
+    });
+    const partial = await context.jobs.create({
+      id: `${batch.id}-partial`,
+      url: 'https://wx.zsxq.com/group/48844584441158/topic/866666666666666',
+      requestedBy: 'extension',
+      batchId: batch.id,
+      planId: 'zsxq-chen-teacher',
+      planAttempt: firstAttempt,
+    });
+    await context.service.onJobCreated(partial);
+    const reopened = await context.reopen();
+    context.planMessages.length = 0;
+
+    await reopened.service.onExtensionConnected();
+    const currentAttempt = currentZsxqAttempt(reopened.store, batch.id);
+
+    expect(context.planMessages).toEqual([{
+      batchId: batch.id,
+      planId: 'zsxq-chen-teacher',
+      attempt: currentAttempt,
+      force: true,
+    }]);
+    expect(reopened.store.latest('zsxq-chen-teacher', 1)[0]).toMatchObject({
+      status: 'running',
+      preparationStatus: 'collecting',
+      preparationAttempt: currentAttempt,
+      discovered: 0,
+      accepted: 0,
+    });
+
+    const currentChild = await reopened.jobs.create({
+      id: `${batch.id}-current`,
+      url: 'https://wx.zsxq.com/group/48844584441158/topic/877777777777777',
+      requestedBy: 'extension',
+      batchId: batch.id,
+      planId: 'zsxq-chen-teacher',
+      planAttempt: currentAttempt,
+    });
+    await reopened.service.onJobCreated(currentChild);
+
+    await reopened.service.onExtensionPlanResult({
+      batchId: batch.id,
+      attempt: currentAttempt,
+      discovered: 3,
+      prepared: true,
+    });
+    context.planMessages.length = 0;
+    await reopened.service.onExtensionConnected();
+
+    expect(context.planMessages).toEqual([]);
+    expect(reopened.store.latest('zsxq-chen-teacher', 1)[0]).toMatchObject({
+      status: 'running',
+      preparationStatus: 'completed',
+      accepted: 1,
+    });
+  });
+
+  it('treats a legacy running ZSXQ batch without preparation state as incomplete', async () => {
+    const context = await fixture();
+    const batch = await context.store.start('zsxq-chen-teacher');
+    const stored = JSON.parse(await readFile(context.store.path, 'utf8')) as {
+      batches: Array<Record<string, unknown>>;
+    };
+    delete stored.batches[0]!.preparationStatus;
+    await writeFile(context.store.path, `${JSON.stringify(stored, null, 2)}\n`, 'utf8');
+    const reopened = await context.reopen();
+    context.planMessages.length = 0;
+
+    await reopened.service.onExtensionConnected();
+
+    expect(context.planMessages).toEqual([{
+      batchId: batch.id,
+      planId: 'zsxq-chen-teacher',
+      attempt: expect.stringMatching(/^[a-f0-9]{16}$/),
+    }]);
+  });
+
+  it('reconciles rather than restaging a prepared running ZSXQ batch on a repeated run request', async () => {
+    const context = await fixture();
+    const batch = await context.service.run('zsxq-chen-teacher', { force: true });
+    const attempt = currentZsxqAttempt(context.store, batch.id);
+    const child = await context.jobs.create({
+      id: `${batch.id}-prepared`,
+      url: 'https://wx.zsxq.com/group/48844584441158/topic/877777777777777',
+      requestedBy: 'extension',
+      batchId: batch.id,
+      planId: 'zsxq-chen-teacher',
+      planAttempt: attempt,
+    });
+    await context.service.onJobCreated(child);
+    await context.service.onExtensionPlanResult({
+      batchId: batch.id,
+      attempt,
+      discovered: 1,
+      prepared: true,
+    });
+    context.planMessages.length = 0;
+
+    const resumed = await context.service.run('zsxq-chen-teacher');
+
+    expect(context.planMessages).toEqual([]);
+    expect(resumed).toMatchObject({
+      id: batch.id,
+      status: 'running',
+      preparationStatus: 'completed',
+      accepted: 1,
+    });
+  });
+
+  it('ignores a stale prepared:false report after ZSXQ staging is complete', async () => {
+    const context = await fixture();
+    const batch = await context.service.run('zsxq-chen-teacher', { force: true });
+    const attempt = currentZsxqAttempt(context.store, batch.id);
+    const child = await context.jobs.create({
+      id: `${batch.id}-monotonic`,
+      url: 'https://wx.zsxq.com/group/48844584441158/topic/888888888888888',
+      requestedBy: 'extension',
+      batchId: batch.id,
+      planId: 'zsxq-chen-teacher',
+      planAttempt: attempt,
+    });
+    await context.service.onJobCreated(child);
+    await context.service.onExtensionPlanResult({
+      batchId: batch.id,
+      attempt,
+      discovered: 3,
+      prepared: true,
+      rejections: { '超出15天': 2 },
+    });
+
+    const afterStale = await context.service.onExtensionPlanResult({
+      batchId: batch.id,
+      attempt,
+      discovered: 1,
+      prepared: false,
+      rejections: { '正文不完整': 1 },
+    });
+
+    expect(afterStale).toMatchObject({
+      status: 'running',
+      preparationStatus: 'completed',
+      discovered: 3,
+      rejections: { '超出15天': 2 },
+    });
+  });
+
+  it('keeps a reconnected ZSXQ attempt running until the current attempt and all children finish', async () => {
+    const context = await fixture({ shouldAutoSync: async () => true });
+    const first = await context.service.run('zsxq-chen-teacher', { force: true });
+    const firstAttempt = first.preparationAttempt;
+    expect(firstAttempt).toMatch(/^[a-f0-9]{16}$/);
+
+    const firstChild = await context.jobs.create({
+      id: `${first.id}-first-attempt`,
+      url: 'https://wx.zsxq.com/group/48844584441158/topic/811111111111111',
+      requestedBy: 'extension',
+      batchId: first.id,
+      planId: 'zsxq-chen-teacher',
+      planAttempt: firstAttempt,
+    });
+    await context.service.onJobCreated(firstChild);
+    await context.jobs.transition(firstChild.id, 'collecting');
+    const firstSaved = await context.jobs.transition(firstChild.id, 'saved', {
+      outputPath: `/tmp/${firstChild.id}/index.md`,
+    });
+    await context.service.onJobTerminal(firstSaved);
+
+    await context.service.onExtensionConnected();
+    const current = context.store.latest('zsxq-chen-teacher', 1)[0]!;
+    const currentAttempt = current.preparationAttempt;
+    expect(currentAttempt).toMatch(/^[a-f0-9]{16}$/);
+    expect(currentAttempt).not.toBe(firstAttempt);
+
+    const afterStalePrepared = await context.service.onExtensionPlanResult({
+      batchId: first.id,
+      attempt: firstAttempt!,
+      discovered: 1,
+      prepared: true,
+    });
+    expect(afterStalePrepared).toMatchObject({
+      status: 'running',
+      preparationStatus: 'collecting',
+      preparationAttempt: currentAttempt,
+    });
+
+    const currentChild = await context.jobs.create({
+      id: `${first.id}-current-attempt`,
+      url: 'https://wx.zsxq.com/group/48844584441158/topic/822222222222222',
+      requestedBy: 'extension',
+      batchId: first.id,
+      planId: 'zsxq-chen-teacher',
+      planAttempt: currentAttempt,
+    });
+    await context.service.onJobCreated(currentChild);
+    const prepared = await context.service.onExtensionPlanResult({
+      batchId: first.id,
+      attempt: currentAttempt!,
+      discovered: 2,
+      prepared: true,
+    });
+    expect(prepared).toMatchObject({ status: 'running', accepted: 1, saved: 0 });
+
+    await context.jobs.transition(currentChild.id, 'collecting');
+    const currentSaved = await context.jobs.transition(currentChild.id, 'saved', {
+      outputPath: `/tmp/${currentChild.id}/index.md`,
+    });
+    await context.service.onJobTerminal(currentSaved);
+
+    expect(context.store.latest('zsxq-chen-teacher', 1)[0]).toMatchObject({
+      status: 'completed',
+      accepted: 1,
+      saved: 1,
+      deliveryIds: [
+        expect.stringMatching(/^[a-f0-9]{12}$/),
+        expect.stringMatching(/^[a-f0-9]{12}$/),
+      ],
+    });
+    expect(context.synced).toEqual([firstChild.id, currentChild.id]);
+  });
+
+  it('does not report a no-change success when relevant ZSXQ content stayed incomplete', async () => {
+    const context = await fixture();
+    const batch = await context.service.run('zsxq-chen-teacher', { force: true });
+    const attempt = currentZsxqAttempt(context.store, batch.id);
+    const incompleteUrl = 'https://wx.zsxq.com/group/48844584441158/topic/899999999999999';
+
+    const result = await context.service.onExtensionPlanResult({
+      batchId: batch.id,
+      attempt,
+      discovered: 1,
+      prepared: true,
+      rejections: { '正文不完整': 1 },
+      rejectionDetails: [{ url: incompleteUrl, reason: '正文不完整' }],
+    });
+
+    expect(result).toMatchObject({
+      status: 'completed_with_attention',
+      saved: 0,
+      deliveryIds: [],
+      rejections: { '正文不完整': 1 },
+      rejectionDetails: [{ url: incompleteUrl, reason: '正文不完整' }],
+      error: expect.stringContaining('正文不完整'),
     });
   });
 
   it('turns an authentication result into attention instead of retrying or reporting a hard failure', async () => {
     const context = await fixture();
     const batch = await context.service.run('zsxq-chen-teacher', { force: true });
+    const attempt = currentZsxqAttempt(context.store, batch.id);
 
     const result = await context.service.onExtensionPlanResult({
       batchId: batch.id,
+      attempt,
       discovered: 0,
       error: '请先登录知识星球',
       needsAttention: true,
@@ -914,15 +1281,22 @@ describe('CollectionPlanService', () => {
   it('records only successfully synchronized ZSXQ content as batch deliveries', async () => {
     const context = await fixture({ shouldAutoSync: async () => true });
     const batch = await context.service.run('zsxq-chen-teacher', { force: true });
+    const attempt = currentZsxqAttempt(context.store, batch.id);
     const child = await context.jobs.create({
       id: 'owner-delivered',
       url: 'https://wx.zsxq.com/group/48844584441158/topic/833333333333333',
       requestedBy: 'extension',
       batchId: batch.id,
       planId: 'zsxq-chen-teacher',
+      planAttempt: attempt,
     });
     await context.service.onJobCreated(child);
-    await context.service.onExtensionPlanResult({ batchId: batch.id, discovered: 1 });
+    await context.service.onExtensionPlanResult({
+      batchId: batch.id,
+      attempt,
+      discovered: 1,
+      prepared: true,
+    });
     await context.jobs.transition(child.id, 'collecting');
     const saved = await context.jobs.transition(child.id, 'saved', {
       outputPath: `/tmp/${child.id}/index.md`,
@@ -938,21 +1312,121 @@ describe('CollectionPlanService', () => {
     });
   });
 
+  it('resumes the saved-before-sync crash gap and durably delivers the ZSXQ job after reopen', async () => {
+    const context = await fixture({ shouldAutoSync: async () => true });
+    const { batch, saved } = await stageSavedZsxqJob(
+      context,
+      'owner-restart-gap',
+      'https://wx.zsxq.com/group/48844584441158/topic/844444444444441',
+    );
+
+    // 模拟 Bridge 在 JobStore 写入 saved 后、调用 onJobTerminal 前退出。
+    const reopened = await context.reopen();
+    await reopened.service.onExtensionConnected();
+
+    expect(context.synced).toEqual([saved.id]);
+    expect(reopened.store.latest('zsxq-chen-teacher', 1)[0]).toMatchObject({
+      id: batch.id,
+      status: 'completed',
+      saved: 1,
+      deliveryIds: ['9fa6e4766912'],
+    });
+  });
+
+  it('does not complete a saved ZSXQ batch when source validation rejects automatic sync', async () => {
+    const context = await fixture({ shouldAutoSync: async () => false });
+    const { batch, saved } = await stageSavedZsxqJob(
+      context,
+      'owner-invalid-source',
+      'https://wx.zsxq.com/group/48844584441158/topic/844444444444442',
+    );
+
+    await context.service.onJobTerminal(saved);
+
+    expect(context.synced).toEqual([]);
+    expect(context.store.latest('zsxq-chen-teacher', 1)[0]).toMatchObject({
+      id: batch.id,
+      status: 'completed_with_attention',
+      saved: 1,
+      deliveryIds: [],
+      error: expect.stringContaining('未确认交付'),
+    });
+  });
+
+  it('does not turn a restart-time ZSXQ sync failure into a completed batch', async () => {
+    const syncAttempts: string[] = [];
+    const context = await fixture({
+      shouldAutoSync: async () => true,
+      syncJob: async job => {
+        syncAttempts.push(job.id);
+        throw new Error('重启补同步失败');
+      },
+    });
+    const { batch, saved } = await stageSavedZsxqJob(
+      context,
+      'owner-restart-sync-failure',
+      'https://wx.zsxq.com/group/48844584441158/topic/844444444444443',
+    );
+
+    const reopened = await context.reopen();
+    await reopened.service.onExtensionConnected();
+
+    expect(syncAttempts).toEqual([saved.id]);
+    expect(reopened.store.latest('zsxq-chen-teacher', 1)[0]).toMatchObject({
+      id: batch.id,
+      status: 'completed_with_attention',
+      saved: 1,
+      deliveryIds: [],
+      error: expect.stringContaining('重启补同步失败'),
+    });
+  });
+
+  it('replays a crash-gap ZSXQ delivery at most once across repeated reconnects', async () => {
+    const syncAttempts: string[] = [];
+    const context = await fixture({
+      shouldAutoSync: async () => true,
+      syncJob: async job => { syncAttempts.push(job.id); },
+    });
+    const { batch, saved } = await stageSavedZsxqJob(
+      context,
+      'owner-restart-idempotent',
+      'https://wx.zsxq.com/group/48844584441158/topic/844444444444441',
+    );
+
+    const reopened = await context.reopen();
+    await reopened.service.onExtensionConnected();
+    await reopened.service.onExtensionConnected();
+
+    expect(syncAttempts).toEqual([saved.id]);
+    expect(reopened.store.latest('zsxq-chen-teacher', 1)[0]).toMatchObject({
+      id: batch.id,
+      status: 'completed',
+      deliveryIds: ['9fa6e4766912'],
+    });
+  });
+
   it('surfaces a ZSXQ automatic sync failure on the terminal batch', async () => {
     const context = await fixture({
       shouldAutoSync: async () => true,
       syncJob: async () => { throw new Error('推送失败'); },
     });
     const batch = await context.service.run('zsxq-chen-teacher', { force: true });
+    const attempt = currentZsxqAttempt(context.store, batch.id);
     const child = await context.jobs.create({
       id: 'owner-sync-failure',
       url: 'https://wx.zsxq.com/group/48844584441158/topic/822222222222222',
       requestedBy: 'extension',
       batchId: batch.id,
       planId: 'zsxq-chen-teacher',
+      planAttempt: attempt,
     });
     await context.service.onJobCreated(child);
-    await context.service.onExtensionPlanResult({ batchId: batch.id, discovered: 1 });
+    await context.service.onExtensionPlanResult({
+      batchId: batch.id,
+      attempt,
+      discovered: 1,
+      prepared: true,
+    });
     await context.jobs.transition(child.id, 'collecting');
     const saved = await context.jobs.transition(child.id, 'saved', {
       outputPath: `/tmp/${child.id}/index.md`,

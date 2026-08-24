@@ -92,6 +92,8 @@ export interface JobRecord {
   errorMessage?: string;
   batchId?: string;
   planId?: import('./plans.js').CollectionPlanId;
+  /** 计划子任务所属的 staging 尝试；换代后旧任务结果不得落地。 */
+  planAttempt?: import('./plans.js').CollectionPlanAttempt;
 }
 
 export interface WsEnvelope<TType extends string = string, TPayload = unknown> {

@@ -38,8 +38,11 @@ export function isCollecting(input: {
   batch?: { phase?: string; updatedAt?: number } | undefined;
   lastJobStatus?: string | undefined;
   lastJobUpdatedAt?: number | undefined;
+  /** 当前 Service Worker 内正在执行的固定计划发现/staging 数。 */
+  activePlanCollections?: number | undefined;
   now: number;
 }): boolean {
+  if ((input.activePlanCollections ?? 0) > 0) return true;
   const batch = input.batch;
   // 卡死的批次不算「在跑」：Service Worker 早被回收了，再等下去永远等不到。
   if (batch?.phase === 'running' && input.now - (batch.updatedAt ?? 0) < BATCH_STALE_MS) {

@@ -6,6 +6,7 @@ import {
   parseSupportedUrl,
   type JobRecord,
   type JobStatus,
+  type CollectionPlanAttempt,
   type CollectionPlanId,
 } from '@data-collector/shared';
 
@@ -25,6 +26,7 @@ export interface CreateJobInput {
   requestedBy: JobRecord['requestedBy'];
   batchId?: string;
   planId?: CollectionPlanId;
+  planAttempt?: CollectionPlanAttempt;
 }
 
 export interface JobTransitionPatch {
@@ -129,6 +131,7 @@ export class JobStore {
         updatedAt: timestamp,
         ...(input.batchId ? { batchId: input.batchId } : {}),
         ...(input.planId ? { planId: input.planId } : {}),
+        ...(input.planAttempt ? { planAttempt: input.planAttempt } : {}),
       };
       this.jobs.set(id, job);
       await this.persist();
@@ -186,10 +189,11 @@ export class JobStore {
     });
   }
 
-  async recover(): Promise<void> {
+  async recover(excludedIds: ReadonlySet<string> = new Set()): Promise<void> {
     await this.serializeMutation(async () => {
       let changed = false;
       for (const [id, job] of this.jobs) {
+        if (excludedIds.has(id)) continue;
         if (job.status !== 'dispatched' && job.status !== 'collecting') continue;
         this.jobs.set(id, {
           ...job,
@@ -203,7 +207,17 @@ export class JobStore {
   }
 
   private serializeMutation<T>(operation: () => Promise<T>): Promise<T> {
-    const result = this.mutationQueue.then(operation, operation);
+    const transactionalOperation = async (): Promise<T> => {
+      const snapshot = structuredClone(this.jobs);
+      try {
+        return await operation();
+      } catch (error) {
+        this.jobs.clear();
+        for (const [id, job] of snapshot) this.jobs.set(id, job);
+        throw error;
+      }
+    };
+    const result = this.mutationQueue.then(transactionalOperation, transactionalOperation);
     this.mutationQueue = result.then(
       () => undefined,
       () => undefined,

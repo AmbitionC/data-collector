@@ -122,6 +122,7 @@ async function main() {
       syncJob: async job => { syncedIds.push(job.id); },
     });
     const batch = await store.start('zsxq-chen-teacher');
+    const preparing = await store.beginPreparation(batch.id);
     await store.markDiscovery(batch.id, zsxq.length);
     const job = await jobs.create({
       id: 'owner-topic',
@@ -129,6 +130,7 @@ async function main() {
       requestedBy: 'extension',
       batchId: batch.id,
       planId: 'zsxq-chen-teacher',
+      planAttempt: preparing.preparationAttempt,
     });
     await service.onJobCreated(job);
     await jobs.transition(job.id, 'collecting');

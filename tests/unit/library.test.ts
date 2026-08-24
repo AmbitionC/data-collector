@@ -1,7 +1,10 @@
-import { mkdir, readFile, readdir, symlink, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, readdir, rm, symlink, writeFile } from 'node:fs/promises';
 import { dirname, isAbsolute, join, relative } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import type { CollectedDocument } from '@data-collector/shared';
+import {
+  ZSXQ_COMPLETE_CONTENT_CAPABILITY,
+  type CollectedDocument,
+} from '@data-collector/shared';
 import { organize } from '../../packages/bridge/src/organize/index.js';
 import {
   MarkdownLibrary,
@@ -13,6 +16,10 @@ import { atomicWriteText } from '../../packages/bridge/src/library/writer.js';
 import { createTemporaryDirectoryTracker } from '../helpers/temp.js';
 
 const URL = 'https://mp.weixin.qq.com/s/library-test';
+const CURRENT_COMPLETENESS = {
+  contentCompletenessVersion: ZSXQ_COMPLETE_CONTENT_CAPABILITY,
+  contentCompletenessBuildId: 'v0.4.29 · test-build',
+} as const;
 const temporaryDirectories = createTemporaryDirectoryTracker();
 
 afterEach(() => temporaryDirectories.cleanup());
@@ -128,7 +135,451 @@ describe('Markdown library', () => {
       await readFile(join(root, '_catalog', 'index.json'), 'utf8'),
     ) as unknown[];
     expect(catalog).toHaveLength(1);
+    expect(catalog[0]).not.toHaveProperty('contentComplete');
     expect(fetcher).toHaveBeenCalled();
+  });
+
+  it('preserves unknown completeness for a legacy linked ZSXQ document', async () => {
+    const root = await temporaryDirectory();
+    const library = new MarkdownLibrary({ root });
+    const topicUrl = 'https://wx.zsxq.com/dweb2/index/topic_detail/legacy-linked-topic';
+
+    await library.save(organize(collected({
+      source: 'zsxq',
+      kind: 'post',
+      url: topicUrl,
+      canonicalUrl: topicUrl,
+      title: '历史长文入口',
+      images: [],
+      sourceMetadata: { linkedArticleUrl: 'https://mp.weixin.qq.com/s/legacy-linked-article' },
+    })));
+
+    const catalog = JSON.parse(
+      await readFile(join(root, '_catalog', 'index.json'), 'utf8'),
+    ) as Array<{ contentComplete?: boolean }>;
+    expect(catalog[0]).not.toHaveProperty('contentComplete');
+  });
+
+  it('records explicitly complete source content for future skip decisions', async () => {
+    const root = await temporaryDirectory();
+    const library = new MarkdownLibrary({ root });
+
+    await library.save(organize(collected({ images: [], truncated: false })));
+
+    const catalog = JSON.parse(
+      await readFile(join(root, '_catalog', 'index.json'), 'utf8'),
+    ) as Array<{ contentComplete?: boolean }>;
+    expect(catalog[0]?.contentComplete).toBe(true);
+  });
+
+  it('records incomplete source content explicitly for one-time repair decisions', async () => {
+    const root = await temporaryDirectory();
+    const library = new MarkdownLibrary({ root });
+
+    await library.save(organize(collected({ images: [], truncated: true })));
+
+    const catalog = JSON.parse(
+      await readFile(join(root, '_catalog', 'index.json'), 'utf8'),
+    ) as Array<{ contentComplete?: boolean }>;
+    expect(catalog[0]?.contentComplete).toBe(false);
+  });
+
+  it.each([
+    ['shorter', '新正文'],
+    ['equal-length', '另一个版本正文完全不同，包含甲段、乙段和不同结论。'],
+  ])('keeps richer complete ZSXQ content when a %s complete recapture arrives', async (_, nextText) => {
+    const root = await temporaryDirectory();
+    const library = new MarkdownLibrary({ root });
+    const topicUrl = 'https://wx.zsxq.com/dweb2/index/topic_detail/richer-persistence';
+    const originalText = '原正文内容更加完整，包含第一段、第二段和明确结论。';
+    const first = await library.save(organize(collected({
+      source: 'zsxq',
+      kind: 'post',
+      url: topicUrl,
+      canonicalUrl: topicUrl,
+      title: '完整版本',
+      collectedAt: '2026-08-25T01:00:00.000Z',
+      html: `<p>${originalText}</p>`,
+      text: originalText,
+      images: [],
+      truncated: false,
+      sourceMetadata: CURRENT_COMPLETENESS,
+    })));
+    const catalogPath = join(root, '_catalog', 'index.json');
+    const sourcePath = join(dirname(first.markdownPath), 'source.json');
+    const catalog = JSON.parse(await readFile(catalogPath, 'utf8')) as Array<Record<string, unknown>>;
+    catalog[0]!.sync = {
+      state: 'synced',
+      target: 'life-teachers',
+      at: '2026-08-25T01:30:00.000Z',
+      committed: true,
+      pushed: true,
+    };
+    await writeFile(catalogPath, `${JSON.stringify(catalog, null, 2)}\n`);
+    const before = {
+      markdown: await readFile(first.markdownPath, 'utf8'),
+      source: await readFile(sourcePath, 'utf8'),
+      catalog: await readFile(catalogPath, 'utf8'),
+    };
+
+    const saved = await library.save(organize(collected({
+      source: 'zsxq',
+      kind: 'post',
+      url: topicUrl,
+      canonicalUrl: topicUrl,
+      title: '较弱副本',
+      collectedAt: '2026-08-25T02:00:00.000Z',
+      html: `<p>${nextText}</p>`,
+      text: nextText,
+      images: [],
+      truncated: false,
+      sourceMetadata: CURRENT_COMPLETENESS,
+    })));
+
+    expect(saved).toMatchObject({
+      id: first.id,
+      markdownPath: first.markdownPath,
+      downloadedImages: 0,
+      failedImages: 0,
+    });
+    expect(await readFile(first.markdownPath, 'utf8')).toBe(before.markdown);
+    expect(await readFile(sourcePath, 'utf8')).toBe(before.source);
+    expect(await readFile(catalogPath, 'utf8')).toBe(before.catalog);
+  });
+
+  it('lets a new exact build replace a longer v2 snapshot produced by an older build', async () => {
+    const root = await temporaryDirectory();
+    const library = new MarkdownLibrary({ root });
+    const topicUrl = 'https://wx.zsxq.com/group/1/topic/cross-build-repair';
+    const pollutedText = '旧构建错误混入推荐区和重复块，因此字数更长但并非真实正文。'.repeat(20);
+    const first = await library.save(organize(collected({
+      source: 'zsxq',
+      kind: 'post',
+      url: topicUrl,
+      canonicalUrl: topicUrl,
+      title: '旧构建污染版本',
+      collectedAt: '2026-08-25T01:00:00.000Z',
+      html: `<p>${pollutedText}</p>`,
+      text: pollutedText,
+      images: [],
+      truncated: false,
+      sourceMetadata: {
+        contentCompletenessVersion: ZSXQ_COMPLETE_CONTENT_CAPABILITY,
+        contentCompletenessBuildId: 'v0.4.29 · build-A',
+      },
+    })));
+    const verifiedText = '新构建已经排除推荐区，只保留经详情页验证的完整正文和结论。'.repeat(6);
+
+    await library.save(organize(collected({
+      source: 'zsxq',
+      kind: 'post',
+      url: topicUrl,
+      canonicalUrl: topicUrl,
+      title: '新构建验证版本',
+      collectedAt: '2026-08-25T02:00:00.000Z',
+      html: `<p>${verifiedText}</p>`,
+      text: verifiedText,
+      images: [],
+      truncated: false,
+      sourceMetadata: {
+        contentCompletenessVersion: ZSXQ_COMPLETE_CONTENT_CAPABILITY,
+        contentCompletenessBuildId: 'v0.4.29 · build-B',
+      },
+    })));
+
+    const source = JSON.parse(
+      await readFile(join(dirname(first.markdownPath), 'source.json'), 'utf8'),
+    ) as { document: { text: string } };
+    const catalog = JSON.parse(
+      await readFile(join(root, '_catalog', 'index.json'), 'utf8'),
+    ) as Array<{ title: string; contentCompletenessBuildId?: string }>;
+    expect(source.document.text).toBe(verifiedText);
+    expect(catalog[0]).toMatchObject({
+      title: '新构建验证版本',
+      contentCompletenessBuildId: 'v0.4.29 · build-B',
+    });
+  });
+
+  it.each([
+    [
+      'a different source build',
+      {
+        contentCompletenessVersion: ZSXQ_COMPLETE_CONTENT_CAPABILITY,
+        contentCompletenessBuildId: 'v0.4.29 · build-B',
+      },
+    ],
+    [
+      'a missing source build',
+      { contentCompletenessVersion: ZSXQ_COMPLETE_CONTENT_CAPABILITY },
+    ],
+    [
+      'an empty source build',
+      {
+        contentCompletenessVersion: ZSXQ_COMPLETE_CONTENT_CAPABILITY,
+        contentCompletenessBuildId: '',
+      },
+    ],
+    [
+      'a different source completeness version',
+      {
+        contentCompletenessVersion: 'zsxq-complete-content-v1',
+        contentCompletenessBuildId: 'v0.4.29 · build-A',
+      },
+    ],
+  ])('does not apply same-build rollback protection when source.json carries %s', async (_, storedProof) => {
+    const root = await temporaryDirectory();
+    const library = new MarkdownLibrary({ root });
+    const topicUrl = 'https://wx.zsxq.com/group/1/topic/interrupted-source-proof';
+    const buildA = {
+      contentCompletenessVersion: ZSXQ_COMPLETE_CONTENT_CAPABILITY,
+      contentCompletenessBuildId: 'v0.4.29 · build-A',
+    } as const;
+    const first = await library.save(organize(collected({
+      source: 'zsxq',
+      kind: 'post',
+      url: topicUrl,
+      canonicalUrl: topicUrl,
+      title: '构建 A 的原始版本',
+      collectedAt: '2026-08-25T01:00:00.000Z',
+      html: '<p>构建 A 的原始正文。</p>',
+      text: '构建 A 的原始正文。',
+      images: [],
+      truncated: false,
+      sourceMetadata: buildA,
+    })));
+    const catalogPath = join(root, '_catalog', 'index.json');
+    const sourcePath = join(dirname(first.markdownPath), 'source.json');
+    const catalog = JSON.parse(await readFile(catalogPath, 'utf8')) as Array<Record<string, unknown>>;
+    catalog[0]!.sync = {
+      state: 'synced',
+      target: 'life-teachers',
+      at: '2026-08-25T01:30:00.000Z',
+      committed: true,
+      pushed: true,
+    };
+    await writeFile(catalogPath, `${JSON.stringify(catalog, null, 2)}\n`);
+
+    // 模拟 Markdown/source 已原子写成另一构建，但进程在 catalog 更新前中断。
+    const interrupted = JSON.parse(await readFile(sourcePath, 'utf8')) as {
+      document: {
+        html: string;
+        text: string;
+        sourceMetadata?: Record<string, string>;
+      };
+    };
+    interrupted.document.html = '<p>构建 B 的污染长正文，不能冒充构建 A 的防回退基线。</p>';
+    interrupted.document.text = '构建 B 的污染长正文，不能冒充构建 A 的防回退基线。';
+    interrupted.document.sourceMetadata = storedProof;
+    await writeFile(sourcePath, `${JSON.stringify(interrupted, null, 2)}\n`);
+
+    const repairedText = 'A 的可信短正文。';
+    await library.save(organize(collected({
+      source: 'zsxq',
+      kind: 'post',
+      url: topicUrl,
+      canonicalUrl: topicUrl,
+      title: '构建 A 的修复版本',
+      collectedAt: '2026-08-25T02:00:00.000Z',
+      html: `<p>${repairedText}</p>`,
+      text: repairedText,
+      images: [],
+      truncated: false,
+      sourceMetadata: buildA,
+    })));
+
+    const repaired = JSON.parse(await readFile(sourcePath, 'utf8')) as {
+      document: { text: string; sourceMetadata?: Record<string, unknown> };
+    };
+    const repairedCatalog = JSON.parse(await readFile(catalogPath, 'utf8')) as Array<{
+      title: string;
+      updatedAt: string;
+      contentCompletenessVersion?: string;
+      contentCompletenessBuildId?: string;
+      sync?: { state: string };
+    }>;
+    expect(repaired.document).toMatchObject({
+      text: repairedText,
+      sourceMetadata: buildA,
+    });
+    expect(repairedCatalog[0]).toMatchObject({
+      title: '构建 A 的修复版本',
+      updatedAt: '2026-08-25T02:00:00.000Z',
+      contentCompletenessVersion: ZSXQ_COMPLETE_CONTENT_CAPABILITY,
+      contentCompletenessBuildId: 'v0.4.29 · build-A',
+      sync: { state: 'pending' },
+    });
+  });
+
+  it('replaces complete ZSXQ content only when the recaptured body is strictly richer', async () => {
+    const root = await temporaryDirectory();
+    const library = new MarkdownLibrary({ root });
+    const topicUrl = 'https://wx.zsxq.com/dweb2/index/topic_detail/richer-update';
+    const first = await library.save(organize(collected({
+      source: 'zsxq',
+      kind: 'post',
+      url: topicUrl,
+      canonicalUrl: topicUrl,
+      title: '旧标题',
+      collectedAt: '2026-08-25T01:00:00.000Z',
+      html: '<p>第一段正文。</p>',
+      text: '第一段正文。',
+      images: [],
+      truncated: false,
+      sourceMetadata: CURRENT_COMPLETENESS,
+    })));
+
+    await library.save(organize(collected({
+      source: 'zsxq',
+      kind: 'post',
+      url: topicUrl,
+      canonicalUrl: topicUrl,
+      title: '新标题',
+      collectedAt: '2026-08-25T02:00:00.000Z',
+      html: '<p>第一段正文。第二段新增正文和结论。</p>',
+      text: '第一段正文。第二段新增正文和结论。',
+      images: [],
+      truncated: false,
+      sourceMetadata: CURRENT_COMPLETENESS,
+    })));
+
+    const source = JSON.parse(
+      await readFile(join(dirname(first.markdownPath), 'source.json'), 'utf8'),
+    ) as { document: { text: string } };
+    const catalog = JSON.parse(
+      await readFile(join(root, '_catalog', 'index.json'), 'utf8'),
+    ) as Array<{ title: string; updatedAt: string; sync?: { state: string } }>;
+    expect(source.document.text).toBe('第一段正文。第二段新增正文和结论。');
+    expect(catalog[0]).toMatchObject({
+      title: '新标题',
+      updatedAt: '2026-08-25T02:00:00.000Z',
+      sync: { state: 'pending' },
+    });
+  });
+
+  it('uses catalog completeness for a legacy ZSXQ source snapshot without a truncation field', async () => {
+    const root = await temporaryDirectory();
+    const library = new MarkdownLibrary({ root });
+    const topicUrl = 'https://wx.zsxq.com/dweb2/index/topic_detail/legacy-complete-source';
+    const first = await library.save(organize(collected({
+      source: 'zsxq',
+      kind: 'post',
+      url: topicUrl,
+      canonicalUrl: topicUrl,
+      html: '<p>已由目录确认完整的历史长正文。</p>',
+      text: '已由目录确认完整的历史长正文。',
+      images: [],
+      truncated: false,
+      sourceMetadata: CURRENT_COMPLETENESS,
+    })));
+    const sourcePath = join(dirname(first.markdownPath), 'source.json');
+    const source = JSON.parse(await readFile(sourcePath, 'utf8')) as {
+      document: { text: string; truncated?: boolean };
+    };
+    delete source.document.truncated;
+    await writeFile(sourcePath, `${JSON.stringify(source, null, 2)}\n`);
+    const before = await readFile(sourcePath, 'utf8');
+
+    await library.save(organize(collected({
+      source: 'zsxq',
+      kind: 'post',
+      url: topicUrl,
+      canonicalUrl: topicUrl,
+      collectedAt: '2026-08-25T02:00:00.000Z',
+      html: '<p>短正文。</p>',
+      text: '短正文。',
+      images: [],
+      truncated: false,
+      sourceMetadata: CURRENT_COMPLETENESS,
+    })));
+
+    expect(await readFile(sourcePath, 'utf8')).toBe(before);
+  });
+
+  it('lets the current completeness protocol replace a longer legacy unversioned snapshot', async () => {
+    const root = await temporaryDirectory();
+    const library = new MarkdownLibrary({ root });
+    const topicUrl = 'https://wx.zsxq.com/group/1/topic/versioned-repair';
+    const first = await library.save(organize(collected({
+      source: 'zsxq',
+      kind: 'post',
+      url: topicUrl,
+      canonicalUrl: topicUrl,
+      title: '旧版假完整快照',
+      html: `<p>${'旧版可能混入外围界面的较长正文。'.repeat(20)}</p>`,
+      text: '旧版可能混入外围界面的较长正文。'.repeat(20),
+      images: [],
+      truncated: false,
+    })));
+
+    const verifiedText = '当前协议重新验证过的完整正文与结论。'.repeat(8);
+    await library.save(organize(collected({
+      source: 'zsxq',
+      kind: 'post',
+      url: topicUrl,
+      canonicalUrl: topicUrl,
+      title: '当前协议完整快照',
+      collectedAt: '2026-08-25T03:00:00.000Z',
+      html: `<p>${verifiedText}</p>`,
+      text: verifiedText,
+      images: [],
+      truncated: false,
+      sourceMetadata: {
+        contentCompletenessVersion: ZSXQ_COMPLETE_CONTENT_CAPABILITY,
+        contentCompletenessBuildId: 'v0.4.29 · final-build',
+      },
+    })));
+
+    const source = JSON.parse(
+      await readFile(join(dirname(first.markdownPath), 'source.json'), 'utf8'),
+    ) as { document: { text: string } };
+    const catalog = JSON.parse(
+      await readFile(join(root, '_catalog', 'index.json'), 'utf8'),
+    ) as Array<{ contentCompletenessVersion?: string; contentCompletenessBuildId?: string }>;
+    expect(source.document.text).toBe(verifiedText);
+    expect(catalog[0]).toMatchObject({
+      contentCompletenessVersion: ZSXQ_COMPLETE_CONTENT_CAPABILITY,
+      contentCompletenessBuildId: 'v0.4.29 · final-build',
+    });
+  });
+
+  it.each(['missing', 'corrupt'])('allows a complete ZSXQ recapture to repair a %s legacy source.json', async state => {
+    const root = await temporaryDirectory();
+    const library = new MarkdownLibrary({ root });
+    const topicUrl = `https://wx.zsxq.com/dweb2/index/topic_detail/legacy-source-${state}`;
+    const first = await library.save(organize(collected({
+      source: 'zsxq',
+      kind: 'post',
+      url: topicUrl,
+      canonicalUrl: topicUrl,
+      html: '<p>历史正文比新副本更长，但留存文件已不可用。</p>',
+      text: '历史正文比新副本更长，但留存文件已不可用。',
+      images: [],
+      truncated: false,
+    })));
+    const sourcePath = join(dirname(first.markdownPath), 'source.json');
+    if (state === 'missing') {
+      await rm(sourcePath);
+    } else {
+      await writeFile(sourcePath, '不是 JSON');
+    }
+
+    await library.save(organize(collected({
+      source: 'zsxq',
+      kind: 'post',
+      url: topicUrl,
+      canonicalUrl: topicUrl,
+      title: '自愈后的条目',
+      collectedAt: '2026-08-25T02:00:00.000Z',
+      html: '<p>新的完整正文。</p>',
+      text: '新的完整正文。',
+      images: [],
+      truncated: false,
+    })));
+
+    const repaired = JSON.parse(await readFile(sourcePath, 'utf8')) as {
+      document: { text: string };
+    };
+    expect(repaired.document.text).toBe('新的完整正文。');
   });
 
   it('serializes concurrent saves without losing catalog entries', async () => {

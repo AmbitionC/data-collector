@@ -116,6 +116,29 @@ describe('durable jobs', () => {
     expect(JSON.parse(await readFile(path, 'utf8'))).toMatchObject({ version: 1 });
   });
 
+  it('does not requeue a job whose result is still being persisted in this Bridge process', async () => {
+    const root = await temporaryDirectory();
+    const jobs = await JobStore.open(join(root, '_catalog', 'jobs.json'), {
+      now: () => NOW,
+      id: () => 'unused',
+    });
+    const persisting = await jobs.create({ id: 'persisting', url: WECHAT_URL, requestedBy: 'cli' });
+    const abandoned = await jobs.create({
+      id: 'abandoned',
+      url: 'https://mp.weixin.qq.com/s/abandoned',
+      requestedBy: 'cli',
+    });
+    await jobs.transition(persisting.id, 'dispatched');
+    await jobs.transition(persisting.id, 'collecting');
+    await jobs.transition(abandoned.id, 'dispatched');
+    await jobs.transition(abandoned.id, 'collecting');
+
+    await jobs.recover(new Set([persisting.id]));
+
+    expect(jobs.get(persisting.id)?.status).toBe('collecting');
+    expect(jobs.get(abandoned.id)?.status).toBe('queued');
+  });
+
   it('rejects a duplicate ID that points to different content', async () => {
     const root = await temporaryDirectory();
     const jobs = await JobStore.open(join(root, 'jobs.json'), {

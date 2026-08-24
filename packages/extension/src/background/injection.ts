@@ -21,16 +21,19 @@ export interface InjectionStep {
  * 去滚动页面 —— 钩子都不在，滚多久都等不到结果。这条曾让批量功能对所有
  * 「装扩展之前就打开的标签页」彻底不可用，且从提示里完全看不出原因。
  *
- * 顺序也有讲究：内容脚本先就位，主世界钩子是靠 postMessage 把帖子号交给它的，
- * 监听器不在就白截了。
+ * 顺序也有讲究：主世界钩子先就位并把记录留在页面级 store，内容脚本随后发 replay
+ * 请求取回。更新前已打开的旧页若只剩旧 build 记录，新 hook 会从空状态开始，详情采集
+ * 因缺少当前 build 的精确 API 证据而失败关闭，绝不能把稳定首段冒充全文。
  */
 export function injectionPlan(url: string | undefined): InjectionStep[] {
-  const steps: InjectionStep[] = [{ files: ['content.js'], required: true }];
   if (url && isTopicHookHost(url)) {
-    // 钩子补不上不该连累单页保存 —— 那条路径不需要帖子号。
-    steps.push({ files: ['inject.js'], world: 'MAIN', required: false });
+    // 列表身份和详情完整正文证明都依赖当前精确 hook；任一步失败都不能降级采集。
+    return [
+      { files: ['inject.js'], world: 'MAIN', required: true },
+      { files: ['content.js'], required: true },
+    ];
   }
-  return steps;
+  return [{ files: ['content.js'], required: true }];
 }
 
 /** 这个地址是否需要主世界帖子号钩子；地址不合法一律当作不需要。 */

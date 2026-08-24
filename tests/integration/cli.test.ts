@@ -2,8 +2,13 @@ import { mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import WebSocket from 'ws';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { APP_VERSION, TRUSTED_EXTENSION_ID, type CollectedDocument } from '@data-collector/shared';
-import { runCli } from '../../packages/bridge/src/cli.js';
+import {
+  APP_VERSION,
+  TRUSTED_EXTENSION_ID,
+  ZSXQ_COMPLETE_CONTENT_CAPABILITY,
+  type CollectedDocument,
+} from '@data-collector/shared';
+import { bridgeStartOptions, runCli } from '../../packages/bridge/src/cli.js';
 import { startBridge, type BridgeHandle } from '../../packages/bridge/src/index.js';
 import { createTemporaryDirectoryTracker } from '../helpers/temp.js';
 
@@ -68,6 +73,18 @@ afterEach(async () => {
 });
 
 describe('Codex CLI', () => {
+  it('keeps artifact authority enabled when --no-update disables only the updater', () => {
+    expect(bridgeStartOptions([
+      'bridge', 'start', '--no-update', '--port', '0', '--library', '/tmp/library',
+    ], '/repo/data-collector')).toMatchObject({
+      port: 0,
+      libraryRoot: '/tmp/library',
+      repoRoot: '/repo/data-collector',
+      enableAutoUpdate: false,
+      enableFeJourneyScheduler: true,
+    });
+  });
+
   it('rebuilds the local fe-journey candidate index without a running Bridge', async () => {
     const root = await temporaryDirectories.create('data-collector-cli-rebuild-index-');
     let stdout = '';
@@ -119,15 +136,24 @@ describe('Codex CLI', () => {
     const bridge = await startBridge({ port: 0, libraryRoot: root, configDir });
     handles.push(bridge);
     const { socket } = await authorize(bridge);
-    socket.send(envelope('extension.hello', 'extension-plan-wait', { version: APP_VERSION }));
+    socket.send(envelope('extension.hello', 'extension-plan-wait', {
+      version: APP_VERSION,
+      capabilities: [ZSXQ_COMPLETE_CONTENT_CAPABILITY],
+    }));
     const port = new URL(bridge.url).port;
     let stdout = '';
     let stderr = '';
-    const command = new Promise<{ requestId: string; payload: { batchId: string } }>((resolve, reject) => {
+    const command = new Promise<{
+      requestId: string;
+      payload: { batchId: string; attempt: string };
+    }>((resolve, reject) => {
       const timer = setTimeout(() => reject(new Error('plan timeout')), 5_000);
       socket.once('message', data => {
         clearTimeout(timer);
-        resolve(JSON.parse(data.toString()) as { requestId: string; payload: { batchId: string } });
+        resolve(JSON.parse(data.toString()) as {
+          requestId: string;
+          payload: { batchId: string; attempt: string };
+        });
       });
     });
 
@@ -141,7 +167,11 @@ describe('Codex CLI', () => {
     const collect = await command;
     socket.send(envelope('plan.result', collect.requestId, {
       batchId: collect.payload.batchId,
+      attempt: collect.payload.attempt,
       discovered: 0,
+      prepared: true,
+      rejections: {},
+      rejectionDetails: [],
     }));
 
     expect(await running).toBe(0);
@@ -159,11 +189,14 @@ describe('Codex CLI', () => {
     const bridge = await startBridge({ port: 0, libraryRoot: root, configDir });
     handles.push(bridge);
     const { socket } = await authorize(bridge);
-    socket.send(envelope('extension.hello', 'extension-plan-attention', { version: APP_VERSION }));
+    socket.send(envelope('extension.hello', 'extension-plan-attention', {
+      version: APP_VERSION,
+      capabilities: [ZSXQ_COMPLETE_CONTENT_CAPABILITY],
+    }));
     const port = new URL(bridge.url).port;
     let stdout = '';
     let stderr = '';
-    const command = nextSocketMessage<{ batchId: string }>(socket);
+    const command = nextSocketMessage<{ batchId: string; attempt: string }>(socket);
     const running = runCli([
       'plans', 'run', 'zsxq-chen-teacher', '--force', '--wait', '5000',
       '--port', port, '--library', root, '--config', configDir,
@@ -174,6 +207,7 @@ describe('Codex CLI', () => {
     const collect = await command;
     socket.send(envelope('plan.result', collect.requestId, {
       batchId: collect.payload.batchId,
+      attempt: collect.payload.attempt,
       discovered: 0,
       error: '请先登录知识星球',
       needsAttention: true,
@@ -338,8 +372,20 @@ describe('Codex CLI', () => {
     let stderr = '';
 
     try {
+      // 这里只验证启动提示和信号收尾；真实 updater 另有专门测试。若让它参与，
+      // close() 的可靠排空时间会受 git/npm 与并行测试负载影响，和本断言无关。
       const result = await runCli(
-        ['bridge', 'start', '--port', '0', '--library', root, '--config', join(root, '.config')],
+        [
+          'bridge',
+          'start',
+          '--no-update',
+          '--port',
+          '0',
+          '--library',
+          root,
+          '--config',
+          join(root, '.config'),
+        ],
         { stdout: () => undefined, stderr: value => { stderr += value; } },
       );
       expect(result).toBe(0);
@@ -350,5 +396,5 @@ describe('Codex CLI', () => {
     expect(stderr).toMatch(/Data Collector Bridge: http:\/\/127\.0\.0\.1:\d+/);
     expect(stderr).toContain('等待受信任的 Data Collector 扩展自动连接');
     expect(stderr).not.toContain(['配', '对码'].join(''));
-  });
+  }, 30_000);
 });

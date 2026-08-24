@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import {
   APP_VERSION,
   TRUSTED_EXTENSION_ID,
+  ZSXQ_COMPLETE_CONTENT_CAPABILITY,
 } from '@data-collector/shared';
 import {
   BridgeConnection,
@@ -171,6 +172,8 @@ async function flushPromises(): Promise<void> {
   await Promise.resolve();
 }
 
+const PLAN_ATTEMPT = 'a1b2c3d4e5f60718';
+
 describe('extension Bridge connection', () => {
   it('bootstraps an empty installation and saves the authorized token without pairing', async () => {
     const storage = new MemoryStorage();
@@ -209,7 +212,10 @@ describe('extension Bridge connection', () => {
     });
     expect(JSON.parse(socket.sent[0]!)).toMatchObject({
       type: 'extension.hello',
-      payload: { version: APP_VERSION },
+      payload: {
+        version: APP_VERSION,
+        capabilities: [ZSXQ_COMPLETE_CONTENT_CAPABILITY],
+      },
     });
   });
 
@@ -276,12 +282,15 @@ describe('extension Bridge connection', () => {
     );
     expect(JSON.parse(socket.sent[0]!)).toMatchObject({
       type: 'extension.hello',
-      payload: { version: APP_VERSION },
+      payload: {
+        version: APP_VERSION,
+        capabilities: [ZSXQ_COMPLETE_CONTENT_CAPABILITY],
+      },
     });
     expect(storage.values.bridgeStatus).toBe('connected');
   });
 
-  it('omits new plan-result fields while connected to a strict 0.4.10 Bridge', async () => {
+  it('fails a ZSXQ staging result closed on a Bridge too old for completeness audit fields', async () => {
     const storage = new MemoryStorage({ bridgeToken: 'x'.repeat(43) });
     const socket = new MemorySocket();
     const connection = new BridgeConnection(dependencies(
@@ -293,27 +302,26 @@ describe('extension Bridge connection', () => {
     socket.emit('open');
     await vi.waitFor(() => expect(socket.sent).toHaveLength(1));
 
-    connection.send('plan.result', 'batch-1', {
+    expect(() => connection.send('plan.result', 'batch-1', {
       batchId: 'batch-1',
       discovered: 3,
       prepared: false,
       rejections: { '非星主': 2 },
-    });
-
-    expect(JSON.parse(socket.sent.at(-1)!).payload).toEqual({
-      batchId: 'batch-1',
-      discovered: 3,
-      prepared: false,
-    });
+      rejectionDetails: [{
+        url: 'https://wx.zsxq.com/group/48844584441158/topic/811111111111111',
+        reason: '非星主',
+      }],
+    })).toThrow('BRIDGE_UPDATE_REQUIRED');
+    expect(socket.sent).toHaveLength(1);
   });
 
-  it('keeps rejection counts when the Bridge supports them', async () => {
+  it('keeps rejection counts but omits per-item details for a strict 0.4.28 Bridge', async () => {
     const storage = new MemoryStorage({ bridgeToken: 'x'.repeat(43) });
     const socket = new MemorySocket();
     const connection = new BridgeConnection(dependencies(
       storage,
       () => socket,
-      vi.fn<typeof fetch>(async () => healthResponse(TRUSTED_EXTENSION_ID, APP_VERSION)),
+      vi.fn<typeof fetch>(async () => healthResponse(TRUSTED_EXTENSION_ID, '0.4.28')),
     ));
     await connection.start();
     socket.emit('open');
@@ -323,9 +331,48 @@ describe('extension Bridge connection', () => {
       batchId: 'batch-1',
       discovered: 3,
       rejections: { '非星主': 2 },
+      rejectionDetails: [{
+        url: 'https://wx.zsxq.com/group/48844584441158/topic/811111111111111',
+        reason: '非星主',
+      }],
     });
 
-    expect(JSON.parse(socket.sent.at(-1)!).payload.rejections).toEqual({ '非星主': 2 });
+    expect(JSON.parse(socket.sent.at(-1)!).payload).toEqual({
+      batchId: 'batch-1',
+      discovered: 3,
+      rejections: { '非星主': 2 },
+    });
+  });
+
+  it('keeps rejection counts and per-item details when the Bridge supports them', async () => {
+    const storage = new MemoryStorage({ bridgeToken: 'x'.repeat(43) });
+    const socket = new MemorySocket();
+    const connection = new BridgeConnection(dependencies(
+      storage,
+      () => socket,
+      vi.fn<typeof fetch>(async () => healthResponse(TRUSTED_EXTENSION_ID, '0.4.29')),
+    ));
+    await connection.start();
+    socket.emit('open');
+    await vi.waitFor(() => expect(socket.sent).toHaveLength(1));
+
+    connection.send('plan.result', 'batch-1', {
+      batchId: 'batch-1',
+      discovered: 3,
+      rejections: { '非星主': 2 },
+      rejectionDetails: [{
+        url: 'https://wx.zsxq.com/group/48844584441158/topic/811111111111111',
+        reason: '非星主',
+      }],
+    });
+
+    expect(JSON.parse(socket.sent.at(-1)!).payload).toMatchObject({
+      rejections: { '非星主': 2 },
+      rejectionDetails: [{
+        url: 'https://wx.zsxq.com/group/48844584441158/topic/811111111111111',
+        reason: '非星主',
+      }],
+    });
   });
 
   it('fails closed after a later health refresh cannot verify the Bridge version', async () => {
@@ -355,11 +402,17 @@ describe('extension Bridge connection', () => {
     await connection.retry();
     secondSocket.emit('open');
     await vi.waitFor(() => expect(secondSocket.sent).toHaveLength(1));
-    connection.send('plan.result', 'unknown-bridge', {
-      batchId: 'unknown-bridge', discovered: 1, rejections: { '非星主': 1 },
-    });
-
-    expect(JSON.parse(secondSocket.sent.at(-1)!).payload.rejections).toBeUndefined();
+    expect(() => connection.send('plan.result', 'unknown-bridge', {
+      batchId: 'unknown-bridge',
+      discovered: 1,
+      prepared: true,
+      rejections: { '正文不完整': 1 },
+      rejectionDetails: [{
+        url: 'https://wx.zsxq.com/group/48844584441158/topic/811111111111111',
+        reason: '正文不完整',
+      }],
+    })).toThrow('BRIDGE_UPDATE_REQUIRED');
+    expect(secondSocket.sent).toHaveLength(1);
   });
 
   it('refreshes routing on every authorized connect（改去向无需重装扩展）', async () => {
@@ -825,6 +878,176 @@ describe('extension Bridge connection', () => {
     expect(collect).toHaveBeenCalledTimes(1);
   });
 
+  it('records a Bridge-side persistence failure instead of leaving the job organizing', async () => {
+    const storage = new MemoryStorage({ bridgeToken: 'x'.repeat(43) });
+    const socket = new MemorySocket();
+    const connection = new BridgeConnection(dependencies(storage, () => socket));
+    await connection.start();
+    socket.emit('open');
+    await vi.waitFor(() => expect(socket.sent).toHaveLength(1));
+
+    socket.emit(
+      'message',
+      JSON.stringify({
+        protocolVersion: 1,
+        type: 'job.failed',
+        requestId: 'job-save-failed',
+        timestamp: '2026-07-18T00:00:00.000Z',
+        payload: { code: 'SAVE_FAILED', message: '知识库写入失败' },
+      }),
+    );
+
+    await vi.waitFor(() => expect(storage.values).toMatchObject({
+      lastJobId: 'job-save-failed',
+      lastJobStatus: 'failed',
+      lastJobError: '知识库写入失败',
+    }));
+  });
+
+  it('settles a persistence waiter only for the matching job and plan attempt', async () => {
+    const storage = new MemoryStorage({ bridgeToken: 'x'.repeat(43) });
+    const socket = new MemorySocket();
+    const connection = new BridgeConnection(dependencies(storage, () => socket));
+    await connection.start();
+    socket.emit('open');
+    await vi.waitFor(() => expect(socket.sent).toHaveLength(1));
+
+    let settled = false;
+    const waiting = connection.waitForJobTerminal('job-current-attempt', PLAN_ATTEMPT, 30_000)
+      .then(() => { settled = true; });
+    socket.emit('message', JSON.stringify({
+      protocolVersion: 1,
+      type: 'job.saved',
+      requestId: 'job-other',
+      timestamp: '2026-08-25T00:00:00.000Z',
+      payload: { outputPath: '/library/other.md', results: [], attempt: PLAN_ATTEMPT },
+    }));
+    await flushPromises();
+    expect(settled).toBe(false);
+
+    socket.emit('message', JSON.stringify({
+      protocolVersion: 1,
+      type: 'job.saved',
+      requestId: 'job-current-attempt',
+      timestamp: '2026-08-25T00:00:01.000Z',
+      payload: {
+        outputPath: '/library/current.md',
+        results: [],
+        attempt: PLAN_ATTEMPT,
+      },
+    }));
+
+    await expect(waiting).resolves.toBeUndefined();
+    expect(settled).toBe(true);
+  });
+
+  it('replays an early terminal notice and rejects a cached cross-attempt notice', async () => {
+    const storage = new MemoryStorage({ bridgeToken: 'x'.repeat(43) });
+    const socket = new MemorySocket();
+    const connection = new BridgeConnection(dependencies(storage, () => socket));
+    await connection.start();
+    socket.emit('open');
+    await vi.waitFor(() => expect(socket.sent).toHaveLength(1));
+
+    const saved = (jobId: string, attempt: string) => socket.emit('message', JSON.stringify({
+      protocolVersion: 1,
+      type: 'job.saved',
+      requestId: jobId,
+      timestamp: '2026-08-25T00:00:00.000Z',
+      payload: { outputPath: `/library/${jobId}.md`, results: [], attempt },
+    }));
+    saved('job-early-current', PLAN_ATTEMPT);
+    await flushPromises();
+    await expect(connection.waitForJobTerminal(
+      'job-early-current',
+      PLAN_ATTEMPT,
+    )).resolves.toBeUndefined();
+
+    saved('job-early-stale', '0123456789abcdef');
+    await flushPromises();
+    await expect(connection.waitForJobTerminal(
+      'job-early-stale',
+      PLAN_ATTEMPT,
+    )).rejects.toThrow('回执尝试不匹配');
+  });
+
+  it('rejects a persistence waiter when the matching job reports sink failure', async () => {
+    const storage = new MemoryStorage({ bridgeToken: 'x'.repeat(43) });
+    const socket = new MemorySocket();
+    const connection = new BridgeConnection(dependencies(storage, () => socket));
+    await connection.start();
+    socket.emit('open');
+    await vi.waitFor(() => expect(socket.sent).toHaveLength(1));
+
+    const waiting = connection.waitForJobTerminal('job-sink-failed', PLAN_ATTEMPT, 30_000);
+    socket.emit('message', JSON.stringify({
+      protocolVersion: 1,
+      type: 'job.failed',
+      requestId: 'job-sink-failed',
+      timestamp: '2026-08-25T00:00:00.000Z',
+      payload: {
+        code: 'SAVE_FAILED',
+        message: '知识库目录写入失败',
+        attempt: PLAN_ATTEMPT,
+      },
+    }));
+
+    await expect(waiting).rejects.toThrow('知识库目录写入失败');
+  });
+
+  it('recovers a lost WebSocket acknowledgement from the persisted JobStore state', async () => {
+    const storage = new MemoryStorage({ bridgeToken: 'x'.repeat(43) });
+    const socket = new MemorySocket();
+    const fetcher = vi.fn<typeof fetch>(async () => new Response(JSON.stringify({
+      id: 'job-notice-lost',
+      status: 'saved',
+      planAttempt: PLAN_ATTEMPT,
+    }), { status: 200, headers: { 'content-type': 'application/json' } }));
+    const deps = dependencies(storage, () => socket, fetcher);
+    let expire!: () => void;
+    deps.setTimeout = vi.fn(callback => {
+      expire = callback;
+      return 91;
+    });
+    const connection = new BridgeConnection(deps);
+    await connection.start();
+    socket.emit('open');
+    await vi.waitFor(() => expect(socket.sent).toHaveLength(1));
+
+    const waiting = connection.waitForJobTerminal('job-notice-lost', PLAN_ATTEMPT, 500);
+    expire();
+
+    await expect(waiting).resolves.toBeUndefined();
+    expect(fetcher).toHaveBeenCalledWith(
+      'http://127.0.0.1:17321/v1/jobs/job-notice-lost',
+      { headers: { authorization: `Bearer ${'x'.repeat(43)}` } },
+    );
+  });
+
+  it('rejects instead of assuming saved when timeout recovery finds no terminal state', async () => {
+    const storage = new MemoryStorage({ bridgeToken: 'x'.repeat(43) });
+    const socket = new MemorySocket();
+    const fetcher = vi.fn<typeof fetch>(async () => new Response(JSON.stringify({
+      id: 'job-still-collecting',
+      status: 'collecting',
+    }), { status: 200, headers: { 'content-type': 'application/json' } }));
+    const deps = dependencies(storage, () => socket, fetcher);
+    let expire!: () => void;
+    deps.setTimeout = vi.fn(callback => {
+      expire = callback;
+      return 92;
+    });
+    const connection = new BridgeConnection(deps);
+    await connection.start();
+    socket.emit('open');
+    await vi.waitFor(() => expect(socket.sent).toHaveLength(1));
+
+    const waiting = connection.waitForJobTerminal('job-still-collecting', undefined, 500);
+    expire();
+
+    await expect(waiting).rejects.toThrow('持久化回执超时');
+  });
+
   it('serializes concurrent start attempts into a single socket', async () => {
     const storage = new MemoryStorage();
     const socketFactory = vi.fn(() => new MemorySocket());
@@ -1020,6 +1243,34 @@ describe('extension Bridge connection', () => {
     await flushPromises();
 
     expect(storage.writes.some(write => write.lastJobId === 'not-sent')).toBe(false);
+  });
+
+  it('binds a ZSXQ plan job creation request to the dispatched attempt token', async () => {
+    const storage = new MemoryStorage({ bridgeToken: 'x'.repeat(43) });
+    let requestBody: unknown;
+    const fetcher = vi.fn<typeof fetch>(async (_input, init) => {
+      requestBody = JSON.parse(String(init?.body));
+      return new Response(JSON.stringify({ id: 'attempt-bound-job' }), {
+        status: 202,
+        headers: { 'content-type': 'application/json' },
+      });
+    });
+    const connection = new BridgeConnection(dependencies(storage, () => new MemorySocket(), fetcher));
+
+    await connection.createJob(
+      'https://wx.zsxq.com/group/48844584441158/topic/811111111111111',
+      {
+        batchId: 'batch-attempt-bound',
+        planId: 'zsxq-chen-teacher',
+        attempt: 'a1b2c3d4e5f60718',
+      },
+    );
+
+    expect(requestBody).toMatchObject({
+      batchId: 'batch-attempt-bound',
+      planId: 'zsxq-chen-teacher',
+      attempt: 'a1b2c3d4e5f60718',
+    });
   });
 
   it('reports that automatic connection is in progress when protected actions lack a token', async () => {

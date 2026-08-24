@@ -9,7 +9,6 @@ import { build } from 'esbuild';
 
 const execFileAsync = promisify(execFile);
 const WORKSPACE = resolve(import.meta.dirname, '..');
-const EXPECTED_VERSION = '0.4.25';
 const CURRENT_BATCH = 'delivery-smoke-current';
 const OLD_BATCH = 'delivery-smoke-old';
 
@@ -88,7 +87,16 @@ async function exists(path) {
 
 async function main() {
   const packageJson = JSON.parse(await readFile(join(WORKSPACE, 'package.json'), 'utf8'));
-  assert.equal(packageJson.version, EXPECTED_VERSION, `端到端交付烟测要求版本 ${EXPECTED_VERSION}`);
+  const versionFiles = [
+    'packages/shared/package.json',
+    'packages/bridge/package.json',
+    'packages/extension/package.json',
+    'packages/extension/manifest.json',
+  ];
+  for (const relativePath of versionFiles) {
+    const candidate = JSON.parse(await readFile(join(WORKSPACE, relativePath), 'utf8'));
+    assert.equal(candidate.version, packageJson.version, `${relativePath} 与根版本不一致`);
+  }
 
   const temporaryRoot = await mkdtemp(join(tmpdir(), 'data-collector-delivery-smoke-'));
   try {

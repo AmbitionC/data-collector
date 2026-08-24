@@ -3,7 +3,10 @@ import { mkdir, open, readFile, rename, unlink } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import {
   collectionBatchSchema,
+  stableContentId,
   type CollectionBatch,
+  type CollectionPlanAttempt,
+  type CollectionPlanRejection,
   type CollectionPlanId,
   type JobRecord,
 } from '@data-collector/shared';
@@ -93,7 +96,7 @@ export class CollectionPlanStore {
     return store;
   }
 
-  start(planId: CollectionPlanId): Promise<CollectionBatch> {
+  start(planId: CollectionPlanId, options: { force?: boolean } = {}): Promise<CollectionBatch> {
     return this.serializeMutation(async () => {
       const startedAt = this.now();
       const id = `${planId}-${startedAt.replace(/\D/g, '')}-${randomBytes(4).toString('hex')}`;
@@ -109,9 +112,10 @@ export class CollectionPlanStore {
         failed: 0,
         needsAttention: 0,
         deliveryIds: [],
+        ...(options.force === true ? { force: true } : {}),
         ...(planId === 'nowcoder-agent-market'
           ? { selectionStatus: 'collecting' as const, rounds: 0 }
-          : {}),
+          : { preparationStatus: 'collecting' as const }),
         jobIds: [],
       };
       this.batches.set(id, batch);
@@ -120,11 +124,46 @@ export class CollectionPlanStore {
     });
   }
 
-  attachJob(batchId: string, jobId: string): Promise<void> {
-    return this.serializeMutation(async () => {
+  /** 换新并持久化知识星球 staging 尝试；旧轮后续消息从此全部失效。 */
+  beginPreparation(batchId: string): Promise<CollectionBatch> {
+    return this.serializeTransactionalMutation(async () => {
       const batch = this.require(batchId);
+      if (batch.planId !== 'zsxq-chen-teacher') throw new Error('仅知识星球固定计划支持准备尝试');
+      if (batch.status !== 'running') throw new Error('采集批次已结束，无法开始新尝试');
+      batch.preparationAttempt = randomBytes(8).toString('hex');
+      batch.preparationStatus = 'collecting';
+      // 每个 attempt 只结算自己的子任务。旧轮 JobRecord 保留供审计，
+      // 但不再能把当前轮提前结算或污染统计。
+      batch.jobIds = [];
+      batch.discovered = 0;
+      batch.accepted = 0;
+      batch.saved = 0;
+      batch.skipped = 0;
+      batch.failed = 0;
+      batch.needsAttention = 0;
+      delete batch.coverage;
+      delete batch.rejections;
+      delete batch.rejectionDetails;
+      await this.persist();
+      return publicBatch(batch);
+    });
+  }
+
+  assertPreparationAttempt(batchId: string, attempt: CollectionPlanAttempt): Promise<void> {
+    return this.serializeMutation(async () => {
+      this.requireCurrentPreparationAttempt(this.require(batchId), attempt);
+    });
+  }
+
+  attachJob(batchId: string, jobId: string, attempt?: CollectionPlanAttempt): Promise<void> {
+    return this.serializeTransactionalMutation(async () => {
+      const batch = this.require(batchId);
+      if (batch.planId === 'zsxq-chen-teacher') {
+        this.requireCurrentPreparationAttempt(batch, attempt);
+      }
       if (!batch.jobIds.includes(jobId)) batch.jobIds.push(jobId);
       batch.accepted = batch.jobIds.length;
+      batch.discovered = Math.max(batch.discovered, batch.accepted);
       await this.persist();
     });
   }
@@ -137,6 +176,7 @@ export class CollectionPlanStore {
       if (nextIds.length === 0) return;
       batch.jobIds.push(...nextIds);
       batch.accepted = batch.jobIds.length;
+      batch.discovered = Math.max(batch.discovered, batch.accepted);
       batch.rounds = (batch.rounds ?? 0) + 1;
       await this.persist();
     });
@@ -163,12 +203,102 @@ export class CollectionPlanStore {
     discovered: number,
     coverage?: Record<string, number>,
     rejections?: Record<string, number>,
+    rejectionDetails?: readonly CollectionPlanRejection[],
   ): Promise<void> {
     return this.serializeMutation(async () => {
       const batch = this.require(batchId);
-      batch.discovered = discovered;
+      batch.discovered = Math.max(discovered, batch.accepted);
       if (coverage) batch.coverage = { ...coverage };
       if (rejections) batch.rejections = { ...rejections };
+      if (rejectionDetails) {
+        batch.rejectionDetails = rejectionDetails.map(detail => ({ ...detail }));
+      }
+      await this.persist();
+    });
+  }
+
+  /**
+   * 持久化知识星球两阶段 staging。completed 是单调状态：迟到或重放的
+   * prepared:false 不得把已完整创建的任务集合重新降级为半成品。
+   */
+  markPreparation(batchId: string, prepared: boolean): Promise<CollectionBatch> {
+    return this.serializeMutation(async () => {
+      const batch = this.require(batchId);
+      if (batch.planId !== 'zsxq-chen-teacher') throw new Error('仅知识星球固定计划支持准备阶段');
+      if (prepared || batch.preparationStatus !== 'completed') {
+        batch.preparationStatus = prepared ? 'completed' : 'collecting';
+        await this.persist();
+      }
+      return publicBatch(batch);
+    });
+  }
+
+  /** 只把当前 attempt 的发现结果与准备态作为一次原子事实落盘。 */
+  recordPreparationResult(
+    batchId: string,
+    attempt: CollectionPlanAttempt,
+    result: {
+      discovered: number;
+      prepared: boolean;
+      coverage?: Record<string, number>;
+      rejections?: Record<string, number>;
+      rejectionDetails?: readonly CollectionPlanRejection[];
+    },
+  ): Promise<CollectionBatch> {
+    return this.serializeTransactionalMutation(async () => {
+      const batch = this.require(batchId);
+      if (
+        batch.planId !== 'zsxq-chen-teacher'
+        || batch.status !== 'running'
+        || batch.preparationAttempt !== attempt
+      ) return publicBatch(batch);
+      // 同一 attempt 内的迟到 prepared:false 也不得回退或覆盖已完成统计。
+      if (batch.preparationStatus === 'completed' && !result.prepared) return publicBatch(batch);
+      batch.discovered = Math.max(result.discovered, batch.accepted);
+      if (result.coverage) batch.coverage = { ...result.coverage };
+      if (result.rejections) batch.rejections = { ...result.rejections };
+      if (result.rejectionDetails) {
+        batch.rejectionDetails = result.rejectionDetails.map(detail => ({ ...detail }));
+      }
+      batch.preparationStatus = result.prepared ? 'completed' : 'collecting';
+      await this.persist();
+      return publicBatch(batch);
+    });
+  }
+
+  /** 旧 attempt 的迟到错误不得终止已换新的批次。 */
+  finishPreparationWithError(
+    batchId: string,
+    attempt: CollectionPlanAttempt,
+    message: string,
+    needsAttention: boolean,
+  ): Promise<CollectionBatch> {
+    return this.serializeTransactionalMutation(async () => {
+      const batch = this.require(batchId);
+      if (
+        batch.planId !== 'zsxq-chen-teacher'
+        || batch.status !== 'running'
+        || batch.preparationAttempt !== attempt
+      ) return publicBatch(batch);
+      batch.status = needsAttention ? 'completed_with_attention' : 'failed';
+      batch.finishedAt = this.now();
+      batch.error = message;
+      await this.persist();
+      return publicBatch(batch);
+    });
+  }
+
+  /** 追加运行期防线产生的逐条拒绝；同一 URL/原因重复上报时保持幂等。 */
+  recordRejection(batchId: string, rejection: CollectionPlanRejection): Promise<void> {
+    return this.serializeMutation(async () => {
+      const batch = this.require(batchId);
+      const details = batch.rejectionDetails ?? [];
+      if (details.some(detail => detail.url === rejection.url && detail.reason === rejection.reason)) return;
+      batch.rejectionDetails = details.concat({ ...rejection });
+      batch.rejections = {
+        ...(batch.rejections ?? {}),
+        [rejection.reason]: (batch.rejections?.[rejection.reason] ?? 0) + 1,
+      };
       await this.persist();
     });
   }
@@ -280,6 +410,7 @@ export class CollectionPlanStore {
   reconcile(batchId: string, jobs: readonly JobRecord[]): Promise<CollectionBatch> {
     return this.serializeMutation(async () => {
       const batch = this.require(batchId);
+      if (batch.status !== 'running') return publicBatch(batch);
       if (batch.selectionStatus === 'completed') return publicBatch(batch);
       const byId = new Map(jobs.map(job => [job.id, job]));
       const children = batch.jobIds.map(id => byId.get(id)).filter((job): job is JobRecord => Boolean(job));
@@ -294,12 +425,28 @@ export class CollectionPlanStore {
 
       const terminal = children.length === batch.jobIds.length && children.every(job =>
         job.status === 'saved' || job.status === 'failed' || job.status === 'needs_attention');
-      if (terminal && batch.planId !== 'nowcoder-agent-market') {
+      const preparationComplete = batch.planId !== 'zsxq-chen-teacher'
+        || batch.preparationStatus === 'completed';
+      if (terminal && preparationComplete && batch.planId !== 'nowcoder-agent-market') {
+        const incompleteRejections = batch.rejections?.['正文不完整'] ?? 0;
+        const undeliveredSaved = batch.planId === 'zsxq-chen-teacher'
+          ? children.filter(job =>
+              job.status === 'saved'
+              && !batch.deliveryIds.includes(stableContentId(job.url)))
+          : [];
         batch.status = batch.failed === batch.accepted && batch.accepted > 0
           ? 'failed'
-          : batch.failed > 0 || batch.needsAttention > 0
+          : batch.failed > 0
+              || batch.needsAttention > 0
+              || incompleteRejections > 0
+              || undeliveredSaved.length > 0
             ? 'completed_with_attention'
             : 'completed';
+        if (undeliveredSaved.length > 0 && batch.status === 'completed_with_attention') {
+          batch.error = `${undeliveredSaved.length} 条已保存知识星球内容尚未确认交付`;
+        } else if (incompleteRejections > 0 && batch.status === 'completed_with_attention') {
+          batch.error = `${incompleteRejections} 条知识星球内容正文不完整，未归档交付`;
+        }
         batch.finishedAt ??= this.now();
       } else {
         batch.status = 'running';
@@ -356,6 +503,16 @@ export class CollectionPlanStore {
     const batch = this.batches.get(id);
     if (!batch) throw new Error(`采集批次不存在：${id}`);
     return batch;
+  }
+
+  private requireCurrentPreparationAttempt(
+    batch: StoredBatch,
+    attempt: CollectionPlanAttempt | undefined,
+  ): void {
+    if (batch.status !== 'running') throw new Error('采集批次已结束，拒绝追加任务');
+    if (!attempt || batch.preparationAttempt !== attempt) {
+      throw new Error('知识星球采集尝试已过期');
+    }
   }
 
   private serializeMutation<T>(operation: () => Promise<T>): Promise<T> {

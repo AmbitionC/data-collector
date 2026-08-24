@@ -2,10 +2,15 @@ import {
   APP_VERSION,
   EXTENSION_REPLACED_CLOSE_CODE,
   EXTENSION_REPLACED_CLOSE_REASON,
+  ZSXQ_COMPLETE_CONTENT_CAPABILITY,
   bridgeAuthorizedPayloadSchema,
+  collectionPlanAttemptSchema,
   jobCollectPayloadSchema,
+  jobFailedPayloadSchema,
+  jobSavedPayloadSchema,
   planCollectPayloadSchema,
   wsEnvelopeSchema,
+  type CollectionPlanAttempt,
   type CollectionPlanId,
 } from '@data-collector/shared';
 
@@ -40,11 +45,17 @@ interface ConnectionDependencies {
 type CollectHandler = (requestId: string, url: string, interactive: boolean) => void | Promise<void>;
 type PlanCollectHandler = (
   requestId: string,
-  payload: { batchId: string; planId: CollectionPlanId; force?: boolean },
+  payload: {
+    batchId: string;
+    planId: CollectionPlanId;
+    attempt: CollectionPlanAttempt;
+    force?: boolean;
+  },
 ) => void | Promise<void>;
 
 const DEFAULT_PORT = 17321;
 const PLAN_REJECTIONS_MINIMUM_BRIDGE_VERSION = '0.4.11';
+const PLAN_REJECTION_DETAILS_MINIMUM_BRIDGE_VERSION = '0.4.29';
 
 function versionAtLeast(actual: string | undefined, minimum: string): boolean {
   if (!actual) return false;
@@ -63,6 +74,23 @@ interface ConnectionTransition {
   values: Record<string, unknown>;
 }
 
+interface JobTerminalNotice {
+  status: 'saved' | 'failed';
+  attempt?: CollectionPlanAttempt;
+  message?: string;
+}
+
+interface JobTerminalWaiter {
+  expectedAttempt?: CollectionPlanAttempt;
+  resolve: () => void;
+  reject: (error: Error) => void;
+  timeoutHandle?: unknown;
+  settled: boolean;
+}
+
+const JOB_TERMINAL_ACK_TIMEOUT_MS = 60_000;
+const RECENT_JOB_TERMINAL_LIMIT = 100;
+
 export class BridgeConnection {
   private socket: SocketLike | undefined;
   private pingTimer: unknown;
@@ -79,6 +107,9 @@ export class BridgeConnection {
   private ignoreStoredToken = false;
   private reconnectSuppressed = false;
   private bridgeVersion: string | undefined;
+  /** WebSocket 终态可能比调用方注册 waiter 更快，保留一个有界抢先回执缓存。 */
+  private readonly recentJobTerminals = new Map<string, JobTerminalNotice>();
+  private readonly jobTerminalWaiters = new Map<string, Set<JobTerminalWaiter>>();
 
   constructor(private readonly dependencies: ConnectionDependencies) {}
 
@@ -240,7 +271,12 @@ export class BridgeConnection {
       this.reconnectSuppressed = false;
       this.reconnectAttempt = 0;
       this.cancelReconnect();
-      this.send('extension.hello', 'extension', { version: APP_VERSION });
+      const runningBuildId = typeof __BUILD_ID__ === 'string' ? __BUILD_ID__ : undefined;
+      this.send('extension.hello', 'extension', {
+        version: APP_VERSION,
+        ...(runningBuildId ? { buildId: runningBuildId } : {}),
+        capabilities: [ZSXQ_COMPLETE_CONTENT_CAPABILITY],
+      });
       this.startKeepalive();
     };
 
@@ -312,14 +348,23 @@ export class BridgeConnection {
     const socket = this.socket;
     if (socket?.readyState !== 1) throw new Error('Bridge WebSocket 未连接');
     let compatiblePayload = payload;
-    if (
-      type === 'plan.result' &&
-      !versionAtLeast(this.bridgeVersion, PLAN_REJECTIONS_MINIMUM_BRIDGE_VERSION) &&
-      typeof payload === 'object' &&
-      payload !== null
-    ) {
-      const { rejections: _rejections, ...legacyPayload } = payload as Record<string, unknown>;
-      compatiblePayload = legacyPayload;
+    if (type === 'plan.result' && typeof payload === 'object' && payload !== null) {
+      const planPayload = { ...payload as Record<string, unknown> };
+      // prepared 是 ZSXQ 两阶段 staging 的标识。旧/未知 Bridge 无法可靠接收
+      // rejection audit；宁可让上层收敛成 attention，也绝不能删字段后假绿。
+      if (
+        typeof planPayload.prepared === 'boolean'
+        && !versionAtLeast(this.bridgeVersion, PLAN_REJECTION_DETAILS_MINIMUM_BRIDGE_VERSION)
+      ) {
+        throw new Error('BRIDGE_UPDATE_REQUIRED：当前 Bridge 无法接收知识星球正文完整性审计结果');
+      }
+      if (!versionAtLeast(this.bridgeVersion, PLAN_REJECTIONS_MINIMUM_BRIDGE_VERSION)) {
+        delete planPayload.rejections;
+      }
+      if (!versionAtLeast(this.bridgeVersion, PLAN_REJECTION_DETAILS_MINIMUM_BRIDGE_VERSION)) {
+        delete planPayload.rejectionDetails;
+      }
+      compatiblePayload = planPayload;
     }
     socket.send(
       JSON.stringify({
@@ -361,6 +406,7 @@ export class BridgeConnection {
       sinks?: string[];
       batchId?: string;
       planId?: CollectionPlanId;
+      attempt?: CollectionPlanAttempt;
     },
   ): Promise<{ id: string }> {
     const settings = await this.settings();
@@ -382,6 +428,7 @@ export class BridgeConnection {
           ...(overrides?.sinks?.length ? { sinks: overrides.sinks } : {}),
           ...(overrides?.batchId ? { batchId: overrides.batchId } : {}),
           ...(overrides?.planId ? { planId: overrides.planId } : {}),
+          ...(overrides?.attempt ? { attempt: overrides.attempt } : {}),
         }),
       },
     );
@@ -395,6 +442,143 @@ export class BridgeConnection {
       lastJobError: '',
     });
     return { id: job.id };
+  }
+
+  /**
+   * 等待 Bridge 的持久化终态。WebSocket notice 是快路径；若 Bridge 恰好在
+   * JobStore 落盘后、发 notice 前重启，超时时再查 JobStore，避免把成功误报失败。
+   */
+  waitForJobTerminal(
+    jobId: string,
+    expectedAttempt?: CollectionPlanAttempt,
+    timeoutMs = JOB_TERMINAL_ACK_TIMEOUT_MS,
+  ): Promise<void> {
+    const recent = this.recentJobTerminals.get(jobId);
+    if (recent) {
+      this.recentJobTerminals.delete(jobId);
+      const error = this.jobTerminalError(jobId, recent, expectedAttempt);
+      return error ? Promise.reject(error) : Promise.resolve();
+    }
+    return new Promise<void>((resolve, reject) => {
+      const waiter: JobTerminalWaiter = {
+        ...(expectedAttempt ? { expectedAttempt } : {}),
+        resolve,
+        reject,
+        settled: false,
+      };
+      const waiters = this.jobTerminalWaiters.get(jobId) ?? new Set<JobTerminalWaiter>();
+      waiters.add(waiter);
+      this.jobTerminalWaiters.set(jobId, waiters);
+      waiter.timeoutHandle = this.dependencies.setTimeout(() => {
+        void this.recoverPersistedJobTerminal(jobId)
+          .then(notice => {
+            if (waiter.settled) return;
+            if (notice) {
+              this.recordJobTerminal(jobId, notice);
+              return;
+            }
+            this.finishJobTerminalWaiter(
+              jobId,
+              waiter,
+              new Error(`等待 Bridge 持久化回执超时：${jobId}`),
+            );
+          })
+          .catch(() => {
+            this.finishJobTerminalWaiter(
+              jobId,
+              waiter,
+              new Error(`等待 Bridge 持久化回执超时：${jobId}`),
+            );
+          });
+      }, Math.max(1, timeoutMs));
+    });
+  }
+
+  private jobTerminalError(
+    jobId: string,
+    notice: JobTerminalNotice,
+    expectedAttempt?: CollectionPlanAttempt,
+  ): Error | undefined {
+    if (expectedAttempt && notice.attempt !== expectedAttempt) {
+      return new Error(
+        `固定计划任务回执尝试不匹配：${jobId}（期望 ${expectedAttempt}，收到 ${notice.attempt ?? '缺失'}）`,
+      );
+    }
+    return notice.status === 'failed'
+      ? new Error(notice.message ?? `Bridge 持久化失败：${jobId}`)
+      : undefined;
+  }
+
+  private finishJobTerminalWaiter(
+    jobId: string,
+    waiter: JobTerminalWaiter,
+    error?: Error,
+  ): void {
+    if (waiter.settled) return;
+    waiter.settled = true;
+    if (waiter.timeoutHandle !== undefined) {
+      this.dependencies.clearTimeout(waiter.timeoutHandle);
+    }
+    const waiters = this.jobTerminalWaiters.get(jobId);
+    waiters?.delete(waiter);
+    if (waiters?.size === 0) this.jobTerminalWaiters.delete(jobId);
+    if (error) waiter.reject(error);
+    else waiter.resolve();
+  }
+
+  private recordJobTerminal(jobId: string, notice: JobTerminalNotice): void {
+    const waiters = this.jobTerminalWaiters.get(jobId);
+    if (waiters?.size) {
+      for (const waiter of [...waiters]) {
+        this.finishJobTerminalWaiter(
+          jobId,
+          waiter,
+          this.jobTerminalError(jobId, notice, waiter.expectedAttempt),
+        );
+      }
+      return;
+    }
+    this.recentJobTerminals.delete(jobId);
+    this.recentJobTerminals.set(jobId, notice);
+    while (this.recentJobTerminals.size > RECENT_JOB_TERMINAL_LIMIT) {
+      const oldest = this.recentJobTerminals.keys().next().value as string | undefined;
+      if (oldest === undefined) break;
+      this.recentJobTerminals.delete(oldest);
+    }
+  }
+
+  private async recoverPersistedJobTerminal(jobId: string): Promise<JobTerminalNotice | undefined> {
+    const { baseUrl, token } = await this.authorized();
+    const fetcher = this.dependencies.fetch;
+    const response = await fetcher(`${baseUrl}/v1/jobs/${encodeURIComponent(jobId)}`, {
+      headers: { authorization: `Bearer ${token}` },
+    });
+    if (!response.ok) return undefined;
+    const raw = await response.json() as {
+      id?: unknown;
+      status?: unknown;
+      planAttempt?: unknown;
+      errorMessage?: unknown;
+    };
+    if (raw.id !== jobId) return undefined;
+    const parsedAttempt = collectionPlanAttemptSchema.safeParse(raw.planAttempt);
+    const attempt = parsedAttempt.success ? parsedAttempt.data : undefined;
+    if (raw.status === 'saved') {
+      return { status: 'saved', ...(attempt ? { attempt } : {}) };
+    }
+    if (raw.status === 'failed' || raw.status === 'needs_attention') {
+      return {
+        status: 'failed',
+        ...(attempt ? { attempt } : {}),
+        ...(typeof raw.errorMessage === 'string' ? { message: raw.errorMessage } : {}),
+      };
+    }
+    return undefined;
+  }
+
+  /** 当前 Bridge 是否达到某项扩展侧兼容逻辑要求的最低版本。 */
+  supportsVersion(minimum: string): boolean {
+    return versionAtLeast(this.bridgeVersion, minimum);
   }
 
   /** 已入库内容列表（供侧栏的「已入库」页面）。 */
@@ -557,11 +741,16 @@ export class BridgeConnection {
         if (isCurrent()) await this.planCollectHandler?.(message.requestId, {
           batchId: payload.batchId,
           planId: payload.planId,
+          attempt: payload.attempt,
           ...(payload.force === undefined ? {} : { force: payload.force }),
         });
       } else if (message.type === 'job.saved' && isCurrent()) {
         // Bridge 的 job.saved 载荷为 { outputPath, results }（多 sink 后的首要产出路径）。
-        const payload = message.payload as { outputPath?: unknown; results?: unknown };
+        const payload = jobSavedPayloadSchema.parse(message.payload);
+        this.recordJobTerminal(message.requestId, {
+          status: 'saved',
+          ...(payload.attempt ? { attempt: payload.attempt } : {}),
+        });
         // 真正写成功的去向要留下来：默认路由可能同时写两处，结果屏光说「本地知识库」
         // 是在骗人——用户正是因此搞不清内容到底进了哪里。
         const sinkIds = Array.isArray(payload.results)
@@ -576,6 +765,18 @@ export class BridgeConnection {
           ...(typeof payload.outputPath === 'string'
             ? { lastOutputPath: payload.outputPath }
             : {}),
+        });
+      } else if (message.type === 'job.failed' && isCurrent()) {
+        const payload = jobFailedPayloadSchema.parse(message.payload);
+        this.recordJobTerminal(message.requestId, {
+          status: 'failed',
+          message: payload.message,
+          ...(payload.attempt ? { attempt: payload.attempt } : {}),
+        });
+        await this.transitionJob(generation, isCurrent, {
+          lastJobId: message.requestId,
+          lastJobStatus: 'failed',
+          lastJobError: payload.message,
         });
       }
     } catch {

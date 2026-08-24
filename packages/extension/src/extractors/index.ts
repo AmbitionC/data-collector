@@ -19,11 +19,14 @@ import {
 export { ExtractionError } from './types.js';
 export {
   COLLECTED_ATTRIBUTE,
+  ZSXQ_EXPAND_CONTROL_SELECTOR,
   KEY_ATTRIBUTE,
+  isZsxqExpandControl,
   isZsxqArticle,
   linkedArticleUrl,
   listBodyText,
   pendingTopicCount,
+  zsxqExpandLabel,
 } from './zsxq.js';
 export type { ListEntry, ListExtraction } from './zsxq.js';
 
@@ -58,6 +61,8 @@ export function extractDocument(
   document: Document,
   rawUrl: string,
   now: Clock = () => new Date().toISOString(),
+  topics?: TopicIndex,
+  requireZsxqTopicEvidence = false,
 ): CollectedDocument {
   let url: URL;
   try {
@@ -72,7 +77,7 @@ export function extractDocument(
       // 长文页是独立形态：帖子在信息流里只有导语，正文在 articles.zsxq.com 上。
       return isZsxqArticle(url)
         ? extractZsxqArticle(document, url, now)
-        : extractZsxq(document, url, now);
+        : extractZsxq(document, url, now, topics, requireZsxqTopicEvidence);
     case 'nowcoder':
       return extractNowcoder(document, url, now);
     case 'github':
