@@ -49,7 +49,7 @@ function recencyOf(document: CollectedDocument): string | undefined {
   return document.publishedAt;
 }
 
-/** 30 天内 A/B 级真实面经，按公司轮转取样；任何公司都不能突破 4 条。 */
+/** 30 天内 A/B 级真实面经，按公司轮转优先保证多样性，再由充足来源补满目标。 */
 export function selectNowcoderPlanCandidates(
   documents: readonly CollectedDocument[],
   now: string,
@@ -91,11 +91,9 @@ export function selectNowcoderPlanCandidates(
   const accepted: CollectedDocument[] = [];
   const seenClusters = new Set<string>();
   let advanced = true;
-  while (accepted.length < FE_JOURNEY_PRESET.nowcoder.planAcceptedLimit && advanced) {
+  while (accepted.length < FE_JOURNEY_PRESET.nowcoder.planTargetAccepted && advanced) {
     advanced = false;
     for (const company of order) {
-      const companyAccepted = accepted.filter(document => companyOf(document) === company).length;
-      if (companyAccepted >= FE_JOURNEY_PRESET.nowcoder.planPerCompanyAcceptedLimit) continue;
       const bucket = buckets.get(company)!;
       while (bucket.length > 0) {
         const document = bucket.shift()!;
@@ -109,14 +107,14 @@ export function selectNowcoderPlanCandidates(
         advanced = true;
         break;
       }
-      if (accepted.length >= FE_JOURNEY_PRESET.nowcoder.planAcceptedLimit) break;
+      if (accepted.length >= FE_JOURNEY_PRESET.nowcoder.planTargetAccepted) break;
     }
   }
 
   const acceptedUrls = new Set(accepted.map(document => document.canonicalUrl));
   for (const document of eligible) {
     if (!acceptedUrls.has(document.canonicalUrl) && !rejected.some(item => item.url === document.canonicalUrl)) {
-      rejected.push({ url: document.canonicalUrl, reason: '公司或批次上限' });
+      rejected.push({ url: document.canonicalUrl, reason: '批次上限' });
     }
   }
   const coverage = Object.fromEntries(NOWCODER_COMPANIES.map(company => [

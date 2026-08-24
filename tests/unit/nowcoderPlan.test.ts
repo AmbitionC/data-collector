@@ -35,26 +35,28 @@ function interview(
 }
 
 describe('Nowcoder fixed collection plan selection', () => {
-  it('accepts only recent A/B evidence, caps each company at four, and keeps honest zero coverage', () => {
-    const recent = [
-      ...Array.from({ length: 6 }, (_, index) => interview('bytedance', 30_000 + index)),
-      ...Array.from({ length: 6 }, (_, index) => interview('tencent', 31_000 + index)),
-      ...Array.from({ length: 6 }, (_, index) => interview('alibaba', 32_000 + index)),
+  it('fills exactly ten slots without a company cap while preserving available diversity', () => {
+    const candidates = [
+      ...Array.from({ length: 10 }, (_, index) => interview('alibaba', 32_000 + index)),
+      interview('bytedance', 30_000),
       interview('ant', 33_000, '2026-08-15T04:00:00.000Z', 'truncated'),
       interview('ant', 33_001, '2026-07-01T04:00:00.000Z'),
     ];
 
-    const result = selectNowcoderPlanCandidates(recent, '2026-08-23T01:00:00.000Z');
+    const result = selectNowcoderPlanCandidates(candidates, '2026-08-23T01:00:00.000Z');
 
-    expect(result.accepted).toHaveLength(12);
-    expect(result.coverage).toEqual({ bytedance: 4, tencent: 4, alibaba: 4, ant: 0 });
+    expect(result.accepted).toHaveLength(10);
+    expect(result.coverage).toEqual({ bytedance: 1, tencent: 0, alibaba: 9, ant: 0 });
+    expect(result.accepted).toContainEqual(
+      expect.objectContaining({ canonicalUrl: 'https://www.nowcoder.com/discuss/30000' }),
+    );
     expect(result.rejected).toEqual(expect.arrayContaining([
       expect.objectContaining({ url: expect.stringContaining('33000'), reason: '证据等级不足' }),
       expect.objectContaining({ url: expect.stringContaining('33001'), reason: '超过30天' }),
     ]));
   });
 
-  it('rotates the first company by Shanghai calendar date without exceeding company caps', () => {
+  it('rotates the first company by Shanghai calendar date', () => {
     const documents = (['bytedance', 'tencent', 'alibaba', 'ant'] as const)
       .flatMap((company, companyIndex) => Array.from(
         { length: 2 },
@@ -67,7 +69,6 @@ describe('Nowcoder fixed collection plan selection', () => {
     expect(firstDay.accepted[0]?.sourceMetadata?.company).not.toBe(
       nextDay.accepted[0]?.sourceMetadata?.company,
     );
-    expect(Math.max(...Object.values(firstDay.coverage))).toBeLessThanOrEqual(4);
   });
 
   it('rejects a candidate already linked to an existing question-cluster representative', () => {
