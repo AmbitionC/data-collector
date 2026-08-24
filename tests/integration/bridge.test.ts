@@ -152,6 +152,103 @@ afterEach(async () => {
 });
 
 describe('local Bridge', () => {
+  it('does not finish closing while an accepted WebSocket result is still persisting', async () => {
+    let releaseImage!: () => void;
+    let markImageStarted!: () => void;
+    const imageGate = new Promise<void>(resolve => { releaseImage = resolve; });
+    const imageStarted = new Promise<void>(resolve => { markImageStarted = resolve; });
+    const root = await temporaryDirectory();
+    const bridge = await startBridge({
+      port: 0,
+      libraryRoot: root,
+      configDir: join(root, '.config'),
+      fetch: async () => {
+        markImageStarted();
+        await imageGate;
+        return new Response(new Uint8Array([137, 80, 78, 71]), {
+          headers: { 'content-type': 'image/png', 'content-length': '4' },
+        });
+      },
+      resolveAddresses: async () => ['93.184.216.34'],
+    });
+    let closePromise: Promise<void> | undefined;
+    try {
+      const authorized = await authorize(bridge);
+      authorized.socket.send(envelope('extension.hello', 'close-drain-hello', {
+        version: APP_VERSION,
+      }));
+      await waitForExtensionReady(bridge);
+      const created = await requestJson<{ id: string }>(bridge.url, '/v1/jobs', {
+        method: 'POST',
+        token: authorized.token,
+        body: { url: URL, requestedBy: 'extension' },
+      });
+      authorized.socket.send(envelope('job.progress', created.body.id, { stage: 'collecting' }));
+      authorized.socket.send(envelope('job.result', created.body.id, {
+        document: document({
+          html: '<p>关闭前必须完成持久化。</p><img src="https://images.example/close.png">',
+          text: '关闭前必须完成持久化。',
+          images: [{ url: 'https://images.example/close.png' }],
+        }),
+      }));
+      await imageStarted;
+
+      let closeSettled = false;
+      closePromise = bridge.close().then(() => { closeSettled = true; });
+      await new Promise(resolve => setTimeout(resolve, 50));
+
+      expect(closeSettled).toBe(false);
+    } finally {
+      releaseImage();
+      await closePromise;
+    }
+  });
+
+  it('drains a routed HTTP operation even after its client disconnects', async () => {
+    let releaseReveal!: () => void;
+    let markRevealStarted!: () => void;
+    const revealGate = new Promise<void>(resolve => { releaseReveal = resolve; });
+    const revealStarted = new Promise<void>(resolve => { markRevealStarted = resolve; });
+    const root = await temporaryDirectory();
+    const target = join(root, 'entry.md');
+    await writeFile(target, '# entry\n', 'utf8');
+    const bridge = await startBridge({
+      port: 0,
+      libraryRoot: root,
+      configDir: join(root, '.config'),
+      reveal: async () => {
+        markRevealStarted();
+        await revealGate;
+      },
+    });
+    let closePromise: Promise<void> | undefined;
+    try {
+      const authorized = await authorize(bridge);
+      const controller = new AbortController();
+      const request = fetch(`${bridge.url}/v1/reveal`, {
+        method: 'POST',
+        headers: {
+          authorization: `Bearer ${authorized.token}`,
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({ path: target }),
+        signal: controller.signal,
+      });
+      await revealStarted;
+      controller.abort();
+      await expect(request).rejects.toThrow();
+
+      let closeSettled = false;
+      closePromise = bridge.close().then(() => { closeSettled = true; });
+      await new Promise(resolve => setTimeout(resolve, 50));
+
+      expect(closeSettled).toBe(false);
+    } finally {
+      releaseReveal();
+      await closePromise;
+    }
+  });
+
   it('keeps an offline fixed plan pending, dispatches it on extension hello, and records the result', async () => {
     const root = await temporaryDirectory();
     const configDir = join(root, '.config');
