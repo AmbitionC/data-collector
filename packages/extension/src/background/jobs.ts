@@ -9,6 +9,7 @@ import {
 import { linkedArticleUrl } from '../extractors/index.js';
 import type { HookStats } from '../topicIndex.js';
 import type { OwnedTabPurpose } from './ownedTabs.js';
+import { RemoteJobScheduler } from './remoteJobScheduler.js';
 
 export interface BrowserTab {
   id?: number;
@@ -220,7 +221,7 @@ function lifeTeacherCategory(document: CollectedDocument): string {
 }
 
 export class JobRunner {
-  private remoteQueue: Promise<void> = Promise.resolve();
+  private readonly remoteScheduler = new RemoteJobScheduler(2);
   private batchStopped = false;
 
   constructor(private readonly options: JobRunnerOptions) {}
@@ -540,9 +541,10 @@ export class JobRunner {
   }
 
   async runRemoteJob(requestId: string, rawUrl: string, interactive = true): Promise<void> {
-    const result = this.remoteQueue.then(() => this.runRemoteJobNow(requestId, rawUrl, interactive));
-    this.remoteQueue = result.catch(() => undefined);
-    return result;
+    return this.remoteScheduler.run(
+      () => this.runRemoteJobNow(requestId, rawUrl, interactive),
+      interactive ? 'interactive' : 'batch',
+    );
   }
 
   private async runRemoteJobNow(requestId: string, rawUrl: string, interactive: boolean): Promise<void> {

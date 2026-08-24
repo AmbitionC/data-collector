@@ -447,27 +447,45 @@ describe('extension job runner', () => {
     expect(gold?.payload).toMatchObject({ document: { userCategory: '投资' } });
   });
 
-  it('queues remote jobs so reconnect bursts do not open unlimited tabs', async () => {
+  it('bounds reconnect bursts, prioritizes interactive jobs, and closes every generated tab', async () => {
     const tabs = new InMemoryTabs();
     const bridge = new InMemoryBridge();
-    let releaseFirst: (() => void) | undefined;
+    const releases: Array<() => void> = [];
     let waits = 0;
+    let markThirdCreated: (() => void) | undefined;
+    const thirdCreated = new Promise<void>(resolve => { markThirdCreated = resolve; });
+    const create = tabs.create.bind(tabs);
+    tabs.create = async input => {
+      const tab = await create(input);
+      if (tabs.created.length === 3) markThirdCreated?.();
+      return tab;
+    };
     const runner = new JobRunner({
       tabs,
       bridge,
       waitForTabComplete: async () => {
         waits += 1;
-        if (waits === 1) await new Promise<void>(resolve => { releaseFirst = resolve; });
+        if (waits <= 2) await new Promise<void>(resolve => { releases.push(resolve); });
       },
     });
 
-    const first = runner.runRemoteJob('job-1', URL);
-    const second = runner.runRemoteJob('job-2', URL);
+    const urls = [1, 2, 3, 4].map(index => `https://mp.weixin.qq.com/s/background-test-${index}`);
+    const first = runner.runRemoteJob('job-1', urls[0]!, false);
+    const second = runner.runRemoteJob('job-2', urls[1]!, false);
     await new Promise(resolve => setTimeout(resolve, 0));
-    expect(tabs.created).toHaveLength(1);
-    releaseFirst?.();
-    await Promise.all([first, second]);
     expect(tabs.created).toHaveLength(2);
+    const interactive = runner.runRemoteJob('job-3', urls[2]!, true);
+    const fourth = runner.runRemoteJob('job-4', urls[3]!, false);
+
+    releases[0]?.();
+    await thirdCreated;
+    expect(tabs.created.map(tab => tab.url)).toEqual([urls[0], urls[1], urls[2]]);
+
+    releases[1]?.();
+    await Promise.all([first, second, interactive, fourth]);
+    expect(tabs.created.map(tab => tab.url)).toEqual(urls);
+    expect(tabs.handedOff).toEqual([]);
+    expect(tabs.removed).toEqual([42, 42, 42, 42]);
   });
 
   it('retries the content-script message while it is not ready, then succeeds', async () => {
