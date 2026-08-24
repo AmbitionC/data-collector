@@ -34,6 +34,8 @@ const COMPANIES: readonly CompanyDefinition[] = [
   { id: 'other', label: '月之暗面', aliases: [/月之暗面|Moonshot|Kimi/i] },
   { id: 'other', label: '百度', aliases: [/百度|Baidu/i] },
   { id: 'other', label: '华为', aliases: [/华为|Huawei/i] },
+  { id: 'other', label: '快手', aliases: [/快手|Kuaishou/i] },
+  { id: 'other', label: 'OPPO', aliases: [/OPPO|欧珀/i] },
 ];
 
 const BUSINESS_UNITS: readonly [RegExp, string][] = [
@@ -66,7 +68,7 @@ const COMPILATION_PATTERN = /(?:面试题|面经).{0,12}(?:汇总|合集|题库|
 const PARODY_OR_COPY_PATTERN = /戏仿|恶搞|段子|只为博君一笑|保洁岗|网络搬运|网上搬运|转载自|网传/u;
 const HARD_PROMOTION_PATTERN = /加微信|扫码|训练营|付费资料|进群|领取资料|订阅专栏后|购买后(?:可)?继续查看/u;
 const SOFT_RECOMMENDATION_PATTERN = /推荐.{0,30}(?:开源|仓库|GitHub)|github\.com\//iu;
-const EXPLICIT_AGENT_PATTERN = /\bAgent\b|智能体|AI\s*应用|大模型应用|RAG|MCP|AI\s*Infra/iu;
+const EXPLICIT_AGENT_PATTERN = /\bAgent\b|智能体|AI\s*(?:应用|全栈)|大模型应用|RAG|MCP|AI\s*Infra/iu;
 const STRONG_ENGINEERING_SIGNALS: readonly RegExp[] = [
   /\bLLM\b|大语言模型/iu,
   /向量(?:数据库|检索)|Embedding/iu,
@@ -120,8 +122,8 @@ function isAgentRelevant(text: string): boolean {
  * 面经正文经 DOM 抽取后常把换行压成空格，`1.…2.…` 仍保留编号。
  * 编号序列比问号更可靠；没有编号时才按明确问句计数。
  */
-export function countInterviewQuestions(text: string): number {
-  const numbered = [...text.matchAll(/(?:^|[^\d])([1-9]|[1-9]\d)[.、．]\s*(?=[\p{L}“"（(])/gu)]
+export function countInterviewQuestions(text: string, html = ''): number {
+  const numbered = [...text.matchAll(/(?:^|[^\d])([1-9]|[1-9]\d)[.、．]\s*(?=[\p{L}\p{N}“"（(])/gu)]
     .map(match => Number(match[1]));
   if (numbered.length >= 3) {
     let count = 0;
@@ -141,7 +143,10 @@ export function countInterviewQuestions(text: string): number {
     .slice(0, -1)
     .map(part => part.slice(-120).trim())
     .filter(part => [...part].length >= 6);
-  return Math.min(questions.length, 100);
+  const counterQuestionHeading = html.search(/<(?:strong|h[1-6])\b[^>]*>\s*反问\s*<\//iu);
+  const interviewHtml = counterQuestionHeading >= 0 ? html.slice(0, counterQuestionHeading) : html;
+  const structuredListItems = [...interviewHtml.matchAll(/<li\b/giu)].length;
+  return Math.min(Math.max(questions.length, structuredListItems), 100);
 }
 
 export function analyzeNowcoderEvidence(document: CollectedDocument): NowcoderEvidence {
@@ -156,7 +161,7 @@ export function analyzeNowcoderEvidence(document: CollectedDocument): NowcoderEv
   const round = ROUND_PATTERN.exec(identityText)?.[1];
   const interviewDate = interviewDateOf(document, identityText);
   const contentAccess = accessOf(document);
-  const questionCount = countInterviewQuestions(document.text);
+  const questionCount = countInterviewQuestions(document.text, document.html);
   const agentRelevant = isAgentRelevant(`${title}\n${document.text.slice(0, 1_200)}`);
   const editorial = EDITORIAL_PATTERN.test(title) || EDITORIAL_PATTERN.test(document.text.slice(0, 800));
   const firstHand = !editorial && (

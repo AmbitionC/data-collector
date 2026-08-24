@@ -16,7 +16,7 @@ const COMPANY_SIGNALS: Readonly<Record<NowcoderCompany, RegExp>> = Object.freeze
   tencent: /腾讯|微信支付|微信|\bWXG\b|\bTEG\b/iu,
   alibaba: /阿里云|阿里巴巴|阿里|淘天|淘宝|天猫/iu,
   ant: /蚂蚁集团|蚂蚁|支付宝|Alipay/iu,
-  other: /拼多多|PDD|小红书|REDnote|月之暗面|Moonshot|Kimi|百度|Baidu|华为|Huawei/iu,
+  other: /拼多多|PDD|小红书|REDnote|月之暗面|Moonshot|Kimi|百度|Baidu|华为|Huawei|快手|Kuaishou|OPPO|欧珀/iu,
 });
 const AGENT_SIGNALS = /Agent|智能体|AI\s*应用|AI\s*工程|大模型|RAG|MCP/iu;
 const INTERVIEW_SIGNALS = /面经|面试|一面|二面|三面|四面|五面|终面|技术面|HR\s*面/iu;

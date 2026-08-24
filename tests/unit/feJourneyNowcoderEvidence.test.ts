@@ -140,6 +140,48 @@ describe('Nowcoder interview evidence', () => {
     });
   });
 
+  it('recognizes supplemental big-tech AI roles and counts structured question lists', () => {
+    const oppo = nowcoder(
+      'OPPO AI全栈 一面面经',
+      '我参加了 OPPO AI 全栈一面。以下是具体问题：自我介绍用过哪些AI开发工具介绍项目有哪些线性数据结构反问部门方向',
+      {
+        html: [
+          '<p>我参加了 OPPO AI 全栈一面。以下是具体问题：</p>',
+          '<ol>',
+          ...Array.from({ length: 13 }, (_, index) => `<li value="${index + 1}">核心问题 ${index + 1}</li>`),
+          '</ol><p><strong>反问</strong></p><ol><li>部门方向</li><li>技术栈</li></ol>',
+        ].join(''),
+      },
+    );
+    const kuaishou = nowcoder(
+      '快手大模型应用 Java 实习一面面经',
+      `我参加了快手大模型应用岗位一面，面试官继续追问 Agent 工具和评测。${numberedQuestions(6)}`,
+    );
+
+    expect(analyzeNowcoderEvidence(oppo)).toMatchObject({
+      company: 'other',
+      companyLabel: 'OPPO',
+      questionCount: 13,
+      agentRelevant: true,
+      evidenceGrade: 'B',
+    });
+    expect(analyzeNowcoderEvidence(kuaishou)).toMatchObject({
+      company: 'other',
+      companyLabel: '快手',
+      agentRelevant: true,
+      evidenceGrade: 'B',
+    });
+  });
+
+  it('does not stop a numbered question sequence when a question starts with a number', () => {
+    const evidence = analyzeNowcoderEvidence(nowcoder(
+      '腾讯 AI 应用开发一面',
+      '我参加了腾讯 AI 应用开发一面。1.Prompt 如何选择？2.RAG 如何评估？3.Agent 如何降级？4.Workflow 和 Agent 的边界？5.Token 如何预算？6.1个汉字大约是多少 token？7.上下文被截断怎么办？8.如何设计回滚？',
+    ));
+
+    expect(evidence.questionCount).toBe(8);
+  });
+
   it('does not parse a model version as an interview date', () => {
     const evidence = analyzeNowcoderEvidence(nowcoder(
       '字节 Agent 开发一面：GPT-5.5 与工具调用',

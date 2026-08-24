@@ -71,6 +71,8 @@ export const FE_JOURNEY_PRESET = Object.freeze({
       { company: 'other', query: '百度 AI 面经' },
       { company: 'other', query: '华为 Agent 面经' },
       { company: 'other', query: '华为 AI 面经' },
+      { company: 'other', query: '快手 Agent 面经' },
+      { company: 'other', query: 'OPPO AI 全栈 面经' },
     ]),
   }),
   github: Object.freeze({

@@ -264,6 +264,10 @@ describe('Nowcoder plan discovery query expansion', () => {
         `${company} 智能体 面经`,
       ]));
     }
+    expect(requestedQueries).toEqual(expect.arrayContaining([
+      '快手 Agent 面经',
+      'OPPO AI 全栈 面经',
+    ]));
     expect(candidates.map(candidate => candidate.url)).toEqual([
       'https://www.nowcoder.com/discuss/70001',
     ]);
