@@ -395,6 +395,117 @@ describe('ZSXQ API fallback', () => {
     ]);
   });
 
+  it('resumes a capped view when a later cross-view business skip removes one document', async () => {
+    const sharedTopicId = '776000000000000000';
+    const firstPage = Array.from({ length: 20 }, (_, index) => topic(
+      String(776_000_000_000_000_000n + BigInt(index)),
+      new Date(Date.parse('2026-08-24T23:00:00.000Z') - index * 60 * 60 * 1_000).toISOString(),
+      index === 0 ? '打新观察' : undefined,
+    ));
+    const allRequests: URL[] = [];
+    const fetcher = async (input: RequestInfo | URL): Promise<Response> => {
+      const url = new URL(String(input));
+      if (url.href === `${API}/groups/${GROUP_ID}`) return groupResponse();
+      if (url.href === `${API}/groups/${GROUP_ID}/menus`) return menuResponse();
+      if (url.pathname.endsWith('/topics/sticky')) return topicResponse([]);
+      const scope = url.searchParams.get('scope');
+      if (scope === 'all') {
+        allRequests.push(url);
+        return url.searchParams.has('end_time')
+          ? topicResponse([topic('776000000000000020', '2026-08-24T03:00:00.000Z')])
+          : topicResponse(firstPage);
+      }
+      if (scope === 'digests') {
+        return topicResponse([topic(
+          sharedTopicId,
+          '2026-08-24T23:00:00.000Z',
+          '打新观察：新股积极申购',
+        )]);
+      }
+      return topicResponse([]);
+    };
+
+    const collection = await collectZsxqApiViews(GROUP_ID, {
+      fetcher,
+      aduid: 'test-device',
+      now: () => new Date('2026-08-25T00:00:00.000Z'),
+      requestId: () => 'test-request',
+    });
+
+    expect(allRequests).toHaveLength(2);
+    expect(allRequests[1]?.searchParams.get('end_time')).toBe('2026-08-24T03:59:59.999Z');
+    expect(collection.documents).toHaveLength(20);
+    expect(collection.documents.some(document =>
+      document.sourceMetadata?.topicId === sharedTopicId)).toBe(false);
+    expect(collection.documents.some(document =>
+      document.sourceMetadata?.topicId === '776000000000000020')).toBe(true);
+  });
+
+  it('rejects a normal page that exceeds the requested twenty raw topics', async () => {
+    const overfull = Array.from({ length: 21 }, (_, index) => topic(
+      String(777_000_000_000_000_000n + BigInt(index)),
+      new Date(Date.parse('2026-08-24T23:00:00.000Z') - index * 60 * 1_000).toISOString(),
+    ));
+    const fetcher = async (input: RequestInfo | URL): Promise<Response> => {
+      const url = new URL(String(input));
+      if (url.href === `${API}/groups/${GROUP_ID}`) return groupResponse();
+      if (url.href === `${API}/groups/${GROUP_ID}/menus`) return menuResponse();
+      if (url.pathname.endsWith('/topics/sticky')) return topicResponse([]);
+      return topicResponse(overfull);
+    };
+
+    await expect(collectZsxqApiViews(GROUP_ID, {
+      fetcher,
+      aduid: 'test-device',
+      now: () => new Date('2026-08-25T00:00:00.000Z'),
+      requestId: () => 'test-request',
+    })).rejects.toThrow(/CONTENT_COVERAGE_INCOMPLETE.*ZSXQ_API_RESPONSE_INVALID.*21.*20/u);
+  });
+
+  it('rejects a sticky response that exceeds the requested three topics', async () => {
+    const fetcher = async (input: RequestInfo | URL): Promise<Response> => {
+      const url = new URL(String(input));
+      if (url.href === `${API}/groups/${GROUP_ID}`) return groupResponse();
+      if (url.href === `${API}/groups/${GROUP_ID}/menus`) return menuResponse();
+      if (url.pathname.endsWith('/topics/sticky')) {
+        return topicResponse(Array.from({ length: 4 }, (_, index) => topic(
+          String(778_000_000_000_000_000n + BigInt(index)),
+          new Date(Date.parse('2026-08-24T23:00:00.000Z') - index * 1_000).toISOString(),
+        )));
+      }
+      return topicResponse([]);
+    };
+
+    await expect(collectZsxqApiViews(GROUP_ID, {
+      fetcher,
+      aduid: 'test-device',
+      requestId: () => 'test-request',
+    })).rejects.toThrow(/CONTENT_COVERAGE_INCOMPLETE.*ZSXQ_API_RESPONSE_INVALID.*4.*3/u);
+  });
+
+  it('fails closed before the signed fallback exceeds its message character budget', async () => {
+    const largeText = `投资经营${'长'.repeat(100_000)}`;
+    const fetcher = async (input: RequestInfo | URL): Promise<Response> => {
+      const url = new URL(String(input));
+      if (url.href === `${API}/groups/${GROUP_ID}`) return groupResponse();
+      if (url.href === `${API}/groups/${GROUP_ID}/menus`) return menuResponse();
+      if (url.pathname.endsWith('/topics/sticky')) return topicResponse([]);
+      if (url.searchParams.get('scope') !== 'all') return topicResponse([]);
+      return topicResponse(Array.from({ length: 11 }, (_, index) => topic(
+        String(779_000_000_000_000_000n + BigInt(index)),
+        new Date(Date.parse('2026-08-24T23:00:00.000Z') - index * 60 * 1_000).toISOString(),
+        `${largeText}${index}`,
+      )));
+    };
+
+    await expect(collectZsxqApiViews(GROUP_ID, {
+      fetcher,
+      aduid: 'test-device',
+      now: () => new Date('2026-08-25T00:00:00.000Z'),
+      requestId: () => 'test-request',
+    })).rejects.toThrow(/CONTENT_COVERAGE_INCOMPLETE.*ZSXQ_API_PAYLOAD_LIMIT.*2000000/u);
+  });
+
   it('fails closed when a successful topic page contains an unconvertible entry', async () => {
     const fetcher = async (input: RequestInfo | URL): Promise<Response> => {
       const url = new URL(String(input));
