@@ -111,6 +111,23 @@ describe('harvestTopics', () => {
     expect(records.find(record => record.topicId === quotedId)?.sourceBodyProven).toBe(false);
   });
 
+  it('treats the exact group sticky endpoint as a source-proven topic feed', () => {
+    const [record] = harvestTopics({
+      succeeded: true,
+      resp_data: {
+        topics: [{
+          topic_id: '511111111111112',
+          type: 'talk',
+          talk: { text: '置顶接口直接返回的完整正文。' },
+        }],
+      },
+    }, 400, {
+      responsePath: 'https://api.zsxq.com/v2/groups/48844584441158/topics/sticky',
+    });
+
+    expect(record?.sourceBodyProven).toBe(true);
+  });
+
   it('does not certify a failed topic response even when it echoes a body-shaped object', () => {
     const [record] = harvestTopics({
       succeeded: false,

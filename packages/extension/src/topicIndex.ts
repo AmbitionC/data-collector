@@ -665,7 +665,7 @@ export interface TopicHarvestContext {
   responsePath: string;
 }
 
-const GROUP_TOPICS_RESPONSE = /^https:\/\/api\.zsxq\.com\/v2\/groups\/\d+\/topics\/?$/u;
+const GROUP_TOPICS_RESPONSE = /^https:\/\/api\.zsxq\.com\/v2\/groups\/\d+\/topics(?:\/sticky)?\/?$/u;
 const TOPIC_DETAIL_RESPONSE = /^https:\/\/api\.zsxq\.com\/v2\/topics\/\d+\/?$/u;
 
 /** 标题本身不是正文；只认已知正文容器里的 text/content。 */
