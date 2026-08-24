@@ -22,6 +22,7 @@ export function contentRequestType(request: string, buildId = CONTENT_BUILD_ID):
 export const CONTENT_DOCUMENT_REQUEST = contentRequestType('extract.document');
 export const CONTENT_LIST_REQUEST = contentRequestType('extract.list');
 export const CONTENT_SELECT_VIEW_REQUEST = contentRequestType('list.selectView');
+export const CONTENT_API_COLLECT_REQUEST = contentRequestType('list.apiCollect');
 export const CONTENT_RESTORE_REQUEST = contentRequestType('list.restore');
 export const CONTENT_ADVANCE_REQUEST = contentRequestType('list.advance');
 export const CONTENT_REFRESH_TOPICS_REQUEST = contentRequestType('list.refreshTopics');
@@ -35,6 +36,7 @@ const CURRENT_CONTENT_REQUESTS: ReadonlySet<string> = new Set([
   CONTENT_DOCUMENT_REQUEST,
   CONTENT_LIST_REQUEST,
   CONTENT_SELECT_VIEW_REQUEST,
+  CONTENT_API_COLLECT_REQUEST,
   CONTENT_RESTORE_REQUEST,
   CONTENT_ADVANCE_REQUEST,
   CONTENT_REFRESH_TOPICS_REQUEST,

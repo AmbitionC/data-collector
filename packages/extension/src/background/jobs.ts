@@ -15,6 +15,7 @@ import { linkedArticleUrl } from '../extractors/index.js';
 import type { HookStats } from '../topicIndex.js';
 import type { OwnedTabPurpose } from './ownedTabs.js';
 import { RemoteJobScheduler } from './remoteJobScheduler.js';
+import type { ZsxqApiCollection } from '../zsxqApiFallback.js';
 import {
   CONTENT_BUILD_ID,
   CONTENT_EXTRACTION_PROTOCOL,
@@ -236,6 +237,7 @@ export type ExtractionResponse = (
   | { ok: true; hook: HookStats }
   | { ok: true; refresh: { toggled: boolean; category?: string } }
   | { ok: true; selected: { label: ZsxqPlanView; topicIds: string[] } }
+  | { ok: true; apiCollection: ZsxqApiCollection }
   | { ok: false; error: { code: string; message: string } }
 ) & {
   /** 旧内容脚本没有这两个字段；生产采集必须验证它们。 */
@@ -294,6 +296,7 @@ interface PayloadMap {
   hook: HookStats;
   refresh: { toggled: boolean; category?: string };
   selected: { label: ZsxqPlanView; topicIds: string[] };
+  apiCollection: ZsxqApiCollection;
 }
 
 const TRANSIENT_TAB_ERROR = /Tabs cannot be edited right now|tab.*(?:temporarily|busy)|No tab with id/i;
@@ -693,7 +696,7 @@ export class JobRunner {
         type: this.contentMessageType('list.selectView'),
         label,
       });
-      if (!selected.ok) throw new Error(selected.error.message);
+      if (!selected.ok) throw new Error(`${selected.error.code}: ${selected.error.message}`);
       payloadOf(selected, 'selected');
       await this.ask(tabId, {
         type: this.contentMessageType('list.restore'),
@@ -704,7 +707,7 @@ export class JobRunner {
         round += 1
       ) {
         const extracted = await this.extractStableList(tabId);
-        if (!extracted.ok) throw new Error(extracted.error.message);
+        if (!extracted.ok) throw new Error(`${extracted.error.code}: ${extracted.error.message}`);
         const list = payloadOf(extracted, 'list');
         const unresolved = list.items.filter(item => !item.document);
         const coverageRisks = unresolved.filter(item => item.skipKind !== 'business-filter');
@@ -832,7 +835,21 @@ export class JobRunner {
         // reload is safe. User-owned ZSXQ tabs still use injection only and never lose their view.
         await this.options.tabs.reload(tabId);
         await this.options.waitForTabComplete(tabId, 30_000);
-        extraction = await collectViews();
+        try {
+          extraction = await collectViews();
+        } catch (reloadedError) {
+          if (!isBlankZsxqPlanShell(reloadedError)) throw reloadedError;
+          const fallback = await this.ask(tabId, {
+            type: this.contentMessageType('list.apiCollect'),
+          });
+          if (!fallback.ok) throw new Error(fallback.error.message);
+          const collection = payloadOf(fallback, 'apiCollection');
+          const audit: ZsxqPlanExtractionAudit = { businessSkips: new Map() };
+          for (const item of collection.businessSkips) {
+            audit.businessSkips.set(item.url, item);
+          }
+          extraction = { documents: collection.documents, audit };
+        }
       }
       const documents = extraction.documents;
       const documentUrls = new Set(documents.map(document => document.canonicalUrl));

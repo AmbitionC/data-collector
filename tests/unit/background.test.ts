@@ -1968,6 +1968,51 @@ describe('extension job runner', () => {
     expect(tabs.removed).toEqual([42]);
   });
 
+  it('uses the signed API fallback when the fresh ZSXQ SPA is blank after reload', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-08-25T10:00:00.000Z'));
+    const tabs = new InMemoryTabs();
+    const bridge = new InMemoryBridge();
+    const candidate = {
+      ...topic('api-shell-recovery'),
+      title: '陈老师投资经营复盘',
+      text: '这是陈老师关于投资、创业和经营的完整复盘。',
+      publishedAt: '2026-08-24T10:00:00.000Z',
+      sourceMetadata: { authorRole: 'owner' },
+    } satisfies CollectedDocument;
+    tabs.sendMessage = async (_tabId, message) => {
+      const type = (message as { type?: string }).type ?? '';
+      tabs.asked.push(type);
+      if (type === 'list.apiCollect') {
+        return {
+          ok: true,
+          apiCollection: { documents: [candidate], businessSkips: [] },
+        } as never;
+      }
+      throw new Error(`unexpected ${type}`);
+    };
+    const runner = new JobRunner({
+      tabs,
+      bridge,
+      waitForTabComplete: async () => undefined,
+      delay: async () => undefined,
+    });
+    vi.spyOn(runner, 'collectZsxqPlanViews')
+      .mockRejectedValue(new Error('页面上找不到「最新」标签（分类栏尚未渲染）'));
+
+    await runner.runZsxqCollectionPlan(
+      'api-shell-recovery',
+      PLAN_ATTEMPT,
+      undefined,
+      { force: true },
+    );
+
+    expect(tabs.reloaded).toEqual([42]);
+    expect(tabs.asked).toContain('list.apiCollect');
+    expect(bridge.createdFor).toEqual([candidate.canonicalUrl]);
+    expect(tabs.removed).toEqual([42]);
+  });
+
   it('fails closed when a configured Bridge cannot provide per-URL completeness state', async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date('2026-08-25T10:00:00.000Z'));
@@ -2194,17 +2239,20 @@ describe('extension job runner', () => {
     });
   });
 
-  it('hands off the single ZSXQ plan page when the whole plan requires login', async () => {
+  it('preserves an auth error code and hands off the single ZSXQ plan page without login wording', async () => {
     const tabs = new InMemoryTabs();
     tabs.sendMessage = async () => ({
       ok: false,
-      error: { code: 'AUTH_REQUIRED', message: '请先登录知识星球' },
+      error: {
+        code: 'AUTH_REQUIRED',
+        message: '知识星球当前显示公开介绍页；请恢复该星球的成员访问后重试',
+      },
     });
     const bridge = new InMemoryBridge();
     const runner = new JobRunner({ tabs, bridge, waitForTabComplete: async () => undefined });
 
     await expect(runner.runZsxqCollectionPlan('login-batch', PLAN_ATTEMPT))
-      .rejects.toThrow('请先登录知识星球');
+      .rejects.toThrow(/AUTH_REQUIRED.*成员访问/u);
 
     expect(tabs.created).toEqual([{
       url: LIST_URL,

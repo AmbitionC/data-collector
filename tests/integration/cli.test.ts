@@ -365,6 +365,12 @@ describe('Codex CLI', () => {
 
   it('prints the Bridge URL and waits for the trusted extension on start', async () => {
     const root = await temporaryDirectories.create('data-collector-cli-start-');
+    const configDir = join(root, '.config');
+    await mkdir(configDir, { recursive: true });
+    await writeFile(join(configDir, 'sinks.json'), JSON.stringify({
+      sinks: { markdown: { type: 'markdown' } },
+      routes: {},
+    }));
     const processOnce = vi.spyOn(process, 'once').mockImplementation(((event: string, listener: (...args: never[]) => void) => {
       if (event === 'SIGINT') queueMicrotask(listener);
       return process;
@@ -384,7 +390,7 @@ describe('Codex CLI', () => {
           '--library',
           root,
           '--config',
-          join(root, '.config'),
+          configDir,
         ],
         { stdout: () => undefined, stderr: value => { stderr += value; } },
       );

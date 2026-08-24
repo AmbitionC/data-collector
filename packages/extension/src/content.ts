@@ -28,6 +28,7 @@ import {
 import { commercialSignals } from './adFilter.js';
 import {
   CONTENT_BUILD_ID,
+  CONTENT_API_COLLECT_REQUEST,
   CONTENT_DIAGNOSE_REQUEST,
   CONTENT_DOCUMENT_REQUEST,
   CONTENT_ADVANCE_REQUEST,
@@ -42,6 +43,7 @@ import {
   CONTENT_LIST_REQUEST,
   isCurrentContentRequest,
 } from './contentProtocol.js';
+import { collectZsxqApiViews } from './zsxqApiFallback.js';
 
 /**
  * 帖子号索引。帖子号不在 DOM 上，只能从应用自己的接口响应里取（见 inject.ts）。
@@ -142,6 +144,7 @@ interface ExtractMessage {
     | typeof CONTENT_DOCUMENT_REQUEST
     | typeof CONTENT_LIST_REQUEST
     | typeof CONTENT_SELECT_VIEW_REQUEST
+    | typeof CONTENT_API_COLLECT_REQUEST
     | typeof CONTENT_RESTORE_REQUEST
     | typeof CONTENT_ADVANCE_REQUEST
     | typeof CONTENT_REFRESH_TOPICS_REQUEST
@@ -158,7 +161,8 @@ interface ExtractMessage {
     | 'list.hookStats'
     | 'list.refreshTopics'
     | 'list.focusLast'
-    | 'list.selectView';
+    | 'list.selectView'
+    | 'list.apiCollect';
   /** list.highlight：要滚过去并高亮的那一条。 */
   key?: string;
   label?: ZsxqPlanView;
@@ -1160,6 +1164,28 @@ function menuLabels(): { labels: string[]; active?: string } {
   return { labels, ...(active ? { active: (active.textContent ?? '').trim() } : {}) };
 }
 
+function isPublicJoinPage(): boolean {
+  if (document.querySelector('.topic-container')) return false;
+  const hasJoinControl = [...document.querySelectorAll<HTMLElement>('button, a, [role="button"]')]
+    .some(element => (element.textContent ?? '').trim() === '加入星球');
+  return hasJoinControl && (document.body.textContent ?? '').includes('星球介绍');
+}
+
+function zsxqAduid(): string {
+  const key = 'XAduid';
+  try {
+    const existing = localStorage.getItem(key);
+    if (existing) return existing;
+    const created = crypto.randomUUID();
+    localStorage.setItem(key, created);
+    return created;
+  } catch {
+    // The site app uses the same per-browser pseudonymous ID. If storage is unavailable, a
+    // request-scoped value still lets the API return an explicit auth/error result safely.
+    return crypto.randomUUID();
+  }
+}
+
 /** 按文案重新查找并点击：Angular 切换分类时会重建这些节点，旧引用点不动。 */
 function clickMenu(label: string): boolean {
   const target = [...document.querySelectorAll<HTMLElement>(MENU_ITEM)]
@@ -1204,6 +1230,12 @@ async function waitForMenu(label: ZsxqPlanView): Promise<void> {
     () => menuLabels().labels.includes(label) ? true : undefined,
     PLAN_MENU_RENDER_TIMEOUT_MS,
     () => {
+      if (isPublicJoinPage()) {
+        return new ExtractionError(
+          'AUTH_REQUIRED',
+          '知识星球当前显示“加入星球”公开介绍页；请在 Edge 中恢复该星球的成员访问后重试',
+        );
+      }
       const observed = menuLabels().labels;
       const detail = observed.length > 0 ? `（当前看到：${observed.join('、')}）` : '（分类栏尚未渲染）';
       return new ExtractionError('UNSUPPORTED_LAYOUT', `页面上找不到「${label}」标签${detail}`);
@@ -1581,6 +1613,7 @@ if (!alreadyRegistered) chrome.runtime.onMessage.addListener((message: unknown, 
     request.type !== 'list.refreshTopics' &&
     request.type !== 'list.focusLast' &&
     request.type !== 'list.selectView' &&
+    request.type !== 'list.apiCollect' &&
     !currentRequest
   ) {
     return false;
@@ -1595,6 +1628,35 @@ if (!alreadyRegistered) chrome.runtime.onMessage.addListener((message: unknown, 
         }
       : response);
   };
+
+  if (request.type === 'list.apiCollect' || request.type === CONTENT_API_COLLECT_REQUEST) {
+    const groupId = /\/group\/(\d+)/u.exec(location.pathname)?.[1];
+    if (!groupId) {
+      respond({
+        ok: false,
+        error: { code: 'UNSUPPORTED_LAYOUT', message: 'ZSXQ_API_FALLBACK_FAILED：当前地址没有星球编号' },
+      });
+      return false;
+    }
+    void collectZsxqApiViews(groupId, { aduid: zsxqAduid() }).then(
+      apiCollection => respond({ ok: true, apiCollection }),
+      error => {
+        const message = error instanceof Error ? error.message : '知识星球接口兜底采集失败';
+        respond({
+          ok: false,
+          error: {
+            code: message.startsWith('AUTH_REQUIRED')
+              ? 'AUTH_REQUIRED'
+              : message.startsWith('AUTHOR_IDENTITY_UNPROVEN')
+                ? 'AUTHOR_IDENTITY_UNPROVEN'
+                : 'COLLECTION_FAILED',
+            message,
+          },
+        });
+      },
+    );
+    return true;
+  }
 
   if (request.type === 'list.selectView' || request.type === CONTENT_SELECT_VIEW_REQUEST) {
     const label = request.label;

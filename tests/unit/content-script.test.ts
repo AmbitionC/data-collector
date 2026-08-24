@@ -496,6 +496,59 @@ describe('content script list collection', () => {
     expect(timeoutSpy.mock.calls.some(([, milliseconds]) => milliseconds === 45_000)).toBe(true);
   });
 
+  it('reports the public join page as missing member access instead of an unsupported layout', async () => {
+    document.body.innerHTML = `
+      <main class="group-introduction">
+        <h2>星球介绍</h2>
+        <p>知识星球的内容构成</p>
+        <button type="button">加入星球</button>
+      </main>`;
+    vi.useFakeTimers();
+
+    const response = await settle(ask<ExtractionErrorResponse>({
+      type: 'list.selectView',
+      label: '最新',
+    }));
+
+    expect(response).toMatchObject({
+      ok: false,
+      error: {
+        code: 'AUTH_REQUIRED',
+        message: expect.stringContaining('成员访问'),
+      },
+    });
+  });
+
+  it('lets a delayed member menu replace a transient public join shell during cold start', async () => {
+    document.body.innerHTML = `
+      <main class="group-introduction">
+        <h2>星球介绍</h2>
+        <button type="button">加入星球</button>
+      </main>`;
+    vi.useFakeTimers();
+    setTimeout(() => {
+      document.body.innerHTML = `
+        <app-menu><div class="menu-container">
+          <div class="item actived">最新</div>
+          <div class="item">精华</div>
+          <div class="item">只看星主</div>
+        </div></app-menu>
+        <div class="topic-container" data-topic-id="646666666666666">
+          <div class="talk-content-container">成员访问恢复后渲染出的完整帖子。</div>
+        </div>`;
+    }, 30_000);
+
+    const response = await settle(ask<ViewResponse>({
+      type: 'list.selectView',
+      label: '最新',
+    }));
+
+    expect(response).toMatchObject({
+      ok: true,
+      selected: { label: '最新', topicIds: ['646666666666666'] },
+    });
+  });
+
   it('does not accept an already-active view until its delayed topic body is stable', async () => {
     document.body.innerHTML = `
       <app-menu><div class="menu-container">
