@@ -685,7 +685,9 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
             [stableContentId(job.url)],
             source => router.syncTarget(source),
             undefined,
-            deliveryBatchId ? { deliveryBatchId } : {},
+            deliveryBatchId
+              ? { deliveryBatchId, deliveryPlanId: 'nowcoder-agent-market' }
+              : {},
           );
           if (outcome.failed > 0 || outcome.synced === 0) throw new Error('自动同步未送达目标收件箱');
         },
@@ -696,7 +698,11 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
             ids,
             source => router.syncTarget(source),
             undefined,
-            { deliveryBatchId, atomic: true },
+            {
+              deliveryBatchId,
+              deliveryPlanId: 'nowcoder-agent-market',
+              atomic: true,
+            },
           );
           if (outcome.failed > 0 || outcome.synced !== ids.length) {
             throw new Error('自动同步未送达目标收件箱');

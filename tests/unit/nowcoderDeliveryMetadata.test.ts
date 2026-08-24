@@ -75,6 +75,58 @@ describe('Nowcoder pooled delivery metadata', () => {
     expect(await pendingIds(library, 'nowcoder-delivery-batch')).toEqual([entry!.id]);
   });
 
+  it('marks a one-off capture as a fixed-plan delivery without inventing a capture batch', async () => {
+    const library = await temporaryDirectories.create('nowcoder-one-off-library-');
+    const repo = await temporaryDirectories.create('nowcoder-one-off-repo-');
+    const router = SinkRouter.build({
+      sinks: {
+        markdown: { type: 'markdown' },
+        'fe-journey': { type: 'repo-inbox', repoPath: repo, commit: false, push: false },
+      },
+      routes: { nowcoder: ['fe-journey'] },
+    }, { libraryRoot: library });
+    const url = 'https://www.nowcoder.com/discuss/93002';
+    await router.save(organize({
+      schemaVersion: 1,
+      source: 'nowcoder',
+      kind: 'post',
+      url,
+      canonicalUrl: url,
+      title: '阿里 Agent 开发一面面经',
+      collectedAt: '2026-08-25T00:00:00.000Z',
+      publishedAt: '2026-08-24T00:00:00.000Z',
+      html: '<p>面试官追问 Agent Loop。</p>',
+      text: '面试官追问 Agent Loop。',
+      images: [],
+      truncated: false,
+      sourceMetadata: { evidenceGrade: 'A', agentRelevant: true },
+    }));
+    const [entry] = await listLibrary(library);
+
+    const outcome = await syncEntries(
+      library,
+      [entry!.id],
+      source => router.syncTarget(source),
+      undefined,
+      {
+        deliveryBatchId: 'nowcoder-delivery-batch',
+        deliveryPlanId: 'nowcoder-agent-market',
+      },
+    );
+
+    expect(outcome).toMatchObject({ synced: 1, failed: 0 });
+    const [directory] = await readdir(join(repo, '_inbox', 'nowcoder'));
+    const meta = JSON.parse(await readFile(
+      join(repo, '_inbox', 'nowcoder', directory!, 'meta.json'),
+      'utf8',
+    )) as { sourceMetadata: Record<string, unknown> };
+    expect(meta.sourceMetadata).toMatchObject({
+      planId: 'nowcoder-agent-market',
+      deliveryBatchId: 'nowcoder-delivery-batch',
+    });
+    expect(meta.sourceMetadata).not.toHaveProperty('sourceBatchId');
+  });
+
   it('keeps every entry pending when one atomic fixed-plan sync fails', async () => {
     const library = await temporaryDirectories.create('nowcoder-atomic-library-');
     const router = SinkRouter.build({

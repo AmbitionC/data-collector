@@ -5,7 +5,11 @@ import type { ContentSink } from '../sinks/types.js';
 import { assertInsideRoot } from './paths.js';
 import { atomicWriteText, SOURCE_FILE, type SyncInfo } from './writer.js';
 import { withCatalogTransaction } from './catalogTransaction.js';
-import { stableContentId, ZSXQ_COMPLETE_CONTENT_CAPABILITY } from '@data-collector/shared';
+import {
+  stableContentId,
+  ZSXQ_COMPLETE_CONTENT_CAPABILITY,
+  type CollectionPlanId,
+} from '@data-collector/shared';
 
 /**
  * 把已在本机库里的条目同步到目标仓库的收件箱。
@@ -49,6 +53,8 @@ export type ResolveTarget = (source: string) => ContentSink | undefined;
 export interface SyncEntriesOptions {
   /** Delivery scope for a pooled fixed-plan item; capture scope remains immutable. */
   deliveryBatchId?: string;
+  /** Fixed plan responsible for this delivery, including one-off captures without capture metadata. */
+  deliveryPlanId?: CollectionPlanId;
   /** Persist catalog delivery state only when every requested entry succeeds. */
   atomic?: boolean;
 }
@@ -200,6 +206,7 @@ export async function syncEntries(
                 ...(typeof captureBatchId === 'string'
                   ? { sourceBatchId: captureBatchId }
                   : {}),
+                ...(options.deliveryPlanId ? { planId: options.deliveryPlanId } : {}),
                 deliveryBatchId: options.deliveryBatchId,
               },
             },
