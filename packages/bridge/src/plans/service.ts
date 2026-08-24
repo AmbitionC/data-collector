@@ -20,6 +20,14 @@ const PLAN_HOURS: Record<CollectionPlanId, number> = {
 const NOWCODER_CONTENT_REJECTION_CODES = new Map([
   ['UNSUPPORTED_LAYOUT', '页面结构不含可采集正文'],
 ]);
+const MAX_PLAN_ERROR_LENGTH = 2_000;
+const BENCHMARK_FAILURE_MESSAGE = '基准报告写入失败';
+
+function benchmarkFailureError(prior?: string): string {
+  if (!prior) return BENCHMARK_FAILURE_MESSAGE;
+  const suffix = `；${BENCHMARK_FAILURE_MESSAGE}`;
+  return `${prior.slice(0, MAX_PLAN_ERROR_LENGTH - suffix.length)}${suffix}`;
+}
 
 export interface PlanDueState {
   due: boolean;
@@ -229,6 +237,10 @@ export class CollectionPlanService {
   }
 
   async onExtensionPlanResult(result: ExtensionPlanResult): Promise<CollectionBatch> {
+    const persisted = this.dependencies.store.latest(undefined, Number.MAX_SAFE_INTEGER)
+      .find(batch => batch.id === result.batchId);
+    if (!persisted) throw new Error(`采集批次不存在：${result.batchId}`);
+    if (persisted.status !== 'running' || persisted.planId !== 'zsxq-chen-teacher') return persisted;
     if (result.error) {
       const terminal = await (result.needsAttention
         ? this.dependencies.store.attention(result.batchId, result.error)
@@ -549,12 +561,10 @@ export class CollectionPlanService {
     try {
       await this.dependencies.writeBenchmark(batch, jobs);
       return batch;
-    } catch (error) {
-      const detail = error instanceof Error ? error.message : String(error);
-      const prior = batch.error ? `${batch.error}；` : '';
+    } catch {
       return this.dependencies.store.attention(
         batch.id,
-        `${prior}基准报告写入失败：${detail}`,
+        benchmarkFailureError(batch.error),
       );
     }
   }

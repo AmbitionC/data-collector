@@ -92,6 +92,12 @@ describe('writePlanBenchmark', () => {
         questionCount: 4,
         clusterId: 'cluster-7daf7a39e447',
       }],
+      ['job-private-three', {
+        company: '/Users/private/evidence',
+        evidenceGrade: 'https://private.example/session',
+        questionCount: 'Error: raw question metadata',
+        clusterId: 'Error: /Users/private/evidence could not be read',
+      }],
     ]);
 
     const reportPath = await writePlanBenchmark(root, batch, jobs, {
@@ -160,8 +166,69 @@ describe('writePlanBenchmark', () => {
       'RAW_COOKIE',
       '/Users/private',
       'nowcoder.com',
+      'private.example',
+      'raw question metadata',
+      'could not be read',
     ]) {
       expect(serialized).not.toContain(secret);
     }
+  });
+
+  it.each([
+    ['numeric shorthand', '0'],
+    ['timezone-less local time', '2026-08-25T00:01:00.000'],
+    ['numeric timezone offset', '2026-08-25T08:01:00.000+08:00'],
+    ['missing milliseconds', '2026-08-25T00:01:00Z'],
+    ['impossible calendar date', '2026-02-30T00:01:00.000Z'],
+  ])('rejects %s instead of normalizing a false job timestamp', async (_name, createdAt) => {
+    const root = await temporaryDirectories.create('plan-benchmark-invalid-job-time-');
+    const batch: CollectionBatch = {
+      id: 'nowcoder-invalid-job-time',
+      planId: 'nowcoder-agent-market',
+      status: 'completed',
+      startedAt: '2026-08-25T00:00:00.000Z',
+      finishedAt: '2026-08-25T00:10:00.000Z',
+      discovered: 1,
+      accepted: 1,
+      saved: 1,
+      skipped: 0,
+      failed: 0,
+      needsAttention: 0,
+      deliveryIds: [],
+    };
+
+    await expect(writePlanBenchmark(root, batch, [job(
+      'invalid-time-job',
+      'https://www.nowcoder.com/discuss/91001',
+      'saved',
+      createdAt,
+      '2026-08-25T00:01:01.000Z',
+      { batchId: batch.id },
+    )], { metadataFor: () => undefined })).rejects.toThrow('时间无效');
+  });
+
+  it.each([
+    ['timezone-less batch start', '2026-08-25T00:00:00.000'],
+    ['impossible batch start', '2026-02-30T00:00:00.000Z'],
+  ])('rejects %s before emitting batch metrics', async (_name, startedAt) => {
+    const root = await temporaryDirectories.create('plan-benchmark-invalid-batch-time-');
+    const batch: CollectionBatch = {
+      id: 'nowcoder-invalid-batch-time',
+      planId: 'nowcoder-agent-market',
+      status: 'completed',
+      startedAt,
+      finishedAt: '2026-08-25T00:10:00.000Z',
+      discovered: 0,
+      accepted: 0,
+      saved: 0,
+      skipped: 0,
+      failed: 0,
+      needsAttention: 0,
+      deliveryIds: [],
+    };
+
+    await expect(writePlanBenchmark(root, batch, [], {
+      metadataFor: () => undefined,
+    })).rejects.toThrow('时间无效');
   });
 });

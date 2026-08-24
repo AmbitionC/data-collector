@@ -1,4 +1,4 @@
-import { mkdir, rename, rmdir } from 'node:fs/promises';
+import { mkdir, readFile, rename, rmdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { CollectionBatch, CollectionPlanId, JobRecord } from '@data-collector/shared';
@@ -8,6 +8,7 @@ import {
   CollectionPlanStore,
   planDueState,
 } from '../../packages/bridge/src/plans/index.js';
+import { writePlanBenchmark } from '../../packages/bridge/src/plans/benchmark.js';
 import { createTemporaryDirectoryTracker } from '../helpers/temp.js';
 
 const temporaryDirectories = createTemporaryDirectoryTracker();
@@ -487,11 +488,87 @@ describe('CollectionPlanService', () => {
       status: 'completed_with_attention',
       selectionStatus: 'completed',
       saved: 10,
-      error: expect.stringContaining('基准报告写入失败：benchmark disk unavailable'),
+      error: expect.stringContaining('基准报告写入失败'),
     });
+    expect(terminal.error).not.toContain('benchmark disk unavailable');
     expect(terminal.deliveryIds).toHaveLength(10);
     expect(saved).toHaveLength(10);
     expect(saved.every(job => job.status === 'saved' && Boolean(job.outputPath))).toBe(true);
+  });
+
+  it('ignores repeated stale extension results after a Nowcoder batch and benchmark are terminal', async () => {
+    const benchmarkRoot = await temporaryDirectories.create('plan-benchmark-idempotency-');
+    let benchmarkWrites = 0;
+    const context = await fixture({
+      candidates: nowcoderCandidates(10, 14_300),
+      selectNowcoderJobs: acceptAllExcept(new Set()),
+      writeBenchmark: async (terminal, jobs) => {
+        benchmarkWrites += 1;
+        await writePlanBenchmark(benchmarkRoot, terminal, jobs, {
+          metadataFor: () => undefined,
+        });
+      },
+    });
+    const batch = await context.service.run('nowcoder-agent-market', { force: true });
+    await saveJobs(context, context.jobs.list().filter(job => job.batchId === batch.id));
+    await saveJobs(context, context.jobs.list().filter(job =>
+      job.batchId === batch.id && job.status === 'queued'));
+    const terminal = context.store.latest('nowcoder-agent-market', 1)[0]!;
+    const benchmarkPath = join(benchmarkRoot, 'benchmarks', `${batch.id}.json`);
+    const benchmarkBefore = await readFile(benchmarkPath, 'utf8');
+
+    const staleError = await context.service.onExtensionPlanResult({
+      batchId: batch.id,
+      discovered: 0,
+      error: 'stale extension failure',
+      needsAttention: true,
+    });
+    const repeatedError = await context.service.onExtensionPlanResult({
+      batchId: batch.id,
+      discovered: 0,
+      error: 'duplicate stale extension failure',
+    });
+    const repeatedResult = await context.service.onExtensionPlanResult({
+      batchId: batch.id,
+      discovered: 999,
+    });
+
+    expect(staleError).toEqual(terminal);
+    expect(repeatedError).toEqual(terminal);
+    expect(repeatedResult).toEqual(terminal);
+    expect(context.store.latest('nowcoder-agent-market', 1)[0]).toEqual(terminal);
+    expect(benchmarkWrites).toBe(1);
+    expect(await readFile(benchmarkPath, 'utf8')).toBe(benchmarkBefore);
+  });
+
+  it('bounds and sanitizes benchmark failure attention so the real store reopens', async () => {
+    const sensitiveFailure = [
+      '/Users/private/evidence/index.md',
+      'https://private.example/session?cookie=secret',
+      'raw benchmark failure',
+      'x'.repeat(4_000),
+    ].join(' ');
+    const context = await fixture({
+      candidates: nowcoderCandidates(10, 14_400),
+      selectNowcoderJobs: acceptAllExcept(new Set()),
+      syncJob: async () => { throw new Error('push failed first'); },
+      writeBenchmark: async () => { throw new Error(sensitiveFailure); },
+    });
+    const batch = await context.service.run('nowcoder-agent-market', { force: true });
+    await saveJobs(context, context.jobs.list().filter(job => job.batchId === batch.id));
+    await saveJobs(context, context.jobs.list().filter(job =>
+      job.batchId === batch.id && job.status === 'queued'));
+
+    const terminal = context.store.latest('nowcoder-agent-market', 1)[0]!;
+    expect(terminal.error).toContain('自动同步失败：push failed first');
+    expect(terminal.error).toContain('基准报告写入失败');
+    expect(terminal.error!.length).toBeLessThanOrEqual(2_000);
+    expect(terminal.error).not.toContain('/Users/private');
+    expect(terminal.error).not.toContain('private.example');
+    expect(terminal.error).not.toContain('raw benchmark failure');
+
+    const reopened = await context.reopen();
+    expect(reopened.store.latest('nowcoder-agent-market', 1)[0]).toEqual(terminal);
   });
 
   it('resumes a terminal round on reconnect and dispatches only its refill jobs', async () => {

@@ -10,6 +10,8 @@ import {
 const CONFIGURED_REMOTE_TAB_LIMIT = 2;
 const NOWCODER_COMPANIES = new Set(['bytedance', 'tencent', 'alibaba', 'ant']);
 const EVIDENCE_GRADES = new Set(['A', 'B', 'C']);
+const CANONICAL_UTC_TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
+const CLUSTER_ID = /^cluster-[a-f0-9]{12}$/;
 
 interface BenchmarkJobMetadata {
   company?: string;
@@ -25,9 +27,16 @@ export interface PlanBenchmarkOptions {
 }
 
 function millisecondsBetween(start: string, finish: string, label: string): number {
-  const startTime = Date.parse(start);
-  const finishTime = Date.parse(finish);
-  if (!Number.isFinite(startTime) || !Number.isFinite(finishTime) || finishTime < startTime) {
+  const parseCanonical = (value: string): number | undefined => {
+    if (!CANONICAL_UTC_TIMESTAMP.test(value)) return undefined;
+    const parsed = Date.parse(value);
+    return Number.isFinite(parsed) && new Date(parsed).toISOString() === value
+      ? parsed
+      : undefined;
+  };
+  const startTime = parseCanonical(start);
+  const finishTime = parseCanonical(finish);
+  if (startTime === undefined || finishTime === undefined || finishTime < startTime) {
     throw new Error(`${label}时间无效`);
   }
   return finishTime - startTime;
@@ -53,9 +62,7 @@ function allowlistedMetadata(value: unknown): BenchmarkJobMetadata {
     candidate.questionCount >= 0
     ? candidate.questionCount
     : undefined;
-  const clusterId = typeof candidate.clusterId === 'string' &&
-    candidate.clusterId.trim().length > 0 &&
-    candidate.clusterId.length <= 100
+  const clusterId = typeof candidate.clusterId === 'string' && CLUSTER_ID.test(candidate.clusterId)
     ? candidate.clusterId
     : undefined;
   return {
