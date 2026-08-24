@@ -1,7 +1,7 @@
 import { readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import type { JobRecord } from '@data-collector/shared';
+import { collectionBatchSchema, type JobRecord } from '@data-collector/shared';
 import { CollectionPlanStore } from '../../packages/bridge/src/plans/index.js';
 import { createTemporaryDirectoryTracker } from '../helpers/temp.js';
 
@@ -21,6 +21,61 @@ function job(id: string, status: JobRecord['status'], errorCode?: string): JobRe
 }
 
 describe('CollectionPlanStore', () => {
+  it('persists one round while atomically attaching all jobs in that round', async () => {
+    const root = await temporaryDirectories.create('plan-store-round-');
+    const path = join(root, 'plans.json');
+    const store = await CollectionPlanStore.open(path, () => '2026-08-23T01:00:00.000Z');
+    const batch = await store.start('nowcoder-agent-market');
+
+    expect(batch.rounds).toBe(0);
+
+    await store.markDiscovery(batch.id, 2);
+    await store.attachRound(batch.id, ['job-1', 'job-2', 'job-2']);
+    const reopened = await CollectionPlanStore.open(path);
+
+    expect(reopened.latest('nowcoder-agent-market', 1)[0]).toMatchObject({
+      accepted: 2,
+      rounds: 1,
+    });
+  });
+
+  it('reopens a terminal pending Nowcoder selection and keeps its round count schema-valid', async () => {
+    const times = ['2026-08-23T01:00:00.000Z', '2026-08-23T01:03:00.000Z'];
+    const root = await temporaryDirectories.create('plan-store-resume-');
+    const path = join(root, 'plans.json');
+    const store = await CollectionPlanStore.open(path, () => times.shift()!);
+    const batch = await store.start('nowcoder-agent-market');
+    await store.markDiscovery(batch.id, 1);
+    await store.attachRound(batch.id, ['job-1']);
+    await store.markSelectionPending(batch.id);
+    await store.reconcile(batch.id, [job('job-1', 'saved')]);
+
+    const resumed = await store.resumeCollection(batch.id);
+    const reopened = await CollectionPlanStore.open(path);
+    const persisted = reopened.latest('nowcoder-agent-market', 1)[0]!;
+
+    expect(resumed).toMatchObject({
+      status: 'running',
+      selectionStatus: 'collecting',
+      rounds: 1,
+    });
+    expect(resumed.finishedAt).toBeUndefined();
+    expect(persisted).toEqual(resumed);
+    expect(collectionBatchSchema.safeParse(persisted).success).toBe(true);
+  });
+
+  it('does not resume a completed Nowcoder selection', async () => {
+    const root = await temporaryDirectories.create('plan-store-finalized-');
+    const store = await CollectionPlanStore.open(
+      join(root, 'plans.json'),
+      () => '2026-08-23T01:00:00.000Z',
+    );
+    const batch = await store.start('nowcoder-agent-market');
+    await store.finalizeSelection(batch.id, 0, {}, {});
+
+    await expect(store.resumeCollection(batch.id)).rejects.toThrow('已完成筛选');
+  });
+
   it('keeps a batch running until every attached child is terminal', async () => {
     const root = await temporaryDirectories.create('plan-store-');
     const store = await CollectionPlanStore.open(

@@ -57,6 +57,8 @@ export interface CollectionBatch {
   deliveryIds: string[];
   /** 需要二次筛选的计划用持久状态保证 Bridge 重启后可续跑。 */
   selectionStatus?: 'collecting' | 'pending' | 'completed';
+  /** 已分发的目标补齐轮数；旧批次没有该字段时仍按零轮兼容读取。 */
+  rounds?: number;
   coverage?: Record<string, number>;
   /** 固定计划过滤原因的同源计数，便于审计为什么没入选。 */
   rejections?: Record<string, number>;
@@ -79,6 +81,7 @@ export const collectionBatchSchema = z.object({
   needsAttention: countSchema,
   deliveryIds: z.array(z.string().regex(/^[a-f0-9]{12}$/)).max(100).default([]),
   selectionStatus: z.enum(['collecting', 'pending', 'completed']).optional(),
+  rounds: countSchema.optional(),
   coverage: z.record(z.string().trim().min(1).max(100), countSchema).optional(),
   rejections: z.record(z.string().trim().min(1).max(100), countSchema).optional(),
   error: z.string().trim().min(1).max(2_000).optional(),

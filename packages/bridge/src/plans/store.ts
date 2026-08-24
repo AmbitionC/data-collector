@@ -109,7 +109,9 @@ export class CollectionPlanStore {
         failed: 0,
         needsAttention: 0,
         deliveryIds: [],
-        ...(planId === 'nowcoder-agent-market' ? { selectionStatus: 'collecting' as const } : {}),
+        ...(planId === 'nowcoder-agent-market'
+          ? { selectionStatus: 'collecting' as const, rounds: 0 }
+          : {}),
         jobIds: [],
       };
       this.batches.set(id, batch);
@@ -123,6 +125,19 @@ export class CollectionPlanStore {
       const batch = this.require(batchId);
       if (!batch.jobIds.includes(jobId)) batch.jobIds.push(jobId);
       batch.accepted = batch.jobIds.length;
+      await this.persist();
+    });
+  }
+
+  attachRound(batchId: string, jobIds: readonly string[]): Promise<void> {
+    return this.serializeMutation(async () => {
+      const batch = this.require(batchId);
+      if (batch.planId !== 'nowcoder-agent-market') throw new Error('仅牛客固定计划支持补齐轮次');
+      const nextIds = [...new Set(jobIds)].filter(id => id.length > 0 && !batch.jobIds.includes(id));
+      if (nextIds.length === 0) return;
+      batch.jobIds.push(...nextIds);
+      batch.accepted = batch.jobIds.length;
+      batch.rounds = (batch.rounds ?? 0) + 1;
       await this.persist();
     });
   }
@@ -147,6 +162,20 @@ export class CollectionPlanStore {
       const batch = this.require(batchId);
       batch.selectionStatus = 'pending';
       await this.persist();
+    });
+  }
+
+  resumeCollection(batchId: string): Promise<CollectionBatch> {
+    return this.serializeMutation(async () => {
+      const batch = this.require(batchId);
+      if (batch.planId !== 'nowcoder-agent-market') throw new Error('仅牛客固定计划支持恢复筛选');
+      if (batch.selectionStatus === 'completed') throw new Error('牛客固定计划已完成筛选');
+      batch.status = 'running';
+      batch.selectionStatus = 'collecting';
+      delete batch.finishedAt;
+      delete batch.error;
+      await this.persist();
+      return publicBatch(batch);
     });
   }
 

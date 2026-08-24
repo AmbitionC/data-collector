@@ -7,6 +7,8 @@ import {
 } from '@data-collector/shared';
 import type { JobStore } from '../jobs/store.js';
 import type { NowcoderDiscoveryCandidate } from '../feJourney/nowcoderDiscovery.js';
+import { FE_JOURNEY_PRESET } from '../feJourney/preset.js';
+import { knownNowcoderPlanUrls } from './nowcoderHistory.js';
 import { NOWCODER_COMPANIES, type CompanyId } from './nowcoderPlan.js';
 import type { CollectionPlanStore } from './store.js';
 
@@ -97,24 +99,24 @@ function rotatedCompanies(now: string): CompanyId[] {
   return NOWCODER_COMPANIES.map((_, index) => NOWCODER_COMPANIES[(index + offset) % 4]!);
 }
 
-function selectDiscoveryPool(
+function selectDiscoveryRound(
   candidates: readonly NowcoderDiscoveryCandidate[],
   now: string,
+  limit: number,
 ): NowcoderDiscoveryCandidate[] {
   const buckets = new Map<CompanyId, NowcoderDiscoveryCandidate[]>(
     NOWCODER_COMPANIES.map(company => [company, candidates.filter(item => item.queryCompany === company)]),
   );
   const selected: NowcoderDiscoveryCandidate[] = [];
   let advanced = true;
-  while (selected.length < 12 && advanced) {
+  while (selected.length < limit && advanced) {
     advanced = false;
     for (const company of rotatedCompanies(now)) {
-      if (selected.filter(item => item.queryCompany === company).length >= 4) continue;
       const candidate = buckets.get(company)?.shift();
       if (!candidate) continue;
       selected.push(candidate);
       advanced = true;
-      if (selected.length >= 12) break;
+      if (selected.length >= limit) break;
     }
   }
   return selected;
@@ -125,7 +127,7 @@ export class CollectionPlanService {
   private readonly executing = new Set<string>();
   private readonly syncedJobs = new Set<string>();
   private readonly coveredJobs = new Set<string>();
-  private readonly finalizingBatches = new Set<string>();
+  private readonly advancingBatches = new Set<string>();
   private readonly batchSyncErrors = new Map<string, string[]>();
 
   constructor(private readonly dependencies: CollectionPlanServiceDependencies) {
@@ -183,7 +185,7 @@ export class CollectionPlanService {
         batch.status !== 'running' &&
         batch.selectionStatus === 'pending'
       ) {
-        await this.finalizeNowcoderBatch(batch);
+        await this.advanceNowcoderBatch(batch);
         continue;
       }
       if (batch.status !== 'running') continue;
@@ -195,7 +197,7 @@ export class CollectionPlanService {
         attached.length === 0
       ) {
         const reconciled = await this.dependencies.store.reconcile(batch.id, jobs);
-        await this.finalizeNowcoderBatch(reconciled);
+        await this.advanceNowcoderBatch(reconciled);
         continue;
       }
       // Bridge 已在 extension.hello 前把 dispatched/collecting 恢复为 queued 并重派。
@@ -206,7 +208,7 @@ export class CollectionPlanService {
           reconciled.planId === 'nowcoder-agent-market' &&
           reconciled.status !== 'running' &&
           reconciled.selectionStatus === 'pending'
-        ) await this.finalizeNowcoderBatch(reconciled);
+        ) await this.advanceNowcoderBatch(reconciled);
       } else await this.execute(batch);
     }
     if (options.runDue) await this.runDuePlans();
@@ -281,61 +283,210 @@ export class CollectionPlanService {
       return;
     }
     if (reconciled.status === 'running') return;
-    await this.finalizeNowcoderBatch(reconciled);
+    await this.advanceNowcoderBatch(reconciled);
   }
 
-  private async finalizeNowcoderBatch(batch: CollectionBatch): Promise<void> {
-    if (batch.selectionStatus === 'completed' || this.finalizingBatches.has(batch.id)) return;
-    this.finalizingBatches.add(batch.id);
+  async advanceNowcoderBatch(batch: CollectionBatch): Promise<void> {
+    if (batch.selectionStatus === 'completed' || this.advancingBatches.has(batch.id)) return;
+    this.advancingBatches.add(batch.id);
     try {
-      const saved = this.dependencies.jobs.list().filter(candidate =>
-        candidate.batchId === batch.id && candidate.status === 'saved');
-      // 搜索结果会混入求建议、招聘等非面经详情页。只在同批至少有一页成功抽取、
-      // 足以证明采集器仍可用时，才把布局不支持降级为内容过滤；整批都失败仍保留故障信号。
-      const contentRejectionFailures = saved.length === 0
-        ? []
-        : this.dependencies.jobs.list().filter(candidate =>
-          candidate.batchId === batch.id &&
-          candidate.status === 'failed' &&
-          NOWCODER_CONTENT_REJECTION_CODES.has(candidate.errorCode ?? ''));
-      const selection = await this.dependencies.selectNowcoderJobs(saved, batch.startedAt);
-      const rejectionCounts: Record<string, number> = { ...(batch.rejections ?? {}) };
-      for (const rejected of selection.rejected) {
-        rejectionCounts[rejected.reason] = (rejectionCounts[rejected.reason] ?? 0) + 1;
-      }
-      for (const rejected of contentRejectionFailures) {
-        const reason = NOWCODER_CONTENT_REJECTION_CODES.get(rejected.errorCode ?? '')!;
-        rejectionCounts[reason] = (rejectionCounts[reason] ?? 0) + 1;
-      }
-      for (const accepted of selection.accepted) {
-        const contentId = stableContentId(accepted.url);
-        if (batch.deliveryIds.includes(contentId) || this.syncedJobs.has(accepted.id)) continue;
-        this.syncedJobs.add(accepted.id);
+      let current = batch;
+      while (current.selectionStatus !== 'completed') {
+        const jobs = this.dependencies.jobs.list();
+        const attached = jobs.filter(job => job.batchId === current.id);
+        let prepared: Awaited<ReturnType<CollectionPlanService['selectSaved']>>;
         try {
-          await this.dependencies.syncJob(accepted);
-          await this.dependencies.store.markDelivered(batch.id, contentId);
+          prepared = await this.selectSaved(current, attached);
         } catch (error) {
-          this.recordSyncError(batch.id, error);
+          await this.dependencies.store.attention(
+            current.id,
+            `牛客真实性筛选失败：${error instanceof Error ? error.message : String(error)}`,
+          );
+          this.clearBatchRuntime(current.id);
+          return;
         }
+
+        const target = FE_JOURNEY_PRESET.nowcoder.planTargetAccepted;
+        if (prepared.selection.accepted.length >= target) {
+          await this.finalizeExactTen(current, prepared);
+          return;
+        }
+
+        const wholeBatchLayoutOutage = attached.length > 0 &&
+          prepared.saved.length === 0 &&
+          attached.every(job =>
+            job.status === 'failed' && NOWCODER_CONTENT_REJECTION_CODES.has(job.errorCode ?? ''));
+        if (wholeBatchLayoutOutage) {
+          await this.dependencies.store.finalizeSelection(
+            current.id,
+            0,
+            prepared.selection.coverage,
+            prepared.rejectionCounts,
+          );
+          this.clearBatchRuntime(current.id);
+          return;
+        }
+
+        const budget = FE_JOURNEY_PRESET.nowcoder.planDetailBudget;
+        if (attached.length >= budget) {
+          await this.attentionWithoutDelivery(current, prepared, '已达到 24 条详情任务安全上限');
+          return;
+        }
+
+        const roundSize = attached.length === 0
+          ? FE_JOURNEY_PRESET.nowcoder.planInitialRoundSize
+          : FE_JOURNEY_PRESET.nowcoder.planRefillRoundSize;
+        let next: NowcoderDiscoveryCandidate[];
+        try {
+          next = await this.discoverRound(current, Math.min(roundSize, budget - attached.length));
+        } catch (error) {
+          await this.dependencies.store.fail(
+            current.id,
+            error instanceof Error ? error.message : '固定采集计划执行失败',
+          );
+          this.clearBatchRuntime(current.id);
+          return;
+        }
+        if (next.length === 0) {
+          await this.attentionWithoutDelivery(current, prepared, '公开候选已耗尽');
+          return;
+        }
+
+        await this.dependencies.store.resumeCollection(current.id);
+        current = await this.createAttachAndDispatch(current, attached.length, next);
+        if (current.status === 'running') return;
       }
-      const syncErrors = this.batchSyncErrors.get(batch.id);
-      await this.dependencies.store.finalizeSelection(
-        batch.id,
-        selection.accepted.length,
-        selection.coverage,
-        rejectionCounts,
-        syncErrors?.length ? `自动同步失败：${syncErrors.join('；')}` : undefined,
-        contentRejectionFailures.length,
-      );
-    } catch (error) {
-      await this.dependencies.store.attention(
-        batch.id,
-        `牛客真实性筛选失败：${error instanceof Error ? error.message : String(error)}`,
-      );
     } finally {
-      this.finalizingBatches.delete(batch.id);
-      this.clearBatchRuntime(batch.id);
+      this.advancingBatches.delete(batch.id);
     }
+  }
+
+  private async selectSaved(batch: CollectionBatch, attached: readonly JobRecord[]) {
+    const saved = attached.filter(candidate => candidate.status === 'saved');
+    // 搜索结果会混入求建议、招聘等非面经详情页。只在同批至少有一页成功抽取、
+    // 足以证明采集器仍可用时，才把布局不支持降级为内容过滤；整批都失败仍保留故障信号。
+    const contentRejectionFailures = saved.length === 0
+      ? []
+      : attached.filter(candidate =>
+        candidate.status === 'failed' &&
+        NOWCODER_CONTENT_REJECTION_CODES.has(candidate.errorCode ?? ''));
+    const selection = saved.length === 0
+      ? {
+          accepted: [],
+          coverage: { bytedance: 0, tencent: 0, alibaba: 0, ant: 0 },
+          rejected: [],
+        }
+      : await this.dependencies.selectNowcoderJobs(saved, batch.startedAt);
+    const rejectionCounts: Record<string, number> = { ...(batch.rejections ?? {}) };
+    for (const rejected of selection.rejected) {
+      rejectionCounts[rejected.reason] = (rejectionCounts[rejected.reason] ?? 0) + 1;
+    }
+    for (const rejected of contentRejectionFailures) {
+      const reason = NOWCODER_CONTENT_REJECTION_CODES.get(rejected.errorCode ?? '')!;
+      rejectionCounts[reason] = (rejectionCounts[reason] ?? 0) + 1;
+    }
+    return { saved, selection, rejectionCounts, contentRejectionFailures };
+  }
+
+  private async discoverRound(
+    batch: CollectionBatch,
+    limit: number,
+  ): Promise<NowcoderDiscoveryCandidate[]> {
+    const jobs = this.dependencies.jobs.list();
+    const known = knownNowcoderPlanUrls(jobs, batch.id, this.now());
+    const discovered = await this.dependencies.discoverNowcoder(known);
+    const unique = [...new Map(discovered.map(candidate => [candidate.url, candidate])).values()]
+      .filter(candidate => !known.has(candidate.url));
+    return selectDiscoveryRound(unique, batch.startedAt, limit);
+  }
+
+  private async createAttachAndDispatch(
+    batch: CollectionBatch,
+    attachedCount: number,
+    candidates: readonly NowcoderDiscoveryCandidate[],
+  ): Promise<CollectionBatch> {
+    const staged: JobRecord[] = [];
+    for (const candidate of candidates) {
+      staged.push(await this.dependencies.jobs.create({
+        id: `${batch.id}-${stableContentId(candidate.url)}`,
+        url: candidate.url,
+        requestedBy: 'codex',
+        batchId: batch.id,
+        planId: batch.planId,
+      }));
+    }
+    await this.dependencies.store.markDiscovery(
+      batch.id,
+      Math.max(batch.discovered, attachedCount + staged.length),
+      batch.coverage ?? { bytedance: 0, tencent: 0, alibaba: 0, ant: 0 },
+      batch.rejections ?? {},
+    );
+    await this.dependencies.store.attachRound(batch.id, staged.map(job => job.id));
+    await this.dependencies.store.markSelectionPending(batch.id);
+    for (const job of staged) {
+      try {
+        await this.dependencies.dispatch(job);
+      } catch (error) {
+        await this.dependencies.jobs.transition(job.id, 'failed', {
+          errorCode: 'DISPATCH_FAILED',
+          errorMessage: error instanceof Error ? error.message : '任务分发失败',
+        });
+      }
+    }
+    return this.dependencies.store.reconcile(batch.id, this.dependencies.jobs.list());
+  }
+
+  private async finalizeExactTen(
+    batch: CollectionBatch,
+    prepared: Awaited<ReturnType<CollectionPlanService['selectSaved']>>,
+  ): Promise<void> {
+    const accepted = prepared.selection.accepted.slice(
+      0,
+      FE_JOURNEY_PRESET.nowcoder.planTargetAccepted,
+    );
+    const delivered = new Set(batch.deliveryIds);
+    for (const job of accepted) {
+      const contentId = stableContentId(job.url);
+      if (delivered.has(contentId) || this.syncedJobs.has(job.id)) continue;
+      this.syncedJobs.add(job.id);
+      try {
+        await this.dependencies.syncJob(job);
+        await this.dependencies.store.markDelivered(batch.id, contentId);
+        delivered.add(contentId);
+      } catch (error) {
+        this.recordSyncError(batch.id, error);
+      }
+    }
+    const syncErrors = this.batchSyncErrors.get(batch.id);
+    await this.dependencies.store.finalizeSelection(
+      batch.id,
+      accepted.length,
+      prepared.selection.coverage,
+      prepared.rejectionCounts,
+      syncErrors?.length ? `自动同步失败：${syncErrors.join('；')}` : undefined,
+      prepared.contentRejectionFailures.length,
+    );
+    this.clearBatchRuntime(batch.id);
+  }
+
+  private async attentionWithoutDelivery(
+    batch: CollectionBatch,
+    prepared: Awaited<ReturnType<CollectionPlanService['selectSaved']>>,
+    reason: string,
+  ): Promise<void> {
+    await this.dependencies.store.finalizeSelection(
+      batch.id,
+      prepared.selection.accepted.length,
+      prepared.selection.coverage,
+      prepared.rejectionCounts,
+      undefined,
+      prepared.contentRejectionFailures.length,
+    );
+    await this.dependencies.store.attention(
+      batch.id,
+      `牛客合格候选不足 10 条（${prepared.selection.accepted.length}/10）：${reason}`,
+    );
+    this.clearBatchRuntime(batch.id);
   }
 
   private recordSyncError(batchId: string, error: unknown): void {
@@ -368,42 +519,7 @@ export class CollectionPlanService {
         await this.dependencies.collectZsxq(batch.id, batch.planId);
         return;
       }
-      const known = new Set(this.dependencies.jobs.list().map(job => job.url));
-      const discovered = await this.dependencies.discoverNowcoder(known);
-      const discoveryPool = selectDiscoveryPool(discovered, this.now());
-      const poolRejected = discovered.length - discoveryPool.length;
-      await this.dependencies.store.markDiscovery(batch.id, discovered.length, {
-        bytedance: 0, tencent: 0, alibaba: 0, ant: 0,
-      }, poolRejected > 0 ? { '发现池/单批详情上限': poolRejected } : {});
-      const staged: JobRecord[] = [];
-      for (const candidate of discoveryPool) {
-        const job = await this.dependencies.jobs.create({
-          id: `${batch.id}-${stableContentId(candidate.url)}`,
-          url: candidate.url,
-          requestedBy: 'codex',
-          batchId: batch.id,
-          planId: batch.planId,
-        });
-        await this.onJobCreated(job);
-        staged.push(job);
-      }
-      await this.dependencies.store.markSelectionPending(batch.id);
-      for (const job of staged) {
-        try {
-          await this.dependencies.dispatch(job);
-        } catch (error) {
-          const failed = await this.dependencies.jobs.transition(job.id, 'failed', {
-            errorCode: 'DISPATCH_FAILED',
-            errorMessage: error instanceof Error ? error.message : '任务分发失败',
-          });
-          await this.onJobTerminal(failed);
-        }
-      }
-      const reconciled = await this.dependencies.store.reconcile(
-        batch.id,
-        this.dependencies.jobs.list(),
-      );
-      if (reconciled.status !== 'running') await this.finalizeNowcoderBatch(reconciled);
+      await this.advanceNowcoderBatch(batch);
     } catch (error) {
       await this.dependencies.store.fail(
         batch.id,
