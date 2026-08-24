@@ -245,6 +245,44 @@ describe('CollectionPlanStore', () => {
     expect(await readFile(path, 'utf8')).toBe(corrupt);
   });
 
+  it('finds active attempts without applying the display history limit', async () => {
+    const root = await temporaryDirectories.create('plan-store-active-');
+    const path = join(root, 'plans.json');
+    const terminal = Array.from({ length: 100 }, (_, index) => ({
+      id: `newer-terminal-${String(index).padStart(3, '0')}`,
+      planId: 'zsxq-chen-teacher',
+      status: 'completed',
+      startedAt: new Date(Date.parse('2026-01-01T00:00:00.000Z') + index * 1_000).toISOString(),
+      finishedAt: new Date(Date.parse('2026-01-01T00:00:00.500Z') + index * 1_000).toISOString(),
+      discovered: 0,
+      accepted: 0,
+      saved: 0,
+      skipped: 0,
+      failed: 0,
+      needsAttention: 0,
+      deliveryIds: [],
+      jobIds: [],
+    }));
+    const active = {
+      ...terminal[0],
+      id: 'old-active-attempt',
+      status: 'running',
+      startedAt: '2020-01-01T00:00:00.000Z',
+      finishedAt: undefined,
+      preparationStatus: 'collecting',
+      preparationAttempt: '0123456789abcdef',
+    };
+    await writeFile(path, `${JSON.stringify({ version: 1, batches: [active, ...terminal] })}\n`);
+
+    const store = await CollectionPlanStore.open(path);
+
+    expect(store.latest('zsxq-chen-teacher', 100).some(batch => batch.id === active.id)).toBe(false);
+    expect(store.active('zsxq-chen-teacher')).toEqual([
+      expect.objectContaining({ id: active.id, status: 'running' }),
+    ]);
+    expect(store.get(active.id)).toMatchObject({ id: active.id, status: 'running' });
+  });
+
   it('keeps every running batch plus only the newest 180 terminal batches', async () => {
     const root = await temporaryDirectories.create('plan-store-retention-');
     const path = join(root, 'plans.json');

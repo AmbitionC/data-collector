@@ -13,11 +13,14 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { MANIFEST_PUBLIC_KEY, TRUSTED_EXTENSION_ID } from '@data-collector/shared';
 import {
+  commitExtensionArtifacts,
   packageExtension,
+  recoverInterruptedExtensionArtifacts,
   validateExtensionArchive,
   validateExtensionDirectory,
   writeExtensionArchive,
 } from '../../scripts/package-extension.mjs';
+import { acquireArtifactLease } from '../../scripts/artifact-lease.mjs';
 import { createTemporaryDirectoryTracker } from '../helpers/temp.js';
 
 const REQUIRED_FILES = [
@@ -218,6 +221,37 @@ describe('extension package validation', () => {
       .toBe('unrelated artifact');
   });
 
+  it('does not commit the stable directory or archive until the shared artifact lease is available', async () => {
+    const workspace = await temporaryDirectories.create('data-collector-workspace-');
+    const dist = await writeFixture(join(workspace, 'packages', 'extension', 'dist'));
+    await writeFile(join(dist, 'build-id.txt'), 'build B', 'utf8');
+    const stable = await writeFixture(join(workspace, 'artifacts', 'data-collector-extension'));
+    await writeFile(join(stable, 'build-id.txt'), 'build A', 'utf8');
+    const lease = await acquireArtifactLease(workspace, {
+      role: 'zsxq-sink',
+      timeoutMs: 1_000,
+      pollIntervalMs: 5,
+    });
+    let committedValidationStarted = false;
+    let packageSettled = false;
+    const packaging = packageExtension(workspace, {
+      validateCommittedDirectory: async root => {
+        committedValidationStarted = true;
+        return validateExtensionDirectory(root);
+      },
+    }).finally(() => { packageSettled = true; });
+
+    await new Promise(resolve => setTimeout(resolve, 75));
+    expect(packageSettled).toBe(false);
+    expect(committedValidationStarted).toBe(false);
+    expect(await readFile(join(stable, 'build-id.txt'), 'utf8')).toBe('build A');
+
+    await lease.release();
+    await packaging;
+    expect(committedValidationStarted).toBe(true);
+    expect(await readFile(join(stable, 'build-id.txt'), 'utf8')).toBe('build B');
+  });
+
   it('does not turn a committed release into a build failure when old archive cleanup fails', async () => {
     const workspace = await temporaryDirectories.create('data-collector-workspace-');
     await writeFixture(join(workspace, 'packages', 'extension', 'dist'));
@@ -332,5 +366,77 @@ describe('extension package validation', () => {
       'data-collector-extension',
       'data-collector-extension-0.2.0.zip',
     ]);
+  });
+
+  it('recovers the previous artifact pair after a package process dies between renames', async () => {
+    const workspace = await temporaryDirectories.create('data-collector-workspace-');
+    const dist = await writeFixture(join(workspace, 'packages', 'extension', 'dist'));
+    await writeFile(join(dist, 'build-id.txt'), 'build B', 'utf8');
+    const artifacts = join(workspace, 'artifacts');
+    const stable = await writeFixture(join(artifacts, 'data-collector-extension'));
+    await writeFile(join(stable, 'build-id.txt'), 'build A', 'utf8');
+    const archive = join(artifacts, 'data-collector-extension-0.2.0.zip');
+    await writeExtensionArchive(stable, archive);
+    const archiveA = await readFile(archive);
+    const interrupted = join(artifacts, '.data-collector-extension-transaction-interrupted');
+    await mkdir(interrupted);
+    await writeFile(join(interrupted, 'transaction.json'), JSON.stringify({
+      version: 1,
+      archiveName: 'data-collector-extension-0.2.0.zip',
+      hadStableDirectory: true,
+      hadArchive: true,
+    }));
+    await fsRename(stable, join(interrupted, 'previous-directory'));
+    await fsRename(archive, join(interrupted, 'previous-archive.zip'));
+    await writeFile(archive, 'partial archive B', 'utf8');
+
+    await expect(packageExtension(workspace, {
+      writeArchive: async () => { throw new Error('injected staging failure after recovery'); },
+    })).rejects.toThrow('injected staging failure after recovery');
+
+    expect(await readFile(join(stable, 'build-id.txt'), 'utf8')).toBe('build A');
+    expect(await readFile(archive)).toEqual(archiveA);
+    expect(await readdir(artifacts)).not.toContain('.data-collector-extension-transaction-interrupted');
+  });
+
+  it('removes an unpublished legacy staging directory that has no transaction journal', async () => {
+    const workspace = await temporaryDirectories.create('data-collector-workspace-');
+    const orphan = join(
+      workspace,
+      'artifacts',
+      '.data-collector-extension-transaction-unpublished',
+    );
+    await mkdir(orphan, { recursive: true });
+    await writeFile(join(orphan, 'partial.txt'), 'staged but never published', 'utf8');
+
+    await expect(recoverInterruptedExtensionArtifacts(workspace)).resolves.toBeUndefined();
+    await expect(stat(orphan)).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
+  it('keeps a completely committed artifact pair when recovery observes its transaction', async () => {
+    const workspace = await temporaryDirectories.create('data-collector-workspace-');
+    const artifacts = join(workspace, 'artifacts');
+    const transactionRoot = join(
+      artifacts,
+      '.data-collector-extension-transaction-committed-window',
+    );
+    const stagedDirectory = await writeFixture(join(transactionRoot, 'unpacked'));
+    const stagedArchive = join(transactionRoot, 'extension.zip');
+    await writeExtensionArchive(stagedDirectory, stagedArchive);
+    const stableDirectory = join(artifacts, 'data-collector-extension');
+    const archive = join(artifacts, 'data-collector-extension-0.2.0.zip');
+
+    await commitExtensionArtifacts({
+      transactionRoot,
+      stagedDirectory,
+      stagedArchive,
+      stableDirectory,
+      archive,
+    });
+    await recoverInterruptedExtensionArtifacts(workspace);
+
+    await expect(validateExtensionDirectory(stableDirectory)).resolves.toEqual(REQUIRED_FILES);
+    await expect(validateExtensionArchive(archive, stableDirectory)).resolves.toEqual(REQUIRED_FILES);
+    await expect(stat(transactionRoot)).rejects.toMatchObject({ code: 'ENOENT' });
   });
 });

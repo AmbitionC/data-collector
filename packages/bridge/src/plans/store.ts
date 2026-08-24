@@ -340,6 +340,18 @@ export class CollectionPlanStore {
       .map(publicBatch);
   }
 
+  active(planId?: CollectionPlanId): CollectionBatch[] {
+    return [...this.batches.values()]
+      .filter(batch => batch.status === 'running' && (!planId || batch.planId === planId))
+      .sort((left, right) => right.startedAt.localeCompare(left.startedAt) || right.id.localeCompare(left.id))
+      .map(publicBatch);
+  }
+
+  get(id: string): CollectionBatch | undefined {
+    const batch = this.batches.get(id);
+    return batch ? publicBatch(batch) : undefined;
+  }
+
   private require(id: string): StoredBatch {
     const batch = this.batches.get(id);
     if (!batch) throw new Error(`采集批次不存在：${id}`);

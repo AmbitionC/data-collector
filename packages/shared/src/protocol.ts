@@ -6,6 +6,8 @@ import { collectionBatchSchema, collectionPlanIdSchema } from './plans.js';
 
 export const EXTENSION_REPLACED_CLOSE_CODE = 4009;
 export const EXTENSION_REPLACED_CLOSE_REASON = 'replaced';
+/** 具备固定知识星球计划“补齐或拒绝，绝不归档半篇”完整链路。 */
+export const ZSXQ_COMPLETE_CONTENT_CAPABILITY = 'zsxq-complete-content-v2';
 
 export const collectedImageSchema = z.object({
   url: z.string().url().max(4096),

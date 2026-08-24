@@ -4,6 +4,8 @@ import type { OrganizedDocument } from '../organize/index.js';
 import type { ContentSink } from '../sinks/types.js';
 import { assertInsideRoot } from './paths.js';
 import { atomicWriteText, SOURCE_FILE, type SyncInfo } from './writer.js';
+import { withCatalogTransaction } from './catalogTransaction.js';
+import { stableContentId, ZSXQ_COMPLETE_CONTENT_CAPABILITY } from '@data-collector/shared';
 
 /**
  * 把已在本机库里的条目同步到目标仓库的收件箱。
@@ -26,6 +28,9 @@ export interface LibraryCatalogEntry {
   relativePath: string;
   updatedAt: string;
   publishedAt?: string;
+  contentComplete?: boolean;
+  contentCompletenessVersion?: string;
+  contentCompletenessBuildId?: string;
   /** Fixed-plan delivery intent retained until that delivery batch finalizes. */
   deliveryBatchId?: string;
   sync?: SyncInfo;
@@ -80,6 +85,56 @@ async function readOrganized(root: string, entry: LibraryCatalogEntry): Promise<
   return JSON.parse(raw) as OrganizedDocument;
 }
 
+function assertZsxqSourceMatchesCatalog(
+  entry: LibraryCatalogEntry,
+  organized: OrganizedDocument,
+): void {
+  if (entry.source !== 'zsxq') return;
+  const document = organized?.document;
+  const metadata = document?.sourceMetadata;
+  let sourceId: string | undefined;
+  let catalogId: string | undefined;
+  try {
+    sourceId = typeof document?.canonicalUrl === 'string'
+      ? stableContentId(document.canonicalUrl)
+      : undefined;
+    catalogId = stableContentId(entry.url);
+  } catch {
+    // The single generic error below is intentionally actionable and does not leak parser details.
+  }
+  if (
+    document?.source !== 'zsxq'
+    || document.url !== entry.url
+    || document.canonicalUrl !== entry.url
+    || sourceId !== entry.id
+    || catalogId !== entry.id
+    || document.truncated !== false
+    || metadata?.contentCompletenessVersion !== ZSXQ_COMPLETE_CONTENT_CAPABILITY
+    || metadata.contentCompletenessVersion !== entry.contentCompletenessVersion
+    || typeof metadata.contentCompletenessBuildId !== 'string'
+    || metadata.contentCompletenessBuildId.length === 0
+    || metadata.contentCompletenessBuildId !== entry.contentCompletenessBuildId
+  ) {
+    throw new Error('source.json 与目录中的知识星球正文完整性证明不一致；请重新采集这一条');
+  }
+}
+
+function sameCatalogRevision(
+  current: LibraryCatalogEntry,
+  snapshot: LibraryCatalogEntry,
+): boolean {
+  return current.source === snapshot.source
+    && current.title === snapshot.title
+    && current.url === snapshot.url
+    && current.category === snapshot.category
+    && current.relativePath === snapshot.relativePath
+    && current.updatedAt === snapshot.updatedAt
+    && current.publishedAt === snapshot.publishedAt
+    && current.contentComplete === snapshot.contentComplete
+    && current.contentCompletenessVersion === snapshot.contentCompletenessVersion
+    && current.contentCompletenessBuildId === snapshot.contentCompletenessBuildId;
+}
+
 function messageOf(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
@@ -102,6 +157,24 @@ export async function syncEntries(
 
   for (const entry of catalog) {
     if (!wanted.has(entry.id)) continue;
+    // 知识星球历史数据里有「明确截断」与「旧版未记录完整性」两种情形。
+    // 两者都不能进交付 sink；留在 pending 队列，供新版重采后收敛为 true。
+    if (
+      entry.source === 'zsxq'
+      && (
+        entry.contentComplete !== true
+        || entry.contentCompletenessVersion !== ZSXQ_COMPLETE_CONTENT_CAPABILITY
+      )
+    ) {
+      const sync: SyncInfo = {
+        state: 'failed',
+        at: now(),
+        error: '知识星球正文尚未确认完整，已阻止同步；请用新版重新采集该条',
+      };
+      entry.sync = sync;
+      results.push({ id: entry.id, title: entry.title, sync });
+      continue;
+    }
     const sink = resolveTarget(entry.source);
     if (!sink) {
       const sync: SyncInfo = {
@@ -115,6 +188,7 @@ export async function syncEntries(
     }
     try {
       const organized = await readOrganized(root, entry);
+      assertZsxqSourceMatchesCatalog(entry, organized);
       const captureBatchId = organized.document.sourceMetadata?.batchId;
       const delivered = options.deliveryBatchId
         ? {
@@ -173,7 +247,20 @@ export async function syncEntries(
   }
 
   if (results.length > 0 && (!options.atomic || results.every(item => item.sync.state === 'synced'))) {
-    await atomicWriteText(root, catalogPathOf(root), `${JSON.stringify(catalog, null, 2)}\n`);
+    const snapshots = new Map(catalog.map(entry => [entry.id, entry]));
+    const touched = new Set(results.map(result => result.id));
+    await withCatalogTransaction(root, async () => {
+      const latest = await readCatalog(root);
+      for (const current of latest) {
+        const update = snapshots.get(current.id);
+        if (!update || !touched.has(current.id) || !sameCatalogRevision(current, update)) continue;
+        if (update.sync) current.sync = { ...update.sync };
+        else delete current.sync;
+        if (update.deliveryBatchId) current.deliveryBatchId = update.deliveryBatchId;
+        else delete current.deliveryBatchId;
+      }
+      await atomicWriteText(root, catalogPathOf(root), `${JSON.stringify(latest, null, 2)}\n`);
+    });
   }
   return {
     synced: results.filter(item => item.sync.state === 'synced').length,

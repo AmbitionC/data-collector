@@ -15,7 +15,10 @@ import {
   syncEntries,
 } from '../../packages/bridge/src/library/index.js';
 import { SinkRouter } from '../../packages/bridge/src/sinks/index.js';
-import type { CollectedDocument } from '@data-collector/shared';
+import {
+  ZSXQ_COMPLETE_CONTENT_CAPABILITY,
+  type CollectedDocument,
+} from '@data-collector/shared';
 import { createTemporaryDirectoryTracker } from '../helpers/temp.js';
 
 /**
@@ -48,6 +51,11 @@ function post(overrides: Partial<CollectedDocument> = {}): CollectedDocument {
     html: '<p>跌破 60 日线就该降仓，这是纪律问题，不是判断问题。</p>',
     text: '跌破 60 日线就该降仓，这是纪律问题，不是判断问题。',
     images: [],
+    truncated: false,
+    sourceMetadata: {
+      contentCompletenessVersion: ZSXQ_COMPLETE_CONTENT_CAPABILITY,
+      contentCompletenessBuildId: 'v0.4.29 · pipeline-test',
+    },
     ...overrides,
   };
 }
@@ -174,6 +182,121 @@ describe('采集 → 本地 → 同步 → 归档 的完整链路', () => {
     // 本机库里的状态同步更新，「已入库」页据此展示。
     const after = await listLibrary(library);
     expect(after[0]?.sync).toMatchObject({ state: 'synced', target: 'life-teachers' });
+  });
+
+  it('拒绝同步正文不完整或完整性未知的历史知识星球条目', async () => {
+    const { library, repo, router } = await pipeline();
+    const incomplete = post({
+      canonicalUrl: 'https://wx.zsxq.com/group/1/topic/522222222222221',
+      title: '明确不完整',
+      truncated: true,
+    });
+    const unknown = post({
+      canonicalUrl: 'https://wx.zsxq.com/group/1/topic/522222222222222',
+      title: '历史未知完整性',
+    });
+    delete unknown.truncated;
+    await router.save(organize(incomplete));
+    await router.save(organize(unknown));
+
+    const outcome = await syncEntries(
+      library,
+      await pendingIds(library),
+      source => router.syncTarget(source),
+    );
+
+    expect(outcome).toMatchObject({ synced: 0, failed: 2 });
+    expect(outcome.entries.every(item => item.sync.error?.includes('正文尚未确认完整')))
+      .toBe(true);
+    expect(await inboxEntries(repo)).toEqual([]);
+    expect((await pendingIds(library)).sort()).toEqual(
+      outcome.entries.map(item => item.id).sort(),
+    );
+  });
+
+  it('rejects a legacy catalog true that has no current completeness protocol', async () => {
+    const { library, repo, router } = await pipeline();
+    await router.save(organize(post()));
+    const catalogPath = join(library, '_catalog', 'index.json');
+    const catalog = JSON.parse(await readFile(catalogPath, 'utf8')) as Array<Record<string, unknown>>;
+    delete catalog[0]!.contentCompletenessVersion;
+    delete catalog[0]!.contentCompletenessBuildId;
+    await writeFile(catalogPath, `${JSON.stringify(catalog, null, 2)}\n`);
+
+    const outcome = await syncEntries(
+      library,
+      await pendingIds(library),
+      source => router.syncTarget(source),
+    );
+
+    expect(outcome).toMatchObject({ synced: 0, failed: 1 });
+    expect(outcome.entries[0]?.sync.error).toContain('正文尚未确认完整');
+    expect(await inboxEntries(repo)).toEqual([]);
+  });
+
+  it.each([
+    ['source', (source: Record<string, any>) => { source.document.source = 'nowcoder'; }],
+    ['URL and stable id', (source: Record<string, any>) => {
+      source.document.url = 'https://wx.zsxq.com/group/1/topic/599999999999999';
+      source.document.canonicalUrl = 'https://wx.zsxq.com/group/1/topic/599999999999999';
+    }],
+    ['truncation state', (source: Record<string, any>) => { source.document.truncated = true; }],
+    ['completeness protocol', (source: Record<string, any>) => {
+      source.document.sourceMetadata.contentCompletenessVersion = 'zsxq-complete-content-v0';
+    }],
+    ['extension build', (source: Record<string, any>) => {
+      source.document.sourceMetadata.contentCompletenessBuildId = 'v0.4.29 · different-build';
+    }],
+  ])('rejects a ZSXQ source.json whose %s disagrees with the catalog proof', async (_field, mutate) => {
+    const { library, repo, router } = await pipeline();
+    await router.save(organize(post()));
+    const [entry] = await listLibrary(library);
+    const sourcePath = join(library, entry!.relativePath.replace(/index\.md$/, 'source.json'));
+    const source = JSON.parse(await readFile(sourcePath, 'utf8')) as Record<string, any>;
+    mutate(source);
+    await writeFile(sourcePath, `${JSON.stringify(source, null, 2)}\n`, 'utf8');
+
+    const outcome = await syncEntries(library, [entry!.id], source => router.syncTarget(source));
+
+    expect(outcome).toMatchObject({ synced: 0, failed: 1 });
+    expect(outcome.entries[0]?.sync.error).toContain('source.json');
+    expect(await inboxEntries(repo)).toEqual([]);
+  });
+
+  it('does not lose a capture added while another catalog entry is synchronizing', async () => {
+    const { library, router } = await pipeline();
+    await router.save(organize(post()));
+    const [first] = await listLibrary(library);
+    let releaseSave!: () => void;
+    let markSaveStarted!: () => void;
+    const saveGate = new Promise<void>(resolve => { releaseSave = resolve; });
+    const saveStarted = new Promise<void>(resolve => { markSaveStarted = resolve; });
+    const syncing = syncEntries(library, [first!.id], () => ({
+      id: 'blocking-sink',
+      label: 'blocking sink',
+      categories: [],
+      root: library,
+      save: async () => {
+        markSaveStarted();
+        await saveGate;
+        return { sinkId: 'blocking-sink', ok: true, outputRef: 'saved' };
+      },
+    }));
+    await saveStarted;
+
+    await router.save(organize(post({
+      canonicalUrl: 'https://wx.zsxq.com/group/1/topic/522222222222299',
+      title: '同步期间新采集的第二条',
+    })));
+    releaseSave();
+    await syncing;
+
+    const after = await listLibrary(library);
+    expect(after.map(entry => entry.title).sort()).toEqual([
+      '创业板跌破 60 日线',
+      '同步期间新采集的第二条',
+    ]);
+    expect(after.find(entry => entry.id === first!.id)?.sync?.state).toBe('synced');
   });
 
   it('同步过的不再算「待同步」，重复点同步也不会重复建条目', async () => {
