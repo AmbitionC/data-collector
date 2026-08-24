@@ -19,6 +19,7 @@ import {
   type TabsApi,
 } from './jobs.js';
 import { OwnedTabRegistry, type OwnedTabsStorage } from './ownedTabs.js';
+import { planErrorNeedsAttention } from './planAttention.js';
 
 const storage: ExtensionStorage = {
   get: keys => chrome.storage.local.get(keys),
@@ -176,7 +177,7 @@ connection.onPlanCollect(async (requestId, payload) => {
       attempt: payload.attempt,
       discovered: 0,
       error: message,
-      ...(/AUTH_REQUIRED|BRIDGE_UPDATE_REQUIRED|CONTENT_EMPTY|CONTENT_COVERAGE_INCOMPLETE|AUTHOR_IDENTITY_UNPROVEN|PUBLISHED_AT_UNPROVEN|登录|完整状态/u.test(message)
+      ...(planErrorNeedsAttention(message)
         ? { needsAttention: true }
         : {}),
     });

@@ -245,7 +245,7 @@ describe('ZSXQ API fallback', () => {
     expect(pageCounts.every(count => count <= 12)).toBe(true);
   });
 
-  it('rejects a repeated full page when the server ignores the pagination cursor', async () => {
+  it('rejects a repeated short page instead of mistaking it for source exhaustion', async () => {
     const repeated = Array.from({ length: 20 }, (_, index) => topic(
       String(760_000_000_000_000_000n + BigInt(index)),
       new Date(Date.parse('2026-08-24T23:00:00.000Z') - index * 60 * 1_000).toISOString(),
@@ -256,7 +256,7 @@ describe('ZSXQ API fallback', () => {
       if (url.href === `${API}/groups/${GROUP_ID}`) return groupResponse();
       if (url.href === `${API}/groups/${GROUP_ID}/menus`) return menuResponse();
       if (url.pathname.endsWith('/topics/sticky')) return topicResponse([]);
-      return topicResponse(repeated);
+      return topicResponse(url.searchParams.has('end_time') ? repeated.slice(0, 19) : repeated);
     };
 
     await expect(collectZsxqApiViews(GROUP_ID, {

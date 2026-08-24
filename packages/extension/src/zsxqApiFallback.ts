@@ -471,19 +471,6 @@ export async function collectZsxqApiViews(
         newRawIds += 1;
       }
       addDocuments(documents, converted.documents);
-      if (documents.size >= PLAN_ITEMS_PER_VIEW) {
-        return { label: view, documents: [...documents.values()].slice(0, PLAN_ITEMS_PER_VIEW) };
-      }
-      if (converted.entries.length < TOPIC_PAGE_SIZE) {
-        return { label: view, documents: [...documents.values()] };
-      }
-      if (newRawIds === 0) {
-        throw coverageError(
-          'ZSXQ_API_CURSOR_UNPROVEN',
-          `「${view}」第 ${page + 1} 页没有出现新的 topic_id`,
-        );
-      }
-
       const times = converted.entries.map(entry => Date.parse(entry.createTime));
       for (let index = 1; index < times.length; index += 1) {
         if (times[index]! > times[index - 1]!) {
@@ -498,6 +485,18 @@ export async function collectZsxqApiViews(
           'ZSXQ_API_CURSOR_UNPROVEN',
           `「${view}」第 ${page + 1} 页未遵守 end_time 游标`,
         );
+      }
+      if (converted.entries.length > 0 && newRawIds === 0) {
+        throw coverageError(
+          'ZSXQ_API_CURSOR_UNPROVEN',
+          `「${view}」第 ${page + 1} 页没有出现新的 topic_id`,
+        );
+      }
+      if (documents.size >= PLAN_ITEMS_PER_VIEW) {
+        return { label: view, documents: [...documents.values()].slice(0, PLAN_ITEMS_PER_VIEW) };
+      }
+      if (converted.entries.length < TOPIC_PAGE_SIZE) {
+        return { label: view, documents: [...documents.values()] };
       }
       const oldestTime = times.at(-1)!;
       if (oldestTime <= cutoff) return { label: view, documents: [...documents.values()] };
