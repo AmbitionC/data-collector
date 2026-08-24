@@ -9,13 +9,13 @@ const REPO = '/Users/chenhao/code/data-collector';
 
 function host(
   responses: Record<string, string | Error>,
-  builtCommit?: string,
+  builtCommit?: string | null,
 ): UpdateHost & { ran: string[] } {
   const ran: string[] = [];
   return {
     ran,
     now: () => '2026-07-25T00:00:00.000Z',
-    ...(builtCommit === undefined ? {} : { builtCommit: async () => builtCommit }),
+    ...(builtCommit === undefined ? {} : { builtCommit: async () => builtCommit ?? undefined }),
     async run(command, args) {
       const key = `${command} ${args.join(' ')}`;
       ran.push(key);
@@ -115,6 +115,25 @@ describe('bridge auto update', () => {
     expect(outcome.message).toContain('产物落后于代码');
   });
 
+
+  it('rebuilds when production artifact identity is missing or corrupt', async () => {
+    const target = host(
+      {
+        ...AT_OLD,
+        'git fetch origin master': '',
+        'git rev-parse origin/master': 'aaaaaaaaaaaabbbb\n',
+        'npm run package': '/path/to.zip',
+      },
+      // The production host has an artifact reader, but it cannot prove any current build.
+      null,
+    );
+
+    const outcome = await updateWorkspace(REPO, target);
+
+    expect(target.ran).toContain('npm run package');
+    expect(outcome).toMatchObject({ changed: true, commit: 'aaaaaaaaaaaa' });
+    expect(outcome.message).toContain('产物落后于代码');
+  });
   it('stays quiet when the artifacts already match HEAD', async () => {
     const target = host(
       {

@@ -1,6 +1,6 @@
 import { createHash, randomBytes } from 'node:crypto';
 import { lookup } from 'node:dns/promises';
-import { mkdir, open, rename, rmdir } from 'node:fs/promises';
+import { mkdir, open, rename, rmdir, unlink } from 'node:fs/promises';
 import { extname, join, relative } from 'node:path';
 import { isIP } from 'node:net';
 import type { CollectedImage } from '@data-collector/shared';
@@ -25,14 +25,19 @@ export interface AssetResult {
 async function atomicWrite(root: string, path: string, bytes: Uint8Array): Promise<void> {
   await assertSafeWritePath(root, path);
   const temporary = `${path}.${process.pid}.${randomBytes(6).toString('hex')}.tmp`;
-  const handle = await open(temporary, 'w', 0o600);
   try {
-    await handle.writeFile(bytes);
-    await handle.sync();
-  } finally {
-    await handle.close();
+    const handle = await open(temporary, 'w', 0o600);
+    try {
+      await handle.writeFile(bytes);
+      await handle.sync();
+    } finally {
+      await handle.close();
+    }
+    await rename(temporary, path);
+  } catch (error) {
+    await unlink(temporary).catch(() => undefined);
+    throw error;
   }
-  await rename(temporary, path);
 }
 
 function replaceUrl(html: string, source: string, replacement: string): string {

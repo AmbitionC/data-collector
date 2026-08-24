@@ -1,5 +1,5 @@
 import { randomBytes } from 'node:crypto';
-import { mkdir, open, readFile, rename } from 'node:fs/promises';
+import { mkdir, open, readFile, rename, unlink } from 'node:fs/promises';
 import { dirname, join, relative } from 'node:path';
 import { descriptorFor, stableContentId, type Source } from '@data-collector/shared';
 import { renderMarkdown } from './markdown.js';
@@ -67,14 +67,19 @@ export async function atomicWriteText(root: string, path: string, contents: stri
   await mkdir(dirname(path), { recursive: true });
   await assertSafeWritePath(root, path);
   const temporary = `${path}.${process.pid}.${randomBytes(6).toString('hex')}.tmp`;
-  const handle = await open(temporary, 'w', 0o600);
   try {
-    await handle.writeFile(contents, 'utf8');
-    await handle.sync();
-  } finally {
-    await handle.close();
+    const handle = await open(temporary, 'w', 0o600);
+    try {
+      await handle.writeFile(contents, 'utf8');
+      await handle.sync();
+    } finally {
+      await handle.close();
+    }
+    await rename(temporary, path);
+  } catch (error) {
+    await unlink(temporary).catch(() => undefined);
+    throw error;
   }
-  await rename(temporary, path);
 }
 
 function yamlString(value: string): string {

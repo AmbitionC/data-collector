@@ -127,6 +127,49 @@ describe('CollectionPlanStore', () => {
       reopened.latest('nowcoder-agent-market', 1)[0])).resolves.toEqual(before);
   });
 
+
+  it('rolls back a reconciled terminal batch when its atomic persistence fails', async () => {
+    const root = await temporaryDirectories.create('plan-store-reconcile-rollback-');
+    const path = join(root, 'plans.json');
+    const backupPath = join(root, 'plans.persisted.json');
+    const store = await CollectionPlanStore.open(path, () => '2026-08-25T00:00:00.000Z');
+    const batch = await store.start('zsxq-chen-teacher');
+    await store.markDiscovery(batch.id, 1);
+    await store.attachJob(batch.id, 'topic-1');
+    const before = store.latest('zsxq-chen-teacher', 1)[0]!;
+    await rename(path, backupPath);
+    await mkdir(path);
+
+    try {
+      await expect(store.reconcile(batch.id, [job('topic-1', 'saved')])).rejects.toThrow();
+      expect(store.latest('zsxq-chen-teacher', 1)[0]).toEqual(before);
+    } finally {
+      await rmdir(path);
+      await rename(backupPath, path);
+    }
+
+    await expect(CollectionPlanStore.open(path).then(reopened =>
+      reopened.latest('zsxq-chen-teacher', 1)[0])).resolves.toEqual(before);
+  });
+
+  it('rolls back ordinary plan mutations when their atomic persistence fails', async () => {
+    const root = await temporaryDirectories.create('plan-store-mutation-rollback-');
+    const path = join(root, 'plans.json');
+    const backupPath = join(root, 'plans.persisted.json');
+    const store = await CollectionPlanStore.open(path, () => '2026-08-25T00:00:00.000Z');
+    const batch = await store.start('zsxq-chen-teacher');
+    const before = store.latest('zsxq-chen-teacher', 1)[0]!;
+    await rename(path, backupPath);
+    await mkdir(path);
+
+    try {
+      await expect(store.markDelivered(batch.id, '9fa6e4766912')).rejects.toThrow();
+      expect(store.latest('zsxq-chen-teacher', 1)[0]).toEqual(before);
+    } finally {
+      await rmdir(path);
+      await rename(backupPath, path);
+    }
+  });
   it('keeps a batch running until every attached child is terminal', async () => {
     const root = await temporaryDirectories.create('plan-store-');
     const store = await CollectionPlanStore.open(

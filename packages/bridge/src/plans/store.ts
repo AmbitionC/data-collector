@@ -347,13 +347,7 @@ export class CollectionPlanStore {
   }
 
   private serializeMutation<T>(operation: () => Promise<T>): Promise<T> {
-    const result = this.mutationQueue.then(operation, operation);
-    this.mutationQueue = result.then(() => undefined, () => undefined);
-    return result;
-  }
-
-  private serializeTransactionalMutation<T>(operation: () => Promise<T>): Promise<T> {
-    return this.serializeMutation(async () => {
+    const transactionalOperation = async (): Promise<T> => {
       const snapshot = structuredClone(this.batches);
       try {
         return await operation();
@@ -362,7 +356,14 @@ export class CollectionPlanStore {
         for (const [id, batch] of snapshot) this.batches.set(id, batch);
         throw error;
       }
-    });
+    };
+    const result = this.mutationQueue.then(transactionalOperation, transactionalOperation);
+    this.mutationQueue = result.then(() => undefined, () => undefined);
+    return result;
+  }
+
+  private serializeTransactionalMutation<T>(operation: () => Promise<T>): Promise<T> {
+    return this.serializeMutation(operation);
   }
 
   private persist(): Promise<void> {

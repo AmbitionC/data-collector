@@ -8,7 +8,8 @@ import {
   pendingIds,
   safeSlug,
 } from '../../packages/bridge/src/library/index.js';
-import { readResponseBytes } from '../../packages/bridge/src/library/assets.js';
+import { downloadAssets, readResponseBytes } from '../../packages/bridge/src/library/assets.js';
+import { atomicWriteText } from '../../packages/bridge/src/library/writer.js';
 import { createTemporaryDirectoryTracker } from '../helpers/temp.js';
 
 const URL = 'https://mp.weixin.qq.com/s/library-test';
@@ -56,6 +57,38 @@ describe('library paths', () => {
 });
 
 describe('Markdown library', () => {
+  it('removes a text temp file when its final atomic rename fails', async () => {
+    const root = await temporaryDirectory();
+    const target = join(root, 'blocked-target');
+    await mkdir(target);
+
+    await expect(atomicWriteText(root, target, 'content')).rejects.toThrow();
+
+    expect((await readdir(root)).filter(name => name.endsWith('.tmp'))).toEqual([]);
+  });
+
+  it('removes an asset temp file when its final atomic rename fails', async () => {
+    const root = await temporaryDirectory();
+    const entryDirectory = join(root, 'entry');
+    const assetsDirectory = join(entryDirectory, 'assets');
+    const blockedTarget = join(assetsDirectory, '0f4636c78f65d363-image.png');
+    await mkdir(blockedTarget, { recursive: true });
+
+    const result = await downloadAssets({
+      html: '<img src="https://img.example/blocked.png">',
+      images: [{ url: 'https://img.example/blocked.png', alt: 'image' }],
+      entryDirectory,
+      libraryRoot: root,
+      fetch: async () => new Response(new Uint8Array([137, 80, 78, 71]), {
+        headers: { 'content-type': 'image/png', 'content-length': '4' },
+      }),
+      resolveAddresses: async () => ['93.184.216.34'],
+    });
+
+    expect(result).toMatchObject({ downloaded: 0, failed: 1 });
+    expect((await readdir(assetsDirectory)).filter(name => name.endsWith('.tmp'))).toEqual([]);
+  });
+
   it('writes assets and catalog atomically while preserving a stable update path', async () => {
     const root = await temporaryDirectory();
     const fetcher = vi.fn<typeof fetch>(async input => {

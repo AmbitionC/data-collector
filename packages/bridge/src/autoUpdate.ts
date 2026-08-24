@@ -113,7 +113,8 @@ export async function updateWorkspace(
    * npm run package。
    */
   const built = await host.builtCommit?.(repoRoot);
-  const stale = built !== undefined && !before.startsWith(built);
+  const stale = host.builtCommit !== undefined
+    && (built === undefined || !before.startsWith(built));
   if (target === before && !stale) {
     return {
       changed: false,
