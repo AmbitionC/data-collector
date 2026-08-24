@@ -67,10 +67,8 @@ export function pendingNowcoderPlanJobs(
   const latestByContentId = new Map<string, JobRecord>();
   for (const job of jobs) {
     if (
-      job.planId !== 'nowcoder-agent-market'
-      || job.status !== 'saved'
+      job.status !== 'saved'
       || !job.outputPath
-      || !job.batchId
     ) continue;
     const canonicalUrl = canonicalJobUrl(job.url);
     if (!canonicalUrl) continue;

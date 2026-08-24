@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import type { JobRecord } from '@data-collector/shared';
+import { stableContentId, type JobRecord } from '@data-collector/shared';
 import {
   knownNowcoderPlanUrls,
   pendingNowcoderPlanJobs,
@@ -74,7 +74,7 @@ describe('knownNowcoderPlanUrls', () => {
 });
 
 describe('pendingNowcoderPlanJobs', () => {
-  it('keeps only the latest saved pending copy from a historical Nowcoder batch', () => {
+  it('reuses the latest saved pending copy from plans and one-off collection', () => {
     const pending = job('2001-old', 'saved', '2026-08-23T07:00:00.000Z', {
       url: 'https://www.nowcoder.com/discuss/2001',
       outputPath: '/tmp/2001-old/index.md',
@@ -97,15 +97,14 @@ describe('pendingNowcoderPlanJobs', () => {
       batchId: 'old-batch',
       planId: 'nowcoder-agent-market',
     });
-    const detached = job('2001-detached', 'saved', '2026-08-23T11:00:00.000Z', {
-      url: 'https://www.nowcoder.com/discuss/2001',
-      outputPath: '/tmp/2001-detached/index.md',
-      planId: 'nowcoder-agent-market',
+    const detached = job('2004-detached', 'saved', '2026-08-23T11:00:00.000Z', {
+      url: 'https://www.nowcoder.com/discuss/2004',
+      outputPath: '/tmp/2004-detached/index.md',
     });
 
     expect(pendingNowcoderPlanJobs(
       [pending, latest, delivered, failed, detached],
-      new Set(['f8bf804d6dfb']),
-    )).toEqual([latest]);
+      new Set([stableContentId(pending.url), stableContentId(detached.url)]),
+    )).toEqual([detached, latest]);
   });
 });
