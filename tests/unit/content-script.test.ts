@@ -487,13 +487,13 @@ describe('content script list collection', () => {
         <div class="topic-container" data-topic-id="644444444444444">
           <div class="talk-content-container">SPA 延迟渲染后的知识星球帖子。</div>
         </div>`;
-    }, 300);
+    }, 30_000);
 
     const pending = ask<ViewResponse>({ type: 'list.selectView', label: '最新' });
     const response = await settle(pending);
 
     expect(response.selected).toEqual({ label: '最新', topicIds: ['644444444444444'] });
-    expect(timeoutSpy.mock.calls.some(([, milliseconds]) => milliseconds === 10_000)).toBe(true);
+    expect(timeoutSpy.mock.calls.some(([, milliseconds]) => milliseconds === 45_000)).toBe(true);
   });
 
   it('does not accept an already-active view until its delayed topic body is stable', async () => {

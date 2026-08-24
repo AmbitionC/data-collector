@@ -1148,6 +1148,9 @@ async function advanceList(): Promise<{
  * `<app-menu><div class="menu-container"><div class="item ng-star-inserted actived">精华</div>…`
  */
 const MENU_ITEM = '.menu-container .item';
+// Edge 的知识星球冷启动会先进入通用壳页，真实 group SPA/分类栏在慢机器上可能
+// 30 秒后才挂载。这里仍保持有界等待，但不能早于浏览器实际冷启动窗口失败。
+const PLAN_MENU_RENDER_TIMEOUT_MS = 45_000;
 const MENU_ACTIVE = 'actived';
 
 function menuLabels(): { labels: string[]; active?: string } {
@@ -1199,7 +1202,7 @@ function observeDocumentUntil<T>(
 async function waitForMenu(label: ZsxqPlanView): Promise<void> {
   await observeDocumentUntil(
     () => menuLabels().labels.includes(label) ? true : undefined,
-    10_000,
+    PLAN_MENU_RENDER_TIMEOUT_MS,
     () => {
       const observed = menuLabels().labels;
       const detail = observed.length > 0 ? `（当前看到：${observed.join('、')}）` : '（分类栏尚未渲染）';
