@@ -181,14 +181,14 @@ export class CollectionPlanService {
   }
 
   async run(planId: CollectionPlanId, options: { force?: boolean } = {}): Promise<CollectionBatch> {
-    const running = this.dependencies.store.latest(planId, 20).find(batch => batch.status === 'running');
+    const running = this.dependencies.store.active(planId)[0];
     if (running && !options.force) {
       if (this.dependencies.extensionConnected()) await this.execute(running);
-      return this.dependencies.store.latest(planId, 20).find(batch => batch.id === running.id) ?? running;
+      return this.dependencies.store.get(running.id) ?? running;
     }
     const batch = await this.dependencies.store.start(planId);
     if (this.dependencies.extensionConnected()) await this.execute(batch);
-    return this.dependencies.store.latest(planId, 20).find(item => item.id === batch.id) ?? batch;
+    return this.dependencies.store.get(batch.id) ?? batch;
   }
 
   async runDuePlans(): Promise<void> {
@@ -199,7 +199,11 @@ export class CollectionPlanService {
   }
 
   async onExtensionConnected(options: { runDue?: boolean } = {}): Promise<void> {
-    for (const persisted of this.dependencies.store.latest(undefined, 100)) {
+    const recent = this.dependencies.store.latest(undefined, 100);
+    const persistedBatches = recent.concat(
+      this.dependencies.store.active().filter(batch => !recent.some(item => item.id === batch.id)),
+    );
+    for (const persisted of persistedBatches) {
       const batch = persisted.planId === 'nowcoder-agent-market' && persisted.selectionStatus !== 'completed'
         ? await this.dependencies.store.attachRecoveredJobs(
             persisted.id,
