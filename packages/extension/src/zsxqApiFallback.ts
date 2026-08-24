@@ -11,6 +11,7 @@ import {
   parseTopicJson,
   preferredTopicRecord,
   stripInlineMarkup,
+  TOPIC_MESSAGE_CHARACTER_LIMIT,
   type TopicRecord,
 } from './topicIndex.js';
 import { advertisementIn } from './adFilter.js';
@@ -25,7 +26,6 @@ const STICKY_TOPIC_COUNT = 3;
 const PLAN_LOOKBACK_MS = 15 * 24 * 60 * 60 * 1_000;
 const PLAN_ITEMS_PER_VIEW = 20;
 const MAX_VIEW_PAGES = 12;
-const MAX_COLLECTION_CHARACTERS = 2_000_000;
 const EXPECTED_SCOPES: Record<ZsxqPlanView, string> = {
   最新: 'all',
   精华: 'digests',
@@ -167,10 +167,20 @@ function responseData(payload: unknown): Record<string, unknown> | undefined {
   return isRecord(payload.resp_data) ? payload.resp_data : undefined;
 }
 
-function topicNodes(payload: unknown, feed: string): Record<string, unknown>[] {
+function topicNodes(
+  payload: unknown,
+  feed: string,
+  maximumTopics: number,
+): Record<string, unknown>[] {
   const topics = responseData(payload)?.topics;
   if (!Array.isArray(topics)) {
     throw coverageError('ZSXQ_API_RESPONSE_INVALID', `${feed}未返回 topics 数组`);
+  }
+  if (topics.length > maximumTopics) {
+    throw coverageError(
+      'ZSXQ_API_RESPONSE_INVALID',
+      `${feed}返回 ${topics.length} 条 topic，超过请求的 ${maximumTopics} 条`,
+    );
   }
   return topics.map((topic, index) => {
     if (!isRecord(topic)) {
@@ -339,10 +349,10 @@ export async function collectZsxqApiViews(
     const existing = observations.get(document.canonicalUrl);
     if (!existing) {
       observationCharacters += JSON.stringify(document).length;
-      if (observationCharacters > MAX_COLLECTION_CHARACTERS) {
+      if (observationCharacters > TOPIC_MESSAGE_CHARACTER_LIMIT) {
         throw coverageError(
           'ZSXQ_API_PAYLOAD_LIMIT',
-          `已核验内容超过 ${MAX_COLLECTION_CHARACTERS} 字符安全上限`,
+          `已核验内容超过 ${TOPIC_MESSAGE_CHARACTER_LIMIT} 字符安全上限`,
         );
       }
       observations.set(document.canonicalUrl, document);
@@ -365,10 +375,10 @@ export async function collectZsxqApiViews(
       );
     }
     observationCharacters += JSON.stringify(merged.document).length - JSON.stringify(existing).length;
-    if (observationCharacters > MAX_COLLECTION_CHARACTERS) {
+    if (observationCharacters > TOPIC_MESSAGE_CHARACTER_LIMIT) {
       throw coverageError(
         'ZSXQ_API_PAYLOAD_LIMIT',
-        `已核验内容超过 ${MAX_COLLECTION_CHARACTERS} 字符安全上限`,
+        `已核验内容超过 ${TOPIC_MESSAGE_CHARACTER_LIMIT} 字符安全上限`,
       );
     }
     observations.set(document.canonicalUrl, merged.document);
@@ -383,13 +393,7 @@ export async function collectZsxqApiViews(
     documents: CollectedDocument[];
     entries: Array<{ topicId: string; createTime: string }>;
   } => {
-    const topics = topicNodes(payload, feed);
-    if (topics.length > maximumTopics) {
-      throw coverageError(
-        'ZSXQ_API_RESPONSE_INVALID',
-        `${feed}返回 ${topics.length} 条 topic，超过请求的 ${maximumTopics} 条`,
-      );
-    }
+    const topics = topicNodes(payload, feed, maximumTopics);
     const verified = topics.map((topic, index) => {
       const topicId = identifier(topic.topic_id ?? topic.topicId);
       let record: TopicRecord | undefined;
@@ -472,104 +476,27 @@ export async function collectZsxqApiViews(
     }
   };
 
-  interface PagedView {
+  interface ViewState {
     label: ZsxqPlanView;
-    documents: CollectedDocument[];
-    continuation?: {
-      endTime: string;
-      nextPage: number;
-      seenRawIds: string[];
-    };
+    documents: Map<string, CollectedDocument>;
+    seenRawIds: Set<string>;
+    pagesFetched: number;
+    endTime?: string;
+    exhausted: boolean;
   }
 
-  const collectPagedView = async (
-    view: ZsxqPlanView,
-    previous?: PagedView,
-  ): Promise<PagedView> => {
-    const responsePath = `${API_ROOT}/groups/${groupId}/topics`;
-    const documents = new Map<string, CollectedDocument>();
-    addDocuments(documents, previous?.documents ?? []);
-    for (const skippedUrl of businessSkips.keys()) documents.delete(skippedUrl);
-    const seenRawIds = new Set(previous?.continuation?.seenRawIds ?? []);
-    let endTime = previous?.continuation?.endTime;
-    const firstPage = previous?.continuation?.nextPage ?? 0;
-    for (let page = firstPage; page < MAX_VIEW_PAGES; page += 1) {
-      const url = new URL(responsePath);
-      url.searchParams.set('scope', scopes[view]);
-      url.searchParams.set('count', String(TOPIC_PAGE_SIZE));
-      if (endTime) url.searchParams.set('end_time', endTime);
-      const payload = await apiGet(url.href, common);
-      const converted = documentsFromPayload(
-        payload,
-        view,
-        responsePath,
-        `「${view}」第 ${page + 1} 页`,
-        TOPIC_PAGE_SIZE,
-      );
-      let newRawIds = 0;
-      for (const entry of converted.entries) {
-        if (seenRawIds.has(entry.topicId)) continue;
-        seenRawIds.add(entry.topicId);
-        newRawIds += 1;
-      }
-      addDocuments(documents, converted.documents);
-      for (const skippedUrl of businessSkips.keys()) documents.delete(skippedUrl);
-      const times = converted.entries.map(entry => Date.parse(entry.createTime));
-      for (let index = 1; index < times.length; index += 1) {
-        if (times[index]! > times[index - 1]!) {
-          throw coverageError(
-            'ZSXQ_API_ORDER_UNPROVEN',
-            `「${view}」第 ${page + 1} 页未按发布时间倒序返回`,
-          );
-        }
-      }
-      if (endTime && times.some(time => time > Date.parse(endTime!))) {
-        throw coverageError(
-          'ZSXQ_API_CURSOR_UNPROVEN',
-          `「${view}」第 ${page + 1} 页未遵守 end_time 游标`,
-        );
-      }
-      if (converted.entries.length > 0 && newRawIds === 0) {
-        throw coverageError(
-          'ZSXQ_API_CURSOR_UNPROVEN',
-          `「${view}」第 ${page + 1} 页没有出现新的 topic_id`,
-        );
-      }
-      if (converted.entries.length < TOPIC_PAGE_SIZE) {
-        return {
-          label: view,
-          documents: [...documents.values()].slice(0, PLAN_ITEMS_PER_VIEW),
-        };
-      }
-      const oldestTime = times.at(-1)!;
-      if (oldestTime <= cutoff) {
-        return {
-          label: view,
-          documents: [...documents.values()].slice(0, PLAN_ITEMS_PER_VIEW),
-        };
-      }
-      const nextEndTime = new Date(oldestTime - 1).toISOString();
-      if (nextEndTime === endTime) {
-        throw coverageError('ZSXQ_API_CURSOR_UNPROVEN', `「${view}」分页游标没有前进`);
-      }
-      if (documents.size >= PLAN_ITEMS_PER_VIEW) {
-        return {
-          label: view,
-          documents: [...documents.values()].slice(0, PLAN_ITEMS_PER_VIEW),
-          continuation: {
-            endTime: nextEndTime,
-            nextPage: page + 1,
-            seenRawIds: [...seenRawIds],
-          },
-        };
-      }
-      endTime = nextEndTime;
+  const responsePath = `${API_ROOT}/groups/${groupId}/topics`;
+  const states: ViewState[] = REQUIRED_VIEWS.map(label => ({
+    label,
+    documents: new Map(),
+    seenRawIds: new Set(),
+    pagesFetched: 0,
+    exhausted: false,
+  }));
+  const pruneBusinessSkips = (): void => {
+    for (const state of states) {
+      for (const skippedUrl of businessSkips.keys()) state.documents.delete(skippedUrl);
     }
-    throw coverageError(
-      'ZSXQ_API_PAGE_LIMIT',
-      `「${view}」已翻满 ${MAX_VIEW_PAGES} 页仍未取得 ${PLAN_ITEMS_PER_VIEW} 条可核验文档，`
-      + '且尚未证明最近 15 天内容已经耗尽',
-    );
   };
 
   const stickyPath = `${API_ROOT}/groups/${groupId}/topics/sticky`;
@@ -583,28 +510,92 @@ export async function collectZsxqApiViews(
     '「最新」置顶列表',
     STICKY_TOPIC_COUNT,
   );
-  const byView = await Promise.all(REQUIRED_VIEWS.map(view => collectPagedView(view)));
-  // A richer copy discovered by a later view can turn an earlier accepted short copy into a
-  // business skip. Resume capped views from their proven cursor so the final delivery keeps its
-  // promised capacity without re-fetching the first page or making every normal run fetch ahead.
-  for (let pass = 0; pass < MAX_VIEW_PAGES; pass += 1) {
-    const refillIndexes = byView.flatMap((view, index) => {
-      const retained = view.documents.filter(document => !businessSkips.has(document.canonicalUrl));
-      return view.continuation && retained.length < PLAN_ITEMS_PER_VIEW
-        ? [index]
-        : [];
-    });
-    if (refillIndexes.length === 0) break;
-    for (const index of refillIndexes) {
-      byView[index] = await collectPagedView(byView[index]!.label, byView[index]);
-    }
-    if (pass === MAX_VIEW_PAGES - 1) {
+
+  while (true) {
+    pruneBusinessSkips();
+    const activeStates = states.filter(state =>
+      !state.exhausted && state.documents.size < PLAN_ITEMS_PER_VIEW);
+    if (activeStates.length === 0) break;
+    const pageLimited = activeStates.find(state => state.pagesFetched >= MAX_VIEW_PAGES);
+    if (pageLimited) {
       throw coverageError(
-        'ZSXQ_API_BUSINESS_FILTER_UNSTABLE',
-        '跨视图业务过滤在安全轮数内仍未稳定',
+        'ZSXQ_API_PAGE_LIMIT',
+        `「${pageLimited.label}」已翻满 ${MAX_VIEW_PAGES} 页仍未取得 ${PLAN_ITEMS_PER_VIEW} 条可核验文档，`
+        + '且尚未证明最近 15 天内容已经耗尽',
       );
     }
+    const pages = await Promise.all(activeStates.map(async state => {
+      const url = new URL(responsePath);
+      url.searchParams.set('scope', scopes[state.label]);
+      url.searchParams.set('count', String(TOPIC_PAGE_SIZE));
+      if (state.endTime) url.searchParams.set('end_time', state.endTime);
+      return { state, payload: await apiGet(url.href, common) };
+    }));
+
+    for (const { state, payload } of pages) {
+      const pageNumber = state.pagesFetched + 1;
+      const feed = `「${state.label}」第 ${pageNumber} 页`;
+      const converted = documentsFromPayload(
+        payload,
+        state.label,
+        responsePath,
+        feed,
+        TOPIC_PAGE_SIZE,
+      );
+      let newRawIds = 0;
+      for (const entry of converted.entries) {
+        if (state.seenRawIds.has(entry.topicId)) continue;
+        state.seenRawIds.add(entry.topicId);
+        newRawIds += 1;
+      }
+      addDocuments(state.documents, converted.documents);
+      const times = converted.entries.map(entry => Date.parse(entry.createTime));
+      for (let index = 1; index < times.length; index += 1) {
+        if (times[index]! > times[index - 1]!) {
+          throw coverageError(
+            'ZSXQ_API_ORDER_UNPROVEN',
+            `${feed}未按发布时间倒序返回`,
+          );
+        }
+      }
+      if (state.endTime && times.some(time => time > Date.parse(state.endTime!))) {
+        throw coverageError(
+          'ZSXQ_API_CURSOR_UNPROVEN',
+          `${feed}未遵守 end_time 游标`,
+        );
+      }
+      if (converted.entries.length > 0 && newRawIds === 0) {
+        throw coverageError(
+          'ZSXQ_API_CURSOR_UNPROVEN',
+          `${feed}没有出现新的 topic_id`,
+        );
+      }
+      state.pagesFetched = pageNumber;
+      if (converted.entries.length < TOPIC_PAGE_SIZE) {
+        state.exhausted = true;
+        continue;
+      }
+      const oldestTime = times.at(-1)!;
+      if (oldestTime <= cutoff) {
+        state.exhausted = true;
+        continue;
+      }
+      const nextEndTime = new Date(oldestTime - 1).toISOString();
+      if (nextEndTime === state.endTime) {
+        throw coverageError(
+          'ZSXQ_API_CURSOR_UNPROVEN',
+          `「${state.label}」分页游标没有前进`,
+        );
+      }
+      state.endTime = nextEndTime;
+    }
+    pruneBusinessSkips();
   }
+
+  const byView = states.map(state => ({
+    label: state.label,
+    documents: [...state.documents.values()].slice(0, PLAN_ITEMS_PER_VIEW),
+  }));
   const latest = byView.find(view => view.label === '最新');
   if (!latest) {
     throw coverageError('ZSXQ_API_VIEW_UNPROVEN', '未生成「最新」视图');
