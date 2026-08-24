@@ -395,6 +395,48 @@ describe('ZSXQ API fallback', () => {
     ]);
   });
 
+  it('filters a skipped sticky copy before it can displace a retained latest post', async () => {
+    const stickyTopicId = '775500000000000000';
+    const latestTopics = Array.from({ length: 20 }, (_, index) => topic(
+      String(775_500_000_000_000_100n + BigInt(index)),
+      new Date(Date.parse('2026-08-24T22:00:00.000Z') - index * 60 * 1_000).toISOString(),
+    ));
+    const fetcher = async (input: RequestInfo | URL): Promise<Response> => {
+      const url = new URL(String(input));
+      if (url.href === `${API}/groups/${GROUP_ID}`) return groupResponse();
+      if (url.href === `${API}/groups/${GROUP_ID}/menus`) return menuResponse();
+      if (url.pathname.endsWith('/topics/sticky')) {
+        return topicResponse([topic(
+          stickyTopicId,
+          '2026-08-24T23:00:00.000Z',
+          '打新观察',
+        )]);
+      }
+      if (url.searchParams.get('scope') === 'all') return topicResponse(latestTopics);
+      if (url.searchParams.get('scope') === 'digests') {
+        return topicResponse([topic(
+          stickyTopicId,
+          '2026-08-24T23:00:00.000Z',
+          '打新观察：新股积极申购',
+        )]);
+      }
+      return topicResponse([]);
+    };
+
+    const collection = await collectZsxqApiViews(GROUP_ID, {
+      fetcher,
+      aduid: 'test-device',
+      now: () => new Date('2026-08-25T00:00:00.000Z'),
+      requestId: () => 'test-request',
+    });
+
+    expect(collection.documents).toHaveLength(20);
+    expect(collection.documents.some(document =>
+      document.sourceMetadata?.topicId === stickyTopicId)).toBe(false);
+    expect(collection.documents.some(document =>
+      document.sourceMetadata?.topicId === '775500000000000119')).toBe(true);
+  });
+
   it('resumes a capped view when a later cross-view business skip removes one document', async () => {
     const sharedTopicId = '776000000000000000';
     const firstPage = Array.from({ length: 20 }, (_, index) => topic(
