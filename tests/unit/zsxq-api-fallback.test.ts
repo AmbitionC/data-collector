@@ -80,4 +80,32 @@ describe('ZSXQ API fallback', () => {
       requestId: () => 'test-request',
     })).rejects.toThrow(/AUTH_REQUIRED/u);
   });
+
+  it('keeps a permission code actionable instead of hiding it as a generic fallback failure', async () => {
+    await expect(collectZsxqApiViews(GROUP_ID, {
+      fetcher: async () => response(
+        '{"code":1030,"succeeded":false,"info":"当前账号无权访问该星球"}',
+      ),
+      aduid: 'test-device',
+      requestId: () => 'test-request',
+    })).rejects.toThrow(/AUTH_REQUIRED.*1030.*无权访问/u);
+  });
+
+  it('classifies a non-JSON forbidden response before treating it as a parse failure', async () => {
+    await expect(collectZsxqApiViews(GROUP_ID, {
+      fetcher: async () => new Response('<html>forbidden</html>', { status: 403 }),
+      aduid: 'test-device',
+      requestId: () => 'test-request',
+    })).rejects.toThrow(/AUTH_REQUIRED.*HTTP 403/u);
+  });
+
+  it('surfaces signature rejection with the exact server code', async () => {
+    await expect(collectZsxqApiViews(GROUP_ID, {
+      fetcher: async () => response(
+        '{"code":1059,"succeeded":false,"info":"X-Signature 校验失败"}',
+      ),
+      aduid: 'test-device',
+      requestId: () => 'test-request',
+    })).rejects.toThrow(/ZSXQ_API_SIGNATURE_INVALID.*1059.*X-Signature/u);
+  });
 });

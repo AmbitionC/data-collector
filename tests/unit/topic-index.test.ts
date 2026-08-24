@@ -6,10 +6,35 @@ import {
   topicRecordsFromMessage,
   harvestTopics,
   normalizeForMatch,
+  parseTopicJson,
   preferredTopicRecord,
 } from '../../packages/extension/src/topicIndex.js';
 
 describe('harvestTopics', () => {
+  it('preserves every int64 identity field used to prove the topic and its owner', () => {
+    const payload = parseTopicJson(String.raw`{
+      "topic_id":9223372036854775807,
+      "group_id":9223372036854775806,
+      "menuId":9223372036854775805,
+      "owner":{"user_id":9223372036854775804,"userId":9223372036854775803}
+    }`) as {
+      topic_id: unknown;
+      group_id: unknown;
+      menuId: unknown;
+      owner: { user_id: unknown; userId: unknown };
+    };
+
+    expect(payload).toEqual({
+      topic_id: '9223372036854775807',
+      group_id: '9223372036854775806',
+      menuId: '9223372036854775805',
+      owner: {
+        user_id: '9223372036854775804',
+        userId: '9223372036854775803',
+      },
+    });
+  });
+
   it('finds topic ids at any depth without assuming the response schema', () => {
     // 不写死接口结构：只认「对象里有 topic_id」，字段调整了也不会立刻失效。
     const payload = {

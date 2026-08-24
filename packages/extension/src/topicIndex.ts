@@ -730,11 +730,17 @@ interface SourceAssets {
 }
 
 /**
- * 原生 JSON.parse 会在我们看见值之前把 int64 topic_id 四舍五入。这里只重写 JSON 对象里
- * 精确名为 topic_id/topicId 的整数 token 为字符串，其他字节原样交回 JSON.parse；因此既
- * 保留精确身份，也不会把正文字符串里看起来像 JSON 的片段误改掉。
+ * 原生 JSON.parse 会在我们看见值之前把 int64 身份字段四舍五入。这里只重写 JSON 对象里
+ * 明确用于身份核验的 id 整数 token 为字符串，其他字节原样交回 JSON.parse；因此既保留
+ * 帖子、星主、星球与菜单的精确身份，也不会把正文字符串里看起来像 JSON 的片段误改掉。
  */
 export function parseTopicJson(body: string): unknown {
+  const losslessIdentityKeys = new Set([
+    'topic_id', 'topicId',
+    'user_id', 'userId',
+    'group_id', 'groupId',
+    'menu_id', 'menuId',
+  ]);
   let rewritten = '';
   let copiedUntil = 0;
   let cursor = 0;
@@ -763,7 +769,7 @@ export function parseTopicJson(body: string): unknown {
       continue;
     }
     cursor = tokenEnd;
-    if (key !== 'topic_id' && key !== 'topicId') continue;
+    if (typeof key !== 'string' || !losslessIdentityKeys.has(key)) continue;
     let colon = cursor;
     while (/\s/u.test(body[colon] ?? '')) colon += 1;
     if (body[colon] !== ':') continue;

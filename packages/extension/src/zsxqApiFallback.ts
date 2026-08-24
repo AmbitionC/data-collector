@@ -43,7 +43,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function identifier(value: unknown): string | undefined {
   if (typeof value === 'string' && /^\d+$/u.test(value)) return value;
-  if (typeof value === 'number' && Number.isFinite(value)) return String(value);
+  if (typeof value === 'number' && Number.isSafeInteger(value) && value >= 0) return String(value);
   return undefined;
 }
 
@@ -69,6 +69,44 @@ async function signedHeaders(url: string, aduid: string, requestId: string): Pro
   });
 }
 
+const MEMBER_ACCESS_ERROR_CODES = new Set([
+  '401', '403',
+  '1005', '1008', '1009', '1015',
+  '1030', '1036', '1037',
+]);
+
+function serverCode(payload: unknown): string | undefined {
+  if (!isRecord(payload)) return undefined;
+  const code = payload.code;
+  if (typeof code === 'string' && code.trim()) return code.trim();
+  if (typeof code === 'number' && Number.isSafeInteger(code)) return String(code);
+  return undefined;
+}
+
+function serverDetail(payload: unknown): string | undefined {
+  if (!isRecord(payload)) return undefined;
+  for (const key of ['info', 'message', 'msg', 'error'] as const) {
+    const value = payload[key];
+    if (typeof value === 'string' && value.trim()) return value.trim().slice(0, 500);
+    if (!isRecord(value)) continue;
+    for (const nestedKey of ['info', 'message', 'msg'] as const) {
+      const nested = value[nestedKey];
+      if (typeof nested === 'string' && nested.trim()) return nested.trim().slice(0, 500);
+    }
+  }
+  return undefined;
+}
+
+function failureEvidence(payload: unknown, status: number): string {
+  const code = serverCode(payload);
+  const detail = serverDetail(payload);
+  return [
+    `HTTP ${status}`,
+    ...(code ? [`服务端 code ${code}`] : []),
+    ...(detail ? [detail] : []),
+  ].join('，');
+}
+
 async function apiGet(
   url: string,
   dependencies: Required<Pick<ZsxqApiFallbackDependencies, 'fetcher' | 'requestId'>>
@@ -88,14 +126,25 @@ async function apiGet(
   try {
     payload = parseTopicJson(body);
   } catch {
+    if (response.status === 401 || response.status === 403) {
+      throw new Error(`AUTH_REQUIRED：知识星球登录或成员访问不可用（HTTP ${response.status}）`);
+    }
     throw new Error(`ZSXQ_API_FALLBACK_FAILED：知识星球接口返回了非 JSON 内容（HTTP ${response.status}）`);
   }
-  const code = isRecord(payload) ? payload.code : undefined;
-  if (response.status === 401 || code === 401) {
-    throw new Error('AUTH_REQUIRED：知识星球浏览器会话已失效，无法读取最近内容');
+  const code = serverCode(payload);
+  const evidence = failureEvidence(payload, response.status);
+  if (code === '1059') {
+    throw new Error(`ZSXQ_API_SIGNATURE_INVALID：知识星球接口签名校验失败（${evidence}）`);
+  }
+  if (
+    response.status === 401
+    || response.status === 403
+    || (code !== undefined && MEMBER_ACCESS_ERROR_CODES.has(code))
+  ) {
+    throw new Error(`AUTH_REQUIRED：知识星球登录或成员访问不可用（${evidence}）`);
   }
   if (!response.ok || !isRecord(payload) || payload.succeeded !== true) {
-    throw new Error(`ZSXQ_API_FALLBACK_FAILED：知识星球接口拒绝请求（HTTP ${response.status}）`);
+    throw new Error(`ZSXQ_API_FALLBACK_FAILED：知识星球接口拒绝请求（${evidence}）`);
   }
   return payload;
 }

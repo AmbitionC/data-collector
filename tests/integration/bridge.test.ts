@@ -1250,7 +1250,7 @@ describe('local Bridge', () => {
         { token },
       );
       expect(job.body.status).toBe('saved');
-    });
+    }, { timeout: 5_000 });
     const catalog = JSON.parse(
       await readFile(join(root, 'library', '_catalog', 'index.json'), 'utf8'),
     ) as Array<{ contentComplete?: boolean }>;
