@@ -31,6 +31,19 @@ function topicResponse(topics: readonly Record<string, unknown>[]): Response {
   return response(JSON.stringify({ succeeded: true, resp_data: { topics } }));
 }
 
+function groupResponse(): Response {
+  return response('{"succeeded":true,"resp_data":{"group":{"owner":{"user_id":"1001","name":"陈老师"}}}}');
+}
+
+function menuResponse(): Response {
+  return response('{"succeeded":true,"resp_data":{"menus":['
+    + '{"title":"最新","preset":true,"preset_type":"all"},'
+    + '{"title":"精华","preset":true,"preset_type":"digests"}'
+    + '],"optional_menus":['
+    + '{"title":"只看星主","preset":true,"preset_type":"by_owner"}'
+    + ']}}');
+}
+
 describe('ZSXQ API fallback', () => {
   it('collects and unions the three required views without reading the blank SPA DOM', async () => {
     const topic = String.raw`{
@@ -155,6 +168,202 @@ describe('ZSXQ API fallback', () => {
       .toMatchObject({ sourceMetadata: { viewLabels: '最新' }, truncated: false });
     expect(collection.documents.find(item => item.sourceMetadata?.topicId === '700000000000000020'))
       .toMatchObject({ sourceMetadata: { viewLabels: '最新、精华、只看星主' } });
+  });
+
+  it('stops at twenty documents per view and does not let old sticky topics displace newer posts', async () => {
+    const scopeBase: Record<string, bigint> = {
+      all: 710_000_000_000_000_000n,
+      digests: 720_000_000_000_000_000n,
+      by_owner: 730_000_000_000_000_000n,
+    };
+    const sticky = Array.from({ length: 3 }, (_, index) => topic(
+      String(790_000_000_000_000_000n + BigInt(index)),
+      new Date(Date.parse('2026-08-01T00:00:00.000Z') - index * 1_000).toISOString(),
+    ));
+    const fetcher = vi.fn(async (input: RequestInfo | URL) => {
+      const url = new URL(String(input));
+      if (url.href === `${API}/groups/${GROUP_ID}`) return groupResponse();
+      if (url.href === `${API}/groups/${GROUP_ID}/menus`) return menuResponse();
+      if (url.pathname.endsWith('/topics/sticky')) return topicResponse(sticky);
+      const base = scopeBase[url.searchParams.get('scope') ?? ''];
+      if (base !== undefined) {
+        return topicResponse(Array.from({ length: 20 }, (_, index) => topic(
+          String(base + BigInt(index)),
+          new Date(Date.parse('2026-08-24T23:00:00.000Z') - index * 60 * 60 * 1_000).toISOString(),
+        )));
+      }
+      return response('{"code":404,"succeeded":false}', 404);
+    });
+
+    const collection = await collectZsxqApiViews(GROUP_ID, {
+      fetcher,
+      aduid: 'test-device',
+      now: () => new Date('2026-08-25T00:00:00.000Z'),
+      requestId: () => 'test-request',
+    });
+
+    expect(fetcher).toHaveBeenCalledTimes(6);
+    expect(collection.documents).toHaveLength(60);
+    expect(collection.documents.some(document =>
+      String(document.sourceMetadata?.topicId).startsWith('79'))).toBe(false);
+  });
+
+  it('fails closed after twelve full pages instead of returning a partial view', async () => {
+    const pageByScope = new Map<string, number>();
+    const scopeOffset: Record<string, bigint> = {
+      all: 0n,
+      digests: 10_000_000n,
+      by_owner: 20_000_000n,
+    };
+    const fetcher = vi.fn(async (input: RequestInfo | URL) => {
+      const url = new URL(String(input));
+      if (url.href === `${API}/groups/${GROUP_ID}`) return groupResponse();
+      if (url.href === `${API}/groups/${GROUP_ID}/menus`) return menuResponse();
+      if (url.pathname.endsWith('/topics/sticky')) return topicResponse([]);
+      const scope = url.searchParams.get('scope') ?? '';
+      const page = pageByScope.get(scope) ?? 0;
+      pageByScope.set(scope, page + 1);
+      const offset = scopeOffset[scope] ?? 0n;
+      return topicResponse(Array.from({ length: 20 }, (_, index) => {
+        const position = page * 20 + index;
+        return topic(
+          String(740_000_000_000_000_000n + offset + BigInt(position)),
+          new Date(Date.parse('2026-08-24T23:00:00.000Z') - position * 10 * 60 * 1_000).toISOString(),
+          '打新 新股 积极申购',
+        );
+      }));
+    });
+
+    await expect(collectZsxqApiViews(GROUP_ID, {
+      fetcher,
+      aduid: 'test-device',
+      now: () => new Date('2026-08-25T00:00:00.000Z'),
+      requestId: () => 'test-request',
+    })).rejects.toThrow(/CONTENT_COVERAGE_INCOMPLETE.*ZSXQ_API_PAGE_LIMIT.*12/u);
+    const pageCounts = [...pageByScope.values()];
+    expect(Math.max(...pageCounts)).toBe(12);
+    expect(pageCounts.every(count => count <= 12)).toBe(true);
+  });
+
+  it('rejects a repeated full page when the server ignores the pagination cursor', async () => {
+    const repeated = Array.from({ length: 20 }, (_, index) => topic(
+      String(760_000_000_000_000_000n + BigInt(index)),
+      new Date(Date.parse('2026-08-24T23:00:00.000Z') - index * 60 * 1_000).toISOString(),
+      '打新 新股 积极申购',
+    ));
+    const fetcher = async (input: RequestInfo | URL): Promise<Response> => {
+      const url = new URL(String(input));
+      if (url.href === `${API}/groups/${GROUP_ID}`) return groupResponse();
+      if (url.href === `${API}/groups/${GROUP_ID}/menus`) return menuResponse();
+      if (url.pathname.endsWith('/topics/sticky')) return topicResponse([]);
+      return topicResponse(repeated);
+    };
+
+    await expect(collectZsxqApiViews(GROUP_ID, {
+      fetcher,
+      aduid: 'test-device',
+      now: () => new Date('2026-08-25T00:00:00.000Z'),
+      requestId: () => 'test-request',
+    })).rejects.toThrow(/CONTENT_COVERAGE_INCOMPLETE.*ZSXQ_API_CURSOR_UNPROVEN/u);
+  });
+
+  it('validates a later page cursor before accepting the document that fills the quota', async () => {
+    const firstPage = Array.from({ length: 20 }, (_, index) => topic(
+      String(765_000_000_000_000_000n + BigInt(index)),
+      new Date(Date.parse('2026-08-24T23:00:00.000Z') - index * 60 * 60 * 1_000).toISOString(),
+      index === 0 ? '打新 新股 积极申购' : undefined,
+    ));
+    const secondIds: Record<string, string> = {
+      all: '765000000000000020',
+      digests: '765000000000000021',
+      by_owner: '765000000000000022',
+    };
+    const fetcher = async (input: RequestInfo | URL): Promise<Response> => {
+      const url = new URL(String(input));
+      if (url.href === `${API}/groups/${GROUP_ID}`) return groupResponse();
+      if (url.href === `${API}/groups/${GROUP_ID}/menus`) return menuResponse();
+      if (url.pathname.endsWith('/topics/sticky')) return topicResponse([]);
+      if (!url.searchParams.has('end_time')) return topicResponse(firstPage);
+      const scope = url.searchParams.get('scope') ?? '';
+      return topicResponse([topic(
+        secondIds[scope]!,
+        scope === 'all' ? '2026-08-24T22:30:00.000Z' : '2026-08-24T03:00:00.000Z',
+      )]);
+    };
+
+    await expect(collectZsxqApiViews(GROUP_ID, {
+      fetcher,
+      aduid: 'test-device',
+      now: () => new Date('2026-08-25T00:00:00.000Z'),
+      requestId: () => 'test-request',
+    })).rejects.toThrow(/CONTENT_COVERAGE_INCOMPLETE.*ZSXQ_API_CURSOR_UNPROVEN/u);
+  });
+
+  it('validates first-page ordering even when that page already fills the quota', async () => {
+    const unordered = Array.from({ length: 20 }, (_, index) => topic(
+      String(766_000_000_000_000_000n + BigInt(index)),
+      new Date(Date.parse('2026-08-24T23:00:00.000Z') - index * 60 * 60 * 1_000).toISOString(),
+    ));
+    unordered[19] = topic(
+      '766000000000000019',
+      '2026-08-24T22:30:00.000Z',
+    );
+    const fetcher = async (input: RequestInfo | URL): Promise<Response> => {
+      const url = new URL(String(input));
+      if (url.href === `${API}/groups/${GROUP_ID}`) return groupResponse();
+      if (url.href === `${API}/groups/${GROUP_ID}/menus`) return menuResponse();
+      if (url.pathname.endsWith('/topics/sticky')) return topicResponse([]);
+      return topicResponse(unordered);
+    };
+
+    await expect(collectZsxqApiViews(GROUP_ID, {
+      fetcher,
+      aduid: 'test-device',
+      now: () => new Date('2026-08-25T00:00:00.000Z'),
+      requestId: () => 'test-request',
+    })).rejects.toThrow(/CONTENT_COVERAGE_INCOMPLETE.*ZSXQ_API_ORDER_UNPROVEN/u);
+  });
+
+  it('rejects an invalid owner scope instead of silently collecting the wrong view', async () => {
+    const fetcher = async (input: RequestInfo | URL): Promise<Response> => {
+      const url = String(input);
+      if (url === `${API}/groups/${GROUP_ID}`) return groupResponse();
+      if (url === `${API}/groups/${GROUP_ID}/menus`) {
+        return response('{"succeeded":true,"resp_data":{"menus":['
+          + '{"title":"最新","preset":true,"preset_type":"all"},'
+          + '{"title":"精华","preset":true,"preset_type":"digests"},'
+          + '{"title":"只看星主","preset":true,"preset_type":"owner"}'
+          + ']}}');
+      }
+      return topicResponse([]);
+    };
+
+    await expect(collectZsxqApiViews(GROUP_ID, {
+      fetcher,
+      aduid: 'test-device',
+      requestId: () => 'test-request',
+    })).rejects.toThrow(/ZSXQ_API_VIEW_UNPROVEN.*by_owner.*owner/u);
+  });
+
+  it('fails closed when a topic has no exact publication time for pagination and filtering', async () => {
+    const fetcher = async (input: RequestInfo | URL): Promise<Response> => {
+      const url = new URL(String(input));
+      if (url.href === `${API}/groups/${GROUP_ID}`) return groupResponse();
+      if (url.href === `${API}/groups/${GROUP_ID}/menus`) return menuResponse();
+      if (url.pathname.endsWith('/topics/sticky')) return topicResponse([]);
+      return topicResponse([{
+        topic_id: '770000000000000001',
+        type: 'talk',
+        create_time: 'not-a-time',
+        talk: { text: '投资经营正文', owner: { user_id: '1001' } },
+      }]);
+    };
+
+    await expect(collectZsxqApiViews(GROUP_ID, {
+      fetcher,
+      aduid: 'test-device',
+      requestId: () => 'test-request',
+    })).rejects.toThrow(/CONTENT_COVERAGE_INCOMPLETE.*ZSXQ_API_PUBLISHED_AT_UNPROVEN.*770000000000000001/u);
   });
 
   it('fails closed when a successful topic page contains an unconvertible entry', async () => {
