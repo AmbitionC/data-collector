@@ -366,6 +366,35 @@ describe('ZSXQ API fallback', () => {
     })).rejects.toThrow(/CONTENT_COVERAGE_INCOMPLETE.*ZSXQ_API_PUBLISHED_AT_UNPROVEN.*770000000000000001/u);
   });
 
+  it('keeps a business skip sticky when only a richer cross-view copy proves it', async () => {
+    const topicId = '775000000000000001';
+    const fetcher = async (input: RequestInfo | URL): Promise<Response> => {
+      const url = new URL(String(input));
+      if (url.href === `${API}/groups/${GROUP_ID}`) return groupResponse();
+      if (url.href === `${API}/groups/${GROUP_ID}/menus`) return menuResponse();
+      if (url.pathname.endsWith('/topics/sticky')) return topicResponse([]);
+      const text = url.searchParams.get('scope') === 'all'
+        ? '打新观察'
+        : '打新观察：新股积极申购';
+      return topicResponse([topic(topicId, '2026-08-24T12:00:00.000Z', text)]);
+    };
+
+    const collection = await collectZsxqApiViews(GROUP_ID, {
+      fetcher,
+      aduid: 'test-device',
+      now: () => new Date('2026-08-25T00:00:00.000Z'),
+      requestId: () => 'test-request',
+    });
+
+    expect(collection.documents).toEqual([]);
+    expect(collection.businessSkips).toEqual([
+      expect.objectContaining({
+        url: `https://wx.zsxq.com/group/${GROUP_ID}/topic/${topicId}`,
+        reason: expect.stringContaining('打新内容'),
+      }),
+    ]);
+  });
+
   it('fails closed when a successful topic page contains an unconvertible entry', async () => {
     const fetcher = async (input: RequestInfo | URL): Promise<Response> => {
       const url = new URL(String(input));
