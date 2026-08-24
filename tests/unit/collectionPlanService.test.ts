@@ -651,10 +651,12 @@ describe('CollectionPlanService', () => {
     });
   });
 
-  it('retries the same exact ten without partial delivery after a mixed sync failure', async () => {
+  it('retries the same exact ten after mixed sync and retry-finalization failures', async () => {
     const syncAttempts: string[] = [];
     const sinkUrls = new Set<string>();
     let failOne = true;
+    let planPath = '';
+    let persistedPath = '';
     const context = await fixture({
       candidates: nowcoderCandidates(10, 17_000),
       selectNowcoderJobs: async jobs => ({
@@ -666,8 +668,14 @@ describe('CollectionPlanService', () => {
         syncAttempts.push(job.url);
         if (failOne && syncAttempts.length === 4) throw new Error(`${job.id} 推送失败`);
         sinkUrls.add(job.url);
+        if (!failOne && syncAttempts.length === 20) {
+          persistedPath = `${planPath}.persisted`;
+          await rename(planPath, persistedPath);
+          await mkdir(planPath);
+        }
       },
     });
+    planPath = context.store.path;
     const batch = await context.service.run('nowcoder-agent-market', { force: true });
     await saveJobs(context, context.jobs.list().filter(job => job.batchId === batch.id));
     await saveJobs(context, context.jobs.list().filter(job =>
@@ -685,11 +693,34 @@ describe('CollectionPlanService', () => {
     expect(sinkUrls.size).toBe(9);
 
     failOne = false;
-    const reopened = await context.reopen();
-    await reopened.service.onExtensionConnected();
+    const retry = await context.reopen();
+    try {
+      await expect(retry.service.onExtensionConnected()).rejects.toThrow();
+
+      expect(retry.store.latest('nowcoder-agent-market', 1)[0]).toMatchObject({
+        status: 'running',
+        selectionStatus: 'pending',
+        deliveryIds: [],
+      });
+    } finally {
+      await rmdir(planPath);
+      await rename(persistedPath, planPath);
+    }
 
     expect(syncAttempts).toHaveLength(20);
     expect(syncAttempts.slice(10)).toEqual(firstSelection);
+    expect(sinkUrls.size).toBe(10);
+    const reopened = await context.reopen();
+    expect(reopened.store.latest('nowcoder-agent-market', 1)[0]).toMatchObject({
+      status: 'running',
+      selectionStatus: 'pending',
+      deliveryIds: [],
+    });
+
+    await reopened.service.onExtensionConnected();
+
+    expect(syncAttempts).toHaveLength(30);
+    expect(syncAttempts.slice(20)).toEqual(firstSelection);
     expect(sinkUrls.size).toBe(10);
     expect(reopened.store.latest('nowcoder-agent-market', 1)[0]).toMatchObject({
       status: 'completed',

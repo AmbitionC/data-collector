@@ -302,7 +302,11 @@ export class CollectionPlanService {
         batch.id,
         this.dependencies.jobs.list().filter(job => job.batchId === batch.id).map(job => job.id),
       );
-      if (current.status !== 'running') current = await this.dependencies.store.resumeCollection(batch.id);
+      if (current.status !== 'running') {
+        current = current.selectionStatus === 'pending'
+          ? await this.dependencies.store.resumeSelection(batch.id)
+          : await this.dependencies.store.resumeCollection(batch.id);
+      }
       while (current.selectionStatus !== 'completed') {
         const jobs = this.dependencies.jobs.list();
         const attached = jobs.filter(job => job.batchId === current.id);

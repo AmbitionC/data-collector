@@ -195,6 +195,19 @@ export class CollectionPlanStore {
     });
   }
 
+  resumeSelection(batchId: string): Promise<CollectionBatch> {
+    return this.serializeTransactionalMutation(async () => {
+      const batch = this.require(batchId);
+      if (batch.planId !== 'nowcoder-agent-market') throw new Error('仅牛客固定计划支持恢复同步');
+      if (batch.selectionStatus !== 'pending') throw new Error('牛客固定计划没有待重试筛选');
+      batch.status = 'running';
+      delete batch.finishedAt;
+      delete batch.error;
+      await this.persist();
+      return publicBatch(batch);
+    });
+  }
+
   markDelivered(batchId: string, contentId: string): Promise<void> {
     return this.serializeMutation(async () => {
       if (!/^[a-f0-9]{12}$/.test(contentId)) throw new Error(`交付内容 ID 无效：${contentId}`);
