@@ -459,7 +459,7 @@ export class CollectionPlanService {
       0,
       FE_JOURNEY_PRESET.nowcoder.planTargetAccepted,
     );
-    const delivered = new Set(batch.deliveryIds);
+    const delivered = new Set<string>();
     for (const job of accepted) {
       const contentId = stableContentId(job.url);
       if (delivered.has(contentId)) continue;
@@ -471,12 +471,20 @@ export class CollectionPlanService {
       }
     }
     const syncErrors = this.batchSyncErrors.get(batch.id);
+    if (syncErrors?.length || delivered.size !== accepted.length) {
+      const message = syncErrors?.length
+        ? `自动同步失败：${syncErrors.join('；')}`
+        : `自动同步结果不足 ${accepted.length} 条`;
+      await this.dependencies.store.retrySelection(batch.id, message);
+      this.clearBatchRuntime(batch.id);
+      return;
+    }
     await this.dependencies.store.finalizeSelection(
       batch.id,
       accepted.length,
       prepared.selection.coverage,
       prepared.rejectionCounts,
-      syncErrors?.length ? `自动同步失败：${syncErrors.join('；')}` : undefined,
+      undefined,
       prepared.contentRejectionFailures.length,
       [...delivered],
     );

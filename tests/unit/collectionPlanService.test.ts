@@ -1,3 +1,4 @@
+import { mkdir, rename, rmdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { CollectionPlanId, JobRecord } from '@data-collector/shared';
@@ -280,7 +281,7 @@ describe('CollectionPlanService', () => {
     expect(context.store.latest('nowcoder-agent-market', 1)[0]!.deliveryIds).toHaveLength(10);
   });
 
-  it('retries idempotent sink writes after delivery finalization fails', async () => {
+  it('retries idempotent sink writes after real delivery persistence fails', async () => {
     const sinkUrls = new Set<string>();
     const syncAttempts: string[] = [];
     const context = await fixture({
@@ -297,23 +298,29 @@ describe('CollectionPlanService', () => {
     await saveJobs(context, refill.slice(0, -1));
     const last = refill.at(-1)!;
     await context.jobs.transition(last.id, 'collecting');
-    const saved = await context.jobs.transition(last.id, 'saved', {
+    await context.jobs.transition(last.id, 'saved', {
       outputPath: `/tmp/${last.id}/index.md`,
     });
-    const finalize = vi.spyOn(context.store, 'finalizeSelection');
-    finalize.mockRejectedValueOnce(new Error('计划终态写入失败'));
+    const reconciled = await context.store.reconcile(batch.id, context.jobs.list());
+    const persistedPath = `${context.store.path}.persisted`;
+    await rename(context.store.path, persistedPath);
+    await mkdir(context.store.path);
 
-    await expect(context.service.onJobTerminal(saved)).rejects.toThrow('计划终态写入失败');
+    try {
+      await expect(context.service.advanceNowcoderBatch(reconciled)).rejects.toThrow();
 
-    expect(context.store.latest('nowcoder-agent-market', 1)[0]).toMatchObject({
-      status: 'running',
-      selectionStatus: 'pending',
-      deliveryIds: [],
-    });
+      expect(context.store.latest('nowcoder-agent-market', 1)[0]).toMatchObject({
+        status: 'running',
+        selectionStatus: 'pending',
+        deliveryIds: [],
+      });
+    } finally {
+      await rmdir(context.store.path);
+      await rename(persistedPath, context.store.path);
+    }
     expect(syncAttempts).toHaveLength(10);
     expect(sinkUrls.size).toBe(10);
 
-    finalize.mockRestore();
     const reopened = await context.reopen();
     await reopened.service.onExtensionConnected();
 
@@ -644,7 +651,10 @@ describe('CollectionPlanService', () => {
     });
   });
 
-  it('surfaces selected Nowcoder sync failures instead of reporting a clean completion', async () => {
+  it('retries the same exact ten without partial delivery after a mixed sync failure', async () => {
+    const syncAttempts: string[] = [];
+    const sinkUrls = new Set<string>();
+    let failOne = true;
     const context = await fixture({
       candidates: nowcoderCandidates(10, 17_000),
       selectNowcoderJobs: async jobs => ({
@@ -652,18 +662,44 @@ describe('CollectionPlanService', () => {
         coverage: { bytedance: 1, tencent: 1, alibaba: 0, ant: 0 },
         rejected: [],
       }),
-      syncJob: async job => { throw new Error(`${job.id} 推送失败`); },
+      syncJob: async job => {
+        syncAttempts.push(job.url);
+        if (failOne && syncAttempts.length === 4) throw new Error(`${job.id} 推送失败`);
+        sinkUrls.add(job.url);
+      },
     });
     const batch = await context.service.run('nowcoder-agent-market', { force: true });
     await saveJobs(context, context.jobs.list().filter(job => job.batchId === batch.id));
     await saveJobs(context, context.jobs.list().filter(job =>
       job.batchId === batch.id && job.status === 'queued'));
 
-    expect(context.store.latest('nowcoder-agent-market', 1)[0]).toMatchObject({
+    const retryable = context.store.latest('nowcoder-agent-market', 1)[0]!;
+    expect(retryable).toMatchObject({
       status: 'completed_with_attention',
       error: expect.stringContaining('自动同步失败'),
       deliveryIds: [],
+      selectionStatus: 'pending',
     });
+    expect(syncAttempts).toHaveLength(10);
+    const firstSelection = [...syncAttempts];
+    expect(sinkUrls.size).toBe(9);
+
+    failOne = false;
+    const reopened = await context.reopen();
+    await reopened.service.onExtensionConnected();
+
+    expect(syncAttempts).toHaveLength(20);
+    expect(syncAttempts.slice(10)).toEqual(firstSelection);
+    expect(sinkUrls.size).toBe(10);
+    expect(reopened.store.latest('nowcoder-agent-market', 1)[0]).toMatchObject({
+      status: 'completed',
+      selectionStatus: 'completed',
+      deliveryIds: expect.arrayContaining(firstSelection.map(() =>
+        expect.stringMatching(/^[a-f0-9]{12}$/))),
+    });
+    const deliveryIds = reopened.store.latest('nowcoder-agent-market', 1)[0]!.deliveryIds;
+    expect(deliveryIds).toHaveLength(10);
+    expect(new Set(deliveryIds).size).toBe(10);
   });
 
   it('waits for every Nowcoder detail before applying the real evidence selection once', async () => {

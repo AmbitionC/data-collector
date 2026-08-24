@@ -213,7 +213,7 @@ export class CollectionPlanStore {
     reclassifiedFailureCount = 0,
     deliveryIds?: readonly string[],
   ): Promise<CollectionBatch> {
-    return this.serializeMutation(async () => {
+    return this.serializeTransactionalMutation(async () => {
       const batch = this.require(batchId);
       if (!Number.isSafeInteger(reclassifiedFailureCount) || reclassifiedFailureCount < 0) {
         throw new Error('重分类失败数无效');
@@ -245,6 +245,20 @@ export class CollectionPlanStore {
         delete batch.error;
       }
       batch.finishedAt ??= this.now();
+      await this.persist();
+      return publicBatch(batch);
+    });
+  }
+
+  retrySelection(batchId: string, message: string): Promise<CollectionBatch> {
+    return this.serializeTransactionalMutation(async () => {
+      const batch = this.require(batchId);
+      if (batch.planId !== 'nowcoder-agent-market') throw new Error('仅牛客固定计划支持重试筛选');
+      batch.status = 'completed_with_attention';
+      batch.selectionStatus = 'pending';
+      batch.deliveryIds = [];
+      batch.finishedAt = this.now();
+      batch.error = message;
       await this.persist();
       return publicBatch(batch);
     });
@@ -323,6 +337,19 @@ export class CollectionPlanStore {
     const result = this.mutationQueue.then(operation, operation);
     this.mutationQueue = result.then(() => undefined, () => undefined);
     return result;
+  }
+
+  private serializeTransactionalMutation<T>(operation: () => Promise<T>): Promise<T> {
+    return this.serializeMutation(async () => {
+      const snapshot = structuredClone(this.batches);
+      try {
+        return await operation();
+      } catch (error) {
+        this.batches.clear();
+        for (const [id, batch] of snapshot) this.batches.set(id, batch);
+        throw error;
+      }
+    });
   }
 
   private persist(): Promise<void> {

@@ -1,4 +1,4 @@
-import { readFile, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, rename, rmdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { collectionBatchSchema, type JobRecord } from '@data-collector/shared';
@@ -93,6 +93,38 @@ describe('CollectionPlanStore', () => {
     await store.finalizeSelection(batch.id, 0, {}, {});
 
     await expect(store.resumeCollection(batch.id)).rejects.toThrow('已完成筛选');
+  });
+
+  it('rolls back the live finalized batch when its atomic persistence fails', async () => {
+    const root = await temporaryDirectories.create('plan-store-finalize-rollback-');
+    const path = join(root, 'plans.json');
+    const backupPath = join(root, 'plans.persisted.json');
+    const store = await CollectionPlanStore.open(path, () => '2026-08-23T01:00:00.000Z');
+    const batch = await store.start('nowcoder-agent-market');
+    await store.markSelectionPending(batch.id);
+    const before = store.latest('nowcoder-agent-market', 1)[0]!;
+    await rename(path, backupPath);
+    await mkdir(path);
+
+    try {
+      await expect(store.finalizeSelection(
+        batch.id,
+        1,
+        { bytedance: 1, tencent: 0, alibaba: 0, ant: 0 },
+        {},
+        undefined,
+        0,
+        ['000000000001'],
+      )).rejects.toThrow();
+
+      expect(store.latest('nowcoder-agent-market', 1)[0]).toEqual(before);
+    } finally {
+      await rmdir(path);
+      await rename(backupPath, path);
+    }
+
+    await expect(CollectionPlanStore.open(path).then(reopened =>
+      reopened.latest('nowcoder-agent-market', 1)[0])).resolves.toEqual(before);
   });
 
   it('keeps a batch running until every attached child is terminal', async () => {
