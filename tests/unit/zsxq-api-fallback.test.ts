@@ -245,6 +245,76 @@ describe('ZSXQ API fallback', () => {
     expect(pageCounts.every(count => count <= 12)).toBe(true);
   });
 
+  it('allows the twelfth page to fill each view without requesting a thirteenth', async () => {
+    const pageByScope = new Map<string, number>();
+    const scopeOffset: Record<string, bigint> = {
+      all: 0n,
+      digests: 10_000_000n,
+      by_owner: 20_000_000n,
+    };
+    const fetcher = async (input: RequestInfo | URL): Promise<Response> => {
+      const url = new URL(String(input));
+      if (url.href === `${API}/groups/${GROUP_ID}`) return groupResponse();
+      if (url.href === `${API}/groups/${GROUP_ID}/menus`) return menuResponse();
+      if (url.pathname.endsWith('/topics/sticky')) return topicResponse([]);
+      const scope = url.searchParams.get('scope') ?? '';
+      const page = pageByScope.get(scope) ?? 0;
+      pageByScope.set(scope, page + 1);
+      const offset = scopeOffset[scope] ?? 0n;
+      return topicResponse(Array.from({ length: 20 }, (_, index) => {
+        const position = page * 20 + index;
+        const retained = page === 11 ? index < 9 : index === 0;
+        return topic(
+          String(741_000_000_000_000_000n + offset + BigInt(position)),
+          new Date(Date.parse('2026-08-24T23:00:00.000Z') - position * 10 * 60 * 1_000)
+            .toISOString(),
+          retained ? undefined : '打新 新股 积极申购',
+        );
+      }));
+    };
+
+    const collection = await collectZsxqApiViews(GROUP_ID, {
+      fetcher,
+      aduid: 'test-device',
+      now: () => new Date('2026-08-25T00:00:00.000Z'),
+      requestId: () => 'test-request',
+    });
+
+    expect([...pageByScope.values()]).toEqual([12, 12, 12]);
+    expect(collection.documents).toHaveLength(60);
+  });
+
+  it('treats a full page crossing the lookback cutoff as proven exhaustion', async () => {
+    const pageByScope = new Map<string, number>();
+    const fetcher = async (input: RequestInfo | URL): Promise<Response> => {
+      const url = new URL(String(input));
+      if (url.href === `${API}/groups/${GROUP_ID}`) return groupResponse();
+      if (url.href === `${API}/groups/${GROUP_ID}/menus`) return menuResponse();
+      if (url.pathname.endsWith('/topics/sticky')) return topicResponse([]);
+      const scope = url.searchParams.get('scope') ?? '';
+      const page = pageByScope.get(scope) ?? 0;
+      pageByScope.set(scope, page + 1);
+      return topicResponse(Array.from({ length: 20 }, (_, index) => topic(
+        String(742_000_000_000_000_000n
+          + BigInt(scope === 'all' ? 0 : scope === 'digests' ? 100 : 200)
+          + BigInt(index)),
+        new Date(Date.parse('2026-08-11T00:00:00.000Z') - index * 3 * 60 * 60 * 1_000)
+          .toISOString(),
+        index === 0 ? undefined : '打新 新股 积极申购',
+      )));
+    };
+
+    const collection = await collectZsxqApiViews(GROUP_ID, {
+      fetcher,
+      aduid: 'test-device',
+      now: () => new Date('2026-08-25T00:00:00.000Z'),
+      requestId: () => 'test-request',
+    });
+
+    expect([...pageByScope.values()]).toEqual([1, 1, 1]);
+    expect(collection.documents).toHaveLength(3);
+  });
+
   it('rejects a repeated short page instead of mistaking it for source exhaustion', async () => {
     const repeated = Array.from({ length: 20 }, (_, index) => topic(
       String(760_000_000_000_000_000n + BigInt(index)),
@@ -483,14 +553,18 @@ describe('ZSXQ API fallback', () => {
       document.sourceMetadata?.topicId === '776000000000000020')).toBe(true);
   });
 
-  it('keeps the richest observed copy even when that copy falls outside another view top twenty', async () => {
+  it('keeps richer and incomplete observations outside another view top twenty', async () => {
     const targetId = '776500000000000000';
+    const taintedId = '776500000000000001';
     const shortText = '投资经营短正文';
     const richText = `${shortText}，这是已核验的完整尾段`;
+    const taintedText = '投资经营风险正文';
     const latest = Array.from({ length: 20 }, (_, index) => topic(
-      index === 19 ? targetId : String(776_500_000_000_000_100n + BigInt(index)),
+      index === 18
+        ? targetId
+        : index === 19 ? taintedId : String(776_500_000_000_000_100n + BigInt(index)),
       new Date(Date.parse('2026-08-24T22:58:00.000Z') - index * 60 * 1_000).toISOString(),
-      index === 19 ? shortText : undefined,
+      index === 18 ? shortText : index === 19 ? taintedText : undefined,
     ));
     const digestFirstPage = Array.from({ length: 20 }, (_, index) => topic(
       String(776_500_000_000_001_000n + BigInt(index)),
@@ -499,8 +573,17 @@ describe('ZSXQ API fallback', () => {
     ));
     const digestSecondPage = [
       topic('776500000000002000', '2026-08-24T23:10:00.000Z'),
-      topic(targetId, '2026-08-24T22:39:00.000Z', richText),
-      ...Array.from({ length: 18 }, (_, index) => topic(
+      topic(targetId, '2026-08-24T22:40:00.000Z', richText),
+      {
+        ...topic(
+          taintedId,
+          '2026-08-24T22:39:00.000Z',
+          `${taintedText}，这份副本无法证明全文`,
+        ),
+        type: 'unknown',
+        owner: { user_id: '1001', name: '陈老师' },
+      },
+      ...Array.from({ length: 17 }, (_, index) => topic(
         String(776_500_000_000_002_100n + BigInt(index)),
         new Date(Date.parse('2026-08-24T22:38:00.000Z') - index * 60 * 1_000).toISOString(),
       )),
@@ -531,6 +614,11 @@ describe('ZSXQ API fallback', () => {
       document.sourceMetadata?.topicId === targetId)).toMatchObject({
       text: richText,
       truncated: false,
+    });
+    expect(collection.documents.find(document =>
+      document.sourceMetadata?.topicId === taintedId)).toMatchObject({
+      text: `${taintedText}，这份副本无法证明全文`,
+      truncated: true,
     });
   });
 
