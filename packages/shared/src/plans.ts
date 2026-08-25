@@ -22,11 +22,14 @@ export type ZsxqPlanView = (typeof ZSXQ_PLAN_VIEWS)[number];
 export interface CollectionPlanRejection {
   url: string;
   reason: string;
+  /** Machine-readable evidence for failures that need repair; business skips omit it. */
+  evidence?: string;
 }
 
 export const collectionPlanRejectionSchema = z.object({
   url: z.string().url().max(4096),
   reason: z.string().trim().min(1).max(100),
+  evidence: z.string().trim().min(1).max(500).optional(),
 }).strict();
 
 export interface ZsxqViewDocuments {

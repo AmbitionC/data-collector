@@ -974,7 +974,17 @@ describe('extension job runner', () => {
       planTopic('41001', '2026-08-10T10:00:00.000Z'),
       planTopic('41002', '2026-08-07T09:59:59.000Z'),
       planTopic('41004', '2026-08-12T10:00:00.000Z'),
-      { ...planTopic('41005', '2026-08-22T10:00:00.000Z'), truncated: true },
+      {
+        ...planTopic('41005', '2026-08-22T10:00:00.000Z'),
+        truncated: true,
+        sourceMetadata: {
+          authorRole: 'owner',
+          sourceBodyProven: true,
+          sourceMediaProven: false,
+          sourceCoversDom: true,
+          extractionMode: 'signed-api-fallback',
+        },
+      },
       {
         ...planTopic('41006', '2026-08-22T11:00:00.000Z'),
         title: '老师，如果想投资黄金的话，最方便灵活的是买什么',
@@ -1042,7 +1052,13 @@ describe('extension job runner', () => {
     expect(phases.at(-1)?.rejectionDetails).toEqual([
       { url: `${LIST_URL}/topic/41002`, reason: '超出15天' },
       { url: `${LIST_URL}/topic/41004`, reason: '本机库已有' },
-      { url: `${LIST_URL}/topic/41005`, reason: '正文不完整' },
+      {
+        url: `${LIST_URL}/topic/41005`,
+        reason: '正文不完整',
+        evidence: 'sourceBodyProven=true; sourceMediaProven=false; sourceCoversDom=true; '
+          + 'extractionMode=signed-api-fallback; textLength=21; images=0; '
+          + 'linkedArticle=false; truncatedBefore=true; truncatedAfter=true',
+      },
     ]);
     const saved = bridge.sent.find(message => message.type === 'job.result');
     expect(saved?.payload).toMatchObject({

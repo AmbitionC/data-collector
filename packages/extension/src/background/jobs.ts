@@ -418,6 +418,24 @@ function isZsxqPlanDomCoverageIncomplete(error: unknown): boolean {
   return /CONTENT_COVERAGE_INCOMPLETE/u.test(message);
 }
 
+function zsxqIncompleteEvidence(
+  before: CollectedDocument,
+  after: CollectedDocument,
+): string {
+  const metadata = after.sourceMetadata ?? before.sourceMetadata ?? {};
+  return [
+    `sourceBodyProven=${String(metadata.sourceBodyProven)}`,
+    `sourceMediaProven=${String(metadata.sourceMediaProven)}`,
+    `sourceCoversDom=${String(metadata.sourceCoversDom)}`,
+    `extractionMode=${String(metadata.extractionMode)}`,
+    `textLength=${after.text.length}`,
+    `images=${after.images.length}`,
+    `linkedArticle=${String(linkedArticleUrl(after.html) !== undefined)}`,
+    `truncatedBefore=${String(before.truncated === true)}`,
+    `truncatedAfter=${String(after.truncated === true)}`,
+  ].join('; ');
+}
+
 export interface CaptureOverrides {
   userCategory?: string;
   userTags?: string[];
@@ -918,9 +936,17 @@ export class JobRunner {
         rejections[item.reason] = (rejections[item.reason] ?? 0) + 1;
         if (item.url) rejectionDetails.push({ url: item.url, reason: item.reason });
       }
-      const reject = (document: CollectedDocument, reason: string): void => {
+      const reject = (
+        document: CollectedDocument,
+        reason: string,
+        evidence?: string,
+      ): void => {
         rejections[reason] = (rejections[reason] ?? 0) + 1;
-        rejectionDetails.push({ url: document.canonicalUrl, reason });
+        rejectionDetails.push({
+          url: document.canonicalUrl,
+          reason,
+          ...(evidence ? { evidence } : {}),
+        });
       };
       for (const document of documents) {
         const authorRole = document.sourceMetadata?.authorRole;
@@ -963,7 +989,7 @@ export class JobRunner {
           continue;
         }
         if (completedDocument.truncated) {
-          reject(document, '正文不完整');
+          reject(document, '正文不完整', zsxqIncompleteEvidence(document, completedDocument));
           continue;
         }
         // 走到这里表示本轮已检查过所有明确截断信号；写成 false 让目录三态一次收敛为“完整”。
