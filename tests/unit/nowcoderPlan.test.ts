@@ -115,6 +115,22 @@ describe('Nowcoder fixed collection plan selection', () => {
     });
   });
 
+  it('rejects a frontend-role interview that only mentions RAG as a side question', () => {
+    const frontend = {
+      ...interview('other', 60_001),
+      title: '快手主站增长前端一面',
+      text: '我参加了快手前端开发一面。1.React 如何更新？2.RAG 是什么？3.浏览器缓存怎么设计？',
+    };
+
+    const result = selectNowcoderPlanCandidates([frontend], '2026-08-23T01:00:00.000Z');
+
+    expect(result.accepted).toEqual([]);
+    expect(result.rejected).toContainEqual({
+      url: frontend.canonicalUrl,
+      reason: '非 Agent 研发岗位',
+    });
+  });
+
   it('keeps the four primary companies ahead of the supplemental other bucket', () => {
     const documents = (['bytedance', 'tencent', 'alibaba', 'ant', 'other'] as const)
       .map((company, index) => interview(company, 61_000 + index));

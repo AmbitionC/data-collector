@@ -95,6 +95,17 @@ describe('Nowcoder interview evidence', () => {
     expect(evidence.evidenceReasons).toContain('汇编或营销');
   });
 
+  it('rejects a simulated interview article with complete answers as editorial content', () => {
+    const evidence = analyzeNowcoderEvidence(nowcoder(
+      '【三年面试五年模拟】小红书 AI Agent 开发一面面经（含完整答案）',
+      `本文按面试问题给出完整参考答案。我参加了小红书 Agent 开发一面。${numberedQuestions(10)}`,
+      { author: '面试题专栏' },
+    ));
+
+    expect(evidence.evidenceGrade).toBe('C');
+    expect(evidence.evidenceReasons).toContain('汇编或营销');
+  });
+
   it('does not mistake a JD and preparation analysis for a first-hand interview', () => {
     const evidence = analyzeNowcoderEvidence(nowcoder(
       '年包50w的字节 Agent 岗，到底要会啥',

@@ -49,6 +49,15 @@ function agentRelevant(document: CollectedDocument): boolean {
   return document.sourceMetadata?.agentRelevant === true;
 }
 
+const EXPLICIT_AGENT_TITLE = /\bAgent\b|智能体|AI\s*(?:应用|全栈|研发|开发)|大模型|RAG/iu;
+const NON_AGENT_ROLE = /前端|客户端|测试开发|产品经理|运营/iu;
+
+function agentRoleRelevant(document: CollectedDocument): boolean {
+  if (EXPLICIT_AGENT_TITLE.test(document.title)) return true;
+  const identity = `${document.title}\n${document.text.slice(0, 240)}`;
+  return !NON_AGENT_ROLE.test(identity);
+}
+
 function recencyOf(document: CollectedDocument): string | undefined {
   const interviewDate = document.sourceMetadata?.interviewDate;
   if (typeof interviewDate === 'string') return `${interviewDate}T00:00:00.000Z`;
@@ -77,6 +86,10 @@ export function selectNowcoderPlanCandidates(
     }
     if (!agentRelevant(document)) {
       rejected.push({ url: document.canonicalUrl, reason: 'Agent 相关性不足' });
+      continue;
+    }
+    if (!agentRoleRelevant(document)) {
+      rejected.push({ url: document.canonicalUrl, reason: '非 Agent 研发岗位' });
       continue;
     }
     if (!companyOf(document) || !['A', 'B'].includes(evidenceGradeOf(document) ?? '')) {
