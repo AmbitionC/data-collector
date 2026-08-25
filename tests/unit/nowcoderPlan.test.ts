@@ -96,6 +96,45 @@ describe('Nowcoder fixed collection plan selection', () => {
     });
   });
 
+  it('deduplicates a paraphrased question sequence even when the repost uses another author', () => {
+    const first = {
+      ...interview('other', 50_010, '2026-08-18T04:00:00.000Z'),
+      title: '小红书 Agent 开发一面',
+      author: '候选人甲',
+      text: [
+        '我参加了小红书 Agent 开发一面。',
+        '1.自我介绍。2.实习时关注哪些业务指标？3.介绍项目背景和上下游。',
+        '4.Agent 用在什么场景？5.Agent 使用什么开发框架？6.OpenManus 的框架是什么？',
+        '7.怎么理解 Harness？8.多 Agent 并发有什么问题？9.怎样控制 Agent 并发量？',
+        '10.长短期记忆怎么实现？11.ReAct 的流程是什么？12.Planner、Executor、Critic 如何协作？',
+        '13.上下文过长如何处理？14.Redis 有哪些数据结构？15.Java 类加载机制是什么？',
+        '16.设计 Agent 广告投放自我优化方案。',
+      ].join(''),
+    };
+    const repost = {
+      ...interview('other', 50_011, '2026-08-17T04:00:00.000Z'),
+      title: '小红书 Agent 开发一面凉经',
+      author: '候选人乙',
+      text: [
+        '我参加了小红书 Agent 开发一面。',
+        '1.请简单介绍自己。2.平时实习主要看什么业务指标？3.讲讲项目的业务背景与链路。',
+        '4.项目里的 Agent 解决了什么场景？5.Agent 代码采用了哪个框架？6.OpenManus 基于什么框架？',
+        '7.Harness 为什么有效？8.多智能体协同有哪些性能瓶颈？9.如何限制 Agent 的并发数？',
+        '10.短期记忆和长期记忆的底层实现？11.讲一下 ReAct 执行过程。12.Planner、Executor、Critic 分别做什么？',
+        '13.上下文超长怎么压缩？14.Redis 常见数据结构？15.Class 文件的加载过程？',
+        '16.如何用 Agent 自动迭代广告投放策略？',
+      ].join(''),
+    };
+
+    const result = selectNowcoderPlanCandidates([first, repost], '2026-08-23T01:00:00.000Z');
+
+    expect(result.accepted.map(document => document.canonicalUrl)).toEqual([first.canonicalUrl]);
+    expect(result.rejected).toContainEqual({
+      url: repost.canonicalUrl,
+      reason: '重复问题簇',
+    });
+  });
+
   it('rejects a recent A-grade interview that is not Agent or AI-application relevant', () => {
     const genericBackend = {
       ...interview('tencent', 60_000),
@@ -127,6 +166,22 @@ describe('Nowcoder fixed collection plan selection', () => {
     expect(result.accepted).toEqual([]);
     expect(result.rejected).toContainEqual({
       url: frontend.canonicalUrl,
+      reason: '非 Agent 研发岗位',
+    });
+  });
+
+  it('rejects a generic full-stack interview that only mentions Agent as a side question', () => {
+    const fullstack = {
+      ...interview('bytedance', 60_002),
+      title: '字节全栈二面与三面面经',
+      text: '我参加了字节全栈开发面试。1.数据库表如何设计？2.RAG 怎么召回？3.ReAct 是什么？',
+    };
+
+    const result = selectNowcoderPlanCandidates([fullstack], '2026-08-23T01:00:00.000Z');
+
+    expect(result.accepted).toEqual([]);
+    expect(result.rejected).toContainEqual({
+      url: fullstack.canonicalUrl,
       reason: '非 Agent 研发岗位',
     });
   });

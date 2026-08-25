@@ -106,6 +106,16 @@ describe('Nowcoder interview evidence', () => {
     expect(evidence.evidenceReasons).toContain('汇编或营销');
   });
 
+  it('rejects an editorialized interview guide with a promotional lead and formula', () => {
+    const evidence = analyzeNowcoderEvidence(nowcoder(
+      '拼多多 AI Agent 岗两轮技术面经：从算法硬核到工程落地的极限挑战',
+      `导读：本文完整还原真题与避坑指南，附赠独家压力面应答公式，适合收藏。我参加了拼多多 Agent 开发一面。${numberedQuestions(10)}`,
+    ));
+
+    expect(evidence.evidenceGrade).toBe('C');
+    expect(evidence.evidenceReasons).toContain('汇编或营销');
+  });
+
   it('does not mistake a JD and preparation analysis for a first-hand interview', () => {
     const evidence = analyzeNowcoderEvidence(nowcoder(
       '年包50w的字节 Agent 岗，到底要会啥',

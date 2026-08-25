@@ -4,6 +4,7 @@ import {
   enrichNowcoderEvidence,
   type NowcoderCompany,
 } from '../feJourney/nowcoderEvidence.js';
+import { normalizedInterviewQuestions } from '../feJourney/fingerprint.js';
 
 export const PRIMARY_NOWCODER_COMPANIES = ['bytedance', 'tencent', 'alibaba', 'ant'] as const;
 export const NOWCODER_COMPANIES = [...PRIMARY_NOWCODER_COMPANIES, 'other'] as const;
@@ -50,7 +51,7 @@ function agentRelevant(document: CollectedDocument): boolean {
 }
 
 const EXPLICIT_AGENT_TITLE = /\bAgent\b|智能体|AI\s*(?:应用|全栈|研发|开发)|大模型|RAG/iu;
-const NON_AGENT_ROLE = /前端|客户端|测试开发|产品经理|运营/iu;
+const NON_AGENT_ROLE = /前端|客户端|测试开发|产品经理|运营|全栈/iu;
 
 function agentRoleRelevant(document: CollectedDocument): boolean {
   if (EXPLICIT_AGENT_TITLE.test(document.title)) return true;
@@ -62,6 +63,29 @@ function recencyOf(document: CollectedDocument): string | undefined {
   const interviewDate = document.sourceMetadata?.interviewDate;
   if (typeof interviewDate === 'string') return `${interviewDate}T00:00:00.000Z`;
   return document.publishedAt;
+}
+
+function commonQuestionSequenceLength(left: readonly string[], right: readonly string[]): number {
+  let previous = new Array<number>(right.length + 1).fill(0);
+  for (const leftQuestion of left) {
+    const current = new Array<number>(right.length + 1).fill(0);
+    for (let index = 1; index <= right.length; index += 1) {
+      current[index] = leftQuestion === right[index - 1]
+        ? (previous[index - 1] ?? 0) + 1
+        : Math.max(previous[index] ?? 0, current[index - 1] ?? 0);
+    }
+    previous = current;
+  }
+  return previous[right.length] ?? 0;
+}
+
+function repeatsQuestionSequence(left: CollectedDocument, right: CollectedDocument): boolean {
+  if (companyOf(left) !== companyOf(right)) return false;
+  const leftQuestions = normalizedInterviewQuestions(left.text);
+  const rightQuestions = normalizedInterviewQuestions(right.text);
+  const shorter = Math.min(leftQuestions.length, rightQuestions.length);
+  if (shorter < 8) return false;
+  return commonQuestionSequenceLength(leftQuestions, rightQuestions) / shorter >= 0.7;
 }
 
 /** 30 天内 A/B 级真实面经，按公司轮转优先保证多样性，再由充足来源补满目标。 */
@@ -124,7 +148,10 @@ export function selectNowcoderPlanCandidates(
       while (bucket.length > 0) {
         const document = bucket.shift()!;
         const cluster = document.feJourney?.clusterId;
-        if (cluster && seenClusters.has(cluster)) {
+        if (
+          (cluster && seenClusters.has(cluster))
+          || accepted.some(existing => repeatsQuestionSequence(existing, document))
+        ) {
           rejected.push({ url: document.canonicalUrl, reason: '重复问题簇' });
           continue;
         }
