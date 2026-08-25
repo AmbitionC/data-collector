@@ -135,6 +135,52 @@ describe('Nowcoder fixed collection plan selection', () => {
     });
   });
 
+  it('deduplicates a long interview template reused across employers with reordered questions', () => {
+    const questions = [
+      '自我介绍和常用开发工具',
+      'Agent 的核心模块如何拆分',
+      '短期记忆和长期记忆怎么实现',
+      '工具调用失败后如何恢复',
+      '怎样降低大模型幻觉',
+      '上下文过长如何压缩',
+      'Skill 和普通提示词有什么区别',
+      '如何设计 Agent 执行循环',
+      '线程池核心参数如何配置',
+      'JVM 内存区域如何划分',
+      'MySQL 索引为什么会失效',
+      '分布式事务两阶段提交有什么问题',
+      '如何合并两个有序数组',
+      'Tool Schema 怎样做参数校验',
+      '模型超时后如何重试和降级',
+      '如何记录 Agent 可观测指标',
+      '多 Agent 之间怎样传递状态',
+      'RAG 召回结果如何评测',
+    ];
+    const numbered = (items: readonly string[]) => items
+      .map((question, index) => `${index + 1}.${question}？`)
+      .join('');
+    const dji = {
+      ...interview('other', 50_020, '2026-08-18T04:00:00.000Z'),
+      title: '大疆创新 Agent 开发一面面经',
+      author: '候选人甲',
+      text: `我参加了大疆创新 Agent 开发一面。${numbered(questions)}`,
+    };
+    const insta360 = {
+      ...interview('other', 50_021, '2026-08-17T04:00:00.000Z'),
+      title: '影石创新 Agent 开发一面面经',
+      author: '候选人乙',
+      text: `我参加了影石创新 Agent 开发一面。${numbered([...questions].reverse())}`,
+    };
+
+    const result = selectNowcoderPlanCandidates([dji, insta360], '2026-08-23T01:00:00.000Z');
+
+    expect(result.accepted.map(document => document.canonicalUrl)).toEqual([dji.canonicalUrl]);
+    expect(result.rejected).toContainEqual({
+      url: insta360.canonicalUrl,
+      reason: '重复问题簇',
+    });
+  });
+
   it('rejects a recent A-grade interview that is not Agent or AI-application relevant', () => {
     const genericBackend = {
       ...interview('tencent', 60_000),

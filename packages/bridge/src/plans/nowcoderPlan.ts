@@ -4,7 +4,11 @@ import {
   enrichNowcoderEvidence,
   type NowcoderCompany,
 } from '../feJourney/nowcoderEvidence.js';
-import { normalizedInterviewQuestions } from '../feJourney/fingerprint.js';
+import {
+  hammingDistance64,
+  normalizedInterviewQuestions,
+  simHash64,
+} from '../feJourney/fingerprint.js';
 
 export const PRIMARY_NOWCODER_COMPANIES = ['bytedance', 'tencent', 'alibaba', 'ant'] as const;
 export const NOWCODER_COMPANIES = [...PRIMARY_NOWCODER_COMPANIES, 'other'] as const;
@@ -80,12 +84,20 @@ function commonQuestionSequenceLength(left: readonly string[], right: readonly s
 }
 
 function repeatsQuestionSequence(left: CollectedDocument, right: CollectedDocument): boolean {
-  if (companyOf(left) !== companyOf(right)) return false;
   const leftQuestions = normalizedInterviewQuestions(left.text);
   const rightQuestions = normalizedInterviewQuestions(right.text);
   const shorter = Math.min(leftQuestions.length, rightQuestions.length);
   if (shorter < 8) return false;
-  return commonQuestionSequenceLength(leftQuestions, rightQuestions) / shorter >= 0.7;
+  if (
+    companyOf(left) === companyOf(right)
+    && commonQuestionSequenceLength(leftQuestions, rightQuestions) / shorter >= 0.7
+  ) {
+    return true;
+  }
+  const longer = Math.max(leftQuestions.length, rightQuestions.length);
+  return shorter >= 15
+    && shorter / longer >= 0.85
+    && hammingDistance64(simHash64(left.text), simHash64(right.text)) <= 9;
 }
 
 /** 30 天内 A/B 级真实面经，按公司轮转优先保证多样性，再由充足来源补满目标。 */
