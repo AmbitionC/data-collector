@@ -5,6 +5,7 @@ import {
   type CollectionPlanAttempt,
   type CollectionPlanRejection,
   type CollectionPlanId,
+  type CollectionPlanTrigger,
   type JobRecord,
 } from '@data-collector/shared';
 import type { JobStore } from '../jobs/store.js';
@@ -169,6 +170,14 @@ export class CollectionPlanService {
     this.now = dependencies.now ?? (() => new Date().toISOString());
   }
 
+  private lastScheduledStartedAt(planId: CollectionPlanId): string | undefined {
+    return this.dependencies.store.latest(planId, 180).find(batch => (
+      batch.trigger === 'scheduled'
+      // 旧批次没有 trigger；历史 force 批次明确是手动补采，其余按旧日任务兼容。
+      || (batch.trigger === undefined && batch.force !== true)
+    ))?.startedAt;
+  }
+
   status(): { plans: Array<{
     id: CollectionPlanId;
     due: boolean;
@@ -179,7 +188,7 @@ export class CollectionPlanService {
     return {
       plans: COLLECTION_PLAN_IDS.map(id => {
         const latest = this.dependencies.store.latest(id, 1)[0];
-        const due = planDueState(id, this.now(), latest?.startedAt);
+        const due = planDueState(id, this.now(), this.lastScheduledStartedAt(id));
         return {
           id,
           due: due.due,
@@ -195,7 +204,10 @@ export class CollectionPlanService {
     return this.dependencies.store.latest(planId, limit);
   }
 
-  async run(planId: CollectionPlanId, options: { force?: boolean } = {}): Promise<CollectionBatch> {
+  async run(
+    planId: CollectionPlanId,
+    options: { force?: boolean; trigger?: CollectionPlanTrigger } = {},
+  ): Promise<CollectionBatch> {
     const running = this.dependencies.store.active(planId)[0];
     if (running && !options.force) {
       if (this.dependencies.extensionConnected()) {
@@ -210,7 +222,10 @@ export class CollectionPlanService {
     }
     const batch = await this.dependencies.store.start(
       planId,
-      options.force === undefined ? {} : { force: options.force },
+      {
+        trigger: options.trigger ?? 'manual',
+        ...(options.force === undefined ? {} : { force: options.force }),
+      },
     );
     if (this.dependencies.extensionConnected()) await this.execute(batch);
     return this.dependencies.store.get(batch.id) ?? batch;
@@ -218,8 +233,9 @@ export class CollectionPlanService {
 
   async runDuePlans(): Promise<void> {
     for (const planId of COLLECTION_PLAN_IDS) {
-      const latest = this.dependencies.store.latest(planId, 1)[0];
-      if (planDueState(planId, this.now(), latest?.startedAt).due) await this.run(planId);
+      if (planDueState(planId, this.now(), this.lastScheduledStartedAt(planId)).due) {
+        await this.run(planId, { trigger: 'scheduled' });
+      }
     }
   }
 

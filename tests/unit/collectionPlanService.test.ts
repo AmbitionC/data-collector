@@ -244,6 +244,34 @@ describe('CollectionPlanService', () => {
     )).toMatchObject({ due: false });
   });
 
+  it('does not let a manual backfill consume the scheduled run for the same Shanghai day', async () => {
+    const context = await fixture({ now: '2026-08-25T16:34:00.000Z' });
+
+    const manual = await context.service.run('zsxq-chen-teacher');
+    expect((manual as CollectionBatch & { trigger?: string }).trigger).toBe('manual');
+    await context.service.onExtensionPlanResult({
+      batchId: manual.id,
+      attempt: currentZsxqAttempt(context.store, manual.id),
+      discovered: 0,
+      prepared: true,
+    });
+
+    context.setNow('2026-08-26T00:01:00.000Z');
+    await context.service.runDuePlans();
+
+    expect(context.planMessages).toHaveLength(2);
+    expect(context.store.latest('zsxq-chen-teacher', 2).map(batch => ({
+      trigger: (batch as CollectionBatch & { trigger?: string }).trigger,
+      startedAt: batch.startedAt,
+    }))).toEqual([
+      { trigger: 'scheduled', startedAt: '2026-08-26T00:01:00.000Z' },
+      { trigger: 'manual', startedAt: '2026-08-25T16:34:00.000Z' },
+    ]);
+
+    await context.service.runDuePlans();
+    expect(context.planMessages).toHaveLength(2);
+  });
+
   it('dispatches eight detail jobs in the initial Nowcoder target-fill round', async () => {
     const context = await fixture({ candidates: nowcoderCandidates(12) });
 

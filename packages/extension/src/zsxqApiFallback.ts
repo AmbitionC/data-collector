@@ -44,6 +44,27 @@ export interface ZsxqApiFallbackDependencies {
 export interface ZsxqApiCollection {
   documents: CollectedDocument[];
   businessSkips: Array<{ url: string; reason: string }>;
+  coverage: Record<string, number>;
+}
+
+function shanghaiPublicationDay(publishedAt: string | undefined): string | undefined {
+  if (!publishedAt || !Number.isFinite(Date.parse(publishedAt))) return undefined;
+  return new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Asia/Shanghai',
+    year: 'numeric', month: '2-digit', day: '2-digit',
+  }).format(new Date(publishedAt));
+}
+
+function addPublicationCoverage(
+  coverage: Record<string, number>,
+  documents: readonly CollectedDocument[],
+): void {
+  for (const document of documents) {
+    const day = shanghaiPublicationDay(document.publishedAt);
+    if (!day) continue;
+    const key = `发布日期:${day}`;
+    coverage[key] = (coverage[key] ?? 0) + 1;
+  }
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -620,8 +641,16 @@ export async function collectZsxqApiViews(
     .slice(0, PLAN_ITEMS_PER_VIEW);
   const documents = unionZsxqViewDocuments(byView)
     .filter(document => !businessSkips.has(document.canonicalUrl));
+  const coverage: Record<string, number> = Object.fromEntries(states.map(state => {
+    const ids = state.label === '最新'
+      ? new Set([...state.seenRawIds, ...sticky.entries.map(entry => entry.topicId)])
+      : state.seenRawIds;
+    return [`视图:${state.label}`, ids.size];
+  }));
+  addPublicationCoverage(coverage, documents);
   return {
     documents,
     businessSkips: [...businessSkips.values()],
+    coverage,
   };
 }

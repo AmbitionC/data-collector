@@ -4,6 +4,9 @@ import type { CollectedDocument, CollectedImage } from './model.js';
 export const COLLECTION_PLAN_IDS = ['zsxq-chen-teacher', 'nowcoder-agent-market'] as const;
 export type CollectionPlanId = (typeof COLLECTION_PLAN_IDS)[number];
 
+export const COLLECTION_PLAN_TRIGGERS = ['manual', 'scheduled'] as const;
+export type CollectionPlanTrigger = (typeof COLLECTION_PLAN_TRIGGERS)[number];
+
 /** Bridge 每次下发固定计划时生成的不可猜测尝试令牌。 */
 export const collectionPlanAttemptSchema = z.string().regex(/^[a-f0-9]{16}$/);
 export type CollectionPlanAttempt = z.infer<typeof collectionPlanAttemptSchema>;
@@ -440,6 +443,8 @@ export interface CollectionBatch {
   needsAttention: number;
   /** 已成功同步到目标仓库收件箱的稳定内容 ID；下游只加工这里列出的本批内容。 */
   deliveryIds: string[];
+  /** 手动补采不得占用当天的自动日任务；旧批次缺失时由服务按兼容规则推断。 */
+  trigger?: CollectionPlanTrigger;
   /** 需要二次筛选的计划用持久状态保证 Bridge 重启后可续跑。 */
   selectionStatus?: 'collecting' | 'pending' | 'completed';
   /** 知识星球计划是否已创建完本轮全部子任务；旧运行中批次缺失时按未完成恢复。 */
@@ -473,6 +478,7 @@ export const collectionBatchSchema = z.object({
   failed: countSchema,
   needsAttention: countSchema,
   deliveryIds: z.array(z.string().regex(/^[a-f0-9]{12}$/)).max(100).default([]),
+  trigger: z.enum(COLLECTION_PLAN_TRIGGERS).optional(),
   selectionStatus: z.enum(['collecting', 'pending', 'completed']).optional(),
   preparationStatus: z.enum(['collecting', 'completed']).optional(),
   preparationAttempt: collectionPlanAttemptSchema.optional(),

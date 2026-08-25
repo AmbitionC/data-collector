@@ -920,6 +920,7 @@ describe('extension job runner', () => {
     const phases: Array<{
       discovered: number;
       prepared: boolean;
+      coverage?: Record<string, number>;
       rejections?: Record<string, number>;
       rejectionDetails?: Array<{ url: string; reason: string }>;
     }> = [];
@@ -934,6 +935,12 @@ describe('extension job runner', () => {
     expect(phases.at(-1)).toMatchObject({
       discovered: 2,
       prepared: true,
+      coverage: {
+        '视图:最新': 2,
+        '视图:精华': 0,
+        '视图:只看星主': 0,
+        '发布日期:2026-08-24': 1,
+      },
       rejections: { '选题偏好过滤': 1 },
       rejectionDetails: [{ url: filteredUrl, reason: '选题偏好过滤' }],
     });

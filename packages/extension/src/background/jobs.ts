@@ -54,6 +54,27 @@ export interface ListPayload {
 
 interface ZsxqPlanExtractionAudit {
   businessSkips: Map<string, { reason: string; url?: string }>;
+  coverage: Record<string, number>;
+}
+
+function shanghaiPublicationDay(publishedAt: string | undefined): string | undefined {
+  if (!publishedAt || !Number.isFinite(Date.parse(publishedAt))) return undefined;
+  return new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Asia/Shanghai',
+    year: 'numeric', month: '2-digit', day: '2-digit',
+  }).format(new Date(publishedAt));
+}
+
+function addPublicationCoverage(
+  coverage: Record<string, number>,
+  documents: readonly CollectedDocument[],
+): void {
+  for (const document of documents) {
+    const day = shanghaiPublicationDay(document.publishedAt);
+    if (!day) continue;
+    const key = `发布日期:${day}`;
+    coverage[key] = (coverage[key] ?? 0) + 1;
+  }
 }
 
 /**
@@ -719,6 +740,7 @@ export class JobRunner {
     for (const label of views) {
       const documents: CollectedDocument[] = [];
       const viewUrls = new Set<string>();
+      const observedKeys = new Set<string>();
       let refreshedFeed = false;
       const selected = await this.ask(tabId, {
         type: this.contentMessageType('list.selectView'),
@@ -775,6 +797,7 @@ export class JobRunner {
           if (item.document || item.skipKind !== 'business-filter') continue;
           const reason = businessSkipReason(item.reason);
           const key = item.url ?? `${label}:${item.key}`;
+          observedKeys.add(key);
           audit?.businessSkips.set(key, {
             reason,
             ...(item.url ? { url: item.url } : {}),
@@ -782,6 +805,7 @@ export class JobRunner {
         }
         for (const item of list.items) {
           if (!item.document) continue;
+          observedKeys.add(item.document.canonicalUrl);
           if (viewUrls.has(item.document.canonicalUrl)) continue;
           documents.push(item.document);
           viewUrls.add(item.document.canonicalUrl);
@@ -809,6 +833,7 @@ export class JobRunner {
         }
       }
       byView.push({ label, documents });
+      if (audit) audit.coverage[`视图:${label}`] = observedKeys.size;
     }
     const merged = new Map(
       unionZsxqViewDocuments(byView).map(document => [document.canonicalUrl, document]),
@@ -825,6 +850,7 @@ export class JobRunner {
         if (selected.length >= 60) break;
       }
     }
+    if (audit) addPublicationCoverage(audit.coverage, selected);
     return selected;
   }
 
@@ -844,6 +870,7 @@ export class JobRunner {
     reportPhase?: (result: {
       discovered: number;
       prepared: boolean;
+      coverage?: Record<string, number>;
       rejections?: Record<string, number>;
       rejectionDetails?: CollectionPlanRejection[];
     }) => Promise<void> | void,
@@ -862,7 +889,7 @@ export class JobRunner {
       await this.options.waitForTabComplete(tabId, 30_000);
       const collectViews = () => retryTransientTabOperation(
         async () => {
-          const audit: ZsxqPlanExtractionAudit = { businessSkips: new Map() };
+          const audit: ZsxqPlanExtractionAudit = { businessSkips: new Map(), coverage: {} };
           const documents = await this.collectZsxqPlanViews(tabId!, ZSXQ_PLAN_VIEWS, audit);
           return { documents, audit };
         },
@@ -874,7 +901,10 @@ export class JobRunner {
         });
         if (!fallback.ok) throw new Error(fallback.error.message);
         const collection = payloadOf(fallback, 'apiCollection');
-        const audit: ZsxqPlanExtractionAudit = { businessSkips: new Map() };
+        const audit: ZsxqPlanExtractionAudit = {
+          businessSkips: new Map(),
+          coverage: { ...collection.coverage },
+        };
         for (const item of collection.businessSkips) audit.businessSkips.set(item.url, item);
         return { documents: collection.documents, audit };
       };
@@ -1004,6 +1034,7 @@ export class JobRunner {
       await reportPhase?.({
         discovered,
         prepared: false,
+        coverage: extraction.audit.coverage,
         rejections,
         rejectionDetails,
       });
@@ -1029,6 +1060,7 @@ export class JobRunner {
       await reportPhase?.({
         discovered,
         prepared: true,
+        coverage: extraction.audit.coverage,
         rejections,
         rejectionDetails,
       });

@@ -8,6 +8,7 @@ import {
   type CollectionPlanAttempt,
   type CollectionPlanRejection,
   type CollectionPlanId,
+  type CollectionPlanTrigger,
   type JobRecord,
 } from '@data-collector/shared';
 
@@ -96,7 +97,10 @@ export class CollectionPlanStore {
     return store;
   }
 
-  start(planId: CollectionPlanId, options: { force?: boolean } = {}): Promise<CollectionBatch> {
+  start(
+    planId: CollectionPlanId,
+    options: { force?: boolean; trigger?: CollectionPlanTrigger } = {},
+  ): Promise<CollectionBatch> {
     return this.serializeMutation(async () => {
       const startedAt = this.now();
       const id = `${planId}-${startedAt.replace(/\D/g, '')}-${randomBytes(4).toString('hex')}`;
@@ -112,6 +116,7 @@ export class CollectionPlanStore {
         failed: 0,
         needsAttention: 0,
         deliveryIds: [],
+        trigger: options.trigger ?? 'manual',
         ...(options.force === true ? { force: true } : {}),
         ...(planId === 'nowcoder-agent-market'
           ? { selectionStatus: 'collecting' as const, rounds: 0 }

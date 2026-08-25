@@ -89,6 +89,12 @@ describe('ZSXQ API fallback', () => {
 
     expect(fetcher).toHaveBeenCalledTimes(6);
     expect(collection.businessSkips).toEqual([]);
+    expect(collection.coverage).toEqual({
+      '视图:最新': 1,
+      '视图:精华': 1,
+      '视图:只看星主': 1,
+      '发布日期:2026-08-24': 1,
+    });
     expect(collection.documents).toHaveLength(1);
     expect(collection.documents[0]).toMatchObject({
       source: 'zsxq',
