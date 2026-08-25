@@ -861,6 +861,18 @@ function sourceAssetsOf(candidate: Record<string, unknown>): SourceAssets {
   const issues = new Set<string>();
   const issueToken = (value: string): string =>
     value.replace(/[^A-Za-z0-9_-]+/gu, '_').slice(0, 80) || 'unknown';
+  const issueShape = (value: unknown): string => {
+    if (value === null) return 'null';
+    if (Array.isArray(value)) return value.length === 0 ? 'array-empty' : 'array-nonempty';
+    if (isRecord(value)) {
+      const keys = Object.keys(value).slice(0, 8).map(issueToken);
+      return keys.length === 0 ? 'object-empty' : `object-${keys.join('+')}`;
+    }
+    if (typeof value === 'string') return value.length === 0 ? 'string-empty' : 'string-nonempty';
+    if (typeof value === 'number') return value === 0 ? 'number-zero' : 'number-nonzero';
+    if (typeof value === 'boolean') return value ? 'boolean-true' : 'boolean-false';
+    return issueToken(typeof value);
+  };
   const markIssue = (issue: string): void => {
     proven = false;
     issues.add(issue);
@@ -1035,7 +1047,7 @@ function sourceAssetsOf(candidate: Record<string, unknown>): SourceAssets {
         continue;
       }
       if (nested !== null && nested !== undefined) {
-        markIssue(`field:${issueToken(key)}`);
+        markIssue(`field:${issueToken(key)}:${issueShape(nested)}`);
       }
     }
 

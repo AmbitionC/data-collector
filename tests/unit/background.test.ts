@@ -983,7 +983,7 @@ describe('extension job runner', () => {
           sourceMediaProven: false,
           sourceCoversDom: true,
           extractionMode: 'signed-api-fallback',
-          sourceMediaIssues: 'field:media_component',
+          sourceMediaIssues: 'field:media_component:object-opaque_id',
         },
       },
       {
@@ -1059,7 +1059,7 @@ describe('extension job runner', () => {
         evidence: 'sourceBodyProven=true; sourceMediaProven=false; sourceCoversDom=true; '
           + 'extractionMode=signed-api-fallback; textLength=21; images=0; '
           + 'linkedArticle=false; truncatedBefore=true; truncatedAfter=true; '
-          + 'sourceMediaIssues=field:media_component',
+          + 'sourceMediaIssues=field:media_component:object-opaque_id',
       },
     ]);
     const saved = bridge.sent.find(message => message.type === 'job.result');

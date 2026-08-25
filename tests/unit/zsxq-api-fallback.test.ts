@@ -622,7 +622,7 @@ describe('ZSXQ API fallback', () => {
       document.sourceMetadata?.topicId === taintedId)).toMatchObject({
       text: `${taintedText}，这份副本无法证明全文`,
       truncated: true,
-      sourceMetadata: { sourceMediaIssues: 'field:media_component' },
+      sourceMetadata: { sourceMediaIssues: 'field:media_component:object-opaque_id' },
     });
   });
 
