@@ -941,6 +941,37 @@ function sourceAssetsOf(candidate: Record<string, unknown>): SourceAssets {
     }
   };
 
+  const isClosedContentVoiceNarrationCache = (
+    key: string,
+    nested: unknown,
+    parent: Record<string, unknown>,
+  ): boolean => {
+    if (
+      key !== 'content_voice'
+      || typeof parent.text !== 'string'
+      || parent.text.trim().length === 0
+      || !isRecord(nested)
+      || Array.isArray(nested)
+    ) return false;
+    // content_voice is the platform's derived playback cache for this text body, not an
+    // authored voice attachment. Keep the exemption closed to the observed metadata-only
+    // schema; URLs, nested payloads, new keys, voice/audio fields and inline media fail closed.
+    const cacheKeys = [
+      'file_id', 'name', 'hash', 'size', 'duration', 'download_count', 'create_time',
+    ] as const;
+    const actualKeys = Object.keys(nested);
+    if (
+      actualKeys.length !== cacheKeys.length
+      || cacheKeys.some(cacheKey => !Object.hasOwn(nested, cacheKey))
+    ) return false;
+    return Object.values(nested).every(cacheValue => (
+      cacheValue === null
+      || typeof cacheValue === 'string'
+      || typeof cacheValue === 'boolean'
+      || (typeof cacheValue === 'number' && Number.isFinite(cacheValue))
+    ));
+  };
+
   const visit = (value: unknown, depth: number): void => {
     if (depth > BODY_DEPTH_LIMIT || visited >= BODY_NODE_LIMIT) {
       markIssue('body-limit');
@@ -1033,6 +1064,7 @@ function sourceAssetsOf(candidate: Record<string, unknown>): SourceAssets {
     ]);
     for (const [key, nested] of Object.entries(value)) {
       if (recognized.has(key)) continue;
+      if (isClosedContentVoiceNarrationCache(key, nested, value)) continue;
       if (!/(?:media|component|attachment|file|image|audio|video|voice|poll|card)/iu.test(key)) {
         continue;
       }
