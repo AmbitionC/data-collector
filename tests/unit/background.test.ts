@@ -983,6 +983,7 @@ describe('extension job runner', () => {
           sourceMediaProven: false,
           sourceCoversDom: true,
           extractionMode: 'signed-api-fallback',
+          sourceMediaIssues: 'field:media_component',
         },
       },
       {
@@ -1057,7 +1058,8 @@ describe('extension job runner', () => {
         reason: '正文不完整',
         evidence: 'sourceBodyProven=true; sourceMediaProven=false; sourceCoversDom=true; '
           + 'extractionMode=signed-api-fallback; textLength=21; images=0; '
-          + 'linkedArticle=false; truncatedBefore=true; truncatedAfter=true',
+          + 'linkedArticle=false; truncatedBefore=true; truncatedAfter=true; '
+          + 'sourceMediaIssues=field:media_component',
       },
     ]);
     const saved = bridge.sent.find(message => message.type === 'job.result');

@@ -169,6 +169,8 @@ export interface TopicRecord {
   sourceBodyProven?: boolean;
   /** 已核验正文对象中的图片/附件字段均已识别并留存；false 代表只能证明文字。 */
   sourceMediaProven?: boolean;
+  /** 媒体证明失败的结构化触发码；只含字段/内联类型，不含正文或资源值。 */
+  sourceMediaIssues?: string[];
   /** 来源正文中的原始图片；折叠 DOM 尚未挂载尾图时由这里恢复。 */
   images?: TopicRecordImage[];
   /** 来源正文中的附件链接；没有可下载 URL 的 opaque 文件对象会让媒体证明失败。 */
@@ -727,6 +729,7 @@ interface SourceAssets {
   images: TopicRecordImage[];
   attachments: TopicRecordAttachment[];
   proven: boolean;
+  issues: string[];
 }
 
 /**
@@ -855,6 +858,13 @@ function sourceAssetsOf(candidate: Record<string, unknown>): SourceAssets {
   const images = new Map<string, TopicRecordImage>();
   const attachments = new Map<string, TopicRecordAttachment>();
   let proven = true;
+  const issues = new Set<string>();
+  const issueToken = (value: string): string =>
+    value.replace(/[^A-Za-z0-9_-]+/gu, '_').slice(0, 80) || 'unknown';
+  const markIssue = (issue: string): void => {
+    proven = false;
+    issues.add(issue);
+  };
   let visited = 0;
   const opaqueInlineImages: Array<string | undefined> = [];
   const opaqueInlineFiles: Array<string | undefined> = [];
@@ -895,7 +905,7 @@ function sourceAssetsOf(candidate: Record<string, unknown>): SourceAssets {
         unsupportedComponentTypes.has(type)
         || (!imageTypes.has(type) && !attachmentTypes.has(type))
       ) {
-        proven = false;
+        markIssue(`inline:${issueToken(type)}`);
         continue;
       }
       const rawUrl = /\b(?:src|href|url)="([^"]+)"/iu.exec(tag)?.[1];
@@ -921,7 +931,7 @@ function sourceAssetsOf(candidate: Record<string, unknown>): SourceAssets {
 
   const visit = (value: unknown, depth: number): void => {
     if (depth > BODY_DEPTH_LIMIT || visited >= BODY_NODE_LIMIT) {
-      proven = false;
+      markIssue('body-limit');
       return;
     }
     visited += 1;
@@ -937,16 +947,16 @@ function sourceAssetsOf(candidate: Record<string, unknown>): SourceAssets {
 
     if ('images' in value) {
       const rawImages = value.images;
-      if (!Array.isArray(rawImages)) proven = false;
+      if (!Array.isArray(rawImages)) markIssue('images:not-array');
       else for (const rawImage of rawImages) {
         const allUrls = imageUrlsOf(rawImage);
         const retainedUrls = allUrls.slice(0, MESSAGE_IMAGE_ALIAS_LIMIT + 1);
         const [url, ...aliases] = retainedUrls;
         if (!url || images.size >= SOURCE_IMAGE_LIMIT) {
-          proven = false;
+          markIssue(!url ? 'images:unresolved' : 'images:limit');
           continue;
         }
-        if (allUrls.length > retainedUrls.length) proven = false;
+        if (allUrls.length > retainedUrls.length) markIssue('images:alias-limit');
         const alt = isRecord(rawImage)
           ? assetLabel(rawImage, ['alt', 'name', 'title', 'file_name', 'fileName'])
           : undefined;
@@ -965,13 +975,13 @@ function sourceAssetsOf(candidate: Record<string, unknown>): SourceAssets {
         if (!(key in value)) continue;
         const rawFiles = value[key];
         if (!Array.isArray(rawFiles)) {
-          proven = false;
+          markIssue(`${key}:not-array`);
           continue;
         }
         for (const rawFile of rawFiles) {
           const url = attachmentUrlOf(rawFile);
           if (!url || attachments.size >= SOURCE_ATTACHMENT_LIMIT) {
-            proven = false;
+            markIssue(!url ? `${key}:unresolved` : `${key}:limit`);
             continue;
           }
           const title = isRecord(rawFile)
@@ -990,7 +1000,7 @@ function sourceAssetsOf(candidate: Record<string, unknown>): SourceAssets {
       for (const rawItem of rawMedia) {
         const url = attachmentUrlOf(rawItem);
         if (!url || attachments.size >= SOURCE_ATTACHMENT_LIMIT) {
-          proven = false;
+          markIssue(!url ? `${key}:unresolved` : `${key}:limit`);
           continue;
         }
         const title = isRecord(rawItem)
@@ -1024,7 +1034,9 @@ function sourceAssetsOf(candidate: Record<string, unknown>): SourceAssets {
       ) {
         continue;
       }
-      if (nested !== null && nested !== undefined) proven = false;
+      if (nested !== null && nested !== undefined) {
+        markIssue(`field:${issueToken(key)}`);
+      }
     }
 
     for (const key of ['text', 'content', ...TOPIC_BODY_KEYS]) {
@@ -1037,15 +1049,20 @@ function sourceAssetsOf(candidate: Record<string, unknown>): SourceAssets {
     opaqueInlineImages.length > structuredImageCount
     || opaqueInlineImages.some(id => id !== undefined && !structuredImageIds.has(id))
   ) {
-    proven = false;
+    markIssue('inline-image:unresolved');
   }
   if (
     opaqueInlineFiles.length > structuredFileCount
     || opaqueInlineFiles.some(id => id !== undefined && !structuredFileIds.has(id))
   ) {
-    proven = false;
+    markIssue('inline-file:unresolved');
   }
-  return { images: [...images.values()], attachments: [...attachments.values()], proven };
+  return {
+    images: [...images.values()],
+    attachments: [...attachments.values()],
+    proven,
+    issues: [...issues],
+  };
 }
 
 function topicIdOf(value: unknown): string | undefined {
@@ -1124,7 +1141,7 @@ export function harvestTopics(
       const sourceBodyProven = provenBodyNodes.has(node);
       const assets = sourceBodyProven
         ? sourceAssetsOf(node)
-        : { images: [], attachments: [], proven: false };
+        : { images: [], attachments: [], proven: false, issues: [] };
       if (
         normalizeForMatch(text)
         || assets.images.length > 0
@@ -1140,6 +1157,7 @@ export function harvestTopics(
           fullTextTruncated,
           sourceBodyProven,
           sourceMediaProven: sourceBodyProven && assets.proven,
+          ...(assets.issues.length > 0 ? { sourceMediaIssues: assets.issues } : {}),
           ...(assets.images.length > 0 ? { images: assets.images } : {}),
           ...(assets.attachments.length > 0 ? { attachments: assets.attachments } : {}),
           keys: Object.keys(node).slice(0, 24),

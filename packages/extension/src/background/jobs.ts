@@ -423,7 +423,7 @@ function zsxqIncompleteEvidence(
   after: CollectedDocument,
 ): string {
   const metadata = after.sourceMetadata ?? before.sourceMetadata ?? {};
-  return [
+  const evidence = [
     `sourceBodyProven=${String(metadata.sourceBodyProven)}`,
     `sourceMediaProven=${String(metadata.sourceMediaProven)}`,
     `sourceCoversDom=${String(metadata.sourceCoversDom)}`,
@@ -433,7 +433,11 @@ function zsxqIncompleteEvidence(
     `linkedArticle=${String(linkedArticleUrl(after.html) !== undefined)}`,
     `truncatedBefore=${String(before.truncated === true)}`,
     `truncatedAfter=${String(after.truncated === true)}`,
-  ].join('; ');
+  ];
+  if (metadata.sourceMediaIssues !== undefined) {
+    evidence.push(`sourceMediaIssues=${String(metadata.sourceMediaIssues)}`);
+  }
+  return evidence.join('; ');
 }
 
 export interface CaptureOverrides {

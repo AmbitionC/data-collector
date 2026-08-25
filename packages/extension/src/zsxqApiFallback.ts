@@ -264,6 +264,9 @@ function documentFromTopic(
       topicId,
       sourceBodyProven: record.sourceBodyProven === true,
       sourceMediaProven: record.sourceMediaProven === true,
+      ...(record.sourceMediaIssues && record.sourceMediaIssues.length > 0
+        ? { sourceMediaIssues: record.sourceMediaIssues.join(',') }
+        : {}),
       sourceCoversDom: true,
       viewLabels: view,
       extractionMode: 'signed-api-fallback',

@@ -580,8 +580,11 @@ describe('ZSXQ API fallback', () => {
           '2026-08-24T22:39:00.000Z',
           `${taintedText}，这份副本无法证明全文`,
         ),
-        type: 'unknown',
-        owner: { user_id: '1001', name: '陈老师' },
+        talk: {
+          text: `${taintedText}，这份副本无法证明全文`,
+          owner: { user_id: '1001', name: '陈老师' },
+          media_component: { opaque_id: 'future-media' },
+        },
       },
       ...Array.from({ length: 17 }, (_, index) => topic(
         String(776_500_000_000_002_100n + BigInt(index)),
@@ -619,6 +622,7 @@ describe('ZSXQ API fallback', () => {
       document.sourceMetadata?.topicId === taintedId)).toMatchObject({
       text: `${taintedText}，这份副本无法证明全文`,
       truncated: true,
+      sourceMetadata: { sourceMediaIssues: 'field:media_component' },
     });
   });
 
