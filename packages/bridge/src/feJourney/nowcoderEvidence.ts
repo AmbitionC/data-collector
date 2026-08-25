@@ -38,6 +38,7 @@ const COMPANIES: readonly CompanyDefinition[] = [
   { id: 'other', label: '哔哩哔哩', aliases: [/哔哩哔哩|B\s*站|bilibili|阿\s*b/i] },
   { id: 'other', label: '深信服', aliases: [/深信服|信服|Sangfor/i] },
   { id: 'other', label: '影石创新', aliases: [/影石创新|影石|Insta360/i] },
+  { id: 'other', label: '大疆创新', aliases: [/大疆创新|大疆|DJI/i] },
   { id: 'other', label: 'OPPO', aliases: [/OPPO|欧珀/i] },
 ];
 

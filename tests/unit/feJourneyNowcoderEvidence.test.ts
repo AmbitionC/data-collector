@@ -194,7 +194,7 @@ describe('Nowcoder interview evidence', () => {
     });
   });
 
-  it('recognizes Sangfor, Bilibili, and Insta360 Agent interviews as supplemental companies', () => {
+  it('recognizes Sangfor, Bilibili, Insta360, and DJI Agent interviews as supplemental companies', () => {
     const sangfor = nowcoder(
       '信服 Agent 开发一面',
       `我参加了深信服 Agent 开发一面。${numberedQuestions(6)}`,
@@ -206,6 +206,10 @@ describe('Nowcoder interview evidence', () => {
     const insta360 = nowcoder(
       '影石创新 AI Agent 一面凉经',
       `我参加了 Insta360 Agent 开发一面。${numberedQuestions(6)}`,
+    );
+    const dji = nowcoder(
+      '大疆创新 AI Agent 开发面经',
+      `我参加了 DJI Agent 开发一面。${numberedQuestions(6)}`,
     );
 
     expect(analyzeNowcoderEvidence(sangfor)).toMatchObject({
@@ -221,6 +225,11 @@ describe('Nowcoder interview evidence', () => {
     expect(analyzeNowcoderEvidence(insta360)).toMatchObject({
       company: 'other',
       companyLabel: '影石创新',
+      evidenceGrade: 'A',
+    });
+    expect(analyzeNowcoderEvidence(dji)).toMatchObject({
+      company: 'other',
+      companyLabel: '大疆创新',
       evidenceGrade: 'A',
     });
   });
