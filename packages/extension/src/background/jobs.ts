@@ -413,6 +413,11 @@ function isBlankZsxqPlanShell(error: unknown): boolean {
   return /页面上找不到「最新」标签（分类栏尚未渲染）/u.test(message);
 }
 
+function isZsxqPlanDomCoverageIncomplete(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /CONTENT_COVERAGE_INCOMPLETE/u.test(message);
+}
+
 export interface CaptureOverrides {
   userCategory?: string;
   userTags?: string[];
@@ -841,29 +846,34 @@ export class JobRunner {
         },
         milliseconds => this.wait(milliseconds),
       );
+      const collectApiViews = async (): Promise<Awaited<ReturnType<typeof collectViews>>> => {
+        const fallback = await this.ask(tabId!, {
+          type: this.contentMessageType('list.apiCollect'),
+        });
+        if (!fallback.ok) throw new Error(fallback.error.message);
+        const collection = payloadOf(fallback, 'apiCollection');
+        const audit: ZsxqPlanExtractionAudit = { businessSkips: new Map() };
+        for (const item of collection.businessSkips) audit.businessSkips.set(item.url, item);
+        return { documents: collection.documents, audit };
+      };
       let extraction: Awaited<ReturnType<typeof collectViews>>;
       try {
         extraction = await collectViews();
       } catch (error) {
-        if (!isBlankZsxqPlanShell(error)) throw error;
-        // This tab was created by the fixed plan and has not selected a view yet, so one bounded
-        // reload is safe. User-owned ZSXQ tabs still use injection only and never lose their view.
-        await this.options.tabs.reload(tabId);
-        await this.options.waitForTabComplete(tabId, 30_000);
-        try {
-          extraction = await collectViews();
-        } catch (reloadedError) {
-          if (!isBlankZsxqPlanShell(reloadedError)) throw reloadedError;
-          const fallback = await this.ask(tabId, {
-            type: this.contentMessageType('list.apiCollect'),
-          });
-          if (!fallback.ok) throw new Error(fallback.error.message);
-          const collection = payloadOf(fallback, 'apiCollection');
-          const audit: ZsxqPlanExtractionAudit = { businessSkips: new Map() };
-          for (const item of collection.businessSkips) {
-            audit.businessSkips.set(item.url, item);
+        if (isZsxqPlanDomCoverageIncomplete(error)) {
+          extraction = await collectApiViews();
+        } else {
+          if (!isBlankZsxqPlanShell(error)) throw error;
+          // This tab was created by the fixed plan and has not selected a view yet, so one bounded
+          // reload is safe. User-owned ZSXQ tabs still use injection only and never lose their view.
+          await this.options.tabs.reload(tabId);
+          await this.options.waitForTabComplete(tabId, 30_000);
+          try {
+            extraction = await collectViews();
+          } catch (reloadedError) {
+            if (!isBlankZsxqPlanShell(reloadedError)) throw reloadedError;
+            extraction = await collectApiViews();
           }
-          extraction = { documents: collection.documents, audit };
         }
       }
       const documents = extraction.documents;

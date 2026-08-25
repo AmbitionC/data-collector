@@ -644,7 +644,7 @@ describe('extension job runner', () => {
     expect(documents.map(document => document.canonicalUrl)).toContain(`${LIST_URL}/topic/30001`);
   });
 
-  it('fails closed when a required ZSXQ view has visible posts but no provable documents', async () => {
+  it('fails closed when neither DOM nor signed API can prove a required ZSXQ view', async () => {
     const tabs = new InMemoryTabs();
     const bridge = new InMemoryBridge();
     let active = '';
@@ -697,6 +697,15 @@ describe('extension job runner', () => {
       if (request.type === 'list.advance') {
         return { ok: true, advance: { collapsed: 0, loaded: 0 } };
       }
+      if (request.type === 'list.apiCollect') {
+        return {
+          ok: false,
+          error: {
+            code: 'COLLECTION_FAILED',
+            message: 'CONTENT_COVERAGE_INCOMPLETE（ZSXQ_API_TOPIC_UNPROVEN）：签名接口仍无法形成可验证文档',
+          },
+        } as never;
+      }
       throw new Error(`unexpected ${request.type}`);
     };
     const runner = new JobRunner({
@@ -711,7 +720,7 @@ describe('extension job runner', () => {
       'coverage-gap',
       PLAN_ATTEMPT,
       result => { phases.push(result); },
-    )).rejects.toThrow(/CONTENT_COVERAGE_INCOMPLETE.*最新.*20/u);
+    )).rejects.toThrow(/CONTENT_COVERAGE_INCOMPLETE.*签名接口/u);
 
     expect(phases.some(phase => phase.prepared)).toBe(false);
     expect(bridge.createdFor).toEqual([]);
@@ -2073,6 +2082,52 @@ describe('extension job runner', () => {
     );
 
     expect(tabs.reloaded).toEqual([42]);
+    expect(tabs.asked).toContain('list.apiCollect');
+    expect(bridge.createdFor).toEqual([candidate.canonicalUrl]);
+    expect(tabs.removed).toEqual([42]);
+  });
+
+  it('uses the signed API fallback after bounded DOM identity recovery still lacks coverage', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-08-25T10:00:00.000Z'));
+    const tabs = new InMemoryTabs();
+    const bridge = new InMemoryBridge();
+    const candidate = {
+      ...topic('api-identity-recovery'),
+      title: '陈老师投资经营复盘',
+      text: '这是陈老师关于投资、创业和经营的完整复盘。',
+      publishedAt: '2026-08-24T10:00:00.000Z',
+      sourceMetadata: { authorRole: 'owner' },
+    } satisfies CollectedDocument;
+    tabs.sendMessage = async (_tabId, message) => {
+      const type = (message as { type?: string }).type ?? '';
+      tabs.asked.push(type);
+      if (type === 'list.apiCollect') {
+        return {
+          ok: true,
+          apiCollection: { documents: [candidate], businessSkips: [] },
+        } as never;
+      }
+      throw new Error(`unexpected ${type}`);
+    };
+    const runner = new JobRunner({
+      tabs,
+      bridge,
+      waitForTabComplete: async () => undefined,
+      delay: async () => undefined,
+    });
+    vi.spyOn(runner, 'collectZsxqPlanViews').mockRejectedValue(new Error(
+      'CONTENT_COVERAGE_INCOMPLETE：知识星球必采视图「最新」无法形成可验证文档',
+    ));
+
+    await runner.runZsxqCollectionPlan(
+      'api-identity-recovery',
+      PLAN_ATTEMPT,
+      undefined,
+      { force: true },
+    );
+
+    expect(tabs.reloaded).toEqual([]);
     expect(tabs.asked).toContain('list.apiCollect');
     expect(bridge.createdFor).toEqual([candidate.canonicalUrl]);
     expect(tabs.removed).toEqual([42]);
