@@ -184,6 +184,37 @@ describe('Nowcoder interview evidence', () => {
     });
   });
 
+  it('recognizes Sangfor, Bilibili, and Insta360 Agent interviews as supplemental companies', () => {
+    const sangfor = nowcoder(
+      '信服 Agent 开发一面',
+      `我参加了深信服 Agent 开发一面。${numberedQuestions(6)}`,
+    );
+    const bilibili = nowcoder(
+      '哔哩哔哩 AI 应用岗 Agent 开发一面',
+      `我参加了 B 站 Agent 开发一面。${numberedQuestions(6)}`,
+    );
+    const insta360 = nowcoder(
+      '影石创新 AI Agent 一面凉经',
+      `我参加了 Insta360 Agent 开发一面。${numberedQuestions(6)}`,
+    );
+
+    expect(analyzeNowcoderEvidence(sangfor)).toMatchObject({
+      company: 'other',
+      companyLabel: '深信服',
+      evidenceGrade: 'A',
+    });
+    expect(analyzeNowcoderEvidence(bilibili)).toMatchObject({
+      company: 'other',
+      companyLabel: '哔哩哔哩',
+      evidenceGrade: 'A',
+    });
+    expect(analyzeNowcoderEvidence(insta360)).toMatchObject({
+      company: 'other',
+      companyLabel: '影石创新',
+      evidenceGrade: 'A',
+    });
+  });
+
   it('does not stop a numbered question sequence when a question starts with a number', () => {
     const evidence = analyzeNowcoderEvidence(nowcoder(
       '腾讯 AI 应用开发一面',
