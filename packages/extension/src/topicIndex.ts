@@ -944,12 +944,10 @@ function sourceAssetsOf(candidate: Record<string, unknown>): SourceAssets {
   const isClosedContentVoiceNarrationCache = (
     key: string,
     nested: unknown,
-    parent: Record<string, unknown>,
   ): boolean => {
     if (
       key !== 'content_voice'
-      || typeof parent.text !== 'string'
-      || parent.text.trim().length === 0
+      || !hasBodyBearingValue(candidate)
       || !isRecord(nested)
       || Array.isArray(nested)
     ) return false;
@@ -1064,7 +1062,7 @@ function sourceAssetsOf(candidate: Record<string, unknown>): SourceAssets {
     ]);
     for (const [key, nested] of Object.entries(value)) {
       if (recognized.has(key)) continue;
-      if (isClosedContentVoiceNarrationCache(key, nested, value)) continue;
+      if (isClosedContentVoiceNarrationCache(key, nested)) continue;
       if (!/(?:media|component|attachment|file|image|audio|video|voice|poll|card)/iu.test(key)) {
         continue;
       }

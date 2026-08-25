@@ -935,9 +935,13 @@ describe('正文被折叠时用接口那份补齐', () => {
   });
 
   it('distinguishes the closed content-voice narration cache from authored audio', () => {
-    const harvest = (topicId: string, talk: Record<string, unknown>) => harvestTopics({
+    const harvest = (
+      topicId: string,
+      talk: Record<string, unknown>,
+      topicFields: Record<string, unknown> = {},
+    ) => harvestTopics({
       succeeded: true,
-      resp_data: { topics: [{ topic_id: topicId, talk }] },
+      resp_data: { topics: [{ topic_id: topicId, talk, ...topicFields }] },
     }, 400, {
       responsePath: 'https://api.zsxq.com/v2/groups/48844584441158/topics',
     })[0];
@@ -953,28 +957,29 @@ describe('正文被折叠时用接口那份补齐', () => {
 
     expect(harvest('903100000000029', {
       text: '完整纯文本正文。',
+    }, {
       content_voice: narrationCache,
     })).toMatchObject({
       sourceBodyProven: true,
       sourceMediaProven: true,
     });
 
-    for (const [topicId, field, value] of [
-      ['903100000000030', 'voice', narrationCache],
-      ['903100000000031', 'audio', narrationCache],
+    for (const [topicId, field, value, atTopicRoot] of [
+      ['903100000000030', 'voice', narrationCache, false],
+      ['903100000000031', 'audio', narrationCache, false],
       ['903100000000032', 'content_voice', {
         ...narrationCache,
         download_url: 'https://files.zsxq.com/content.mp3',
-      }],
+      }, true],
       ['903100000000033', 'content_voice', {
         ...narrationCache,
         payload: { file_id: 123456789 },
-      }],
+      }, true],
     ] as const) {
       expect(harvest(topicId, {
         text: '真实语音、可下载音频或扩展结构仍必须完整解析。',
-        [field]: value,
-      })?.sourceMediaProven, `${field}:${topicId}`).toBe(false);
+        ...(!atTopicRoot ? { [field]: value } : {}),
+      }, atTopicRoot ? { [field]: value } : {})?.sourceMediaProven, `${field}:${topicId}`).toBe(false);
     }
   });
 
