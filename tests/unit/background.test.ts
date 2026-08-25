@@ -719,6 +719,71 @@ describe('extension job runner', () => {
     expect(latestAttempts).toBe(11);
   });
 
+  it('refreshes an already-active fixed-plan view once to recover missing topic identities', async () => {
+    const tabs = new InMemoryTabs();
+    const bridge = new InMemoryBridge();
+    const recovered = topic('73200');
+    let refreshed = false;
+    let refreshRequests = 0;
+    tabs.sendMessage = async (_id, message) => {
+      const request = message as { type: string; label?: string };
+      if (request.type === 'list.selectView') {
+        return { ok: true, selected: { label: request.label, topicIds: [] } } as never;
+      }
+      if (request.type === 'list.restore') {
+        return { ok: true, advance: { collapsed: 0, loaded: 0 } };
+      }
+      if (request.type === 'list.refreshTopics') {
+        refreshRequests += 1;
+        refreshed = true;
+        return { ok: true, refresh: { toggled: true, category: '最新' } } as never;
+      }
+      if (request.type === 'extract.list') {
+        return refreshed
+          ? {
+              ok: true,
+              list: {
+                items: [{ key: 'recovered-topic', title: recovered.title, document: recovered }],
+                skipped: 0,
+                total: 1,
+                captured: 1,
+              },
+            }
+          : {
+              ok: true,
+              list: {
+                items: [{
+                  key: 'missing-topic-id',
+                  title: '已显示但尚未绑定帖子编号',
+                  reason: '这条帖子的编号没截到，所以无法确定它自己的网址',
+                  skipKind: 'coverage-risk',
+                }],
+                skipped: 1,
+                total: 1,
+                captured: 0,
+              },
+            } as never;
+      }
+      if (request.type === 'list.advance') {
+        return { ok: true, advance: { collapsed: 0, loaded: 0 } };
+      }
+      throw new Error(`unexpected ${request.type}`);
+    };
+    const runner = new JobRunner({
+      tabs,
+      bridge,
+      waitForTabComplete: async () => undefined,
+      delay: async () => undefined,
+    });
+
+    const documents = await runner.collectZsxqPlanViews(7, ['最新']);
+
+    expect(documents.map(document => document.canonicalUrl)).toEqual([
+      `${LIST_URL}/topic/73200`,
+    ]);
+    expect(refreshRequests).toBe(1);
+  });
+
   it('retries a transient coverage-risk frame before accepting the stable document frame', async () => {
     const tabs = new InMemoryTabs();
     const bridge = new InMemoryBridge();

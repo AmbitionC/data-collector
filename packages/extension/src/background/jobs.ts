@@ -692,6 +692,7 @@ export class JobRunner {
     for (const label of views) {
       const documents: CollectedDocument[] = [];
       const viewUrls = new Set<string>();
+      let refreshedFeed = false;
       const selected = await this.ask(tabId, {
         type: this.contentMessageType('list.selectView'),
         label,
@@ -718,6 +719,20 @@ export class JobRunner {
         );
         const riskCount = coverageRisks.length + hiddenRisks;
         if (list.total > 0 && riskCount > 0) {
+          if (!refreshedFeed) {
+            refreshedFeed = true;
+            const refresh = await this.ask(tabId, {
+              type: this.contentMessageType('list.refreshTopics'),
+            })
+              .then(response => (response.ok
+                ? payloadOf(response, 'refresh')
+                : { toggled: false }))
+              .catch(() => ({ toggled: false as boolean }));
+            if (refresh.toggled) {
+              round -= 1;
+              continue;
+            }
+          }
           const reasons = [...new Set(coverageRisks
             .map(item => item.reason?.trim())
             .filter((reason): reason is string => Boolean(reason)))]
