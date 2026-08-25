@@ -83,6 +83,39 @@ describe('data-collector-delivery skill', () => {
     expect(JSON.stringify(manifest)).not.toContain('历史内容');
   });
 
+  it('scopes pooled Nowcoder entries by the delivery batch instead of their capture batch', async () => {
+    const repo = await temporaryDirectories.create('delivery-nowcoder-manifest-');
+    await entry(repo, 'nowcoder', 'current-delivery', {
+      id: 'a1b2c3d4e5f6', source: 'nowcoder', title: '字节 Agent 面经',
+      sourceMetadata: {
+        batchId: 'capture-batch-old',
+        sourceBatchId: 'capture-batch-old',
+        deliveryBatchId: 'delivery-batch-current',
+        planId: 'nowcoder-agent-market',
+        evidenceGrade: 'A',
+      },
+    });
+    await entry(repo, 'nowcoder', 'old-delivery', {
+      id: '0123456789ab', source: 'nowcoder', title: '历史交付面经',
+      sourceMetadata: {
+        batchId: 'capture-batch-current',
+        deliveryBatchId: 'delivery-batch-old',
+        planId: 'nowcoder-agent-market',
+        evidenceGrade: 'A',
+      },
+    });
+
+    const output = await runNode([
+      join(skillRoot, 'scripts', 'inbox-manifest.mjs'),
+      '--repo', repo,
+      '--batch', 'delivery-batch-current',
+      '--source', 'nowcoder',
+    ], repo);
+    const manifest = JSON.parse(output) as { matched: Array<{ id: string }> };
+
+    expect(manifest.matched.map(item => item.id)).toEqual(['a1b2c3d4e5f6']);
+  });
+
   it('rejects source traversal before reading outside the repository', async () => {
     const repo = await temporaryDirectories.create('delivery-traversal-');
     await expect(runNode([

@@ -59,6 +59,8 @@ import {
 import {
   CollectionPlanService,
   CollectionPlanStore,
+  filterProcessedNowcoderDocuments,
+  loadProcessedNowcoderHistory,
   pendingNowcoderPlanJobs,
   selectNowcoderPlanCandidates,
   type ExtensionPlanResult,
@@ -657,8 +659,18 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
             if (document) readable.push({ job: planJob, document });
             else rejected.push({ url: planJob.url, reason: '本机文档不可读' });
           }
+          const targetRoot = router.syncTarget('nowcoder')?.root;
+          const processed = targetRoot
+            ? filterProcessedNowcoderDocuments(
+                readable.map(item => item.document),
+                await loadProcessedNowcoderHistory(targetRoot),
+              )
+            : {
+                eligible: readable.map(item => item.document),
+                rejected: [] as Array<{ url: string; reason: string }>,
+              };
           const selection = selectNowcoderPlanCandidates(
-            readable.map(item => item.document),
+            processed.eligible,
             now,
           );
           const acceptedUrls = new Set(selection.accepted.map(document => document.canonicalUrl));
@@ -667,7 +679,7 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
               .filter(item => acceptedUrls.has(item.document.canonicalUrl))
               .map(item => item.job),
             coverage: selection.coverage,
-            rejected: rejected.concat(selection.rejected),
+            rejected: rejected.concat(processed.rejected, selection.rejected),
           };
         },
         coverageKey: async job => {

@@ -59,7 +59,10 @@ if (!rawRepo || !batch || !source) {
       malformed.push({ path: displayPath, reason: 'meta.json 不是有效 JSON' });
       continue;
     }
-    if (meta?.sourceMetadata?.batchId !== batch) continue;
+    const manifestBatch = source === 'nowcoder'
+      ? (meta?.sourceMetadata?.deliveryBatchId ?? meta?.sourceMetadata?.batchId)
+      : meta?.sourceMetadata?.batchId;
+    if (manifestBatch !== batch) continue;
     if (meta?.source !== source || typeof meta?.id !== 'string' || !/^[a-f0-9]{12}$/.test(meta.id)) {
       malformed.push({ path: displayPath, reason: '当前批次条目的 source 或 id 无效' });
       continue;
