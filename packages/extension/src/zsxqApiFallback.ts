@@ -439,6 +439,51 @@ function ownerPageDocument(
   return { topicId, createTime, document };
 }
 
+function ownerDetailDocument(
+  groupId: string,
+  topicId: string,
+  payload: unknown,
+  groupOwner: Record<string, unknown>,
+  collectedAt: string,
+  expectedCreateTime: string,
+): CollectedDocument {
+  const data = responseData(payload);
+  const topic = isRecord(data?.topic)
+    ? data.topic
+    : data && identifier(data.topic_id ?? data.topicId) ? data : undefined;
+  if (!topic || identifier(topic.topic_id ?? topic.topicId) !== topicId) {
+    throw coverageError(
+      'ZSXQ_API_TOPIC_UNPROVEN',
+      `帖子详情接口未返回预期 topic ${topicId}`,
+    );
+  }
+  const responsePath = `${API_ROOT}/topics/${topicId}`;
+  let record: TopicRecord | undefined;
+  for (const candidate of harvestTopics(payload, 40, { responsePath })) {
+    if (candidate.topicId !== topicId) continue;
+    record = preferredTopicRecord(record, candidate);
+  }
+  const createTime = createTimeOf(topic);
+  if (!record || !createTime || createTime !== expectedCreateTime) {
+    throw coverageError(
+      'ZSXQ_API_TOPIC_CONFLICT',
+      `帖子详情 ${topicId} 的正文或发布时间与列表不一致`,
+    );
+  }
+  const document = documentFromTopic(
+    groupId,
+    '只看星主',
+    topic,
+    { ...record, createTime },
+    groupOwner,
+    collectedAt,
+  );
+  if (document.sourceMetadata?.authorRole !== 'owner') {
+    throw new Error(`AUTHOR_IDENTITY_UNPROVEN：帖子详情 ${topicId} 未证明为星主发布`);
+  }
+  return document;
+}
+
 /**
  * Fetches exactly one signed `by_owner` page. The caller persists the returned
  * cursor only after all jobs derived from this page have reached a terminal state.
@@ -507,9 +552,30 @@ export async function collectZsxqApiOwnerPage(
   const documents: CollectedDocument[] = [];
   const businessSkips: ZsxqOwnerPage['businessSkips'] = [];
   for (const item of verified) {
-    const excluded = excludedBy(item.document.text);
-    const links = [...item.document.html.matchAll(/\bhref="([^"]+)"/giu)].map(match => match[1]!);
-    const advertisement = advertisementIn(links);
+    let document = item.document;
+    let excluded = excludedBy(document.text);
+    let links = [...document.html.matchAll(/\bhref="([^"]+)"/giu)].map(match => match[1]!);
+    let advertisement = advertisementIn(links);
+    // The feed can return only a `...` preview while claiming a structurally valid body. Prefer the
+    // signed detail endpoint; the background DOM detail collector remains a fail-closed fallback.
+    if (!excluded && !advertisement && document.truncated === true) {
+      const detailPayload = await apiGet(`${API_ROOT}/topics/${item.topicId}`, common);
+      const detail = ownerDetailDocument(
+        groupId,
+        item.topicId,
+        detailPayload,
+        owner,
+        collectedAt,
+        item.createTime,
+      );
+      // Same signed topic id, publication time and owner have already been proven above. The feed
+      // preview can contain a duplicated title after `...`, so ordinary prefix merging is not a
+      // valid identity check here; the detail representation is authoritative for this topic.
+      document = detail;
+      excluded = excludedBy(document.text);
+      links = [...document.html.matchAll(/\bhref="([^"]+)"/giu)].map(match => match[1]!);
+      advertisement = advertisementIn(links);
+    }
     const reason = excluded
       ? `${excluded.label}（按选题偏好跳过，命中：${excluded.hits.join('、')}）`
       : advertisement
@@ -517,12 +583,12 @@ export async function collectZsxqApiOwnerPage(
         : undefined;
     if (reason) {
       businessSkips.push({
-        url: item.document.canonicalUrl,
+        url: document.canonicalUrl,
         reason,
         publishedAt: item.createTime,
       });
     } else {
-      documents.push(item.document);
+      documents.push(document);
     }
   }
   if (JSON.stringify({ documents, businessSkips }).length > TOPIC_MESSAGE_CHARACTER_LIMIT) {

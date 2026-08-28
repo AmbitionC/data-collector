@@ -88,6 +88,43 @@ describe('ZSXQ API fallback', () => {
     expect(result.pageKey).toMatch(/^start:/u);
   });
 
+  it('replaces a three-dot feed preview with the signed topic-detail body before returning the page', async () => {
+    const topicId = '690000000000000098';
+    const preview = topic(
+      topicId,
+      '2026-08-19T23:00:00.000Z',
+      '投资课程正文已经讲到现金流，关键的方法和结论还在后面...',
+    );
+    const full = topic(
+      topicId,
+      '2026-08-19T23:00:00.000Z',
+      '投资课程正文已经讲到现金流，关键的方法和结论还在后面：先核对现金流，再结合估值和仓位做决策。',
+    );
+    const requested: string[] = [];
+    const fetcher = async (input: RequestInfo | URL): Promise<Response> => {
+      const url = String(input);
+      requested.push(url);
+      if (url === `${API}/groups/${GROUP_ID}`) return groupResponse();
+      if (url === `${API}/groups/${GROUP_ID}/menus`) return menuResponse();
+      if (url === `${API}/topics/${topicId}`) {
+        return response(JSON.stringify({ succeeded: true, resp_data: { topic: full } }));
+      }
+      return topicResponse([preview]);
+    };
+
+    const result = await collectZsxqApiOwnerPage(GROUP_ID, {}, {
+      fetcher,
+      aduid: 'test-device',
+      requestId: () => 'test-request',
+    });
+
+    expect(requested).toContain(`${API}/topics/${topicId}`);
+    expect(result.documents).toEqual([expect.objectContaining({
+      truncated: false,
+      text: expect.stringContaining('先核对现金流，再结合估值'),
+    })]);
+  });
+
   it('uses trusted owner context to fetch only the requested continuation page', async () => {
     const fetcher = vi.fn(async (input: RequestInfo | URL) => {
       const url = new URL(String(input));
