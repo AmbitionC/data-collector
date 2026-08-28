@@ -1,5 +1,6 @@
 import { readFile, realpath } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
+import sanitizeHtml from 'sanitize-html';
 import {
   collectedDocumentSchema,
   hasZsxqApiPreviewTail,
@@ -56,6 +57,24 @@ function topicIdOf(url: string, metadata: Record<string, string | number | boole
 }
 
 /**
+ * 星球会把关联帖标题截成 `...`，并同时放进正文行和独立链接行。
+ * 这是链接标签的展示省略，不是当前帖子的正文残片。紧凑索引仍要
+ * 检查真正的 API 预览尾，因此只从该次检查的文本副本里拿掉锚点标签。
+ */
+function withoutLinkedPreviewTitles(text: string, html: string): string {
+  let body = text;
+  for (const match of html.matchAll(/<a\b[^>]*>([\s\S]*?)<\/a>/giu)) {
+    const label = sanitizeHtml(match[1] ?? '', {
+      allowedTags: [],
+      allowedAttributes: {},
+    }).replace(/\s+/gu, ' ').trim();
+    if (!/\.\.\.\s*$/u.test(label)) continue;
+    body = body.split(label).join('');
+  }
+  return body;
+}
+
+/**
  * Builds the compact, body-free index sent to the extension before collection.
  *
  * A broken ZSXQ entry aborts the complete index. Silently omitting it would turn an
@@ -102,7 +121,9 @@ export async function loadZsxqLibraryIndex(root: string): Promise<ZsxqLibraryInd
         ? metadata.authorRole
         : undefined;
       const topicId = topicIdOf(entry.url, metadata);
-      const contentComplete = hasZsxqApiPreviewTail(document.text)
+      const contentComplete = hasZsxqApiPreviewTail(
+        withoutLinkedPreviewTitles(document.text, document.html),
+      )
         ? false
         : trustedCompleteness(entry);
       const compact: ZsxqLibraryIndexEntry = {
