@@ -398,6 +398,9 @@ describe('extension job runner', () => {
       delay: async () => undefined,
       knownZsxqIndex: async () => knownIndex,
     });
+    bridge.terminalAck = async () => {
+      expect(bridge.sent.filter(message => message.type === 'job.result')).toHaveLength(0);
+    };
     const phases: Array<Record<string, unknown>> = [];
 
     await runner.runZsxqCollectionPlan(

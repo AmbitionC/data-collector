@@ -1080,11 +1080,13 @@ export class JobRunner {
       });
       staged.push({ id: job.id, document: plannedDocument });
     }
+    const terminalReceipts = staged.map(item =>
+      this.options.bridge.waitForJobTerminal(item.id, attempt));
     for (const item of staged) {
       this.options.bridge.send('job.progress', item.id, { stage: 'collecting' });
       this.sendDocumentResult(item.id, item.document);
     }
-    await Promise.all(staged.map(item => this.options.bridge.waitForJobTerminal(item.id, attempt)));
+    await Promise.all(terminalReceipts);
     return {
       discovered: documents.length + [...audit.businessSkips].filter(([key, skipped]) =>
         !documentUrls.has(skipped.url ?? key)).length,
@@ -1329,13 +1331,14 @@ export class JobRunner {
         staged.push({ jobId: job.id, document: plannedDocument, draft, repair });
       }
 
+      const terminalReceipts = staged.map(item =>
+        this.options.bridge.waitForJobTerminal(item.jobId, attempt));
       for (const item of staged) {
         this.options.bridge.send('job.progress', item.jobId, { stage: 'collecting' });
         this.sendDocumentResult(item.jobId, item.document);
       }
       try {
-        await Promise.all(staged.map(item =>
-          this.options.bridge.waitForJobTerminal(item.jobId, attempt)));
+        await Promise.all(terminalReceipts);
       } catch (error) {
         for (const item of staged) item.draft.failedCount += 1;
         audit.failed += staged.length;
