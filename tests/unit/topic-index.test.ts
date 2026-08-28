@@ -527,6 +527,19 @@ describe('正文被折叠时用接口那份补齐', () => {
     expect(record?.fullTextTruncated).toBe(true);
   });
 
+  it('does not mistake an ellipsis in the opening title for a truncated complete body', () => {
+    const [record] = harvestTopics({
+      topics: [{
+        topic_id: '90301',
+        talk: {
+          text: '最近有星友问我财新的 skill 数据包有没有优惠活动...\n\n后面还有完整的正文、价格比较、购买截止时间和最终说明。',
+        },
+      }],
+    });
+
+    expect(record?.fullTextTruncated).toBe(false);
+  });
+
   it('preserves every API body segment instead of silently slicing arrays after four items', () => {
     const segments = Array.from(
       { length: 10 },

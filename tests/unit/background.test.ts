@@ -688,7 +688,9 @@ describe('extension job runner', () => {
       PLAN_ATTEMPT,
       phase => { phases.push(phase as unknown as Record<string, unknown>); },
       { zsxqMode: 'owner-history', targetDays: [] },
-    )).rejects.toThrow(/CONTENT_COVERAGE_INCOMPLETE.*1 条/u);
+    )).rejects.toThrow(
+      /CONTENT_COVERAGE_INCOMPLETE.*1 条.*80102.*sourceMediaProven=false/u,
+    );
 
     expect(pageRequests).toBe(1);
     expect(bridge.createdFor).toEqual([]);

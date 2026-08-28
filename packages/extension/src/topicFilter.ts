@@ -107,7 +107,7 @@ export const DATING_RULE: ExcludeRule = {
 export const PROMOTION_RULE: ExcludeRule = {
   id: 'promotion',
   label: '推广/带货内容',
-  strong: ['优惠活动', '购买链接', '专属福利', '付费专栏'],
+  strong: ['优惠活动', '渠道优惠价', '购买链接', '专属福利', '付费专栏'],
   supporting: ['购买', '价格', '优惠券', '渠道价', '人工开通', '兑换码', '续费'],
 };
 

@@ -1411,7 +1411,15 @@ export class JobRunner {
         ownerAudit: { ...audit },
       };
       if (audit.failed > 0) {
-        throw new Error(`CONTENT_COVERAGE_INCOMPLETE：${audit.failed} 条知识星球正文未能完整保存`);
+        const evidence = rejectionDetails
+          .filter(detail => detail.reason === '正文不完整')
+          .slice(-Math.min(audit.failed, 5))
+          .map(detail => `${detail.url}（${detail.evidence ?? '无完整性证据'}）`)
+          .join('；');
+        throw new Error(
+          `CONTENT_COVERAGE_INCOMPLETE：${audit.failed} 条知识星球正文未能完整保存`
+          + (evidence ? `：${evidence}` : ''),
+        );
       }
       await reportPhase?.(phase);
       const targetDaysCrossed = targetDays.every(day =>
