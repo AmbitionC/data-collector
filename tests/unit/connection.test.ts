@@ -995,6 +995,32 @@ describe('extension Bridge connection', () => {
     await expect(waiting).rejects.toThrow('知识库目录写入失败');
   });
 
+  it('allows slow image and attachment sinks ten minutes before timeout recovery', async () => {
+    const storage = new MemoryStorage({ bridgeToken: 'x'.repeat(43) });
+    const socket = new MemorySocket();
+    const deps = dependencies(storage, () => socket);
+    const connection = new BridgeConnection(deps);
+    await connection.start();
+    socket.emit('open');
+    await vi.waitFor(() => expect(socket.sent).toHaveLength(1));
+
+    const waiting = connection.waitForJobTerminal('job-slow-media', PLAN_ATTEMPT);
+
+    expect(deps.setTimeout).toHaveBeenCalledWith(expect.any(Function), 10 * 60_000);
+    socket.emit('message', JSON.stringify({
+      protocolVersion: 1,
+      type: 'job.saved',
+      requestId: 'job-slow-media',
+      timestamp: '2026-08-25T00:00:00.000Z',
+      payload: {
+        outputPath: '/library/job-slow-media.md',
+        results: [],
+        attempt: PLAN_ATTEMPT,
+      },
+    }));
+    await expect(waiting).resolves.toBeUndefined();
+  });
+
   it('recovers a lost WebSocket acknowledgement from the persisted JobStore state', async () => {
     const storage = new MemoryStorage({ bridgeToken: 'x'.repeat(43) });
     const socket = new MemorySocket();

@@ -93,7 +93,10 @@ interface JobTerminalWaiter {
   settled: boolean;
 }
 
-const JOB_TERMINAL_ACK_TIMEOUT_MS = 60_000;
+// Image downloads, repository writes and delivery sync all finish before Bridge emits the durable
+// terminal acknowledgement. Real ZSXQ posts with remote media can legitimately take over a minute;
+// keep this below the 30-minute plan deadline while leaving enough room for slow attachment hosts.
+const JOB_TERMINAL_ACK_TIMEOUT_MS = 10 * 60_000;
 const RECENT_JOB_TERMINAL_LIMIT = 100;
 
 export class BridgeConnection {
