@@ -313,6 +313,197 @@ describe('采集 → 本地 → 同步 → 归档 的完整链路', () => {
     expect(await inboxEntries(repo)).toHaveLength(1);
   });
 
+  it('fixed-plan sync does not commit an unchanged recapture again', async () => {
+    const { library, repo, router } = await pipeline();
+    await router.save(organize(post({
+      collectedAt: '2026-08-25T01:00:00.000Z',
+      sourceMetadata: {
+        contentCompletenessVersion: ZSXQ_COMPLETE_CONTENT_CAPABILITY,
+        contentCompletenessBuildId: 'v0.4.30 · build-A',
+        batchId: 'capture-batch-A',
+        planId: 'zsxq-chen-teacher',
+      },
+    })));
+    const [entry] = await listLibrary(library);
+    const resolveTarget = (source: string) => router.syncTarget(source);
+    const first = await syncEntries(
+      library,
+      [entry!.id],
+      resolveTarget,
+      undefined,
+      { skipDelivered: true },
+    );
+    expect(first).toMatchObject({ synced: 1, failed: 0 });
+    expect(Number((await run('git', ['rev-list', '--count', 'HEAD'], { cwd: repo })).stdout.trim()))
+      .toBe(2);
+
+    await router.save(organize(post({
+      collectedAt: '2026-08-25T02:00:00.000Z',
+      sourceMetadata: {
+        contentCompletenessVersion: ZSXQ_COMPLETE_CONTENT_CAPABILITY,
+        contentCompletenessBuildId: 'v0.4.30 · build-B',
+        batchId: 'capture-batch-B',
+        planId: 'zsxq-chen-teacher',
+      },
+    })));
+    const duplicate = await syncEntries(
+      library,
+      [entry!.id],
+      resolveTarget,
+      undefined,
+      { skipDelivered: true },
+    );
+
+    expect(duplicate).toMatchObject({ synced: 1, failed: 0 });
+    expect(Number((await run('git', ['rev-list', '--count', 'HEAD'], { cwd: repo })).stdout.trim()))
+      .toBe(2);
+    expect(await inboxEntries(repo)).toHaveLength(1);
+
+    const explicitRedelivery = await syncEntries(
+      library,
+      [entry!.id],
+      resolveTarget,
+    );
+    expect(explicitRedelivery).toMatchObject({ synced: 1, failed: 0 });
+    expect(Number((await run('git', ['rev-list', '--count', 'HEAD'], { cwd: repo })).stdout.trim()))
+      .toBe(3);
+
+    await router.save(organize(post({
+      collectedAt: '2026-08-25T03:00:00.000Z',
+      html: '<p>跌破 60 日线就该降仓；新增条件是放量破位后不得在当日抄底。</p>',
+      text: '跌破 60 日线就该降仓；新增条件是放量破位后不得在当日抄底。',
+      sourceMetadata: {
+        contentCompletenessVersion: ZSXQ_COMPLETE_CONTENT_CAPABILITY,
+        contentCompletenessBuildId: 'v0.4.30 · build-C',
+        batchId: 'capture-batch-C',
+        planId: 'zsxq-chen-teacher',
+      },
+    })));
+    const changed = await syncEntries(
+      library,
+      [entry!.id],
+      resolveTarget,
+      undefined,
+      { skipDelivered: true },
+    );
+
+    expect(changed).toMatchObject({ synced: 1, failed: 0 });
+    expect(Number((await run('git', ['rev-list', '--count', 'HEAD'], { cwd: repo })).stdout.trim()))
+      .toBe(4);
+  });
+
+  it('does not trust a delivered catalog receipt when source.json has a different revision', async () => {
+    const { library, repo, router } = await pipeline();
+    await router.save(organize(post()));
+    const [entry] = await listLibrary(library);
+    await syncEntries(library, [entry!.id], source => router.syncTarget(source));
+    const sourcePath = join(library, entry!.relativePath.replace(/index\.md$/u, 'source.json'));
+    const source = JSON.parse(await readFile(sourcePath, 'utf8')) as {
+      document: { html: string; text: string };
+    };
+    source.document.html = '<p>进程中断后只写入 source.json 的新正文。</p>';
+    source.document.text = '进程中断后只写入 source.json 的新正文。';
+    await writeFile(sourcePath, `${JSON.stringify(source, null, 2)}\n`, 'utf8');
+
+    const outcome = await syncEntries(
+      library,
+      [entry!.id],
+      sourceName => router.syncTarget(sourceName),
+      undefined,
+      { skipDelivered: true },
+    );
+
+    expect(outcome).toMatchObject({ synced: 0, failed: 1 });
+    expect(outcome.entries[0]?.sync.error).toContain('投递版本');
+    expect(Number((await run('git', ['rev-list', '--count', 'HEAD'], { cwd: repo })).stdout.trim()))
+      .toBe(2);
+  });
+
+  it('does not overwrite a concurrent sync state while another entry is being delivered', async () => {
+    const { library, router } = await pipeline();
+    const stableUrl = 'https://wx.zsxq.com/group/1/topic/533333333333331';
+    const changedUrl = 'https://wx.zsxq.com/group/1/topic/533333333333332';
+    await router.save(organize(post({
+      canonicalUrl: stableUrl,
+      url: stableUrl,
+      title: '已经投递且本轮不变',
+      collectedAt: '2026-08-25T03:00:00.000Z',
+    })));
+    await router.save(organize(post({
+      canonicalUrl: changedUrl,
+      url: changedUrl,
+      title: '本轮需要投递',
+      collectedAt: '2026-08-25T01:00:00.000Z',
+    })));
+    const initial = await listLibrary(library);
+    const sinkRoot = await temporaryDirectories.create('sync-state-sink-');
+    const immediateSink = {
+      id: 'state-test-sink',
+      label: 'state test sink',
+      categories: [] as string[],
+      root: sinkRoot,
+      save: async () => ({ sinkId: 'state-test-sink', ok: true, outputRef: sinkRoot }),
+    };
+    await syncEntries(library, initial.map(item => item.id), () => immediateSink);
+
+    await router.save(organize(post({
+      canonicalUrl: changedUrl,
+      url: changedUrl,
+      title: '本轮需要投递',
+      collectedAt: '2026-08-25T02:00:00.000Z',
+      html: '<p>正文已经增加了新的投资纪律与复盘结论。</p>',
+      text: '正文已经增加了新的投资纪律与复盘结论。',
+      sourceMetadata: {
+        contentCompletenessVersion: ZSXQ_COMPLETE_CONTENT_CAPABILITY,
+        contentCompletenessBuildId: 'v0.4.30 · state-build-B',
+      },
+    })));
+    const entries = await listLibrary(library);
+    const stable = entries.find(item => item.url === stableUrl)!;
+    let releaseSave!: () => void;
+    let markSaveStarted!: () => void;
+    const saveGate = new Promise<void>(resolve => { releaseSave = resolve; });
+    const saveStarted = new Promise<void>(resolve => { markSaveStarted = resolve; });
+    const blockingSink = {
+      ...immediateSink,
+      save: async (input: ReturnType<typeof organize>) => {
+        if (input.document.canonicalUrl === stableUrl) {
+          throw new Error('unchanged entry must not reach the sink');
+        }
+        markSaveStarted();
+        await saveGate;
+        return { sinkId: 'state-test-sink', ok: true, outputRef: sinkRoot };
+      },
+    };
+    const syncing = syncEntries(
+      library,
+      entries.map(item => item.id),
+      () => blockingSink,
+      undefined,
+      { skipDelivered: true },
+    );
+    await saveStarted;
+
+    const catalogPath = join(library, '_catalog', 'index.json');
+    const concurrent = JSON.parse(await readFile(catalogPath, 'utf8')) as Array<Record<string, any>>;
+    concurrent.find(item => item.id === stable.id)!.sync = {
+      state: 'failed',
+      target: 'state-test-sink',
+      at: '2026-08-25T04:00:00.000Z',
+      error: 'concurrent manual sync failed',
+    };
+    await writeFile(catalogPath, `${JSON.stringify(concurrent, null, 2)}\n`, 'utf8');
+    releaseSave();
+    await syncing;
+
+    expect((await listLibrary(library)).find(item => item.id === stable.id)?.sync).toEqual({
+      state: 'failed',
+      target: 'state-test-sink',
+      at: '2026-08-25T04:00:00.000Z',
+      error: 'concurrent manual sync failed',
+    });
+  });
+
   it('重采后再同步：收件箱仍是一份，绝不长出第二个目录', async () => {
     // 收件箱目录名里只有稳定内容 ID 是稳的：没有发布时间时日期退化成采集日期，
     // 标题取自正文首句（「展开全文」点没点上都会变）。按当次值重算目录名的话，

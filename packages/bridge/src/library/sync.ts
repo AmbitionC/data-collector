@@ -5,6 +5,7 @@ import type { ContentSink } from '../sinks/types.js';
 import { assertInsideRoot } from './paths.js';
 import { atomicWriteText, SOURCE_FILE, type SyncInfo } from './writer.js';
 import { withCatalogTransaction } from './catalogTransaction.js';
+import { deliveryRevision } from './deliveryRevision.js';
 import {
   stableContentId,
   ZSXQ_COMPLETE_CONTENT_CAPABILITY,
@@ -35,6 +36,8 @@ export interface LibraryCatalogEntry {
   contentComplete?: boolean;
   contentCompletenessVersion?: string;
   contentCompletenessBuildId?: string;
+  /** Stable semantic revision of the current source snapshot. */
+  deliveryRevision?: string;
   /** Fixed-plan delivery intent retained until that delivery batch finalizes. */
   deliveryBatchId?: string;
   sync?: SyncInfo;
@@ -57,6 +60,8 @@ export interface SyncEntriesOptions {
   deliveryPlanId?: CollectionPlanId;
   /** Persist catalog delivery state only when every requested entry succeeds. */
   atomic?: boolean;
+  /** Automatic plans may treat an unchanged, reliably delivered revision as an idempotent success. */
+  skipDelivered?: boolean;
 }
 
 function catalogPathOf(root: string): string {
@@ -138,11 +143,33 @@ function sameCatalogRevision(
     && current.publishedAt === snapshot.publishedAt
     && current.contentComplete === snapshot.contentComplete
     && current.contentCompletenessVersion === snapshot.contentCompletenessVersion
-    && current.contentCompletenessBuildId === snapshot.contentCompletenessBuildId;
+    && current.contentCompletenessBuildId === snapshot.contentCompletenessBuildId
+    && current.deliveryRevision === snapshot.deliveryRevision;
 }
 
 function messageOf(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+async function deliveredRevisionStillCurrent(
+  root: string,
+  entryId: string,
+  sinkId: string,
+  revision: string,
+): Promise<boolean> {
+  return withCatalogTransaction(root, async () => {
+    const latest = await readCatalog(root);
+    const current = latest.find(entry => entry.id === entryId);
+    if (
+      !current
+      || current.deliveryRevision !== revision
+      || current.sync?.target !== sinkId
+      || !isDelivered(current.sync)
+    ) return false;
+    const organized = await readOrganized(root, current);
+    assertZsxqSourceMatchesCatalog(current, organized);
+    return deliveryRevision(organized) === revision;
+  });
 }
 
 /**
@@ -160,6 +187,7 @@ export async function syncEntries(
   const catalog = await readCatalog(root);
   const wanted = new Set(ids);
   const results: SyncOutcome['entries'] = [];
+  const changedIds = new Set<string>();
 
   for (const entry of catalog) {
     if (!wanted.has(entry.id)) continue;
@@ -178,6 +206,7 @@ export async function syncEntries(
         error: '知识星球正文尚未确认完整，已阻止同步；请用新版重新采集该条',
       };
       entry.sync = sync;
+      changedIds.add(entry.id);
       results.push({ id: entry.id, title: entry.title, sync });
       continue;
     }
@@ -189,12 +218,45 @@ export async function syncEntries(
         error: `没有为「${entry.source}」配置同步去向`,
       };
       entry.sync = sync;
+      changedIds.add(entry.id);
       results.push({ id: entry.id, title: entry.title, sync });
       continue;
     }
     try {
       const organized = await readOrganized(root, entry);
       assertZsxqSourceMatchesCatalog(entry, organized);
+      if (
+        options.skipDelivered
+        && typeof entry.deliveryRevision === 'string'
+        && entry.deliveryRevision.length > 0
+        && entry.sync?.target === sink.id
+        && isDelivered(entry.sync)
+      ) {
+        let confirmed = false;
+        try {
+          confirmed = deliveryRevision(organized) === entry.deliveryRevision
+            && await deliveredRevisionStillCurrent(
+              root,
+              entry.id,
+              sink.id,
+              entry.deliveryRevision,
+            );
+        } catch {
+          confirmed = false;
+        }
+        if (!confirmed) {
+          const sync: SyncInfo = {
+            state: 'failed',
+            target: sink.id,
+            at: now(),
+            error: '本机快照与已投递版本不一致，已停止使用旧回执；请重新采集后重试',
+          };
+          results.push({ id: entry.id, title: entry.title, sync });
+          continue;
+        }
+        results.push({ id: entry.id, title: entry.title, sync: { ...entry.sync } });
+        continue;
+      }
       const captureBatchId = organized.document.sourceMetadata?.batchId;
       const delivered = options.deliveryBatchId
         ? {
@@ -242,6 +304,7 @@ export async function syncEntries(
         ...(detail.gitWarning ? { error: detail.gitWarning } : {}),
       };
       entry.sync = sync;
+      changedIds.add(entry.id);
       if (sync.state === 'synced' && options.deliveryBatchId) {
         entry.deliveryBatchId = options.deliveryBatchId;
       }
@@ -249,18 +312,18 @@ export async function syncEntries(
     } catch (error) {
       const sync: SyncInfo = { state: 'failed', target: sink.id, at: now(), error: messageOf(error) };
       entry.sync = sync;
+      changedIds.add(entry.id);
       results.push({ id: entry.id, title: entry.title, sync });
     }
   }
 
-  if (results.length > 0 && (!options.atomic || results.every(item => item.sync.state === 'synced'))) {
+  if (changedIds.size > 0 && (!options.atomic || results.every(item => item.sync.state === 'synced'))) {
     const snapshots = new Map(catalog.map(entry => [entry.id, entry]));
-    const touched = new Set(results.map(result => result.id));
     await withCatalogTransaction(root, async () => {
       const latest = await readCatalog(root);
       for (const current of latest) {
         const update = snapshots.get(current.id);
-        if (!update || !touched.has(current.id) || !sameCatalogRevision(current, update)) continue;
+        if (!update || !changedIds.has(current.id) || !sameCatalogRevision(current, update)) continue;
         if (update.sync) current.sync = { ...update.sync };
         else delete current.sync;
         if (update.deliveryBatchId) current.deliveryBatchId = update.deliveryBatchId;

@@ -184,6 +184,134 @@ describe('Markdown library', () => {
     expect(catalog[0]?.contentComplete).toBe(false);
   });
 
+  it('preserves a delivered receipt when only capture transport metadata changes', async () => {
+    const root = await temporaryDirectory();
+    const library = new MarkdownLibrary({ root });
+    const topicUrl = 'https://wx.zsxq.com/group/1/topic/delivery-revision-stable';
+    await library.save(organize(collected({
+      source: 'zsxq',
+      kind: 'post',
+      url: topicUrl,
+      canonicalUrl: topicUrl,
+      title: '同一篇投资复盘',
+      collectedAt: '2026-08-25T01:00:00.000Z',
+      html: '<p>核心结论没有变化，批次和构建号不属于文章内容。</p>',
+      text: '核心结论没有变化，批次和构建号不属于文章内容。',
+      images: [],
+      truncated: false,
+      sourceMetadata: {
+        ...CURRENT_COMPLETENESS,
+        batchId: 'zsxq-batch-A',
+        planId: 'zsxq-chen-teacher',
+        authorRole: 'owner',
+      },
+    })));
+    const catalogPath = join(root, '_catalog', 'index.json');
+    const firstCatalog = JSON.parse(await readFile(catalogPath, 'utf8')) as Array<Record<string, unknown>>;
+    // Simulate a receipt written by 0.4.30, before catalogs carried a deliveryRevision.
+    delete firstCatalog[0]!.deliveryRevision;
+    firstCatalog[0]!.sync = {
+      state: 'synced',
+      target: 'life-teachers',
+      at: '2026-08-25T01:30:00.000Z',
+      committed: true,
+      pushed: true,
+    };
+    firstCatalog[0]!.deliveryBatchId = 'delivery-batch-A';
+    await writeFile(catalogPath, `${JSON.stringify(firstCatalog, null, 2)}\n`);
+
+    await library.save(organize(collected({
+      source: 'zsxq',
+      kind: 'post',
+      url: topicUrl,
+      canonicalUrl: topicUrl,
+      title: '同一篇投资复盘',
+      collectedAt: '2026-08-25T02:00:00.000Z',
+      html: '<p>核心结论没有变化，批次和构建号不属于文章内容。</p>',
+      text: '核心结论没有变化，批次和构建号不属于文章内容。',
+      images: [],
+      truncated: false,
+      sourceMetadata: {
+        contentCompletenessVersion: ZSXQ_COMPLETE_CONTENT_CAPABILITY,
+        contentCompletenessBuildId: 'v0.4.30 · build-B',
+        batchId: 'zsxq-batch-B',
+        planId: 'zsxq-chen-teacher',
+        authorRole: 'owner',
+      },
+    })));
+
+    const [entry] = JSON.parse(await readFile(catalogPath, 'utf8')) as Array<{
+      deliveryRevision?: string;
+      deliveryBatchId?: string;
+      sync?: Record<string, unknown>;
+    }>;
+    expect(entry?.deliveryRevision).toMatch(/^[a-f0-9]{64}$/u);
+    expect(entry?.deliveryBatchId).toBe('delivery-batch-A');
+    expect(entry?.sync).toEqual({
+      state: 'synced',
+      target: 'life-teachers',
+      at: '2026-08-25T01:30:00.000Z',
+      committed: true,
+      pushed: true,
+    });
+  });
+
+  it('resets a delivered receipt when the semantic content changes', async () => {
+    const root = await temporaryDirectory();
+    const library = new MarkdownLibrary({ root });
+    const topicUrl = 'https://wx.zsxq.com/group/1/topic/delivery-revision-change';
+    await library.save(organize(collected({
+      source: 'zsxq',
+      kind: 'post',
+      url: topicUrl,
+      canonicalUrl: topicUrl,
+      title: '仓位纪律',
+      collectedAt: '2026-08-25T01:00:00.000Z',
+      html: '<p>第一版结论。</p>',
+      text: '第一版结论。',
+      images: [],
+      truncated: false,
+      sourceMetadata: CURRENT_COMPLETENESS,
+    })));
+    const catalogPath = join(root, '_catalog', 'index.json');
+    const firstCatalog = JSON.parse(await readFile(catalogPath, 'utf8')) as Array<Record<string, unknown>>;
+    firstCatalog[0]!.sync = {
+      state: 'synced',
+      target: 'life-teachers',
+      at: '2026-08-25T01:30:00.000Z',
+      committed: true,
+      pushed: true,
+    };
+    firstCatalog[0]!.deliveryBatchId = 'delivery-batch-A';
+    await writeFile(catalogPath, `${JSON.stringify(firstCatalog, null, 2)}\n`);
+
+    await library.save(organize(collected({
+      source: 'zsxq',
+      kind: 'post',
+      url: topicUrl,
+      canonicalUrl: topicUrl,
+      title: '仓位纪律',
+      collectedAt: '2026-08-25T02:00:00.000Z',
+      html: '<p>第一版结论。新增了止损条件与复盘数据。</p>',
+      text: '第一版结论。新增了止损条件与复盘数据。',
+      images: [],
+      truncated: false,
+      sourceMetadata: {
+        contentCompletenessVersion: ZSXQ_COMPLETE_CONTENT_CAPABILITY,
+        contentCompletenessBuildId: 'v0.4.30 · build-B',
+      },
+    })));
+
+    const [entry] = JSON.parse(await readFile(catalogPath, 'utf8')) as Array<{
+      deliveryRevision?: string;
+      deliveryBatchId?: string;
+      sync?: { state?: string };
+    }>;
+    expect(entry?.deliveryRevision).toMatch(/^[a-f0-9]{64}$/u);
+    expect(entry).not.toHaveProperty('deliveryBatchId');
+    expect(entry?.sync).toEqual({ state: 'pending' });
+  });
+
   it.each([
     ['shorter', '新正文'],
     ['equal-length', '另一个版本正文完全不同，包含甲段、乙段和不同结论。'],

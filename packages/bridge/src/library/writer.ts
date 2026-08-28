@@ -13,6 +13,7 @@ import { downloadAssets } from './assets.js';
 import type { ResolveAddresses } from './assets.js';
 import { assertInsideRoot, assertSafeWritePath, safeSlug } from './paths.js';
 import { withCatalogTransaction } from './catalogTransaction.js';
+import { deliveryRevision } from './deliveryRevision.js';
 
 /**
  * 同步状态。本机库是唯一落点与去重依据，投递到仓库收件箱是**之后**的显式动作。
@@ -55,6 +56,10 @@ interface CatalogEntry {
   contentCompletenessVersion?: string;
   /** 产生证明的扩展精确 build-id，供部署与历史审计。 */
   contentCompletenessBuildId?: string;
+  /** Stable semantic revision represented by the current local snapshot. */
+  deliveryRevision?: string;
+  /** Fixed-plan delivery receipt retained while the semantic revision is unchanged. */
+  deliveryBatchId?: string;
   sync?: SyncInfo;
 }
 
@@ -180,6 +185,23 @@ async function reliableCompleteZsxqBody(
   return normalizedVisibleBody(document.text);
 }
 
+async function storedDeliveryRevision(
+  sourcePath: string,
+  existing: CatalogEntry,
+): Promise<string | undefined> {
+  try {
+    const stored = JSON.parse(await readFile(sourcePath, 'utf8')) as OrganizedDocument;
+    if (
+      stored?.document?.source !== existing.source
+      || stored.document.canonicalUrl !== existing.url
+      || stableContentId(stored.document.canonicalUrl) !== existing.id
+    ) return undefined;
+    return deliveryRevision(stored);
+  } catch {
+    return undefined;
+  }
+}
+
 export class MarkdownLibrary {
   private readonly root: string;
   private readonly fetcher: typeof fetch;
@@ -227,6 +249,7 @@ export class MarkdownLibrary {
     await assertSafeWritePath(this.root, entryDirectory);
     await mkdir(entryDirectory, { recursive: true });
     await assertSafeWritePath(this.root, markdownPath);
+    const sourcePath = assertInsideRoot(this.root, join(entryDirectory, SOURCE_FILE));
 
     const completenessVersion = input.document.sourceMetadata?.contentCompletenessVersion;
     const completenessBuildId = input.document.sourceMetadata?.contentCompletenessBuildId;
@@ -242,7 +265,6 @@ export class MarkdownLibrary {
       && completenessBuildId.length > 0
       && existing?.contentCompletenessBuildId === completenessBuildId;
     if (existing && hasCurrentCompletenessProof && sameExactCompletenessBuild) {
-      const sourcePath = assertInsideRoot(this.root, join(entryDirectory, SOURCE_FILE));
       const existingBody = await reliableCompleteZsxqBody(sourcePath, existing);
       const incomingBody = normalizedVisibleBody(input.document.text);
       if (
@@ -258,6 +280,17 @@ export class MarkdownLibrary {
         };
       }
     }
+
+    const incomingDeliveryRevision = deliveryRevision(input);
+    const storedRevision = existing
+      ? await storedDeliveryRevision(sourcePath, existing)
+      : undefined;
+    // Existing catalogs have no revision yet. In that migration case, the verified source snapshot
+    // is the receipt revision. Once persisted, both catalog and source must agree before inheriting it.
+    const receiptRevision = existing?.deliveryRevision ?? storedRevision;
+    const sameDeliveredContent = storedRevision !== undefined
+      && storedRevision === incomingDeliveryRevision
+      && receiptRevision === incomingDeliveryRevision;
 
     const assets = await downloadAssets({
       html: input.sanitizedHtml,
@@ -304,8 +337,14 @@ export class MarkdownLibrary {
               : {}),
           }
         : {}),
-      // 重新采集同一地址说明内容可能变了，同步状态回到未同步，等用户再确认一次。
-      sync: { state: 'pending' },
+      deliveryRevision: incomingDeliveryRevision,
+      ...(sameDeliveredContent && existing?.deliveryBatchId
+        ? { deliveryBatchId: existing.deliveryBatchId }
+        : {}),
+      // Transport-only recaptures keep their receipt; semantic changes require a new delivery.
+      sync: sameDeliveredContent && existing?.sync
+        ? { ...existing.sync }
+        : { state: 'pending' },
     };
     const nextCatalog = catalog
       .filter(entry => entry.id !== id)

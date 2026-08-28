@@ -699,7 +699,9 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
             undefined,
             deliveryBatchId
               ? { deliveryBatchId, deliveryPlanId: 'nowcoder-agent-market' }
-              : {},
+              : job.planId === 'zsxq-chen-teacher'
+                ? { skipDelivered: true }
+                : {},
           );
           if (outcome.failed > 0 || outcome.synced === 0) throw new Error('自动同步未送达目标收件箱');
         },
