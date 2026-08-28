@@ -29,7 +29,7 @@ export interface ExcludeRule {
 export const IPO_RULE: ExcludeRule = {
   id: 'ipo',
   label: '打新内容',
-  strong: ['打新', '新股', '申购'],
+  strong: ['打新', '新股', '申购', '认购'],
   supporting: [
     '破发',
     '中签',
@@ -40,6 +40,9 @@ export const IPO_RULE: ExcludeRule = {
     '沪深新股',
     '市值打新',
     '评级建议等级',
+    'REIT',
+    'reits',
+    'reit',
   ],
 };
 
@@ -113,8 +116,34 @@ export const DATING_RULE: ExcludeRule = {
 export const PROMOTION_RULE: ExcludeRule = {
   id: 'promotion',
   label: '推广/带货内容',
-  strong: ['优惠活动', '渠道优惠价', '购买链接', '专属福利', '付费专栏'],
-  supporting: ['购买', '价格', '优惠券', '渠道价', '人工开通', '兑换码', '续费'],
+  strong: [
+    '优惠活动',
+    '渠道优惠价',
+    '购买链接',
+    '专属福利',
+    '付费专栏',
+    '券商开户',
+    '购买或续费',
+    '续费或购买',
+    '如果有需要',
+    '如有需要',
+  ],
+  supporting: [
+    '购买',
+    '价格',
+    '优惠券',
+    '渠道价',
+    '人工开通',
+    '兑换码',
+    '续费',
+    '免五',
+    '低费率',
+    '降价',
+    '原价',
+    '下架产品',
+    '额度',
+    '尽早联系',
+  ],
 };
 
 /** 群规、入群欢迎与功能说明没有长期知识价值。 */

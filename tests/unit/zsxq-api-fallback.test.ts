@@ -253,6 +253,46 @@ describe('ZSXQ API fallback', () => {
     })]);
   });
 
+  it('预览未显示推广证据时，展开完整正文后复筛并且不返回入库文档', async () => {
+    const topicId = '1525182824881242';
+    const createTime = '2025-01-11T03:40:15.045Z';
+    const preview = topic(
+      topicId,
+      createTime,
+      '说个事情，投资账户的费率政策有了新变化，完整说明在后面...',
+    );
+    const full = topic(
+      topicId,
+      createTime,
+      '说个事情，国金证券已经取消了免五政策。'
+        + '目前还剩华宝和海通有免五政策，之前的券商开户文章可参考。',
+    );
+    const requested: string[] = [];
+    const fetcher = async (input: RequestInfo | URL): Promise<Response> => {
+      const url = String(input);
+      requested.push(url);
+      if (url === `${API}/groups/${GROUP_ID}`) return groupResponse();
+      if (url === `${API}/groups/${GROUP_ID}/menus`) return menuResponse();
+      if (url === `${API}/topics/${topicId}`) {
+        return response(JSON.stringify({ succeeded: true, resp_data: { topic: full } }));
+      }
+      return topicResponse([preview]);
+    };
+
+    const result = await collectZsxqApiOwnerPage(GROUP_ID, {}, {
+      fetcher,
+      aduid: 'test-device',
+      requestId: () => 'test-request',
+    });
+
+    expect(requested).toContain(`${API}/topics/${topicId}`);
+    expect(result.documents).toEqual([]);
+    expect(result.businessSkips).toEqual([expect.objectContaining({
+      url: `https://wx.zsxq.com/group/${GROUP_ID}/topic/${topicId}`,
+      reason: expect.stringContaining('推广/带货内容'),
+    })]);
+  });
+
   it('resolves a detail attachment by exact file id before proving the topic complete', async () => {
     const topicId = '22255848145158551';
     const fileId = '9223372036854775802';
