@@ -146,8 +146,18 @@ const runner = new JobRunner({
   knownZsxqIndex: () => connection.zsxqIndex(),
 });
 let activePlanCollections = 0;
+const activePlanAttempts = new Set<string>();
 connection.onCollect((requestId, url, interactive) => runner.runRemoteJob(requestId, url, interactive));
 connection.onPlanCollect(async (requestId, payload) => {
+  connection.send('plan.started', requestId, {
+    planId: payload.planId,
+    batchId: payload.batchId,
+    attempt: payload.attempt,
+  });
+  const attemptKey = `${payload.batchId}\u0000${payload.attempt}`;
+  // Bridge 未看见首个回执时会重发完全相同的 attempt；再次确认即可，不能再开一轮采集。
+  if (activePlanAttempts.has(attemptKey)) return;
+  activePlanAttempts.add(attemptKey);
   if (payload.planId !== 'zsxq-chen-teacher') {
     connection.send('plan.result', requestId, {
       batchId: payload.batchId,
@@ -155,6 +165,7 @@ connection.onPlanCollect(async (requestId, payload) => {
       discovered: 0,
       error: `扩展不支持计划：${payload.planId}`,
     });
+    activePlanAttempts.delete(attemptKey);
     return;
   }
   activePlanCollections += 1;
@@ -189,6 +200,7 @@ connection.onPlanCollect(async (requestId, payload) => {
     });
   } finally {
     activePlanCollections = Math.max(0, activePlanCollections - 1);
+    activePlanAttempts.delete(attemptKey);
   }
 });
 

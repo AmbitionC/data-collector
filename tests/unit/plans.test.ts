@@ -4,6 +4,7 @@ import {
   jobCollectPayloadSchema,
   mergeZsxqDocumentCopies,
   planCollectEnvelopeSchema,
+  planStartedEnvelopeSchema,
   planResultEnvelopeSchema,
   unionZsxqViewDocuments,
 } from '@data-collector/shared';
@@ -833,6 +834,15 @@ describe('fixed collection plan contracts', () => {
       type: 'plan.collect',
       payload: { planId: 'zsxq-chen-teacher', batchId: 'batch-zsxq-1' },
     }).success).toBe(false);
+    expect(planStartedEnvelopeSchema.parse({
+      ...base,
+      type: 'plan.started',
+      payload: {
+        planId: 'zsxq-chen-teacher',
+        batchId: 'batch-zsxq-1',
+        attempt: 'a1b2c3d4e5f60718',
+      },
+    }).payload.attempt).toBe('a1b2c3d4e5f60718');
   });
 
   it('preserves owner-history mode and typed audit facts in a persisted batch', () => {

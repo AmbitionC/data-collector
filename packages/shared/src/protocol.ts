@@ -171,6 +171,13 @@ export const planCollectPayloadSchema = z.object({
   }
 });
 
+/** 扩展收到 plan.collect 后立即回执；Bridge 只有收到它才把派发视为成功。 */
+export const planStartedPayloadSchema = z.object({
+  planId: collectionPlanIdSchema,
+  batchId: z.string().trim().min(1).max(200),
+  attempt: collectionPlanAttemptSchema,
+}).strict();
+
 export const extensionPlanResultPayloadSchema = z.object({
   batchId: z.string().trim().min(1).max(200),
   attempt: collectionPlanAttemptSchema,
@@ -194,6 +201,11 @@ export const planResultPayloadSchema = z.union([
 export const planCollectEnvelopeSchema = wsEnvelopeSchema.extend({
   type: z.literal('plan.collect'),
   payload: planCollectPayloadSchema,
+});
+
+export const planStartedEnvelopeSchema = wsEnvelopeSchema.extend({
+  type: z.literal('plan.started'),
+  payload: planStartedPayloadSchema,
 });
 
 export const planResultEnvelopeSchema = wsEnvelopeSchema.extend({

@@ -18,6 +18,7 @@ import {
   descriptorForHost,
   extensionHelloPayloadSchema,
   extensionPlanResultPayloadSchema,
+  planStartedPayloadSchema,
   jobResultPayloadSchema,
   wsEnvelopeSchema,
   stableContentId,
@@ -60,12 +61,14 @@ import {
 import {
   CollectionPlanService,
   CollectionPlanStore,
+  PlanStartAcks,
   ZsxqDayLedgerStore,
   filterProcessedNowcoderDocuments,
   loadProcessedNowcoderHistory,
   pendingNowcoderPlanJobs,
   selectNowcoderPlanCandidates,
   type ExtensionPlanResult,
+  planStartAckKey,
 } from '../plans/index.js';
 import { writePlanBenchmark } from '../plans/benchmark.js';
 import {
@@ -425,6 +428,7 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
   const isZsxqJob = (job: Pick<JobRecord, 'url'>): boolean =>
     descriptorForHost(new URL(job.url).hostname)?.id === 'zsxq';
   let collectionPlans: CollectionPlanService | undefined;
+  const planStartAcks = new PlanStartAcks();
   const hasActiveZsxqAttempt = (): boolean => planStore?.active('zsxq-chen-teacher')
     .some(batch => batch.preparationAttempt !== undefined) === true;
 
@@ -642,7 +646,7 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
           ) {
             throw new Error('知识星球采集命令未派发：扩展连接或构建证明已变化');
           }
-          targetSocket.send(JSON.stringify(envelope('plan.collect', batchId, {
+          const message = JSON.stringify(envelope('plan.collect', batchId, {
             batchId,
             planId,
             attempt,
@@ -650,7 +654,15 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
             zsxqMode: mode,
             targetDays: [...targetDays],
             ...(resumeCursor ? { resumeCursor } : {}),
-          })));
+          }));
+          await planStartAcks.dispatch(planStartAckKey(batchId, attempt), () => {
+            if (
+              targetSocket !== extensionSocket
+              || !extensionReady
+              || targetSocket.readyState !== WebSocket.OPEN
+            ) throw new Error('扩展连接已在接单确认前变化');
+            targetSocket.send(message);
+          });
           return true;
         },
         ...(zsxqLedger ? { zsxqLedger } : {}),
@@ -855,6 +867,26 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
     }
     if (parsedEnvelope.type === 'bridge.ping') {
       socket.send(JSON.stringify(envelope('bridge.pong', parsedEnvelope.requestId, {})));
+      return;
+    }
+    if (parsedEnvelope.type === 'plan.started') {
+      if (!collectionPlans) throw new Error(planStoreError ?? '固定采集计划不可用');
+      const started = planStartedPayloadSchema.parse(parsedEnvelope.payload);
+      if (parsedEnvelope.requestId !== started.batchId) {
+        throw new Error('知识星球计划接单确认与批次编号不一致');
+      }
+      const artifactBuildId = await refreshArtifactBuildId();
+      if (socket !== extensionSocket) return;
+      if (
+        started.planId === 'zsxq-chen-teacher'
+        && !extensionCanCollectZsxq(socket, artifactBuildId)
+      ) throw new Error('当前扩展构建无权确认知识星球计划');
+      await collectionPlans.assertJobAttempt(
+        started.batchId,
+        started.planId,
+        started.attempt,
+      );
+      planStartAcks.ack(planStartAckKey(started.batchId, started.attempt));
       return;
     }
     if (parsedEnvelope.type === 'plan.result') {
@@ -1345,24 +1377,38 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
       extensionBuildId = undefined;
       let messageQueue: Promise<void> = Promise.resolve();
       let policyViolated = false;
+      const rejectInvalidMessage = (error: unknown): void => {
+        if (policyViolated) return;
+        policyViolated = true;
+        if (socket.readyState === WebSocket.OPEN) {
+          socket.send(
+            JSON.stringify(
+              envelope('protocol.error', 'protocol', {
+                code: 'INVALID_MESSAGE',
+                message: error instanceof Error ? error.message : '消息无效',
+              }),
+            ),
+          );
+          socket.close(1008, 'invalid protocol message');
+        }
+      };
       socket.on('message', data => {
+        // hello 处理链会下发 plan.collect 并等待 plan.started；若确认消息也排在同一
+        // 串行队列后面，就会形成自锁。接单确认只触碰 attempt fence 与内存 waiter，
+        // 可安全地作为唯一的队外控制消息处理。
+        let planStartAck = false;
+        try {
+          planStartAck = (JSON.parse(messageText(data)) as { type?: unknown }).type === 'plan.started';
+        } catch {
+          // 无效 JSON 仍交给串行处理路径生成统一协议错误。
+        }
+        if (planStartAck) {
+          void trackOperation(handleSocketMessage(socket, data)).catch(rejectInvalidMessage);
+          return;
+        }
         messageQueue = trackOperation(messageQueue
           .then(() => handleSocketMessage(socket, data))
-          .catch(error => {
-            if (policyViolated) return;
-            policyViolated = true;
-            if (socket.readyState === WebSocket.OPEN) {
-              socket.send(
-                JSON.stringify(
-                  envelope('protocol.error', 'protocol', {
-                    code: 'INVALID_MESSAGE',
-                    message: error instanceof Error ? error.message : '消息无效',
-                  }),
-                ),
-              );
-              socket.close(1008, 'invalid protocol message');
-            }
-          }));
+          .catch(rejectInvalidMessage));
       });
       socket.once('close', () => {
         if (extensionSocket === socket) {
