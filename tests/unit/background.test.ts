@@ -443,6 +443,74 @@ describe('extension job runner', () => {
     });
   });
 
+  it('reports a zero-count boundary update when a later owner page crosses the prior page day', async () => {
+    const tabs = new InMemoryTabs();
+    const bridge = new InMemoryBridge();
+    const first = {
+      ...topic('80007'),
+      title: '投资复盘',
+      text: '投资经营复盘正文'.repeat(20),
+      publishedAt: '2026-08-24T10:00:00.000Z',
+      sourceMetadata: { authorRole: 'owner', topicId: '80007' },
+    } satisfies CollectedDocument;
+    const pages = [{
+      documents: [first],
+      businessSkips: [],
+      rawCount: 1,
+      pageKey: 'start:80007',
+      nextCursor: '2026-08-24T09:59:59.999Z',
+      exhausted: false,
+      newestObservedAt: first.publishedAt,
+      oldestObservedAt: first.publishedAt,
+      context: { ownerId: '1001', scope: 'by_owner' as const },
+    }, {
+      documents: [],
+      businessSkips: [{
+        url: `${LIST_URL}/topic/80008`,
+        reason: '选题偏好过滤',
+        publishedAt: '2026-08-23T09:00:00.000Z',
+      }],
+      rawCount: 1,
+      pageKey: '2026-08-24T09:59:59.999Z:80008',
+      exhausted: true,
+      newestObservedAt: '2026-08-23T09:00:00.000Z',
+      oldestObservedAt: '2026-08-23T09:00:00.000Z',
+      context: { ownerId: '1001', scope: 'by_owner' as const },
+    }];
+    tabs.sendMessage = async () => ({ ok: true, ownerPage: pages.shift()! }) as never;
+    const runner = new JobRunner({
+      tabs,
+      bridge,
+      waitForTabComplete: async () => undefined,
+      knownZsxqIndex: async () => [{
+        id: '111111111111',
+        url: first.canonicalUrl,
+        topicId: '80007',
+        contentComplete: true,
+      }],
+    });
+    const phases: Array<Record<string, unknown>> = [];
+
+    await runner.runZsxqCollectionPlan(
+      'owner-history-boundary-update',
+      PLAN_ATTEMPT,
+      phase => { phases.push(phase as unknown as Record<string, unknown>); },
+      { zsxqMode: 'owner-history', targetDays: [] },
+    );
+
+    expect(phases.at(-1)).toMatchObject({
+      prepared: true,
+      dayDrafts: expect.arrayContaining([
+        expect.objectContaining({
+          day: '2026-08-24',
+          rawOwnerCount: 0,
+          qualifyingCount: 0,
+          crossedDayBoundary: true,
+        }),
+      ]),
+    });
+  });
+
   it('collects the bounded latest and digest views before daily owner-ledger pages', async () => {
     const tabs = new InMemoryTabs();
     const bridge = new InMemoryBridge();

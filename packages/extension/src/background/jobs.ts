@@ -1376,6 +1376,14 @@ export class JobRunner {
         : undefined;
       const crossed = (day: string): boolean =>
         page.exhausted || (oldestPageDay !== undefined && oldestPageDay < day);
+      const boundaryUpdates: ZsxqDayDraft[] = [];
+      for (const accumulated of accumulatedDays.values()) {
+        if (accumulated.crossedDayBoundary || !crossed(accumulated.day)) continue;
+        accumulated.crossedDayBoundary = true;
+        const update = emptyOwnerDayDraft(accumulated.day);
+        update.crossedDayBoundary = true;
+        boundaryUpdates.push(update);
+      }
       for (const draft of pageDays.values()) draft.crossedDayBoundary = crossed(draft.day);
       for (const targetDay of targetDays) {
         if (!crossed(targetDay)) continue;
@@ -1402,7 +1410,7 @@ export class JobRunner {
         rejections: { ...rejections },
         rejectionDetails: [...rejectionDetails],
         checkpoint,
-        dayDrafts: [...pageDays.values()],
+        dayDrafts: [...pageDays.values(), ...boundaryUpdates],
         ownerAudit: { ...audit },
       };
       if (audit.failed > 0) {
