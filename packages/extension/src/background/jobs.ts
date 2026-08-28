@@ -1402,10 +1402,10 @@ export class JobRunner {
         dayDrafts: [...pageDays.values()],
         ownerAudit: { ...audit },
       };
-      await reportPhase?.(phase);
       if (audit.failed > 0) {
         throw new Error(`CONTENT_COVERAGE_INCOMPLETE：${audit.failed} 条知识星球正文未能完整保存`);
       }
+      await reportPhase?.(phase);
       const targetDaysCrossed = targetDays.every(day =>
         accumulatedDays.get(day)?.crossedDayBoundary === true);
       if (page.exhausted || (mode === 'daily-ledger' && targetDaysCrossed)) {

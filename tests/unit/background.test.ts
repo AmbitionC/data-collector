@@ -521,7 +521,11 @@ describe('extension job runner', () => {
       sourceMetadata: { authorRole: 'owner', topicId: '80101' },
     } satisfies CollectedDocument;
     let pageRequests = 0;
-    tabs.sendMessage = async () => {
+    tabs.sendMessage = async (_tabId, message) => {
+      const request = message as { type: string };
+      if (request.type !== 'list.apiCollectOwnerPage') {
+        throw new Error(`unexpected ${request.type}`);
+      }
       pageRequests += 1;
       return {
         ok: true,
@@ -559,6 +563,64 @@ describe('extension job runner', () => {
     )).rejects.toThrow('持久化回执失败');
 
     expect(pageRequests).toBe(1);
+    expect(phases).toEqual([]);
+  });
+
+  it('does not checkpoint an owner page that contains an incomplete qualifying body', async () => {
+    const tabs = new InMemoryTabs();
+    const bridge = new InMemoryBridge();
+    const candidate = {
+      ...topic('80102'),
+      title: '投资经营复盘',
+      text: '投资创业经营正文'.repeat(20),
+      html: '<p>投资创业经营正文</p>',
+      truncated: true,
+      publishedAt: '2026-08-24T10:00:00.000Z',
+      sourceMetadata: {
+        authorRole: 'owner',
+        topicId: '80102',
+        sourceBodyProven: true,
+        sourceMediaProven: false,
+      },
+    } satisfies CollectedDocument;
+    let pageRequests = 0;
+    tabs.sendMessage = async (_tabId, message) => {
+      const request = message as { type: string };
+      if (request.type !== 'list.apiCollectOwnerPage') {
+        throw new Error(`unexpected ${request.type}`);
+      }
+      pageRequests += 1;
+      return {
+        ok: true,
+        ownerPage: {
+          documents: [candidate],
+          businessSkips: [],
+          rawCount: 1,
+          pageKey: 'start:incomplete-page',
+          exhausted: true,
+          newestObservedAt: candidate.publishedAt,
+          oldestObservedAt: candidate.publishedAt,
+          context: { ownerId: '1001', scope: 'by_owner' },
+        },
+      } as never;
+    };
+    const runner = new JobRunner({
+      tabs,
+      bridge,
+      waitForTabComplete: async () => undefined,
+      knownZsxqIndex: async () => [],
+    });
+    const phases: Array<Record<string, unknown>> = [];
+
+    await expect(runner.runZsxqCollectionPlan(
+      'owner-page-incomplete-body',
+      PLAN_ATTEMPT,
+      phase => { phases.push(phase as unknown as Record<string, unknown>); },
+      { zsxqMode: 'owner-history', targetDays: [] },
+    )).rejects.toThrow(/CONTENT_COVERAGE_INCOMPLETE.*1 条/u);
+
+    expect(pageRequests).toBe(1);
+    expect(bridge.createdFor).toEqual([]);
     expect(phases).toEqual([]);
   });
 
