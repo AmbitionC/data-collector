@@ -502,6 +502,15 @@ function isConfirmedDeletedLinkedArticle(document: CollectedDocument): boolean {
     && /长文章不存在或者被删除/u.test(failure);
 }
 
+/** 只认服务端对精确 article id 的 1030 终态；登录超时、401 和普通空页仍须失败重试。 */
+function isConfirmedForbiddenLinkedArticle(document: CollectedDocument): boolean {
+  const failure = document.sourceMetadata?.linkedArticleApiFailure;
+  return typeof failure === 'string'
+    && /HTTP 200/u.test(failure)
+    && /服务端 code 1030(?:，|\b)/u.test(failure)
+    && /权限不足，无权该请求/u.test(failure);
+}
+
 export interface CaptureOverrides {
   userCategory?: string;
   userTags?: string[];
@@ -1093,6 +1102,14 @@ export class JobRunner {
           );
           continue;
         }
+        if (isConfirmedForbiddenLinkedArticle(completedDocument)) {
+          reject(
+            document,
+            '源站关联长文无访问权限（签名接口 code 1030，未入库）',
+            zsxqIncompleteEvidence(document, completedDocument),
+          );
+          continue;
+        }
         throw new Error(
           `CONTENT_COVERAGE_INCOMPLETE：知识星球「最新 / 精华」正文不完整：`
           + `${document.canonicalUrl}（${zsxqIncompleteEvidence(document, completedDocument)}）`,
@@ -1348,6 +1365,16 @@ export class JobRunner {
             reject(
               document.canonicalUrl,
               '源站关联长文已删除（签名接口 code 21504，未入库）',
+              zsxqIncompleteEvidence(document, completedDocument),
+            );
+            continue;
+          }
+          if (isConfirmedForbiddenLinkedArticle(completedDocument)) {
+            draft.filteredCount += 1;
+            audit.filtered += 1;
+            reject(
+              document.canonicalUrl,
+              '源站关联长文无访问权限（签名接口 code 1030，未入库）',
               zsxqIncompleteEvidence(document, completedDocument),
             );
             continue;
@@ -1683,6 +1710,8 @@ export class JobRunner {
             document,
             isConfirmedDeletedLinkedArticle(completedDocument)
               ? '源站关联长文已删除（签名接口 code 21504，未入库）'
+              : isConfirmedForbiddenLinkedArticle(completedDocument)
+                ? '源站关联长文无访问权限（签名接口 code 1030，未入库）'
               : '正文不完整',
             zsxqIncompleteEvidence(document, completedDocument),
           );
@@ -2066,15 +2095,21 @@ export class JobRunner {
           signedApiFailure = `${apiResponse.error.code}:${apiResponse.error.message}`
             .replace(/\s+/gu, ' ')
             .slice(0, 240);
-          // 21504 是服务端对该精确 article id 的终态证明。真实验证中对应文章页只剩空壳；
-          // 再开一个 SPA 标签页轮询 44.5 秒不会产生正文，只会浪费时间。
-          if (isConfirmedDeletedLinkedArticle({
+          // 21504（已删除）和 HTTP 200/code 1030（精确文章无权限）都是服务端对该
+          // article id 的终态证明；再开 SPA 标签页轮询 44.5 秒不会补出可归档正文。
+          const failedArticle = {
             ...topicDocument,
             sourceMetadata: {
               ...(topicDocument.sourceMetadata ?? {}),
               linkedArticleApiFailure: signedApiFailure,
             },
-          })) return failed('signed-api-source-deleted');
+          };
+          if (isConfirmedDeletedLinkedArticle(failedArticle)) {
+            return failed('signed-api-source-deleted');
+          }
+          if (isConfirmedForbiddenLinkedArticle(failedArticle)) {
+            return failed('signed-api-source-forbidden');
+          }
         }
       } catch (error) {
         signedApiFailure = (error instanceof Error ? error.message : String(error))

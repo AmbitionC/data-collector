@@ -593,6 +593,83 @@ describe('extension job runner', () => {
     });
   });
 
+  it('records an explicitly forbidden linked article without archiving or opening its preview', async () => {
+    const tabs = new InMemoryTabs();
+    const bridge = new InMemoryBridge();
+    const articleUrl = 'https://articles.zsxq.com/id_oald4nvwkws9.html';
+    const candidate = {
+      ...topic('184242185281212'),
+      title: '保险的估值(5)——数据查看方法',
+      text: '保险估值与保费数据查看方法，完整数据位于关联长文。',
+      html: `<p>保险估值与保费数据查看方法</p><a href="${articleUrl}">全文</a>`,
+      publishedAt: '2022-04-12T07:56:00.000Z',
+      sourceMetadata: { authorRole: 'owner', topicId: '184242185281212' },
+    } satisfies CollectedDocument;
+    tabs.sendMessage = async (_tabId, message) => {
+      const request = message as { type: string };
+      tabs.asked.push(request.type);
+      if (request.type === 'list.apiCollectOwnerPage') {
+        return {
+          ok: true,
+          ownerPage: {
+            documents: [candidate],
+            businessSkips: [],
+            rawCount: 1,
+            pageKey: 'start:184242185281212',
+            exhausted: true,
+            newestObservedAt: candidate.publishedAt,
+            oldestObservedAt: candidate.publishedAt,
+            context: { ownerId: '1001', ownerName: '陈老师', scope: 'by_owner' },
+          },
+        } as never;
+      }
+      if (request.type === 'document.apiCollectArticle') {
+        return {
+          ok: false,
+          error: {
+            code: 'AUTH_REQUIRED',
+            message: 'AUTH_REQUIRED：知识星球登录或成员访问不可用（HTTP 200，服务端 code 1030，权限不足，无权该请求）',
+          },
+        } as never;
+      }
+      throw new Error(`unexpected ${request.type}`);
+    };
+    const runner = new JobRunner({
+      tabs,
+      bridge,
+      waitForTabComplete: async () => undefined,
+      delay: async () => undefined,
+      knownZsxqIndex: async () => [],
+    });
+    const phases: Array<Record<string, unknown>> = [];
+
+    await runner.runZsxqCollectionPlan(
+      'owner-history-forbidden-article',
+      PLAN_ATTEMPT,
+      phase => { phases.push(phase as unknown as Record<string, unknown>); },
+      { zsxqMode: 'owner-history', targetDays: [] },
+    );
+
+    expect(tabs.asked).toEqual([
+      'list.apiCollectOwnerPage',
+      'document.apiCollectArticle',
+    ]);
+    expect(tabs.created.map(item => item.url)).not.toContain(articleUrl);
+    expect(bridge.createdFor).toEqual([]);
+    expect(phases.at(-1)).toMatchObject({
+      prepared: true,
+      rejections: { '源站关联长文无访问权限（签名接口 code 1030，未入库）': 1 },
+      ownerAudit: {
+        observed: 1,
+        qualifying: 0,
+        filtered: 1,
+        saved: 0,
+        failed: 0,
+        exhausted: true,
+      },
+    });
+  });
+
   it('reports a zero-count boundary update when a later owner page crosses the prior page day', async () => {
     const tabs = new InMemoryTabs();
     const bridge = new InMemoryBridge();
