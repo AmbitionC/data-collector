@@ -1335,55 +1335,25 @@ describe('CollectionPlanService', () => {
     await context.service.onExtensionConnected();
     const current = context.store.latest('zsxq-chen-teacher', 1)[0]!;
     const currentAttempt = current.preparationAttempt;
-    expect(currentAttempt).toMatch(/^[a-f0-9]{16}$/);
-    expect(currentAttempt).not.toBe(firstAttempt);
+    expect(currentAttempt).toBe(firstAttempt);
+    expect(context.planMessages).toHaveLength(1);
 
-    const afterStalePrepared = await context.service.onExtensionPlanResult({
-      batchId: first.id,
-      attempt: firstAttempt!,
-      discovered: 1,
-      prepared: true,
-    });
-    expect(afterStalePrepared).toMatchObject({
-      status: 'running',
-      preparationStatus: 'collecting',
-      preparationAttempt: currentAttempt,
-    });
-
-    const currentChild = await context.jobs.create({
-      id: `${first.id}-current-attempt`,
-      url: 'https://wx.zsxq.com/group/48844584441158/topic/822222222222222',
-      requestedBy: 'extension',
-      batchId: first.id,
-      planId: 'zsxq-chen-teacher',
-      planAttempt: currentAttempt,
-    });
-    await context.service.onJobCreated(currentChild);
     const prepared = await context.service.onExtensionPlanResult({
       batchId: first.id,
       attempt: currentAttempt!,
-      discovered: 2,
+      discovered: 1,
       prepared: true,
       ...dailyLedgerFacts(),
     });
-    expect(prepared).toMatchObject({ status: 'running', accepted: 1, saved: 0 });
-
-    await context.jobs.transition(currentChild.id, 'collecting');
-    const currentSaved = await context.jobs.transition(currentChild.id, 'saved', {
-      outputPath: `/tmp/${currentChild.id}/index.md`,
-    });
-    await context.service.onJobTerminal(currentSaved);
+    expect(prepared).toMatchObject({ status: 'completed', accepted: 1, saved: 1 });
 
     expect(context.store.latest('zsxq-chen-teacher', 1)[0]).toMatchObject({
       status: 'completed',
       accepted: 1,
       saved: 1,
-      deliveryIds: [
-        expect.stringMatching(/^[a-f0-9]{12}$/),
-        expect.stringMatching(/^[a-f0-9]{12}$/),
-      ],
+      deliveryIds: [expect.stringMatching(/^[a-f0-9]{12}$/)],
     });
-    expect(context.synced).toEqual([firstChild.id, currentChild.id]);
+    expect(context.synced).toEqual([firstChild.id]);
   });
 
   it('does not report a no-change success when relevant ZSXQ content stayed incomplete', async () => {

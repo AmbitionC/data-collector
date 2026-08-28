@@ -173,6 +173,12 @@ function selectDiscoveryRound(
 export class CollectionPlanService {
   private readonly now: () => string;
   private readonly executing = new Set<string>();
+  /**
+   * `collectZsxq` 只负责把长任务派给扩展，返回后 staging 仍在进行。
+   * 同一 Bridge 进程里的 WebSocket 重连不得把这个活跃 attempt 当成进程恢复并换代；
+   * Bridge 真正重启后此表为空，持久化中的未完成 attempt 仍会按原逻辑恢复重派。
+   */
+  private readonly liveZsxqAttempts = new Map<string, CollectionPlanAttempt>();
   private readonly syncedJobs = new Set<string>();
   private readonly coveredJobs = new Set<string>();
   private readonly advancingBatches = new Set<string>();
@@ -347,6 +353,7 @@ export class CollectionPlanService {
         result.error,
         result.needsAttention === true,
       );
+      this.releaseLiveZsxqAttempt(result.batchId, result.attempt);
       if (terminal.status === 'running') return terminal;
       const finalized = await this.finalizeZsxqLedger(terminal);
       const reported = await this.persistTerminalBenchmark(finalized);
@@ -379,6 +386,9 @@ export class CollectionPlanService {
         ...(result.ownerAudit ? { ownerAudit: result.ownerAudit } : {}),
       },
     );
+    if (result.prepared === true) {
+      this.releaseLiveZsxqAttempt(result.batchId, result.attempt);
+    }
     // 成功结果必须显式证明 staging 已完成；省略 prepared 的旧消息只能保持运行，
     // 由能力门禁/下一次重连重新采集，不能把半批任务结算成成功。
     if (prepared.preparationStatus !== 'completed') return prepared;
@@ -830,9 +840,20 @@ export class CollectionPlanService {
       this.coveredJobs.delete(job.id);
     }
     this.batchSyncErrors.delete(batchId);
+    this.liveZsxqAttempts.delete(batchId);
+  }
+
+  private releaseLiveZsxqAttempt(batchId: string, attempt: CollectionPlanAttempt): void {
+    if (this.liveZsxqAttempts.get(batchId) === attempt) {
+      this.liveZsxqAttempts.delete(batchId);
+    }
   }
 
   private async execute(batch: CollectionBatch): Promise<void> {
+    if (
+      batch.planId === 'zsxq-chen-teacher'
+      && this.liveZsxqAttempts.has(batch.id)
+    ) return;
     if (this.executing.has(batch.id) || !this.canExecute(batch.planId)) return;
     this.executing.add(batch.id);
     let zsxqAttempt: CollectionPlanAttempt | undefined;
@@ -841,6 +862,7 @@ export class CollectionPlanService {
         const preparing = await this.dependencies.store.beginPreparation(batch.id);
         zsxqAttempt = preparing.preparationAttempt;
         if (!zsxqAttempt) throw new Error('知识星球采集尝试未生成');
+        this.liveZsxqAttempts.set(batch.id, zsxqAttempt);
         const mode = preparing.zsxqMode ?? 'daily-ledger';
         const ledgerRequest = this.dependencies.zsxqLedger?.requestFor(mode)
           ?? { targetDays: [] as string[] };
@@ -875,6 +897,7 @@ export class CollectionPlanService {
         : await this.dependencies.store.fail(batch.id, message);
       const finalized = zsxqAttempt ? await this.finalizeZsxqLedger(terminal) : terminal;
       const reported = await this.persistTerminalBenchmark(finalized);
+      if (zsxqAttempt) this.releaseLiveZsxqAttempt(batch.id, zsxqAttempt);
       if (zsxqAttempt && reported.status !== 'running') {
         this.dependencies.onZsxqAttemptTerminal?.(reported);
       }
