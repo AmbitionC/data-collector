@@ -470,6 +470,9 @@ function zsxqIncompleteEvidence(
   if (metadata.sourceMediaIssues !== undefined) {
     evidence.push(`sourceMediaIssues=${String(metadata.sourceMediaIssues)}`);
   }
+  if (metadata.topicDetailFailure !== undefined) {
+    evidence.push(`topicDetailFailure=${String(metadata.topicDetailFailure)}`);
+  }
   return evidence.join('; ');
 }
 
@@ -1819,13 +1822,21 @@ export class JobRunner {
    */
   private async withTopicDetail(document: CollectedDocument): Promise<CollectedDocument> {
     let tabId: number | undefined;
+    const failed = (reason: string): CollectedDocument => ({
+      ...document,
+      sourceMetadata: {
+        ...(document.sourceMetadata ?? {}),
+        topicDetailFailure: reason,
+      },
+      truncated: true,
+    });
     try {
       const tab = await this.options.tabs.create({
         url: document.canonicalUrl,
         active: false,
         purpose: 'remote-job',
       });
-      if (tab.id === undefined) return { ...document, truncated: true };
+      if (tab.id === undefined) return failed('tab-id-missing');
       tabId = tab.id;
       await this.options.waitForTabComplete(tabId, 30_000);
       const response = await this.extractWithRetry(
@@ -1835,16 +1846,14 @@ export class JobRunner {
         true,
         ZSXQ_MAX_STABILITY_SAMPLES,
       );
-      if (!response.ok) return { ...document, truncated: true };
+      if (!response.ok) return failed(`extract-${response.error.code}`);
       const detail = payloadOf(response, 'document');
-      if (
-        detail.source !== 'zsxq'
-        || detail.canonicalUrl !== document.canonicalUrl
-        || detail.truncated !== false
-        || detail.text.length < document.text.length
-      ) return { ...document, truncated: true };
+      if (detail.source !== 'zsxq') return failed('detail-source-mismatch');
+      if (detail.canonicalUrl !== document.canonicalUrl) return failed('detail-url-mismatch');
+      if (detail.truncated !== false) return failed('detail-truncated');
+      if (detail.text.length < document.text.length) return failed('detail-shorter');
       const comparison = mergeZsxqDocumentCopies(document, detail);
-      if (comparison.conflict) return { ...document, truncated: true };
+      if (comparison.conflict) return failed('detail-body-conflict');
       const sourceMetadata = {
         ...(document.sourceMetadata ?? {}),
         ...(detail.sourceMetadata ?? {}),
@@ -1867,7 +1876,10 @@ export class JobRunner {
           ...(detail.publishedAt
             ? { publishedAt: detail.publishedAt }
             : document.publishedAt ? { publishedAt: document.publishedAt } : {}),
-          sourceMetadata,
+          sourceMetadata: {
+            ...sourceMetadata,
+            topicDetailFailure: 'detail-assets-unproven',
+          },
           truncated: true,
         };
       }
@@ -1882,8 +1894,11 @@ export class JobRunner {
         sourceMetadata,
         truncated: false,
       };
-    } catch {
-      return { ...document, truncated: true };
+    } catch (error) {
+      const reason = error instanceof Error
+        ? error.message.replace(/\s+/gu, ' ').slice(0, 160)
+        : String(error).slice(0, 160);
+      return failed(`detail-error:${reason || 'unknown'}`);
     } finally {
       if (tabId !== undefined) await this.options.tabs.remove(tabId).catch(() => undefined);
     }

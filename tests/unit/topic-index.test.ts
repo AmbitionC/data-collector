@@ -1054,6 +1054,14 @@ describe('正文被折叠时用接口那份补齐', () => {
       text: '正文<e type="file" />',
       files: [oneFile],
     })?.sourceMediaProven).toBe(true);
+
+    const unresolved = harvest('9031000000000201', {
+      text: '正文<e type="file" file_id="report-1" />',
+      files: [{ file_id: 'report-1', name: '薪酬数据.xlsx' }],
+    });
+    expect(unresolved?.sourceMediaIssues).toContain(
+      'files:unresolved:object-file_id+name',
+    );
   });
 
   it('keeps opaque inline video/card components incomplete and binds video ids to structured media', () => {

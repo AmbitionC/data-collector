@@ -1024,7 +1024,9 @@ function sourceAssetsOf(candidate: Record<string, unknown>): SourceAssets {
         for (const rawFile of rawFiles) {
           const url = attachmentUrlOf(rawFile);
           if (!url || attachments.size >= SOURCE_ATTACHMENT_LIMIT) {
-            markIssue(!url ? `${key}:unresolved` : `${key}:limit`);
+            markIssue(!url
+              ? `${key}:unresolved:${issueShape(rawFile)}`
+              : `${key}:limit`);
             continue;
           }
           const title = isRecord(rawFile)

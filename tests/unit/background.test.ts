@@ -225,7 +225,10 @@ function linkedPreviewPlanFixture(detailTruncated: boolean, listHasArticleAnchor
   candidate: CollectedDocument;
   detailText: string;
   articleText: string;
-  phases: Array<{ rejections?: Record<string, number> }>;
+  phases: Array<{
+    rejections?: Record<string, number>;
+    rejectionDetails?: Array<{ evidence?: string }>;
+  }>;
 } {
   const tabs = new InMemoryTabs();
   const bridge = new InMemoryBridge();
@@ -315,7 +318,10 @@ function linkedPreviewPlanFixture(detailTruncated: boolean, listHasArticleAnchor
     waitForTabComplete: async () => undefined,
     delay: async () => undefined,
   });
-  const phases: Array<{ rejections?: Record<string, number> }> = [];
+  const phases: Array<{
+    rejections?: Record<string, number>;
+    rejectionDetails?: Array<{ evidence?: string }>;
+  }> = [];
   return { tabs, bridge, runner, candidate, detailText, articleText, phases };
 }
 
@@ -1770,6 +1776,8 @@ describe('extension job runner', () => {
     expect(fixture.bridge.createdFor).toEqual([]);
     expect(fixture.bridge.sent.some(message => message.type === 'job.result')).toBe(false);
     expect(fixture.phases.at(-1)?.rejections?.['正文不完整']).toBe(1);
+    expect(fixture.phases.at(-1)?.rejectionDetails?.at(-1)?.evidence)
+      .toContain('topicDetailFailure=detail-truncated');
   });
 
   it('discovers and collects an article anchor that appears only after topic-detail recovery', async () => {
