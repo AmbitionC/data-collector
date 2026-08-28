@@ -473,6 +473,16 @@ function zsxqIncompleteEvidence(
   if (metadata.topicDetailFailure !== undefined) {
     evidence.push(`topicDetailFailure=${String(metadata.topicDetailFailure)}`);
   }
+  for (const key of [
+    'linkedArticleFailure',
+    'articleLayoutMode',
+    'articleLayoutSelector',
+    'articleLayoutAmbiguous',
+    'articleStableCandidate',
+    'articleStabilityProven',
+  ] as const) {
+    if (metadata[key] !== undefined) evidence.push(`${key}=${String(metadata[key])}`);
+  }
   return evidence.join('; ');
 }
 
@@ -1789,8 +1799,11 @@ export class JobRunner {
         // `truncated:false` 只说明这一帧没有看到折叠控件；SPA 可能刚挂首段。
         // 同一份最丰富正文必须从最后一次变化起连续稳定 24 秒，且任一正向截断证据都粘住。
         const signature = zsxqDocumentSignature(candidate);
+        const stableUnknownArticle = candidate.kind === 'article'
+          && candidate.truncated === undefined
+          && candidate.sourceMetadata?.articleStableCandidate === true;
         const canProveStable = !tainted
-          && candidate.truncated === false
+          && (candidate.truncated === false || stableUnknownArticle)
           && candidate.canonicalUrl === bestDocument?.canonicalUrl
           && candidate.text === bestDocument.text;
         if (canProveStable && signature === stableSignature) {
@@ -1799,7 +1812,20 @@ export class JobRunner {
           stableSignature = canProveStable ? signature : undefined;
           stableForMs = 0;
         }
-        if (canProveStable && stableForMs >= ZSXQ_STABLE_FOR_MS) return response;
+        if (canProveStable && stableForMs >= ZSXQ_STABLE_FOR_MS) {
+          if (!stableUnknownArticle) return response;
+          return {
+            ok: true,
+            document: {
+              ...candidate,
+              truncated: false,
+              sourceMetadata: {
+                ...(candidate.sourceMetadata ?? {}),
+                articleStabilityProven: true,
+              },
+            },
+          };
+        }
         last = response;
         continue;
       }
@@ -1930,6 +1956,18 @@ export class JobRunner {
       // 无长文链接时也必须收敛三态：保留明确 true，其余标记为完整。
       return { ...topicDocument, truncated: topicDocument.truncated === true };
     }
+    const failed = (
+      reason: string,
+      article?: CollectedDocument,
+    ): CollectedDocument => ({
+      ...topicDocument,
+      sourceMetadata: {
+        ...(topicDocument.sourceMetadata ?? {}),
+        ...(article?.sourceMetadata ?? {}),
+        linkedArticleFailure: reason,
+      },
+      truncated: true,
+    });
     // 长文页只能证明“链接出去的文章”完整，不能反证原帖自身没有残留折叠尾段。
     // 详情页仍不完整或取证失败时，后面即使拿到完整文章也只能保留正文，不能清除 taint。
     let tabId: number | undefined;
@@ -1939,7 +1977,7 @@ export class JobRunner {
         active: false,
         purpose: 'linked-article',
       });
-      if (tab.id === undefined) return { ...document, truncated: true };
+      if (tab.id === undefined) return failed('tab-id-missing');
       tabId = tab.id;
       await this.options.waitForTabComplete(tabId, 30_000);
       /*
@@ -1965,14 +2003,14 @@ export class JobRunner {
       );
       if (response.ok) {
         const article = payloadOf(response, 'document');
-        if (
-          article.source !== 'zsxq'
-          || article.kind !== 'article'
-          || !sameCanonicalUrl(article.canonicalUrl, articleUrl)
-          || article.truncated !== false
-          || article.text.length <= topicDocument.text.length
-        ) {
-          return { ...topicDocument, truncated: true };
+        if (article.source !== 'zsxq') return failed('article-source-mismatch', article);
+        if (article.kind !== 'article') return failed('article-kind-mismatch', article);
+        if (!sameCanonicalUrl(article.canonicalUrl, articleUrl)) {
+          return failed('article-url-mismatch', article);
+        }
+        if (article.truncated !== false) return failed('article-truncated', article);
+        if (article.text.length <= topicDocument.text.length) {
+          return failed('article-not-longer', article);
         }
         return {
           ...topicDocument,
@@ -1980,15 +2018,22 @@ export class JobRunner {
           html: `${topicDocument.html}\n<hr />\n${article.html}`,
           text: `${topicDocument.text}\n\n${article.text}`,
           images: [...topicDocument.images, ...article.images],
+          sourceMetadata: {
+            ...(topicDocument.sourceMetadata ?? {}),
+            ...(article.sourceMetadata ?? {}),
+          },
           // 链接正文即使已经完整，也只能在原帖详情同时给出完整证明时清除列表 taint。
           // 详情失败时仍把取得的长文带回，便于诊断/重试，但最终状态必须保持 true。
           truncated: topicDocument.truncated === true,
         };
       }
       // 试满还是没拿到长文：如实标成截断，归档侧才知道这条不完整。
-      return { ...topicDocument, truncated: true };
-    } catch {
-      return { ...topicDocument, truncated: true };
+      return failed(`extract-${response.error.code}`);
+    } catch (error) {
+      const reason = error instanceof Error
+        ? error.message.replace(/\s+/gu, ' ').slice(0, 160)
+        : String(error).slice(0, 160);
+      return failed(`article-error:${reason || 'unknown'}`);
     } finally {
       if (tabId !== undefined) await this.options.tabs.remove(tabId).catch(() => undefined);
     }

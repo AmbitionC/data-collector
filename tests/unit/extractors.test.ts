@@ -1326,6 +1326,35 @@ describe('工单 D2：长文正文在 articles.zsxq.com 上', () => {
     expect(result.truncated).toBeUndefined();
   });
 
+  it('给唯一裸 content 长文留下标题、作者和时间齐全的稳定性候选证据', () => {
+    const url = 'https://articles.zsxq.com/id_identified_weak_content.html';
+    const body = '这是知识星球长文章的完整正文，持续讨论企业经营、自由现金流与投资纪律。'.repeat(30);
+    const doc = new JSDOM(`
+      <h1>中概股近期性价比分析</h1>
+      <div class="author">
+        <div class="role owner">陈老师</div>
+        <div class="date">2026-08-28 18:50</div>
+      </div>
+      <div class="content">${body}</div>
+    `, { url }).window.document;
+
+    const result = extractDocument(doc, url, NOW);
+
+    expect(result).toMatchObject({
+      kind: 'article',
+      title: '中概股近期性价比分析',
+      author: '陈老师',
+      publishedAt: '2026-08-28T10:50:00.000Z',
+      sourceMetadata: {
+        articleLayoutMode: 'weak',
+        articleLayoutSelector: '.content',
+        articleLayoutAmbiguous: false,
+        articleStableCandidate: true,
+      },
+    });
+    expect(result.truncated).toBeUndefined();
+  });
+
   it('长文页已有局部正文但仍挂展开控件时标记为未完成', () => {
     const url = 'https://articles.zsxq.com/id_partial.html';
     const partial = '这是还在渲染的投资与经营长文局部正文。'.repeat(12);

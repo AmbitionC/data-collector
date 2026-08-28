@@ -3813,6 +3813,9 @@ describe('list page batch capture', () => {
       expect(completed.text).toBe(preview.text);
       expect(completed.text).not.toContain(wrongBody);
       expect(completed.truncated).toBe(true);
+      expect(completed.sourceMetadata).toMatchObject({
+        linkedArticleFailure: 'article-url-mismatch',
+      });
     });
 
     it('waits past a no-control partial linked-article sample until the richer body is stable', async () => {
@@ -3921,6 +3924,50 @@ describe('list page batch capture', () => {
       expect(completed.text).toBe(preview.text);
       expect(completed.truncated).toBe(true);
       expect(asked).toBe(11);
+    });
+
+    it('promotes an identified unique weak article only after its body stays stable for 24 seconds', async () => {
+      const { tabs, runner } = withArticle(undefined);
+      const articleUrl = 'https://articles.zsxq.com/id_identifiedweak.html';
+      const preview = {
+        ...topic('linked-identified-weak'),
+        html: `<p>长文导语</p><a href="${articleUrl}">全文</a>`,
+        text: '长文导语',
+        truncated: false,
+      };
+      const body = '这是页面身份完整且持续稳定的知识星球长文正文，包含经营和投资分析。'.repeat(30);
+      const observed: Array<boolean | undefined> = [];
+      let asked = 0;
+      tabs.sendMessage = async () => {
+        asked += 1;
+        const extracted = extractDocument(
+          new JSDOM(`
+            <h1>中概股近期性价比分析</h1>
+            <div class="author">
+              <div class="role owner">陈老师</div>
+              <div class="date">2026-08-28 18:50</div>
+            </div>
+            <div class="content">${body}</div>
+          `, { url: articleUrl }).window.document,
+          articleUrl,
+          () => '2026-08-29T00:00:00.000Z',
+        );
+        observed.push(extracted.truncated);
+        return { ok: true as const, document: extracted };
+      };
+
+      const completed = await (runner as unknown as {
+        withLinkedArticle(document: CollectedDocument): Promise<CollectedDocument>;
+      }).withLinkedArticle(preview);
+
+      expect(observed.every(value => value === undefined)).toBe(true);
+      expect(completed.text).toContain(body.slice(-100));
+      expect(completed.truncated).toBe(false);
+      expect(completed.sourceMetadata).toMatchObject({
+        articleStableCandidate: true,
+        articleStabilityProven: true,
+      });
+      expect(asked).toBe(9);
     });
 
     it('keeps a real article expand control sticky even after later strong frames look complete', async () => {
@@ -4037,6 +4084,9 @@ describe('list page batch capture', () => {
 
       expect(completed.text).toBe(preview.text);
       expect(completed.truncated).toBe(true);
+      expect(completed.sourceMetadata).toMatchObject({
+        linkedArticleFailure: 'tab-id-missing',
+      });
     });
   });
 

@@ -885,7 +885,7 @@ function sanitizedArticleBlock(block: Element): Element {
 function articleContentForSelectors(
   document: Document,
   selectors: readonly string[],
-): { content: Element; ambiguous: boolean } | undefined {
+): { content: Element; ambiguous: boolean; selector: string } | undefined {
   const found = [...document.querySelectorAll(selectors.join(', '))]
     .filter(articleCandidateVisible);
   const outermost = found.filter(
@@ -930,15 +930,19 @@ function articleContentForSelectors(
 
   let richest: Element | undefined;
   let richestLength = 0;
+  let richestSelector: string | undefined;
   for (const group of groups) {
     const content = contentRoot(document, group.blocks)!;
     const length = stripUiNoise(elementText(content)).replace(/\s+/g, '').length;
     if (length > richestLength) {
       richest = content;
       richestLength = length;
+      richestSelector = group.selector;
     }
   }
-  return richest ? { content: richest, ambiguous: groups.length > 1 } : undefined;
+  return richest && richestSelector
+    ? { content: richest, ambiguous: groups.length > 1, selector: richestSelector }
+    : undefined;
 }
 
 /**
@@ -982,7 +986,8 @@ export function extractZsxqArticle(document: Document, url: URL, now: Clock) {
   const weakChoice = strongChoice
     ? undefined
     : articleContentForSelectors(document, ARTICLE_WEAK_SELECTORS);
-  const content = strongChoice?.content ?? weakChoice?.content ?? densestBlock(document);
+  const densityChoice = strongChoice || weakChoice ? undefined : densestBlock(document);
+  const content = strongChoice?.content ?? weakChoice?.content ?? densityChoice;
   if (!content) {
     throw new ExtractionError(
       'CONTENT_EMPTY',
@@ -993,7 +998,8 @@ export function extractZsxqArticle(document: Document, url: URL, now: Clock) {
   const text = stripUiNoise(rawText);
   // 展开控件才是正文被截断的正向证据。裸 `.content`、密度兜底和歧义强候选
   // 都只能说明完整性未知；交给有界重试继续观察，最终仍会按不完整处理。
-  const truncated = hasTruncationControl(content)
+  const hasExpandControl = hasTruncationControl(content);
+  const truncated = hasExpandControl
     ? true
     : strongChoice && !strongChoice.ambiguous
       ? false
@@ -1004,16 +1010,37 @@ export function extractZsxqArticle(document: Document, url: URL, now: Clock) {
   const time = firstWithin(document, TIME_SELECTORS);
   const author = elementText(firstWithin(document, AUTHOR_SELECTORS));
   const publishedAt = parsePublishedAt(elementText(time), time?.getAttribute('datetime'));
+  const titleElement = firstWithin(document, ['h1', 'h2', '.title']);
+  const explicitTitle = elementText(titleElement);
+  // 旧版长文页确实只给正文使用裸 `.content`。单帧仍不能证明完整，但“唯一正文候选 +
+  // 明确标题/作者/发布时间”足以证明页面身份，允许后台在正文连续不变 24 秒后晋升。
+  // 密度兜底、歧义候选、缺任一身份字段或出现展开控件时都不发这个凭据。
+  const articleStableCandidate = Boolean(
+    weakChoice
+      && !weakChoice.ambiguous
+      && !hasExpandControl
+      && explicitTitle
+      && author
+      && publishedAt,
+  );
+  const articleLayoutMode = strongChoice ? 'strong' : weakChoice ? 'weak' : 'density';
+  const articleLayoutSelector = strongChoice?.selector ?? weakChoice?.selector ?? 'density';
   return buildDocument({
     source: 'zsxq',
     kind: 'article',
-    title: titleFromText(elementText(firstWithin(document, ['h1', 'h2', '.title'])) || text),
+    title: titleFromText(explicitTitle || text),
     content,
     url,
     now,
     ...(truncated === undefined ? {} : { truncated }),
     ...(author ? { author } : {}),
     ...(publishedAt ? { publishedAt } : {}),
+    sourceMetadata: {
+      articleLayoutMode,
+      articleLayoutSelector,
+      articleLayoutAmbiguous: strongChoice?.ambiguous ?? weakChoice?.ambiguous ?? true,
+      ...(articleStableCandidate ? { articleStableCandidate: true } : {}),
+    },
   });
 }
 
