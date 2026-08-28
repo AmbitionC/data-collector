@@ -3943,8 +3943,8 @@ describe('list page batch capture', () => {
         const extracted = extractDocument(
           new JSDOM(`
             <h1>中概股近期性价比分析</h1>
-            <div class="author">
-              <div class="role owner">陈老师</div>
+            <div class="author-info">
+              <div class="author"><span class="nick-name">陈老师</span></div>
               <div class="date">2026-08-28 18:50</div>
             </div>
             <div class="content">${body}</div>

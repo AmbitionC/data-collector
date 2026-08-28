@@ -72,6 +72,8 @@ const CONTENT_SELECTORS = [
  *                       <div class="date"> 2026-05-01 22:19 </div></div></div>
  */
 const AUTHOR_SELECTORS = [
+  // 知识星球长文章组件（官方 app-article-preview / 阅读页）的实际作者节点。
+  '.author-info .nick-name',
   '.author .role',
   '.author .name',
   '.author .nickname',

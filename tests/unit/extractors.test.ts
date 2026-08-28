@@ -1331,8 +1331,8 @@ describe('工单 D2：长文正文在 articles.zsxq.com 上', () => {
     const body = '这是知识星球长文章的完整正文，持续讨论企业经营、自由现金流与投资纪律。'.repeat(30);
     const doc = new JSDOM(`
       <h1>中概股近期性价比分析</h1>
-      <div class="author">
-        <div class="role owner">陈老师</div>
+      <div class="author-info">
+        <div class="author"><span class="nick-name">陈老师</span></div>
         <div class="date">2026-08-28 18:50</div>
       </div>
       <div class="content">${body}</div>
