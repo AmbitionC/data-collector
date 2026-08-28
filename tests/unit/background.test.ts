@@ -451,6 +451,100 @@ describe('extension job runner', () => {
     });
   });
 
+  it('records an explicitly deleted linked article without ever archiving its preview', async () => {
+    const tabs = new InMemoryTabs();
+    const bridge = new InMemoryBridge();
+    const articleUrl = 'https://articles.zsxq.com/id_deleted.html';
+    const candidate = {
+      ...topic('80100'),
+      title: '投资经营旧文章',
+      text: '投资经营旧文章的导语，完整正文原来位于关联长文。',
+      html: `<p>投资经营旧文章的导语</p><a href="${articleUrl}">全文</a>`,
+      publishedAt: '2024-12-04T10:00:00.000Z',
+      sourceMetadata: { authorRole: 'owner', topicId: '80100' },
+    } satisfies CollectedDocument;
+    tabs.create = async input => {
+      tabs.created.push(input);
+      return { id: 42, url: input.url, status: 'complete' };
+    };
+    tabs.sendMessage = async (_tabId, message) => {
+      const request = message as { type: string };
+      tabs.asked.push(request.type);
+      if (request.type === 'list.apiCollectOwnerPage') {
+        return {
+          ok: true,
+          ownerPage: {
+            documents: [candidate],
+            businessSkips: [],
+            rawCount: 1,
+            pageKey: 'start:80100',
+            exhausted: true,
+            newestObservedAt: candidate.publishedAt,
+            oldestObservedAt: candidate.publishedAt,
+            context: { ownerId: '1001', ownerName: '陈老师', scope: 'by_owner' },
+          },
+        } as never;
+      }
+      if (request.type === 'document.apiCollectArticle') {
+        return {
+          ok: false,
+          error: {
+            code: 'COLLECTION_FAILED',
+            message: 'ZSXQ_API_FALLBACK_FAILED：知识星球接口拒绝请求（HTTP 200，服务端 code 21504，长文章不存在或者被删除）',
+          },
+        } as never;
+      }
+      throw new Error(`unexpected ${request.type}`);
+    };
+    const runner = new JobRunner({
+      tabs,
+      bridge,
+      waitForTabComplete: async () => undefined,
+      delay: async () => undefined,
+      knownZsxqIndex: async () => [],
+    });
+    const phases: Array<Record<string, unknown>> = [];
+
+    await runner.runZsxqCollectionPlan(
+      'owner-history-deleted-article',
+      PLAN_ATTEMPT,
+      phase => { phases.push(phase as unknown as Record<string, unknown>); },
+      { zsxqMode: 'owner-history', targetDays: [] },
+    );
+
+    expect(tabs.asked).toEqual([
+      'list.apiCollectOwnerPage',
+      'document.apiCollectArticle',
+    ]);
+    expect(tabs.created.map(item => item.url)).not.toContain(articleUrl);
+    expect(bridge.createdFor).toEqual([]);
+    expect(bridge.sent.filter(message => message.type === 'job.result')).toEqual([]);
+    expect(phases.at(-1)).toMatchObject({
+      prepared: true,
+      rejections: { '源站关联长文已删除（签名接口 code 21504，未入库）': 1 },
+      rejectionDetails: [expect.objectContaining({
+        url: candidate.canonicalUrl,
+        evidence: expect.stringContaining('linkedArticleApiFailure=COLLECTION_FAILED'),
+      })],
+      ownerAudit: {
+        observed: 1,
+        qualifying: 0,
+        filtered: 1,
+        saved: 0,
+        failed: 0,
+        exhausted: true,
+      },
+      dayDrafts: [expect.objectContaining({
+        day: '2024-12-04',
+        rawOwnerCount: 1,
+        qualifyingCount: 0,
+        filteredCount: 1,
+        savedCount: 0,
+        failedCount: 0,
+      })],
+    });
+  });
+
   it('reports a zero-count boundary update when a later owner page crosses the prior page day', async () => {
     const tabs = new InMemoryTabs();
     const bridge = new InMemoryBridge();

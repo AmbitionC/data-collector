@@ -457,6 +457,7 @@ function zsxqIncompleteEvidence(
 ): string {
   const metadata = after.sourceMetadata ?? before.sourceMetadata ?? {};
   const evidence = [
+    `title=${after.title.replace(/\s+/gu, ' ').slice(0, 120)}`,
     `sourceBodyProven=${String(metadata.sourceBodyProven)}`,
     `sourceMediaProven=${String(metadata.sourceMediaProven)}`,
     `sourceCoversDom=${String(metadata.sourceCoversDom)}`,
@@ -486,6 +487,14 @@ function zsxqIncompleteEvidence(
     if (metadata[key] !== undefined) evidence.push(`${key}=${String(metadata[key])}`);
   }
   return evidence.join('; ');
+}
+
+/** 只有签名接口的明确 21504 响应才属于不可恢复源站缺失；超时、401、空 DOM 都不算。 */
+function isConfirmedDeletedLinkedArticle(document: CollectedDocument): boolean {
+  const failure = document.sourceMetadata?.linkedArticleApiFailure;
+  return typeof failure === 'string'
+    && /服务端 code 21504(?:，|\b)/u.test(failure)
+    && /长文章不存在或者被删除/u.test(failure);
 }
 
 export interface CaptureOverrides {
@@ -1071,6 +1080,14 @@ export class JobRunner {
         continue;
       }
       if (completedDocument.truncated) {
+        if (isConfirmedDeletedLinkedArticle(completedDocument)) {
+          reject(
+            document,
+            '源站关联长文已删除（签名接口 code 21504，未入库）',
+            zsxqIncompleteEvidence(document, completedDocument),
+          );
+          continue;
+        }
         throw new Error(
           `CONTENT_COVERAGE_INCOMPLETE：知识星球「最新 / 精华」正文不完整：`
           + `${document.canonicalUrl}（${zsxqIncompleteEvidence(document, completedDocument)}）`,
@@ -1307,6 +1324,16 @@ export class JobRunner {
           continue;
         }
         if (completedDocument.truncated) {
+          if (isConfirmedDeletedLinkedArticle(completedDocument)) {
+            draft.filteredCount += 1;
+            audit.filtered += 1;
+            reject(
+              document.canonicalUrl,
+              '源站关联长文已删除（签名接口 code 21504，未入库）',
+              zsxqIncompleteEvidence(document, completedDocument),
+            );
+            continue;
+          }
           draft.failedCount += 1;
           audit.failed += 1;
           reject(
@@ -1634,7 +1661,13 @@ export class JobRunner {
           continue;
         }
         if (completedDocument.truncated) {
-          reject(document, '正文不完整', zsxqIncompleteEvidence(document, completedDocument));
+          reject(
+            document,
+            isConfirmedDeletedLinkedArticle(completedDocument)
+              ? '源站关联长文已删除（签名接口 code 21504，未入库）'
+              : '正文不完整',
+            zsxqIncompleteEvidence(document, completedDocument),
+          );
           continue;
         }
         // 走到这里表示本轮已检查过所有明确截断信号；写成 false 让目录三态一次收敛为“完整”。
@@ -2015,6 +2048,15 @@ export class JobRunner {
           signedApiFailure = `${apiResponse.error.code}:${apiResponse.error.message}`
             .replace(/\s+/gu, ' ')
             .slice(0, 240);
+          // 21504 是服务端对该精确 article id 的终态证明。真实验证中对应文章页只剩空壳；
+          // 再开一个 SPA 标签页轮询 44.5 秒不会产生正文，只会浪费时间。
+          if (isConfirmedDeletedLinkedArticle({
+            ...topicDocument,
+            sourceMetadata: {
+              ...(topicDocument.sourceMetadata ?? {}),
+              linkedArticleApiFailure: signedApiFailure,
+            },
+          })) return failed('signed-api-source-deleted');
         }
       } catch (error) {
         signedApiFailure = (error instanceof Error ? error.message : String(error))
