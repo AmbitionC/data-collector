@@ -128,6 +128,18 @@ export const EXCLUDE_RULES: readonly ExcludeRule[] = [
   COMMUNITY_ADMIN_RULE,
 ];
 
+/**
+ * 用户选定的 A 范围：投资、财富、职场/商业、认知与教育。
+ *
+ * 这只用于决定是否值得打开昂贵的详情页，不替代后续完整正文上的同一判断。列表预览
+ * 通常已经包含标题和首段；完全没有任何领域信号时，前置跳过能避免为日常闲聊等待正文。
+ */
+const LIFE_TEACHER_INTEREST = /投资|股票|股市|A股|港股|美股|基金|ETF|指数|估值|仓位|财报|ROE|市盈率|市净率|银行股|券商|医药|中概股|美债|国债|黄金|牛市|熊市|创业板|上证|沪深|科创|板块|套利|财富|资产|现金流|保险|养老|负债|贷款|债务|财务自由|职业|职场|工作|求职|创业|商业|经营|公司|企业|副业|AI|DeepSeek|认知|决策|思维|复盘|人生|方法论|教育|学校|择校|学习/u;
+
+export function isLifeTeacherInterest(text: string): boolean {
+  return LIFE_TEACHER_INTEREST.test(text);
+}
+
 export interface ExcludeMatch extends ExcludeRule {
   /**
    * 到底是哪几个词让它被判成这一类。

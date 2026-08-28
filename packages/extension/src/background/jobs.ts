@@ -19,6 +19,7 @@ import {
   type ZsxqPlanView,
 } from '@data-collector/shared';
 import { linkedArticleUrl } from '../extractors/index.js';
+import { isLifeTeacherInterest } from '../topicFilter.js';
 import type { HookStats } from '../topicIndex.js';
 import type { OwnedTabPurpose } from './ownedTabs.js';
 import { RemoteJobScheduler } from './remoteJobScheduler.js';
@@ -1050,9 +1051,7 @@ export class JobRunner {
       }
 
       const completedDocument = await this.withLinkedArticle(document);
-      if (!/投资|创业|商业模式|经营|财富|职业|职场|认知/u.test(
-        `${completedDocument.title}\n${completedDocument.text}`,
-      )) {
+      if (!isLifeTeacherInterest(`${completedDocument.title}\n${completedDocument.text}`)) {
         reject(document, '非投资创业主题');
         continue;
       }
@@ -1286,9 +1285,7 @@ export class JobRunner {
         }
 
         const completedDocument = await this.withLinkedArticle(document);
-        if (!/投资|创业|商业模式|经营|财富|职业|职场|认知/u.test(
-          `${completedDocument.title}\n${completedDocument.text}`,
-        )) {
+        if (!isLifeTeacherInterest(`${completedDocument.title}\n${completedDocument.text}`)) {
           draft.filteredCount += 1;
           audit.filtered += 1;
           reject(document.canonicalUrl, '非投资创业主题');
@@ -1609,9 +1606,7 @@ export class JobRunner {
         }
         const completedDocument = await this.withLinkedArticle(document);
         // 主题判断必须看补齐后的正文：列表导语本身可能没有投资/创业关键词。
-        if (!/投资|创业|商业模式|经营|财富|职业|职场|认知/u.test(
-          `${completedDocument.title}\n${completedDocument.text}`,
-        )) {
+        if (!isLifeTeacherInterest(`${completedDocument.title}\n${completedDocument.text}`)) {
           reject(document, '非投资创业主题');
           continue;
         }

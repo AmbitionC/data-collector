@@ -15,7 +15,7 @@ import {
   type TopicRecord,
 } from './topicIndex.js';
 import { advertisementIn } from './adFilter.js';
-import { excludedBy } from './topicFilter.js';
+import { excludedBy, isLifeTeacherInterest } from './topicFilter.js';
 
 const API_ROOT = 'https://api.zsxq.com/v2';
 const WEB_ROOT = 'https://wx.zsxq.com/group';
@@ -556,9 +556,10 @@ export async function collectZsxqApiOwnerPage(
     let excluded = excludedBy(document.text);
     let links = [...document.html.matchAll(/\bhref="([^"]+)"/giu)].map(match => match[1]!);
     let advertisement = advertisementIn(links);
+    let relevant = isLifeTeacherInterest(`${document.title}\n${document.text}`);
     // The feed can return only a `...` preview while claiming a structurally valid body. Prefer the
     // signed detail endpoint; the background DOM detail collector remains a fail-closed fallback.
-    if (!excluded && !advertisement && document.truncated === true) {
+    if (!excluded && !advertisement && relevant && document.truncated === true) {
       const detailPayload = await apiGet(`${API_ROOT}/topics/${item.topicId}`, common);
       const detail = ownerDetailDocument(
         groupId,
@@ -575,12 +576,13 @@ export async function collectZsxqApiOwnerPage(
       excluded = excludedBy(document.text);
       links = [...document.html.matchAll(/\bhref="([^"]+)"/giu)].map(match => match[1]!);
       advertisement = advertisementIn(links);
+      relevant = isLifeTeacherInterest(`${document.title}\n${document.text}`);
     }
     const reason = excluded
       ? `${excluded.label}（按选题偏好跳过，命中：${excluded.hits.join('、')}）`
       : advertisement
         ? `${advertisement.label}（按硬证据跳过，依据：${advertisement.hits.join('；')}）`
-        : undefined;
+        : !relevant ? '非投资创业主题' : undefined;
     if (reason) {
       businessSkips.push({
         url: document.canonicalUrl,

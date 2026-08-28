@@ -125,6 +125,34 @@ describe('ZSXQ API fallback', () => {
     })]);
   });
 
+  it('filters an irrelevant preview before requesting topic detail', async () => {
+    const topicId = '690000000000000097';
+    const requested: string[] = [];
+    const fetcher = async (input: RequestInfo | URL): Promise<Response> => {
+      const url = String(input);
+      requested.push(url);
+      if (url === `${API}/groups/${GROUP_ID}`) return groupResponse();
+      if (url === `${API}/groups/${GROUP_ID}/menus`) return menuResponse();
+      return topicResponse([topic(
+        topicId,
+        '2026-08-19T22:00:00.000Z',
+        '今天下雨了，大家周末愉快，评论区随便聊聊，后面的日常照片...',
+      )]);
+    };
+
+    const result = await collectZsxqApiOwnerPage(GROUP_ID, {}, {
+      fetcher,
+      aduid: 'test-device',
+      requestId: () => 'test-request',
+    });
+
+    expect(requested).not.toContain(`${API}/topics/${topicId}`);
+    expect(result.documents).toEqual([]);
+    expect(result.businessSkips).toEqual([expect.objectContaining({
+      reason: '非投资创业主题',
+    })]);
+  });
+
   it('uses trusted owner context to fetch only the requested continuation page', async () => {
     const fetcher = vi.fn(async (input: RequestInfo | URL) => {
       const url = new URL(String(input));

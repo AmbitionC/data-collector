@@ -1,5 +1,8 @@
 import { describe, expect, it } from 'vitest';
-import { excludedBy } from '../../packages/extension/src/topicFilter.js';
+import {
+  excludedBy,
+  isLifeTeacherInterest,
+} from '../../packages/extension/src/topicFilter.js';
 
 /** 用户实际给出的打新帖原文。 */
 const IPO_POST = `明日沪深新股，展芯股份，半导体赛道，建议积极申购，我的操作，申购展芯股份。
@@ -34,6 +37,22 @@ describe('选题过滤', () => {
   it('空文本与无关文本不命中', () => {
     expect(excludedBy('')).toBeUndefined();
     expect(excludedBy('聊聊长期主义和复利。')).toBeUndefined();
+  });
+});
+
+describe('关注主题前置判断', () => {
+  it('覆盖投资、财富、职场、认知与教育五类', () => {
+    for (const text of [
+      '创业板估值和仓位复盘',
+      '家庭资产与保险配置',
+      '中年职场转型的方法',
+      '把模糊恐惧改写成决策边界',
+      '孩子择校与学习规划',
+    ]) expect(isLifeTeacherInterest(text)).toBe(true);
+  });
+
+  it('社群闲聊和日常通知不进入正文补全', () => {
+    expect(isLifeTeacherInterest('今天下雨了，大家周末愉快，评论区随便聊聊。')).toBe(false);
   });
 });
 
