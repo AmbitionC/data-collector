@@ -30,6 +30,7 @@ import {
   CONTENT_BUILD_ID,
   CONTENT_API_COLLECT_REQUEST,
   CONTENT_API_COLLECT_OWNER_PAGE_REQUEST,
+  CONTENT_API_COLLECT_ARTICLE_REQUEST,
   CONTENT_DIAGNOSE_REQUEST,
   CONTENT_DOCUMENT_REQUEST,
   CONTENT_ADVANCE_REQUEST,
@@ -46,6 +47,7 @@ import {
 } from './contentProtocol.js';
 import {
   collectZsxqApiOwnerPage,
+  collectZsxqApiArticle,
   collectZsxqApiViews,
   type ZsxqOwnerApiContext,
 } from './zsxqApiFallback.js';
@@ -151,6 +153,7 @@ interface ExtractMessage {
     | typeof CONTENT_SELECT_VIEW_REQUEST
     | typeof CONTENT_API_COLLECT_REQUEST
     | typeof CONTENT_API_COLLECT_OWNER_PAGE_REQUEST
+    | typeof CONTENT_API_COLLECT_ARTICLE_REQUEST
     | typeof CONTENT_RESTORE_REQUEST
     | typeof CONTENT_ADVANCE_REQUEST
     | typeof CONTENT_REFRESH_TOPICS_REQUEST
@@ -169,12 +172,14 @@ interface ExtractMessage {
     | 'list.focusLast'
     | 'list.selectView'
     | 'list.apiCollect'
-    | 'list.apiCollectOwnerPage';
+    | 'list.apiCollectOwnerPage'
+    | 'document.apiCollectArticle';
   /** list.highlight：要滚过去并高亮的那一条。 */
   key?: string;
   label?: ZsxqPlanView;
   cursor?: string;
   context?: ZsxqOwnerApiContext;
+  articleUrl?: string;
   overrides?: {
     userCategory?: string;
     userTags?: string[];
@@ -1624,6 +1629,7 @@ if (!alreadyRegistered) chrome.runtime.onMessage.addListener((message: unknown, 
     request.type !== 'list.selectView' &&
     request.type !== 'list.apiCollect' &&
     request.type !== 'list.apiCollectOwnerPage' &&
+    request.type !== 'document.apiCollectArticle' &&
     !currentRequest
   ) {
     return false;
@@ -1638,6 +1644,41 @@ if (!alreadyRegistered) chrome.runtime.onMessage.addListener((message: unknown, 
         }
       : response);
   };
+
+  if (
+    request.type === 'document.apiCollectArticle'
+    || request.type === CONTENT_API_COLLECT_ARTICLE_REQUEST
+  ) {
+    if (typeof request.articleUrl !== 'string' || request.articleUrl.length > 2_000) {
+      respond({
+        ok: false,
+        error: {
+          code: 'UNSUPPORTED_LAYOUT',
+          message: 'ZSXQ_API_FALLBACK_FAILED：缺少有效的关联长文地址',
+        },
+      });
+      return false;
+    }
+    void collectZsxqApiArticle(request.articleUrl, {
+      aduid: zsxqAduid(),
+      domDocument: document,
+    }).then(
+      articleDocument => respond({ ok: true, document: articleDocument }),
+      error => {
+        const message = error instanceof Error ? error.message : '知识星球关联长文接口采集失败';
+        respond({
+          ok: false,
+          error: {
+            code: message.startsWith('AUTH_REQUIRED')
+              ? 'AUTH_REQUIRED'
+              : 'COLLECTION_FAILED',
+            message,
+          },
+        });
+      },
+    );
+    return true;
+  }
 
   if (
     request.type === 'list.apiCollectOwnerPage'

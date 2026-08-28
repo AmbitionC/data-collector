@@ -352,6 +352,8 @@ describe('extension job runner', () => {
     });
     const exact = ownerDocument('80001', '投资复盘', '投资经营复盘正文'.repeat(20));
     const semantic = ownerDocument('80002', '投资复盘副本', '投资经营复盘语义正文'.repeat(20));
+    exact.html += '<a href="https://articles.zsxq.com/id_exact.html">全文</a>';
+    semantic.html += '<a href="https://articles.zsxq.com/id_semantic.html">全文</a>';
     const repair = ownerDocument('80003', '创业修复', '创业经营完整正文'.repeat(20));
     const fresh = ownerDocument('80004', '财富新内容', '财富与职业认知完整正文'.repeat(20));
     const irrelevant = ownerDocument('80005', '天气闲聊', '今天空气很好适合散步'.repeat(20));
@@ -3694,6 +3696,65 @@ describe('list page batch capture', () => {
       expect(document?.text).toContain('居民杠杆率');
     });
 
+    it('优先通过原星球标签页的签名接口补齐长文，不再等待空白文章页 DOM', async () => {
+      const { tabs, runner } = withArticle(undefined);
+      const articleUrl = 'https://articles.zsxq.com/id_abc.html';
+      const articleText = '这是签名文章接口返回的完整正文，覆盖投资、创业、现金流和经营复盘。'.repeat(20);
+      const preview = {
+        ...topic('linked-signed-api'),
+        html: `<p>长文导语</p><a href="${articleUrl}">全文</a>`,
+        text: '长文导语',
+        truncated: false,
+      };
+      const asked: Array<{ id: number; type?: string; articleUrl?: string }> = [];
+      tabs.sendMessage = async (id, message) => {
+        const request = message as { type?: string; articleUrl?: string };
+        asked.push({ id, ...request });
+        if (request.type === 'document.apiCollectArticle') {
+          return {
+            ok: true as const,
+            document: {
+              ...preview,
+              kind: 'article' as const,
+              url: articleUrl,
+              canonicalUrl: articleUrl,
+              title: '签名接口长文',
+              html: `<p>${articleText}</p>`,
+              text: articleText,
+              images: [],
+              truncated: false,
+              sourceMetadata: {
+                articleId: 'abc',
+                sourceBodyProven: true,
+                sourceMediaProven: true,
+                sourceCoversDom: true,
+                extractionMode: 'signed-article-api',
+              },
+            },
+          };
+        }
+        throw new Error(`unexpected request ${request.type}`);
+      };
+
+      const completed = await (runner as unknown as {
+        withLinkedArticle(document: CollectedDocument, apiTabId?: number): Promise<CollectedDocument>;
+      }).withLinkedArticle(preview, 77);
+
+      expect(asked).toEqual([{
+        id: 77,
+        type: 'document.apiCollectArticle',
+        articleUrl,
+      }]);
+      expect(tabs.created.map(item => item.url)).not.toContain(articleUrl);
+      expect(completed.text).toContain(articleText);
+      expect(completed.truncated).toBe(false);
+      expect(completed.sourceMetadata).toMatchObject({
+        linkedArticleApiComplete: true,
+        linkedArticleUrl: articleUrl,
+        extractionMode: 'signed-article-api',
+      });
+    });
+
     it('同屏重复正文相等时保留后份长文链接和两边图片，再完成链接正文补齐', async () => {
       const { tabs, bridge, runner } = listRunner();
       const candidate = topic('linked-duplicate-assets');
@@ -4086,6 +4147,7 @@ describe('list page batch capture', () => {
       expect(completed.truncated).toBe(true);
       expect(completed.sourceMetadata).toMatchObject({
         linkedArticleFailure: 'tab-id-missing',
+        linkedArticleUrl: 'https://articles.zsxq.com/id_missing.html',
       });
     });
   });

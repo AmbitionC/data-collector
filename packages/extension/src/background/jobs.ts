@@ -475,6 +475,8 @@ function zsxqIncompleteEvidence(
   }
   for (const key of [
     'linkedArticleFailure',
+    'linkedArticleUrl',
+    'linkedArticleApiFailure',
     'articleLayoutMode',
     'articleLayoutSelector',
     'articleLayoutAmbiguous',
@@ -1063,7 +1065,7 @@ export class JobRunner {
         continue;
       }
 
-      const completedDocument = await this.withLinkedArticle(document);
+      const completedDocument = await this.withLinkedArticle(document, tabId);
       if (!isLifeTeacherInterest(`${completedDocument.title}\n${completedDocument.text}`)) {
         reject(document, '非投资创业主题');
         continue;
@@ -1297,7 +1299,7 @@ export class JobRunner {
           continue;
         }
 
-        const completedDocument = await this.withLinkedArticle(document);
+        const completedDocument = await this.withLinkedArticle(document, tabId);
         if (!isLifeTeacherInterest(`${completedDocument.title}\n${completedDocument.text}`)) {
           draft.filteredCount += 1;
           audit.filtered += 1;
@@ -1625,7 +1627,7 @@ export class JobRunner {
           reject(document, '本机库已有');
           continue;
         }
-        const completedDocument = await this.withLinkedArticle(document);
+        const completedDocument = await this.withLinkedArticle(document, tabId);
         // 主题判断必须看补齐后的正文：列表导语本身可能没有投资/创业关键词。
         if (!isLifeTeacherInterest(`${completedDocument.title}\n${completedDocument.text}`)) {
           reject(document, '非投资创业主题');
@@ -1939,7 +1941,10 @@ export class JobRunner {
    *
    * 取不到就保留导语并标记为截断；Bridge 会在任何知识星球入库之前据此拒绝半篇内容。
    */
-  private async withLinkedArticle(document: CollectedDocument): Promise<CollectedDocument> {
+  private async withLinkedArticle(
+    document: CollectedDocument,
+    signedApiTabId?: number,
+  ): Promise<CollectedDocument> {
     if (document.source !== 'zsxq') return document;
     if (document.kind === 'article') {
       return { ...document, truncated: document.truncated === true };
@@ -1956,6 +1961,7 @@ export class JobRunner {
       // 无长文链接时也必须收敛三态：保留明确 true，其余标记为完整。
       return { ...topicDocument, truncated: topicDocument.truncated === true };
     }
+    let signedApiFailure: string | undefined;
     const failed = (
       reason: string,
       article?: CollectedDocument,
@@ -1965,9 +1971,57 @@ export class JobRunner {
         ...(topicDocument.sourceMetadata ?? {}),
         ...(article?.sourceMetadata ?? {}),
         linkedArticleFailure: reason,
+        linkedArticleUrl: articleUrl,
+        ...(signedApiFailure ? { linkedArticleApiFailure: signedApiFailure } : {}),
       },
       truncated: true,
     });
+    const completedWith = (
+      article: CollectedDocument,
+      apiComplete: boolean,
+    ): CollectedDocument => ({
+      ...topicDocument,
+      // 导语保留上下文，权威长文正文接在后面。
+      html: `${topicDocument.html}\n<hr />\n${article.html}`,
+      text: `${topicDocument.text}\n\n${article.text}`,
+      images: [...new Map(
+        [...topicDocument.images, ...article.images].map(image => [image.url, image]),
+      ).values()],
+      sourceMetadata: {
+        ...(topicDocument.sourceMetadata ?? {}),
+        ...(article.sourceMetadata ?? {}),
+        linkedArticleUrl: articleUrl,
+        ...(apiComplete ? { linkedArticleApiComplete: true } : {}),
+      },
+      // 长文完整也不能洗掉原帖自身的正向截断证据。
+      truncated: topicDocument.truncated === true,
+    });
+    if (signedApiTabId !== undefined) {
+      try {
+        const apiResponse = await this.ask(signedApiTabId, {
+          type: this.contentMessageType('document.apiCollectArticle'),
+          articleUrl,
+        });
+        if (apiResponse.ok) {
+          const article = payloadOf(apiResponse, 'document');
+          if (article.source !== 'zsxq') signedApiFailure = 'article-source-mismatch';
+          else if (article.kind !== 'article') signedApiFailure = 'article-kind-mismatch';
+          else if (!sameCanonicalUrl(article.canonicalUrl, articleUrl)) {
+            signedApiFailure = 'article-url-mismatch';
+          } else if (article.truncated !== false) signedApiFailure = 'article-truncated';
+          else if (!article.text.trim()) signedApiFailure = 'article-empty';
+          else return completedWith(article, true);
+        } else {
+          signedApiFailure = `${apiResponse.error.code}:${apiResponse.error.message}`
+            .replace(/\s+/gu, ' ')
+            .slice(0, 240);
+        }
+      } catch (error) {
+        signedApiFailure = (error instanceof Error ? error.message : String(error))
+          .replace(/\s+/gu, ' ')
+          .slice(0, 240);
+      }
+    }
     // 长文页只能证明“链接出去的文章”完整，不能反证原帖自身没有残留折叠尾段。
     // 详情页仍不完整或取证失败时，后面即使拿到完整文章也只能保留正文，不能清除 taint。
     let tabId: number | undefined;
@@ -2012,20 +2066,7 @@ export class JobRunner {
         if (article.text.length <= topicDocument.text.length) {
           return failed('article-not-longer', article);
         }
-        return {
-          ...topicDocument,
-          // 导语留着（有时交代了背景），长文正文接在后面。
-          html: `${topicDocument.html}\n<hr />\n${article.html}`,
-          text: `${topicDocument.text}\n\n${article.text}`,
-          images: [...topicDocument.images, ...article.images],
-          sourceMetadata: {
-            ...(topicDocument.sourceMetadata ?? {}),
-            ...(article.sourceMetadata ?? {}),
-          },
-          // 链接正文即使已经完整，也只能在原帖详情同时给出完整证明时清除列表 taint。
-          // 详情失败时仍把取得的长文带回，便于诊断/重试，但最终状态必须保持 true。
-          truncated: topicDocument.truncated === true,
-        };
+        return completedWith(article, false);
       }
       // 试满还是没拿到长文：如实标成截断，归档侧才知道这条不完整。
       return failed(`extract-${response.error.code}`);
@@ -2083,7 +2124,7 @@ export class JobRunner {
       // 单条采集同样要补长文：按 URL 定向重采（收件箱那 48 条）走的就是这条路。
       this.sendDocumentResult(
         requestId,
-        await this.withLinkedArticle(payloadOf(response, 'document')),
+        await this.withLinkedArticle(payloadOf(response, 'document'), tabId),
       );
     } catch (error) {
       const outdated = isContentScriptOutdated(error);
@@ -2155,7 +2196,7 @@ export class JobRunner {
       ...(overrides.userTags ? { userTags: overrides.userTags } : {}),
     };
     // 当前页也可能只是长文导语；与远程单条/批量走同一补全与显式完整性路径。
-    this.sendDocumentResult(job.id, await this.withLinkedArticle(document));
+    this.sendDocumentResult(job.id, await this.withLinkedArticle(document, tab.id));
     return job.id;
   }
 
@@ -2497,7 +2538,7 @@ export class JobRunner {
           tally();
           continue;
         }
-        const completed = await this.withLinkedArticle(document);
+        const completed = await this.withLinkedArticle(document, tabId);
         if (completed.source === 'zsxq' && completed.truncated !== false) {
           items.push({
             key: item.key,

@@ -16,6 +16,7 @@ import {
 } from './topicIndex.js';
 import { advertisementIn } from './adFilter.js';
 import { excludedBy, isLifeTeacherInterest } from './topicFilter.js';
+import { buildDocument } from './extractors/common.js';
 
 const API_ROOT = 'https://api.zsxq.com/v2';
 const WEB_ROOT = 'https://wx.zsxq.com/group';
@@ -41,6 +42,8 @@ export interface ZsxqApiFallbackDependencies {
   aduid: string;
   now?: () => Date;
   requestId?: () => string;
+  /** Detached HTML parsing root. Browser callers use the current content document. */
+  domDocument?: Document;
 }
 
 export interface ZsxqApiCollection {
@@ -211,6 +214,113 @@ async function apiGet(
 function responseData(payload: unknown): Record<string, unknown> | undefined {
   if (!isRecord(payload)) return undefined;
   return isRecord(payload.resp_data) ? payload.resp_data : undefined;
+}
+
+function linkedArticleIdentity(rawUrl: string): { articleId: string; url: URL } {
+  let url: URL;
+  try {
+    url = new URL(rawUrl);
+  } catch {
+    throw coverageError('ZSXQ_API_ARTICLE_ID_UNPROVEN', '关联长文地址不是有效 URL');
+  }
+  const match = /^\/id_([A-Za-z0-9_-]{1,128})\.html$/u.exec(url.pathname);
+  if (
+    url.protocol !== 'https:'
+    || url.hostname !== 'articles.zsxq.com'
+    || url.port !== ''
+    || url.username !== ''
+    || url.password !== ''
+    || !match?.[1]
+  ) {
+    throw coverageError(
+      'ZSXQ_API_ARTICLE_ID_UNPROVEN',
+      `关联长文地址不符合知识星球文章格式：${rawUrl.slice(0, 300)}`,
+    );
+  }
+  url.search = '';
+  url.hash = '';
+  return { articleId: match[1], url };
+}
+
+/**
+ * Reads one linked long-form article from the same signed endpoint used by ZSXQ's web app.
+ * This runs inside a ZSXQ content script, so cookies stay in the browser and are never exported.
+ */
+export async function collectZsxqApiArticle(
+  rawArticleUrl: string,
+  dependencies: ZsxqApiFallbackDependencies,
+): Promise<CollectedDocument> {
+  const { articleId, url } = linkedArticleIdentity(rawArticleUrl);
+  const fetcher = dependencies.fetcher ?? fetch.bind(globalThis);
+  const requestId = dependencies.requestId ?? (() => crypto.randomUUID());
+  const payload = await apiGet(`${API_ROOT}/articles/${articleId}`, {
+    fetcher,
+    requestId,
+    aduid: dependencies.aduid,
+  });
+  const data = responseData(payload);
+  if (!data) {
+    throw coverageError('ZSXQ_API_ARTICLE_INVALID', `文章 ${articleId} 未返回 resp_data`);
+  }
+  const explicitId = data.article_id ?? data.articleId;
+  if (
+    explicitId !== undefined
+    && (typeof explicitId !== 'string'
+      || explicitId.replace(/^id_/u, '') !== articleId)
+  ) {
+    throw coverageError(
+      'ZSXQ_API_ARTICLE_CONFLICT',
+      `文章接口返回的 article_id 与请求的 ${articleId} 不一致`,
+    );
+  }
+  const title = typeof data.title === 'string' ? data.title.trim() : '';
+  const content = typeof data.content === 'string' ? data.content : '';
+  if (!title || !content.trim()) {
+    throw coverageError(
+      'ZSXQ_API_ARTICLE_INVALID',
+      `文章 ${articleId} 缺少可核验标题或正文`,
+    );
+  }
+  if (content.length > TOPIC_MESSAGE_CHARACTER_LIMIT) {
+    throw coverageError(
+      'ZSXQ_API_PAYLOAD_LIMIT',
+      `文章 ${articleId} 正文超过 ${TOPIC_MESSAGE_CHARACTER_LIMIT} 字符安全上限`,
+    );
+  }
+  const domDocument = dependencies.domDocument ?? globalThis.document;
+  if (!domDocument) {
+    throw coverageError('ZSXQ_API_ARTICLE_INVALID', `文章 ${articleId} 缺少安全 HTML 解析环境`);
+  }
+  const container = domDocument.createElement('article');
+  container.innerHTML = content;
+  const rawImageCount = container.querySelectorAll('img').length;
+  const collectedAt = (dependencies.now ?? (() => new Date()))().toISOString();
+  const document = buildDocument({
+    source: 'zsxq',
+    kind: 'article',
+    title,
+    content: container,
+    url,
+    now: () => collectedAt,
+    truncated: false,
+    sourceMetadata: {
+      articleId,
+      sourceBodyProven: true,
+      sourceMediaProven: true,
+      sourceCoversDom: true,
+      extractionMode: 'signed-article-api',
+    },
+  });
+  if (!document.text.trim()) {
+    throw coverageError('ZSXQ_API_ARTICLE_INVALID', `文章 ${articleId} 清理后正文为空`);
+  }
+  if (document.images.length !== rawImageCount) {
+    throw coverageError(
+      'ZSXQ_API_ARTICLE_MEDIA_UNPROVEN',
+      `文章 ${articleId} 的 ${rawImageCount} 张图片中只有 ${document.images.length} 张可核验`,
+    );
+  }
+  return document;
 }
 
 function safeDownloadUrl(value: unknown): string | undefined {

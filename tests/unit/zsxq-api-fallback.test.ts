@@ -1,5 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
+import { JSDOM } from 'jsdom';
 import {
+  collectZsxqApiArticle,
   collectZsxqApiOwnerPage,
   collectZsxqApiViews,
 } from '../../packages/extension/src/zsxqApiFallback.js';
@@ -48,6 +50,85 @@ function menuResponse(): Response {
 }
 
 describe('ZSXQ API fallback', () => {
+  it('collects a linked article from its exact signed endpoint with complete HTML and media', async () => {
+    const articleId = 'usr4im0hkfdhc2';
+    const articleUrl = `https://articles.zsxq.com/id_${articleId}.html`;
+    const requested: Array<{ url: string; init?: RequestInit }> = [];
+    const fetcher = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+      requested.push({ url: String(input), ...(init ? { init } : {}) });
+      return response(JSON.stringify({
+        succeeded: true,
+        resp_data: {
+          article_id: articleId,
+          title: '签名接口返回的完整长文',
+          content: '<p>这是签名接口返回的完整长文正文，包含投资、创业、现金流与经营复盘。</p>'
+            + '<img data-src="https://images.zsxq.com/article-chart.png" alt="经营图表">'
+            + '<script>globalThis.__mustNotRun = true</script>',
+        },
+      }));
+    };
+
+    const result = await collectZsxqApiArticle(articleUrl, {
+      fetcher,
+      aduid: 'test-device',
+      now: () => new Date('2026-08-29T03:00:00.000Z'),
+      requestId: () => 'test-request',
+      domDocument: new JSDOM('<!doctype html>').window.document,
+    });
+
+    expect(requested).toHaveLength(1);
+    expect(requested[0]?.url).toBe(`${API}/articles/${articleId}`);
+    expect(requested[0]?.init).toMatchObject({ credentials: 'include' });
+    const headers = new Headers(requested[0]?.init?.headers);
+    expect(headers.get('X-Aduid')).toBe('test-device');
+    expect(headers.get('X-Request-Id')).toBe('test-request');
+    expect(headers.get('X-Signature')).toMatch(/^[a-f0-9]{40}$/u);
+    expect(result).toMatchObject({
+      source: 'zsxq',
+      kind: 'article',
+      canonicalUrl: articleUrl,
+      title: '签名接口返回的完整长文',
+      text: expect.stringContaining('现金流与经营复盘'),
+      truncated: false,
+      images: [{ url: 'https://images.zsxq.com/article-chart.png', alt: '经营图表' }],
+      sourceMetadata: {
+        articleId,
+        sourceBodyProven: true,
+        sourceMediaProven: true,
+        sourceCoversDom: true,
+        extractionMode: 'signed-article-api',
+      },
+    });
+    expect(result.html).toContain('https://images.zsxq.com/article-chart.png');
+    expect(result.html).not.toContain('<script');
+  });
+
+  it('rejects an invalid article URL before making an authenticated request', async () => {
+    const fetcher = vi.fn<typeof fetch>();
+    await expect(collectZsxqApiArticle('https://articles.zsxq.com/not-an-article', {
+      fetcher,
+      aduid: 'test-device',
+      domDocument: new JSDOM('<!doctype html>').window.document,
+    })).rejects.toThrow(/CONTENT_COVERAGE_INCOMPLETE.*ZSXQ_API_ARTICLE_ID_UNPROVEN/u);
+    expect(fetcher).not.toHaveBeenCalled();
+  });
+
+  it('rejects a signed article response whose explicit id belongs to another article', async () => {
+    const articleUrl = 'https://articles.zsxq.com/id_expected.html';
+    await expect(collectZsxqApiArticle(articleUrl, {
+      fetcher: async () => response(JSON.stringify({
+        succeeded: true,
+        resp_data: {
+          article_id: 'other',
+          title: '错误文章',
+          content: '<p>这是另一篇文章的正文。</p>',
+        },
+      })),
+      aduid: 'test-device',
+      domDocument: new JSDOM('<!doctype html>').window.document,
+    })).rejects.toThrow(/CONTENT_COVERAGE_INCOMPLETE.*ZSXQ_API_ARTICLE_CONFLICT/u);
+  });
+
   it('collects one proven owner page and returns a resumable cursor with dated business skips', async () => {
     const page = Array.from({ length: 20 }, (_, index) => topic(
       String(690_000_000_000_000_000n + BigInt(index)),
