@@ -1312,17 +1312,20 @@ describe('extension Bridge connection', () => {
     );
   });
 
-  it('loads the compact ZSXQ index through the protected Bridge endpoint', async () => {
+  it('loads the compact ZSXQ index without rebinding native fetch', async () => {
     const storage = new MemoryStorage({ bridgeToken: 'x'.repeat(43) });
     const entries = [{
       id: 'abc123def456',
       url: 'https://wx.zsxq.com/group/48844584441158/topic/811111111111111',
       contentComplete: true,
     }];
-    const fetcher = vi.fn<typeof fetch>(async () => new Response(
-      JSON.stringify({ entries }),
-      { status: 200, headers: { 'content-type': 'application/json' } },
-    ));
+    const fetcher = vi.fn(async function (this: unknown) {
+      if (this !== undefined) throw new TypeError('Illegal invocation');
+      return new Response(JSON.stringify({ entries }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    }) as unknown as typeof fetch;
     const connection = new BridgeConnection(dependencies(storage, () => new MemorySocket(), fetcher));
 
     await expect(connection.zsxqIndex()).resolves.toEqual(entries);

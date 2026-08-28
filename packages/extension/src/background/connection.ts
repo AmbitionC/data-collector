@@ -704,8 +704,9 @@ export class BridgeConnection {
       }, timeoutMs);
     });
     try {
+      const fetcher = this.dependencies.fetch;
       return await Promise.race([
-        this.dependencies.fetch(url, { ...init, signal: controller.signal }),
+        fetcher(url, { ...init, signal: controller.signal }),
         timeout,
       ]);
     } finally {
