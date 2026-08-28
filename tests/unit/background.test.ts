@@ -451,6 +451,54 @@ describe('extension job runner', () => {
     });
   });
 
+  it('reloads its owned plan tab and retries the same owner cursor after a message timeout', async () => {
+    vi.useFakeTimers();
+    const tabs = new InMemoryTabs();
+    const bridge = new InMemoryBridge();
+    const requests: Array<{ cursor?: string }> = [];
+    tabs.sendMessage = async (_tabId, message) => {
+      const request = message as { type: string; cursor?: string };
+      tabs.asked.push(request.type);
+      if (request.type !== 'list.apiCollectOwnerPage') {
+        throw new Error(`unexpected ${request.type}`);
+      }
+      requests.push({ ...(request.cursor ? { cursor: request.cursor } : {}) });
+      if (requests.length === 1) return new Promise(() => undefined);
+      return {
+        ok: true,
+        ownerPage: {
+          documents: [],
+          businessSkips: [],
+          rawCount: 0,
+          pageKey: 'start:empty',
+          exhausted: true,
+          context: { ownerId: '1001', ownerName: '陈老师', scope: 'by_owner' },
+        },
+      } as never;
+    };
+    const waitForTabComplete = vi.fn(async () => undefined);
+    const runner = new JobRunner({
+      tabs,
+      bridge,
+      waitForTabComplete,
+      knownZsxqIndex: async () => [],
+    });
+
+    const pending = runner.runZsxqCollectionPlan(
+      'owner-history-timeout-recovery',
+      PLAN_ATTEMPT,
+      undefined,
+      { zsxqMode: 'owner-history', targetDays: [] },
+    );
+    await vi.advanceTimersByTimeAsync(60_001);
+    await pending;
+
+    expect(requests).toEqual([{}, {}]);
+    expect(tabs.reloaded).toEqual([42]);
+    expect(waitForTabComplete).toHaveBeenNthCalledWith(1, 42, 30_000);
+    expect(waitForTabComplete).toHaveBeenNthCalledWith(2, 42, 30_000);
+  });
+
   it('records an explicitly deleted linked article without ever archiving its preview', async () => {
     const tabs = new InMemoryTabs();
     const bridge = new InMemoryBridge();

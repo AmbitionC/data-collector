@@ -441,6 +441,11 @@ function isContentScriptOutdated(error: unknown): boolean {
   return /CONTENT_SCRIPT_OUTDATED/u.test(message);
 }
 
+function isContentScriptRequestTimeout(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /页面交互「[^」]+」超时（60 秒）/u.test(message);
+}
+
 function isBlankZsxqPlanShell(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error);
   return /页面上找不到「最新」标签（分类栏尚未渲染）/u.test(message);
@@ -1194,11 +1199,24 @@ export class JobRunner {
     let previousPageOldestTimestamp: number | undefined;
 
     while (audit.pagesFetched < ZSXQ_OWNER_MAX_PAGES) {
-      const response = await this.ask(tabId, {
+      const pageRequest = {
         type: this.contentMessageType('list.apiCollectOwnerPage'),
         ...(cursor ? { cursor } : {}),
         ...(context ? { context } : {}),
-      });
+      };
+      let response: ExtractionResponse;
+      try {
+        response = await this.ask(tabId, pageRequest);
+      } catch (error) {
+        if (!isContentScriptRequestTimeout(error)) throw error;
+        // The fixed-plan tab is owned by the extension and the signed owner API is
+        // cursor-addressed, so reloading and replaying the exact same read is safe.
+        // This recovers a long-lived Chromium content page whose message listener
+        // occasionally stops replying after many sequential document jobs.
+        await this.options.tabs.reload(tabId);
+        await this.options.waitForTabComplete(tabId, 30_000);
+        response = await this.ask(tabId, pageRequest);
+      }
       if (!response.ok) throw new Error(response.error.message);
       const page = payloadOf(response, 'ownerPage');
       const accounted = page.documents.length + page.businessSkips.length;
