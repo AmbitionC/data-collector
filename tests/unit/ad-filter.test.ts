@@ -41,6 +41,12 @@ describe('广告甄别：只认外链这种硬证据', () => {
     }
   });
 
+  it('识别财新渠道专属福利页这种明确分销落地页', () => {
+    expect(advertisementIn([
+      'https://cdp.ccxe.com.cn/fuli/2026?id=801000092',
+    ])).toMatchObject({ label: '推广/带货内容' });
+  });
+
   it('单独一个渠道参数不算数，凑够两个才算', () => {
     // channelId 这种埋点到处都是，单独出现判成广告必然误伤。
     expect(commercialSignals('https://shop.example.com/p/1?channelId=9')).toEqual([]);

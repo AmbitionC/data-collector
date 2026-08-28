@@ -61,6 +61,26 @@ describe('楼市与相亲', () => {
     expect(excludedBy('选股就像相亲，第一眼看不上的后面基本也不会看上。')).toBeUndefined();
   });
 
+  it('短列表预览只露出明确标题时也能前置过滤', () => {
+    expect(excludedBy('本周楼市分析 本期先看北京的成交和库存。')?.label).toBe('楼市内容');
+    expect(excludedBy('北京跌涨比数据：周六 8.97，后续不再追踪。')?.label).toBe('楼市内容');
+    expect(excludedBy('发相亲帖了，相亲帖有特别的标签。')?.label).toBe('相亲情感内容');
+    expect(excludedBy('入群必看 欢迎加入星球，建议先看精华和只看星主。')?.label)
+      .toBe('社群管理内容');
+  });
+
+  it('促销正文要过滤，但广告识别方法本身保留', () => {
+    expect(excludedBy(
+      '财新春节优惠活动已经开放，以下是购买链接和专属福利，购买时记得勾选立减。',
+    )?.label).toBe('推广/带货内容');
+    expect(excludedBy(
+      '说下我对微信情感专栏付费的看法，文末会给付费专栏链接和续费优惠券。',
+    )?.label).toBe('推广/带货内容');
+    expect(excludedBy(
+      '公众号广告的分辨方法：标题有作者名的是正文，只有公众号名的通常是广告。',
+    )).toBeUndefined();
+  });
+
   it('三条规则各自独立，互不干扰', () => {
     expect(excludedBy('打新这事儿，破发之后我就不参与了。')?.label).toBe('打新内容');
     expect(excludedBy('今天聊聊可转债的下修博弈，条款是关键。')).toBeUndefined();

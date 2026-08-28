@@ -42,6 +42,11 @@ const COMMERCIAL_PARAMS = [
 /** 电商商品页：出现在知识星球的帖子里，基本只有带货一种解释。 */
 const SHOP_HOSTS = ['taobao.com', 'tmall.com', 'jd.com', 'pinduoduo.com', 'yangkeduo.com'];
 
+/** 实机确认的渠道专属福利落地页；host + path 同时匹配才算硬证据。 */
+const CHANNEL_LANDING_PAGES = [
+  { host: 'cdp.ccxe.com.cn', pathPrefix: '/fuli/' },
+];
+
 export interface AdMatch {
   label: string;
   /** 判成广告的依据，逐条如实列出（域名 + 命中的信号）。 */
@@ -65,6 +70,10 @@ export function commercialSignals(raw: string): string[] {
   if (isOwnHost(host)) return [];
 
   const hits: string[] = [];
+  if (CHANNEL_LANDING_PAGES.some(page =>
+    host === page.host && url.pathname.startsWith(page.pathPrefix))) {
+    hits.push('渠道专属福利页');
+  }
   if (/(^|\.)cps\./.test(host) || /\/cps\//i.test(url.pathname)) hits.push('CPS 分销路径');
   if (SHOP_HOSTS.some(shop => host === shop || host.endsWith(`.${shop}`))) hits.push('电商商品页');
   const params = new Set([...url.searchParams.keys()].map(key => key.toLowerCase()));

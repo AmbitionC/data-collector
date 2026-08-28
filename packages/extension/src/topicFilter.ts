@@ -17,6 +17,8 @@ export interface ExcludeRule {
   strong: readonly string[];
   /** 辅助信号：与强信号一起满足「不同信号 ≥ 2」才排除。 */
   supporting: readonly string[];
+  /** 标题/开头命中即足够明确的短语，不要求第二个信号。 */
+  standalone?: readonly string[];
 }
 
 /**
@@ -51,7 +53,7 @@ export const IPO_RULE: ExcludeRule = {
 export const REAL_ESTATE_RULE: ExcludeRule = {
   id: 'real-estate',
   label: '楼市内容',
-  strong: ['楼市', '房价', '学区房', '房地产市场', '二手房'],
+  strong: ['楼市', '房价', '学区房', '房地产', '二手房'],
   supporting: [
     '限购',
     '房产税',
@@ -68,6 +70,7 @@ export const REAL_ESTATE_RULE: ExcludeRule = {
     '房产中介',
     '土地出让',
   ],
+  standalone: ['本周楼市分析', '楼市最新动态', '北京跌涨比数据', '深圳跌涨比数据'],
 };
 
 /**
@@ -97,12 +100,32 @@ export const DATING_RULE: ExcludeRule = {
     // 「年龄」「身高」拿掉了：养老保险、寿险测算这类帖子满篇都是年龄，
     // 给它们递一个佐证信号，只要正文里出现一次比喻性的「相亲」就会被误杀。
   ],
+  standalone: ['相亲帖'],
+};
+
+/** 只排除明确销售/导流正文；讲“如何识别广告”的方法文没有购买信号，会保留。 */
+export const PROMOTION_RULE: ExcludeRule = {
+  id: 'promotion',
+  label: '推广/带货内容',
+  strong: ['优惠活动', '购买链接', '专属福利', '付费专栏'],
+  supporting: ['购买', '价格', '优惠券', '渠道价', '人工开通', '兑换码', '续费'],
+};
+
+/** 群规、入群欢迎与功能说明没有长期知识价值。 */
+export const COMMUNITY_ADMIN_RULE: ExcludeRule = {
+  id: 'community-admin',
+  label: '社群管理内容',
+  strong: ['入群必看', '星球使用指南'],
+  supporting: ['加入星球', '精华', '只看星主', '提问功能', '续费'],
+  standalone: ['入群必看'],
 };
 
 export const EXCLUDE_RULES: readonly ExcludeRule[] = [
   IPO_RULE,
   REAL_ESTATE_RULE,
   DATING_RULE,
+  PROMOTION_RULE,
+  COMMUNITY_ADMIN_RULE,
 ];
 
 export interface ExcludeMatch extends ExcludeRule {
@@ -146,6 +169,15 @@ export function excludedBy(
   if (!text) return undefined;
   const lead = text.slice(0, LEAD_WINDOW);
   for (const rule of rules) {
+    const standaloneHits = (rule.standalone ?? []).filter(marker => lead.includes(marker));
+    if (standaloneHits.length > 0) {
+      const allHits = [
+        ...standaloneHits,
+        ...rule.strong.filter(marker => text.includes(marker)),
+        ...rule.supporting.filter(marker => text.includes(marker)),
+      ];
+      return { ...rule, hits: [...new Set(allHits)] };
+    }
     const strongHits = rule.strong.filter(marker => text.includes(marker));
     if (strongHits.length === 0) continue;
     // 主线判定：强信号得在开头露面，否则只是正文里顺口提了一句。

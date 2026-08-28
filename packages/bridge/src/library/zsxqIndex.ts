@@ -2,6 +2,7 @@ import { readFile, realpath } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import {
   collectedDocumentSchema,
+  hasZsxqApiPreviewTail,
   stableContentId,
   zsxqSemanticSignature,
   ZSXQ_COMPLETE_CONTENT_CAPABILITY,
@@ -101,7 +102,9 @@ export async function loadZsxqLibraryIndex(root: string): Promise<ZsxqLibraryInd
         ? metadata.authorRole
         : undefined;
       const topicId = topicIdOf(entry.url, metadata);
-      const contentComplete = trustedCompleteness(entry);
+      const contentComplete = hasZsxqApiPreviewTail(document.text)
+        ? false
+        : trustedCompleteness(entry);
       const compact: ZsxqLibraryIndexEntry = {
         id: entry.id,
         url: entry.url,

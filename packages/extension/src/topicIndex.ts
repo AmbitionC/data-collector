@@ -1,3 +1,5 @@
+import { hasZsxqApiPreviewTail } from '@data-collector/shared';
+
 /**
  * 帖子号索引：知识星球把帖子号留在组件状态里，DOM 上一个都没有
  * （实测：无 <a>、无 data-*、整棵子树没有 15 位以上数字）。
@@ -1178,7 +1180,9 @@ export function harvestTopics(
       const text = parts.join(' ').slice(0, RAW_TEXT_LIMIT);
       // 对号只需要前若干字，归档要的是全文，两者分开留。
       const rawFullText = rawParts.join('\n\n');
-      const fullTextTruncated = extractedBody.truncated || rawFullText.length > FULL_TEXT_LIMIT;
+      const fullTextTruncated = extractedBody.truncated
+        || rawFullText.length > FULL_TEXT_LIMIT
+        || rawParts.some(hasZsxqApiPreviewTail);
       const fullText = rawFullText.slice(0, FULL_TEXT_LIMIT);
       const sourceBodyProven = provenBodyNodes.has(node);
       const assets = sourceBodyProven

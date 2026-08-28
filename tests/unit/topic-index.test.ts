@@ -514,6 +514,19 @@ describe('正文被折叠时用接口那份补齐', () => {
     expect(record?.fullTextTruncated).toBe(true);
   });
 
+  it('treats a source API preview ending in three dots as truncated', () => {
+    const [record] = harvestTopics({
+      topics: [{
+        topic_id: '9030',
+        talk: {
+          text: '投资入门课程正文已经展开了前面一段，但接口在真正结束前只返回预览...',
+        },
+      }],
+    });
+
+    expect(record?.fullTextTruncated).toBe(true);
+  });
+
   it('preserves every API body segment instead of silently slicing arrays after four items', () => {
     const segments = Array.from(
       { length: 10 },

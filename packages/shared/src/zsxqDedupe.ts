@@ -17,6 +17,18 @@ export interface ZsxqLibraryIndexEntry {
   semanticSignature?: ZsxqSemanticSignature;
 }
 
+/**
+ * The ZSXQ group feed sometimes labels its JSON body as source-complete while returning only a
+ * preview whose final body segment is terminated with three ASCII dots. Chinese author prose
+ * normally uses `……`; the literal `...` is the feed's observable truncation marker. Keep this
+ * check shared so collection and the persisted compact index cannot disagree about completeness.
+ */
+export function hasZsxqApiPreviewTail(text: string): boolean {
+  return text
+    .split(/\r?\n/u)
+    .some(line => line.trim().length >= 20 && /\.\.\.\s*$/u.test(line));
+}
+
 function normalizedBody(text: string): string {
   return text
     .normalize('NFKC')

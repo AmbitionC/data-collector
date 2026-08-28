@@ -12,6 +12,7 @@ async function writeEntry(
   root: string,
   topicId: string,
   completeness: true | false | undefined,
+  text = `投资经营完整正文 ${topicId}`.repeat(10),
 ): Promise<Record<string, unknown>> {
   const url = `https://wx.zsxq.com/group/48844584441158/topic/${topicId}`;
   const id = stableContentId(url);
@@ -30,7 +31,7 @@ async function writeEntry(
       publishedAt: '2026-08-28T01:00:00.000Z',
       collectedAt: '2026-08-29T00:00:00.000Z',
       html: `<p>投资经营完整正文 ${topicId}</p>`,
-      text: `投资经营完整正文 ${topicId}`.repeat(10),
+      text,
       images: [],
       truncated: completeness === true ? false : true,
       sourceMetadata: { authorRole: 'owner', topicId },
@@ -106,5 +107,21 @@ describe('ZSXQ local library index', () => {
     await expect(loadZsxqLibraryIndex(root)).rejects.toThrow(
       /知识星球本机索引无法安全读取.*ENOENT/u,
     );
+  });
+
+  it('does not trust a complete catalog flag when the retained source still contains an API preview tail', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'zsxq-index-preview-'));
+    const entry = await writeEntry(
+      root,
+      '188444124184822',
+      true,
+      '投资入门课程第六课。这里是正文预览，关键结论尚未出现...\n\n投资入门课程-第6课',
+    );
+    await mkdir(join(root, '_catalog'), { recursive: true });
+    await writeFile(join(root, '_catalog', 'index.json'), `${JSON.stringify([entry], null, 2)}\n`);
+
+    const [indexed] = await loadZsxqLibraryIndex(root);
+
+    expect(indexed?.contentComplete).toBe(false);
   });
 });
