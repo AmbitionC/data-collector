@@ -483,7 +483,6 @@ git diff --check -- packages/bridge/src/plans/store.ts packages/bridge/src/plans
 - Modify: `packages/extension/package.json`
 - Modify: `packages/extension/manifest.json`
 - Modify: `packages/shared/src/identity.ts`
-- Test: `tests/unit/deliverySkill.test.ts`
 - Test: `tests/unit/identity.test.ts`
 
 **Interfaces:**
@@ -494,13 +493,13 @@ git diff --check -- packages/bridge/src/plans/store.ts packages/bridge/src/plans
 
 Read and follow `superpowers:writing-skills`; treat the current ZSXQ reference assertion about “last 15 days” as the failing behavior to replace.
 
-- [ ] **Step 2: Write failing documentation/identity tests**
+- [ ] **Step 2: Pressure-test the skill behavior and write a failing version-consistency test**
 
-Assert the delivery reference contains `--owner-history`, `zsxq-day-ledger.json`, and no claim that owner collection is limited to the last 15 days. Assert all package/manifest/shared versions agree.
+Use the `superpowers:writing-skills` pressure scenarios to verify that an agent receiving “补采全部只看星主” chooses `--owner-history`, requires ledger/exhaustion evidence, and does not describe the run as a 15-day scan. Human prose does not get a source-text assertion. In `identity.test.ts`, assert all package/manifest/shared versions agree through the public runtime identity.
 
 - [ ] **Step 3: Run focused tests and confirm failure**
 
-Run: `npm test -- tests/unit/deliverySkill.test.ts tests/unit/identity.test.ts`
+Run: `npm test -- tests/unit/identity.test.ts`
 
 Expected: FAIL on the old delivery reference/version.
 
@@ -524,7 +523,7 @@ Expected: typecheck PASS; all unit/integration tests PASS; extension ZIP produce
 - [ ] **Step 6: Commit only this task and push master**
 
 ```bash
-git add .codex/skills/data-collector-delivery/references/zsxq-delivery.md docs/superpowers/specs/2026-08-23-scheduled-source-plans-design.md package.json package-lock.json packages/shared/package.json packages/bridge/package.json packages/extension/package.json packages/extension/manifest.json packages/shared/src/identity.ts packages/shared/src/plans.ts packages/shared/src/protocol.ts packages/shared/src/zsxqDedupe.ts packages/shared/src/index.ts packages/bridge/src/config.ts packages/bridge/src/plans/zsxqLedger.ts packages/bridge/src/plans/store.ts packages/bridge/src/plans/service.ts packages/bridge/src/library/zsxqIndex.ts packages/bridge/src/server/index.ts packages/bridge/src/cli.ts packages/extension/src/zsxqApiFallback.ts packages/extension/src/content.ts packages/extension/src/contentProtocol.ts packages/extension/src/background/jobs.ts packages/extension/src/background/index.ts packages/extension/src/background/connection.ts tests/unit/plans.test.ts tests/unit/zsxqLedger.test.ts tests/unit/config.test.ts tests/unit/zsxqDedupe.test.ts tests/unit/zsxqIndex.test.ts tests/unit/zsxq-api-fallback.test.ts tests/unit/content.test.ts tests/unit/background.test.ts tests/unit/connection.test.ts tests/unit/collectionPlanStore.test.ts tests/unit/collectionPlanService.test.ts tests/unit/deliverySkill.test.ts tests/unit/identity.test.ts tests/integration/bridge.test.ts tests/integration/cli.test.ts
+git add .codex/skills/data-collector-delivery/references/zsxq-delivery.md docs/superpowers/specs/2026-08-23-scheduled-source-plans-design.md package.json package-lock.json packages/shared/package.json packages/bridge/package.json packages/extension/package.json packages/extension/manifest.json packages/shared/src/identity.ts packages/shared/src/plans.ts packages/shared/src/protocol.ts packages/shared/src/zsxqDedupe.ts packages/shared/src/index.ts packages/bridge/src/config.ts packages/bridge/src/plans/zsxqLedger.ts packages/bridge/src/plans/store.ts packages/bridge/src/plans/service.ts packages/bridge/src/library/zsxqIndex.ts packages/bridge/src/server/index.ts packages/bridge/src/cli.ts packages/extension/src/zsxqApiFallback.ts packages/extension/src/content.ts packages/extension/src/contentProtocol.ts packages/extension/src/background/jobs.ts packages/extension/src/background/index.ts packages/extension/src/background/connection.ts tests/unit/plans.test.ts tests/unit/zsxqLedger.test.ts tests/unit/config.test.ts tests/unit/zsxqDedupe.test.ts tests/unit/zsxqIndex.test.ts tests/unit/zsxq-api-fallback.test.ts tests/unit/content.test.ts tests/unit/background.test.ts tests/unit/connection.test.ts tests/unit/collectionPlanStore.test.ts tests/unit/collectionPlanService.test.ts tests/unit/identity.test.ts tests/integration/bridge.test.ts tests/integration/cli.test.ts
 git diff --cached --check
 git commit -m "feat: ship zsxq owner history audit"
 git push origin master
