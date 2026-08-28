@@ -6,6 +6,7 @@
  */
 
 import { SERVICE_PATH } from './git.js';
+import { dirname } from 'node:path';
 
 export const AUTOSTART_LABEL = 'com.data-collector.bridge';
 
@@ -36,6 +37,17 @@ function escapeXml(value: string): string {
     .replaceAll('>', '&gt;');
 }
 
+/**
+ * 后台服务必须优先使用启动它的那套 Node 工具链。
+ *
+ * launchd 的窄 PATH 可能先命中多年未升级的 /usr/local/bin/npm；若 Bridge 本身由
+ * nvm 的新 Node 启动，自更新却调用旧 npm，旧 npm 会忽略 workspace 参数并递归执行
+ * 根 build 脚本。把 nodePath 的目录放在最前，node / npm / npx 始终来自同一版本。
+ */
+function servicePathForNode(nodePath: string): string {
+  return [...new Set([dirname(nodePath), ...SERVICE_PATH.split(':')])].join(':');
+}
+
 function macPlan(input: {
   home: string;
   nodePath: string;
@@ -59,7 +71,7 @@ ${programArguments}
     <key>EnvironmentVariables</key>
     <dict>
       <key>PATH</key>
-      <string>${escapeXml(SERVICE_PATH)}</string>
+      <string>${escapeXml(servicePathForNode(input.nodePath))}</string>
     </dict>
     <key>RunAtLoad</key>
     <true/>
@@ -95,7 +107,7 @@ function linuxPlan(input: {
 Description=Data Collector Bridge
 
 [Service]
-Environment=PATH=${SERVICE_PATH}
+Environment=PATH=${servicePathForNode(input.nodePath)}
 ExecStart=${input.nodePath} ${input.cliPath} bridge start
 Restart=always
 RestartSec=3

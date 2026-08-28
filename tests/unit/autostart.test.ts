@@ -204,4 +204,16 @@ describe('登录项要带一份够用的 PATH', () => {
     const plan = autostartPlan({ platform: 'linux', ...BASE });
     expect(plan.contents).toMatch(/^Environment=PATH=.*\/opt\/homebrew\/bin/m);
   });
+
+  it('把当前 Node 的 bin 目录放在 PATH 最前，后台构建不会误用系统旧 npm', () => {
+    const nodePath = '/Users/chenhao/.nvm/versions/node/v22.22.3/bin/node';
+    const mac = autostartPlan({ platform: 'darwin', ...BASE, nodePath });
+    const macPath = /<key>PATH<\/key>\s*<string>([^<]+)<\/string>/.exec(mac.contents)?.[1] ?? '';
+    expect(macPath.split(':')[0]).toBe('/Users/chenhao/.nvm/versions/node/v22.22.3/bin');
+
+    const linux = autostartPlan({ platform: 'linux', ...BASE, nodePath });
+    expect(linux.contents).toContain(
+      'Environment=PATH=/Users/chenhao/.nvm/versions/node/v22.22.3/bin:',
+    );
+  });
 });
