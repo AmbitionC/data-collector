@@ -44,6 +44,17 @@ function dailyLedgerFacts(payload: {
   };
 }
 
+function acknowledgePlanStart(
+  socket: WebSocket,
+  command: { requestId: string; payload: { batchId: string; attempt: string; planId?: string } },
+): void {
+  socket.send(envelope('plan.started', command.requestId, {
+    planId: command.payload.planId ?? 'zsxq-chen-teacher',
+    batchId: command.payload.batchId,
+    attempt: command.payload.attempt,
+  }));
+}
+
 async function nextSocketMessage<T>(socket: WebSocket): Promise<{
   requestId: string;
   payload: T;
@@ -196,6 +207,7 @@ describe('Codex CLI', () => {
       stderr: value => { stderr += value; },
     });
     const collect = await command;
+    acknowledgePlanStart(socket, collect);
     socket.send(envelope('plan.result', collect.requestId, {
       batchId: collect.payload.batchId,
       attempt: collect.payload.attempt,
@@ -237,6 +249,7 @@ describe('Codex CLI', () => {
       stderr: value => { stderr += value; },
     });
     const collect = await command;
+    acknowledgePlanStart(socket, collect);
     socket.send(envelope('plan.result', collect.requestId, {
       batchId: collect.payload.batchId,
       attempt: collect.payload.attempt,

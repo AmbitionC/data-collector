@@ -192,6 +192,17 @@ function dailyLedgerFacts(
   };
 }
 
+function acknowledgePlanStart(
+  socket: WebSocket,
+  command: WsEnvelope<string, { batchId: string; attempt: string; planId?: string }>,
+): void {
+  socket.send(envelope('plan.started', command.requestId, {
+    planId: command.payload.planId ?? 'zsxq-chen-teacher',
+    batchId: command.payload.batchId,
+    attempt: command.payload.attempt,
+  }));
+}
+
 afterEach(async () => {
   for (const socket of sockets.splice(0)) socket.close();
   for (const handle of handles.splice(0)) await handle.close();
@@ -622,6 +633,7 @@ describe('local Bridge', () => {
         force: true,
       },
     });
+    acknowledgePlanStart(socket, command);
     socket.send(envelope('plan.result', command.requestId, {
       batchId: started.body.id,
       attempt: command.payload.attempt,
@@ -692,9 +704,10 @@ describe('local Bridge', () => {
         attempt: expect.stringMatching(/^[a-f0-9]{16}$/),
       },
     });
+    acknowledgePlanStart(currentSocket, command);
   });
 
-  it('fences stale ZSXQ plan results and job snapshots after a reconnect rotates the attempt', async () => {
+  it('fences stale ZSXQ plan results and job snapshots after a worker restart rotates the attempt', async () => {
     const root = await temporaryDirectory();
     const bridge = await startBridge({
       port: 0,
@@ -705,6 +718,7 @@ describe('local Bridge', () => {
     const first = await authorize(bridge);
     first.socket.send(envelope('extension.hello', 'attempt-A-extension', {
       version: APP_VERSION,
+      runtimeId: '11111111-1111-4111-8111-111111111111',
       capabilities: [ZSXQ_COMPLETE_CONTENT_CAPABILITY],
     }));
     await waitForExtensionReady(bridge);
@@ -714,12 +728,14 @@ describe('local Bridge', () => {
       planId: string;
       attempt: string;
     }>(first.socket);
-    const started = await requestJson<{ id: string }>(bridge.url, '/v1/plans/run', {
+    const startedPromise = requestJson<{ id: string }>(bridge.url, '/v1/plans/run', {
       method: 'POST',
       token: first.token,
       body: { planId: 'zsxq-chen-teacher', force: true },
     });
     const firstCommand = await firstCommandPromise;
+    acknowledgePlanStart(first.socket, firstCommand);
+    const started = await startedPromise;
     const firstAttempt = firstCommand.payload.attempt;
     first.socket.send(envelope('plan.result', firstCommand.requestId, {
       batchId: started.body.id,
@@ -742,11 +758,12 @@ describe('local Bridge', () => {
         attempt: firstAttempt,
       },
     });
-    expect(firstJob.status).toBe(202);
+    expect(firstJob.status, JSON.stringify(firstJob.body)).toBe(202);
 
     const currentSocket = await connect(bridge, first.token);
     currentSocket.send(envelope('extension.hello', 'attempt-B-extension', {
       version: APP_VERSION,
+      runtimeId: '22222222-2222-4222-8222-222222222222',
       capabilities: [ZSXQ_COMPLETE_CONTENT_CAPABILITY],
     }));
     const currentCommand = await nextMessage<{
@@ -762,6 +779,7 @@ describe('local Bridge', () => {
         attempt: expect.stringMatching(/^[a-f0-9]{16}$/),
       },
     });
+    acknowledgePlanStart(currentSocket, currentCommand);
     expect(currentAttempt).not.toBe(firstAttempt);
 
     currentSocket.send(envelope('plan.result', currentCommand.requestId, {
@@ -916,12 +934,14 @@ describe('local Bridge', () => {
       planId: string;
       attempt: string;
     }>(authorized.socket);
-    const started = await requestJson<{ id: string }>(first.url, '/v1/plans/run', {
+    const startedPromise = requestJson<{ id: string }>(first.url, '/v1/plans/run', {
       method: 'POST',
       token: authorized.token,
       body: { planId: 'zsxq-chen-teacher', force: true },
     });
     const planCommand = await planCommandPromise;
+    acknowledgePlanStart(authorized.socket, planCommand);
+    const started = await startedPromise;
     const firstAttempt = planCommand.payload.attempt;
     authorized.socket.send(envelope('plan.result', planCommand.requestId, {
       batchId: started.body.id,
@@ -1014,6 +1034,7 @@ describe('local Bridge', () => {
         attempt: expect.stringMatching(/^[a-f0-9]{16}$/),
       },
     });
+    acknowledgePlanStart(current, currentPlan);
     expect(currentPlan.payload.attempt).not.toBe(firstAttempt);
     const recovered = await requestJson<{ id: string; status: string }>(restarted.url, '/v1/jobs', {
       method: 'POST',
@@ -1810,12 +1831,14 @@ describe('local Bridge', () => {
       planId: string;
       attempt: string;
     }>(socket);
-    const started = await requestJson<{ id: string }>(bridge.url, '/v1/plans/run', {
+    const startedPromise = requestJson<{ id: string }>(bridge.url, '/v1/plans/run', {
       method: 'POST',
       token,
       body: { planId: 'zsxq-chen-teacher', force: true },
     });
     const planCommand = await planCommandPromise;
+    acknowledgePlanStart(socket, planCommand);
+    const started = await startedPromise;
     const topicUrl = 'https://wx.zsxq.com/group/48844584441158/topic/844444444444444';
     const dispatchedPlanJob = nextMessage<{ url: string; interactive: boolean }>(socket);
     const created = await requestJson<{ id: string }>(bridge.url, '/v1/jobs', {
@@ -1829,6 +1852,7 @@ describe('local Bridge', () => {
         attempt: planCommand.payload.attempt,
       },
     });
+    expect(created.status, JSON.stringify(created.body)).toBe(202);
     await expect(dispatchedPlanJob).resolves.toMatchObject({
       requestId: created.body.id,
       payload: { url: topicUrl, interactive: false },
@@ -2701,6 +2725,7 @@ describe('health 里的产物构建标记', () => {
         attempt: expect.stringMatching(/^[a-f0-9]{16}$/),
       },
     });
+    acknowledgePlanStart(currentSocket, command);
   });
 });
 
@@ -2980,6 +3005,7 @@ describe('自更新后的重启时机', () => {
 
       releaseInitialUpdate();
       const command = await commandPromise;
+      acknowledgePlanStart(authorized.socket, command);
       blockResumedUpdate = true;
       const updateCallsAtAttemptStart = runUpdate.mock.calls.length;
       await new Promise(resolve => setTimeout(resolve, 100));

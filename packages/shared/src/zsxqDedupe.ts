@@ -24,14 +24,17 @@ export interface ZsxqLibraryIndexEntry {
  * check shared so collection and the persisted compact index cannot disagree about completeness.
  */
 export function hasZsxqApiPreviewTail(text: string): boolean {
-  const finalLine = text
+  const lines = text
     .split(/\r?\n/u)
     .map(line => line.trim())
-    .filter(Boolean)
-    .at(-1) ?? '';
-  // 标题本身允许以省略号结尾；只有整份接口正文的最后一段仍以 `...` 收尾，
-  // 才是列表预览被截断的可观察证据。
-  return finalLine.length >= 20 && /\.\.\.\s*$/u.test(finalLine);
+    .filter(Boolean);
+  const previewLine = lines.findIndex(line => line.length >= 20 && /\.\.\.\s*$/u.test(line));
+  if (previewLine < 0) return false;
+  const trailingLength = lines
+    .slice(previewLine + 1)
+    .reduce((length, line) => length + line.length, 0);
+  // 标题本身允许以省略号结尾；但截断正文后面常会再附一行短标题。
+  return trailingLength < 20;
 }
 
 function normalizedBody(text: string): string {
