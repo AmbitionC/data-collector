@@ -185,7 +185,7 @@ async function feJourney(args: string[], io: CliIo): Promise<number> {
 async function plans(args: string[], io: CliIo): Promise<number> {
   const action = args[1];
   if (action !== 'status' && action !== 'run' && action !== 'batches') {
-    throw new Error('用法：data-collector plans <status|run <plan-id>|batches> [--force] [--limit 20]');
+    throw new Error('用法：data-collector plans <status|run <plan-id>|batches> [--owner-history] [--force] [--limit 20]');
   }
   const { baseUrl, token } = await authenticatedToken(args);
   let path = '/v1/plans/status';
@@ -198,6 +198,9 @@ async function plans(args: string[], io: CliIo): Promise<number> {
       throw new Error(`固定计划必须是：${COLLECTION_PLAN_IDS.join('、')}`);
     }
     planId = rawPlanId as CollectionPlanId;
+    if (args.includes('--owner-history') && planId !== 'zsxq-chen-teacher') {
+      throw new Error('--owner-history 只适用于 zsxq-chen-teacher');
+    }
     const rawWait = option(args, '--wait');
     if (rawWait !== undefined) {
       waitMs = Number(rawWait);
@@ -209,7 +212,11 @@ async function plans(args: string[], io: CliIo): Promise<number> {
     init = {
       method: 'POST',
       headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
-      body: JSON.stringify({ planId, force: args.includes('--force') }),
+      body: JSON.stringify({
+        planId,
+        force: args.includes('--force'),
+        ...(args.includes('--owner-history') ? { zsxqMode: 'owner-history' } : {}),
+      }),
     };
   } else if (action === 'batches') {
     const limit = Number(option(args, '--limit') ?? 20);

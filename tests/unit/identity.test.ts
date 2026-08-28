@@ -1,4 +1,6 @@
 import { createHash } from 'node:crypto';
+import { readFile } from 'node:fs/promises';
+import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
   APP_VERSION,
@@ -20,7 +22,20 @@ describe('fixed extension identity and authorization payload', () => {
       `chrome-extension://${derived}`,
       `extension://${derived}`,
     ]));
-    expect(APP_VERSION).toBe('0.4.31');
+    expect(APP_VERSION).toBe('0.4.32');
+  });
+
+  it('keeps every public package and extension version aligned', async () => {
+    const root = process.cwd();
+    const jsonVersion = async (path: string): Promise<string> =>
+      (JSON.parse(await readFile(join(root, path), 'utf8')) as { version: string }).version;
+    await expect(Promise.all([
+      jsonVersion('package.json'),
+      jsonVersion('packages/shared/package.json'),
+      jsonVersion('packages/bridge/package.json'),
+      jsonVersion('packages/extension/package.json'),
+      jsonVersion('packages/extension/manifest.json'),
+    ])).resolves.toEqual(Array.from({ length: 5 }, () => APP_VERSION));
   });
 
   it('accepts only strong authorization tokens', () => {

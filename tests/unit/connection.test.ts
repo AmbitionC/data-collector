@@ -1285,6 +1285,26 @@ describe('extension Bridge connection', () => {
     );
   });
 
+  it('loads the compact ZSXQ index through the protected Bridge endpoint', async () => {
+    const storage = new MemoryStorage({ bridgeToken: 'x'.repeat(43) });
+    const entries = [{
+      id: 'abc123def456',
+      url: 'https://wx.zsxq.com/group/48844584441158/topic/811111111111111',
+      contentComplete: true,
+    }];
+    const fetcher = vi.fn<typeof fetch>(async () => new Response(
+      JSON.stringify({ entries }),
+      { status: 200, headers: { 'content-type': 'application/json' } },
+    ));
+    const connection = new BridgeConnection(dependencies(storage, () => new MemorySocket(), fetcher));
+
+    await expect(connection.zsxqIndex()).resolves.toEqual(entries);
+    expect(fetcher).toHaveBeenCalledWith(
+      'http://127.0.0.1:17321/v1/library/zsxq-index',
+      { headers: { authorization: `Bearer ${'x'.repeat(43)}` } },
+    );
+  });
+
   it('proxies fixed collection plan status and run requests with extension authorization', async () => {
     const storage = new MemoryStorage({ bridgeToken: 'x'.repeat(43) });
     const fetcher = vi.fn<typeof fetch>(async (input, init) => {

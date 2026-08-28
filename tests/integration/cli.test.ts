@@ -21,6 +21,29 @@ function envelope(type: string, requestId: string, payload: unknown): string {
   return JSON.stringify({ protocolVersion: 1, type, requestId, timestamp: new Date().toISOString(), payload });
 }
 
+function dailyLedgerFacts(payload: {
+  zsxqMode?: string;
+  targetDays?: string[];
+}): Record<string, unknown> {
+  const mode = payload.zsxqMode === 'owner-history' ? 'owner-history' : 'daily-ledger';
+  const targetDays = payload.targetDays ?? [];
+  return {
+    checkpoint: { mode, pagesFetched: 1, exhausted: true },
+    dayDrafts: targetDays.map(day => ({
+      day, rawOwnerCount: 0, qualifyingCount: 0, filteredCount: 0,
+      exactDuplicateCount: 0, semanticDuplicateCount: 0, knownCompleteCount: 0,
+      repairCount: 0, candidateCount: 0, savedCount: 0, failedCount: 0,
+      crossedDayBoundary: true,
+    })),
+    ownerAudit: {
+      mode, pagesFetched: 1, observed: 0, qualifying: 0, exactDuplicates: 0,
+      semanticDuplicates: 0, filtered: 0, knownComplete: 0, repaired: 0,
+      saved: 0, failed: 0, exhausted: true, safetyCapReached: false,
+      completedDays: 0, emptyDays: targetDays.length, failedDays: 0,
+    },
+  };
+}
+
 async function nextSocketMessage<T>(socket: WebSocket): Promise<{
   requestId: string;
   payload: T;
@@ -120,6 +143,14 @@ describe('Codex CLI', () => {
     expect(await runCli(['plans', 'run', 'zsxq-chen-teacher', '--force', ...base], io)).toBe(0);
     expect(JSON.parse(stdout)).toMatchObject({ planId: 'zsxq-chen-teacher', status: 'running' });
     stdout = '';
+    expect(await runCli([
+      'plans', 'run', 'zsxq-chen-teacher', '--owner-history', '--force', ...base,
+    ], io)).toBe(0);
+    expect(JSON.parse(stdout)).toMatchObject({
+      planId: 'zsxq-chen-teacher',
+      zsxqMode: 'owner-history',
+    });
+    stdout = '';
     expect(await runCli(['plans', 'batches', '--limit', '1', ...base], io)).toBe(0);
     expect(JSON.parse(stdout).batches).toEqual([
       expect.objectContaining({ planId: 'zsxq-chen-teacher' }),
@@ -172,6 +203,7 @@ describe('Codex CLI', () => {
       prepared: true,
       rejections: {},
       rejectionDetails: [],
+      ...dailyLedgerFacts(collect.payload),
     }));
 
     expect(await running).toBe(0);

@@ -835,6 +835,115 @@ describe('fixed collection plan contracts', () => {
     }).success).toBe(false);
   });
 
+  it('preserves owner-history mode and typed audit facts in a persisted batch', () => {
+    const parsed = collectionBatchSchema.parse({
+      id: 'batch-20260829-zsxq-owner-history',
+      planId: 'zsxq-chen-teacher',
+      status: 'completed',
+      startedAt: '2026-08-29T00:00:00.000Z',
+      finishedAt: '2026-08-29T00:30:00.000Z',
+      discovered: 60,
+      accepted: 3,
+      saved: 3,
+      skipped: 57,
+      failed: 0,
+      needsAttention: 0,
+      deliveryIds: ['0123456789ab'],
+      zsxqMode: 'owner-history',
+      ownerAudit: {
+        mode: 'owner-history',
+        pagesFetched: 3,
+        observed: 60,
+        qualifying: 44,
+        exactDuplicates: 40,
+        semanticDuplicates: 1,
+        filtered: 16,
+        knownComplete: 40,
+        repaired: 0,
+        saved: 3,
+        failed: 0,
+        newestObservedAt: '2026-08-28T01:00:00.000Z',
+        oldestObservedAt: '2021-01-01T01:00:00.000Z',
+        exhausted: true,
+        safetyCapReached: false,
+        completedDays: 400,
+        emptyDays: 1600,
+        failedDays: 0,
+      },
+    });
+
+    expect(parsed).toMatchObject({
+      zsxqMode: 'owner-history',
+      ownerAudit: {
+        observed: 60,
+        qualifying: 44,
+        exhausted: true,
+      },
+    });
+  });
+
+  it('accepts resumable owner page facts in plan collect and result envelopes', () => {
+    const base = {
+      protocolVersion: 1,
+      requestId: 'request-owner-history',
+      timestamp: '2026-08-29T00:00:00.000Z',
+    } as const;
+    const collect = planCollectEnvelopeSchema.parse({
+      ...base,
+      type: 'plan.collect',
+      payload: {
+        planId: 'zsxq-chen-teacher',
+        batchId: 'batch-owner-history',
+        attempt: 'a1b2c3d4e5f60718',
+        zsxqMode: 'owner-history',
+        targetDays: ['2026-08-28', '2026-08-27'],
+        resumeCursor: '2026-08-20T00:00:00.000Z',
+      },
+    });
+    expect(collect.payload).toMatchObject({
+      zsxqMode: 'owner-history',
+      targetDays: ['2026-08-28', '2026-08-27'],
+      resumeCursor: '2026-08-20T00:00:00.000Z',
+    });
+
+    const result = planResultEnvelopeSchema.parse({
+      ...base,
+      type: 'plan.result',
+      payload: {
+        batchId: 'batch-owner-history',
+        attempt: 'a1b2c3d4e5f60718',
+        discovered: 20,
+        prepared: false,
+        checkpoint: {
+          mode: 'owner-history',
+          cursor: '2026-08-20T00:00:00.000Z',
+          pagesFetched: 1,
+          newestObservedAt: '2026-08-28T01:00:00.000Z',
+          oldestObservedAt: '2026-08-20T00:00:00.001Z',
+          exhausted: false,
+        },
+        dayDrafts: [{
+          day: '2026-08-28',
+          rawOwnerCount: 2,
+          qualifyingCount: 1,
+          filteredCount: 1,
+          exactDuplicateCount: 1,
+          semanticDuplicateCount: 0,
+          knownCompleteCount: 1,
+          repairCount: 0,
+          candidateCount: 0,
+          savedCount: 0,
+          failedCount: 0,
+          crossedDayBoundary: true,
+        }],
+      },
+    });
+    expect(result.payload).toMatchObject({
+      checkpoint: { pagesFetched: 1, exhausted: false },
+      dayDrafts: [{ day: '2026-08-28', qualifyingCount: 1 }],
+    });
+  });
+
   it('defaults old direct collection commands to interactive and accepts explicit plan isolation', () => {
     expect(jobCollectPayloadSchema.parse({ url: 'https://mp.weixin.qq.com/s/x' })).toEqual({
       url: 'https://mp.weixin.qq.com/s/x',

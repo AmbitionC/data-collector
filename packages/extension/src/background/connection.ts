@@ -12,6 +12,8 @@ import {
   wsEnvelopeSchema,
   type CollectionPlanAttempt,
   type CollectionPlanId,
+  type ZsxqCollectionMode,
+  type ZsxqLibraryIndexEntry,
 } from '@data-collector/shared';
 
 export interface ExtensionStorage {
@@ -50,6 +52,9 @@ type PlanCollectHandler = (
     planId: CollectionPlanId;
     attempt: CollectionPlanAttempt;
     force?: boolean;
+    zsxqMode?: ZsxqCollectionMode;
+    targetDays?: string[];
+    resumeCursor?: string;
   },
 ) => void | Promise<void>;
 
@@ -593,6 +598,19 @@ export class BridgeConnection {
     return Array.isArray(body.entries) ? body.entries : [];
   }
 
+  /** 固定知识星球计划使用的正文无关紧凑索引，供打开帖子前去重。 */
+  async zsxqIndex(): Promise<ZsxqLibraryIndexEntry[]> {
+    const { baseUrl, token } = await this.authorized();
+    const fetcher = this.dependencies.fetch;
+    const response = await fetcher(`${baseUrl}/v1/library/zsxq-index`, {
+      headers: { authorization: `Bearer ${token}` },
+    });
+    if (!response.ok) throw new Error(`读取知识星球去重索引失败：HTTP ${response.status}`);
+    const body = (await response.json()) as { entries?: unknown };
+    if (!Array.isArray(body.entries)) throw new Error('知识星球去重索引响应无效');
+    return body.entries as ZsxqLibraryIndexEntry[];
+  }
+
   /** 固定采集计划状态（受 Bridge token 保护，不把令牌暴露给侧栏）。 */
   async planStatus(): Promise<unknown> {
     const { baseUrl, token } = await this.authorized();
@@ -743,6 +761,9 @@ export class BridgeConnection {
           planId: payload.planId,
           attempt: payload.attempt,
           ...(payload.force === undefined ? {} : { force: payload.force }),
+          ...(payload.zsxqMode ? { zsxqMode: payload.zsxqMode } : {}),
+          ...(payload.targetDays ? { targetDays: payload.targetDays } : {}),
+          ...(payload.resumeCursor ? { resumeCursor: payload.resumeCursor } : {}),
         });
       } else if (message.type === 'job.saved' && isCurrent()) {
         // Bridge 的 job.saved 载荷为 { outputPath, results }（多 sink 后的首要产出路径）。

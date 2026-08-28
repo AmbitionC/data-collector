@@ -22,6 +22,66 @@ export type BatchStatus = (typeof BATCH_STATUSES)[number];
 export const ZSXQ_PLAN_VIEWS = ['最新', '精华', '只看星主'] as const;
 export type ZsxqPlanView = (typeof ZSXQ_PLAN_VIEWS)[number];
 
+export const ZSXQ_COLLECTION_MODES = ['daily-ledger', 'owner-history'] as const;
+export type ZsxqCollectionMode = (typeof ZSXQ_COLLECTION_MODES)[number];
+
+export const ZSXQ_OWNER_ITEM_OUTCOMES = ['exact', 'semantic', 'saved', 'repaired'] as const;
+export type ZsxqOwnerItemOutcome = (typeof ZSXQ_OWNER_ITEM_OUTCOMES)[number];
+
+/** 正文无关的逐 topic 映射证据，供历史验收对本机完整索引做精确对账。 */
+export interface ZsxqOwnerItemFact {
+  url: string;
+  day: string;
+  outcome: ZsxqOwnerItemOutcome;
+  mappedUrl: string;
+}
+
+export interface ZsxqDayDraft {
+  day: string;
+  rawOwnerCount: number;
+  qualifyingCount: number;
+  filteredCount: number;
+  exactDuplicateCount: number;
+  semanticDuplicateCount: number;
+  knownCompleteCount: number;
+  repairCount: number;
+  candidateCount: number;
+  savedCount: number;
+  failedCount: number;
+  crossedDayBoundary: boolean;
+  itemFacts?: ZsxqOwnerItemFact[];
+}
+
+export interface ZsxqOwnerCheckpoint {
+  mode: ZsxqCollectionMode;
+  cursor?: string;
+  pagesFetched: number;
+  newestObservedAt?: string;
+  oldestObservedAt?: string;
+  exhausted: boolean;
+}
+
+export interface ZsxqOwnerAudit {
+  mode: ZsxqCollectionMode;
+  pagesFetched: number;
+  observed: number;
+  qualifying: number;
+  exactDuplicates: number;
+  semanticDuplicates: number;
+  filtered: number;
+  knownComplete: number;
+  repaired: number;
+  saved: number;
+  failed: number;
+  newestObservedAt?: string;
+  oldestObservedAt?: string;
+  exhausted: boolean;
+  safetyCapReached: boolean;
+  completedDays: number;
+  emptyDays: number;
+  failedDays: number;
+}
+
 export interface CollectionPlanRejection {
   url: string;
   reason: string;
@@ -455,6 +515,10 @@ export interface CollectionBatch {
   force?: boolean;
   /** 已分发的目标补齐轮数；旧批次没有该字段时仍按零轮兼容读取。 */
   rounds?: number;
+  /** 知识星球逐日增量或显式历史审计模式。 */
+  zsxqMode?: ZsxqCollectionMode;
+  /** 只看星主分页、去重、过滤和逐日覆盖的结构化审计事实。 */
+  ownerAudit?: ZsxqOwnerAudit;
   coverage?: Record<string, number>;
   /** 固定计划过滤原因的同源计数，便于审计为什么没入选。 */
   rejections?: Record<string, number>;
@@ -465,6 +529,56 @@ export interface CollectionBatch {
 
 const countSchema = z.number().int().min(0);
 export const collectionPlanIdSchema = z.enum(COLLECTION_PLAN_IDS);
+export const zsxqCollectionModeSchema = z.enum(ZSXQ_COLLECTION_MODES);
+export const zsxqOwnerItemFactSchema = z.object({
+  url: z.string().url().max(4096),
+  day: z.string().regex(/^\d{4}-\d{2}-\d{2}$/u),
+  outcome: z.enum(ZSXQ_OWNER_ITEM_OUTCOMES),
+  mappedUrl: z.string().url().max(4096),
+}).strict();
+export const zsxqDayDraftSchema = z.object({
+  day: z.string().regex(/^\d{4}-\d{2}-\d{2}$/u),
+  rawOwnerCount: countSchema,
+  qualifyingCount: countSchema,
+  filteredCount: countSchema,
+  exactDuplicateCount: countSchema,
+  semanticDuplicateCount: countSchema,
+  knownCompleteCount: countSchema,
+  repairCount: countSchema,
+  candidateCount: countSchema,
+  savedCount: countSchema,
+  failedCount: countSchema,
+  crossedDayBoundary: z.boolean(),
+  itemFacts: z.array(zsxqOwnerItemFactSchema).max(10_000).optional(),
+}).strict();
+export const zsxqOwnerCheckpointSchema = z.object({
+  mode: zsxqCollectionModeSchema,
+  cursor: z.iso.datetime().optional(),
+  pagesFetched: countSchema,
+  newestObservedAt: z.iso.datetime().optional(),
+  oldestObservedAt: z.iso.datetime().optional(),
+  exhausted: z.boolean(),
+}).strict();
+export const zsxqOwnerAuditSchema = z.object({
+  mode: zsxqCollectionModeSchema,
+  pagesFetched: countSchema,
+  observed: countSchema,
+  qualifying: countSchema,
+  exactDuplicates: countSchema,
+  semanticDuplicates: countSchema,
+  filtered: countSchema,
+  knownComplete: countSchema,
+  repaired: countSchema,
+  saved: countSchema,
+  failed: countSchema,
+  newestObservedAt: z.iso.datetime().optional(),
+  oldestObservedAt: z.iso.datetime().optional(),
+  exhausted: z.boolean(),
+  safetyCapReached: z.boolean(),
+  completedDays: countSchema,
+  emptyDays: countSchema,
+  failedDays: countSchema,
+}).strict();
 export const collectionBatchSchema = z.object({
   id: z.string().trim().min(1).max(200),
   planId: collectionPlanIdSchema,
@@ -484,6 +598,8 @@ export const collectionBatchSchema = z.object({
   preparationAttempt: collectionPlanAttemptSchema.optional(),
   force: z.boolean().optional(),
   rounds: countSchema.optional(),
+  zsxqMode: zsxqCollectionModeSchema.optional(),
+  ownerAudit: zsxqOwnerAuditSchema.optional(),
   coverage: z.record(z.string().trim().min(1).max(100), countSchema).optional(),
   rejections: z.record(z.string().trim().min(1).max(100), countSchema).optional(),
   rejectionDetails: z.array(collectionPlanRejectionSchema).max(500).optional(),
@@ -503,5 +619,39 @@ export const collectionBatchSchema = z.object({
   const terminalCount = batch.saved + batch.skipped + batch.failed + batch.needsAttention;
   if (terminalCount > batch.discovered) {
     context.addIssue({ code: 'custom', path: ['discovered'], message: '结果数不能超过发现数' });
+  }
+  if (batch.zsxqMode && batch.planId !== 'zsxq-chen-teacher') {
+    context.addIssue({
+      code: 'custom',
+      path: ['zsxqMode'],
+      message: '只有知识星球计划支持逐日或历史模式',
+    });
+  }
+  if (batch.ownerAudit && batch.ownerAudit.mode !== batch.zsxqMode) {
+    context.addIssue({
+      code: 'custom',
+      path: ['ownerAudit', 'mode'],
+      message: '只看星主审计模式必须与批次模式一致',
+    });
+  }
+  if (batch.status === 'completed' && batch.zsxqMode === 'owner-history') {
+    if (!batch.ownerAudit) {
+      context.addIssue({
+        code: 'custom',
+        path: ['ownerAudit'],
+        message: '历史审计完成批次必须包含审计事实',
+      });
+    } else if (
+      batch.ownerAudit.exhausted !== true
+      || batch.ownerAudit.safetyCapReached
+      || batch.ownerAudit.failed > 0
+      || batch.ownerAudit.failedDays > 0
+    ) {
+      context.addIssue({
+        code: 'custom',
+        path: ['ownerAudit'],
+        message: '历史审计未证明安全耗尽，不能标记完成',
+      });
+    }
   }
 });

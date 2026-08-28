@@ -10,6 +10,7 @@ export interface BridgeConfig {
   jobsFile: string;
   sinksFile: string;
   plansFile: string;
+  zsxqLedgerFile: string;
 }
 
 export interface ConfigOverrides {
@@ -56,5 +57,6 @@ export function loadConfig(overrides: ConfigOverrides = {}): BridgeConfig {
     jobsFile: join(libraryRoot, '_catalog', 'jobs.json'),
     sinksFile: join(configDir, 'sinks.json'),
     plansFile: join(configDir, 'collection-plans.json'),
+    zsxqLedgerFile: join(configDir, 'zsxq-day-ledger.json'),
   };
 }

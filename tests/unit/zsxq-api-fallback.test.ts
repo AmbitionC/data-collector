@@ -1,5 +1,8 @@
 import { describe, expect, it, vi } from 'vitest';
-import { collectZsxqApiViews } from '../../packages/extension/src/zsxqApiFallback.js';
+import {
+  collectZsxqApiOwnerPage,
+  collectZsxqApiViews,
+} from '../../packages/extension/src/zsxqApiFallback.js';
 
 const GROUP_ID = '48844584441158';
 const API = 'https://api.zsxq.com/v2';
@@ -45,6 +48,80 @@ function menuResponse(): Response {
 }
 
 describe('ZSXQ API fallback', () => {
+  it('collects one proven owner page and returns a resumable cursor with dated business skips', async () => {
+    const page = Array.from({ length: 20 }, (_, index) => topic(
+      String(690_000_000_000_000_000n + BigInt(index)),
+      new Date(Date.parse('2026-08-24T23:00:00.000Z') - index * 60 * 1_000).toISOString(),
+      index === 0 ? '打新 新股 积极申购' : undefined,
+    ));
+    const requested: URL[] = [];
+    const fetcher = async (input: RequestInfo | URL): Promise<Response> => {
+      const url = new URL(String(input));
+      requested.push(url);
+      if (url.href === `${API}/groups/${GROUP_ID}`) return groupResponse();
+      if (url.href === `${API}/groups/${GROUP_ID}/menus`) return menuResponse();
+      return topicResponse(page);
+    };
+
+    const result = await collectZsxqApiOwnerPage(GROUP_ID, {}, {
+      fetcher,
+      aduid: 'test-device',
+      now: () => new Date('2026-08-25T00:00:00.000Z'),
+      requestId: () => 'test-request',
+    });
+
+    expect(requested).toHaveLength(3);
+    expect(requested[2]?.searchParams.get('scope')).toBe('by_owner');
+    expect(result).toMatchObject({
+      rawCount: 20,
+      exhausted: false,
+      nextCursor: '2026-08-24T22:40:59.999Z',
+      context: { ownerId: '1001', ownerName: '陈老师', scope: 'by_owner' },
+      newestObservedAt: '2026-08-24T23:00:00.000Z',
+      oldestObservedAt: '2026-08-24T22:41:00.000Z',
+    });
+    expect(result.documents).toHaveLength(19);
+    expect(result.businessSkips).toEqual([expect.objectContaining({
+      publishedAt: '2026-08-24T23:00:00.000Z',
+      reason: expect.stringContaining('打新内容'),
+    })]);
+    expect(result.pageKey).toMatch(/^start:/u);
+  });
+
+  it('uses trusted owner context to fetch only the requested continuation page', async () => {
+    const fetcher = vi.fn(async (input: RequestInfo | URL) => {
+      const url = new URL(String(input));
+      expect(url.searchParams.get('scope')).toBe('by_owner');
+      expect(url.searchParams.get('end_time')).toBe('2026-08-20T00:00:00.000Z');
+      return topicResponse([topic('690000000000000099', '2026-08-19T23:00:00.000Z')]);
+    });
+
+    const result = await collectZsxqApiOwnerPage(GROUP_ID, {
+      cursor: '2026-08-20T00:00:00.000Z',
+      context: { ownerId: '1001', ownerName: '陈老师', scope: 'by_owner' },
+    }, {
+      fetcher,
+      aduid: 'test-device',
+      requestId: () => 'test-request',
+    });
+
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    expect(result).toMatchObject({ rawCount: 1, exhausted: true });
+    expect(result.nextCursor).toBeUndefined();
+  });
+
+  it('fails closed when by_owner returns a non-owner topic', async () => {
+    const member = topic('690000000000000199', '2026-08-19T23:00:00.000Z');
+    (member.talk as Record<string, unknown>).owner = { user_id: '2002', name: '成员' };
+    await expect(collectZsxqApiOwnerPage(GROUP_ID, {
+      context: { ownerId: '1001', ownerName: '陈老师', scope: 'by_owner' },
+    }, {
+      fetcher: async () => topicResponse([member]),
+      aduid: 'test-device',
+      requestId: () => 'test-request',
+    })).rejects.toThrow(/AUTHOR_IDENTITY_UNPROVEN.*690000000000000199/u);
+  });
+
   it('collects and unions the three required views without reading the blank SPA DOM', async () => {
     const topic = String.raw`{
       "succeeded":true,

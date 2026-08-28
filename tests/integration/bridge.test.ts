@@ -149,6 +149,49 @@ function envelope<T>(type: string, requestId: string, payload: T): string {
   });
 }
 
+function dailyLedgerFacts(
+  payload: { zsxqMode?: string; targetDays?: string[] },
+  qualifying = 0,
+): Record<string, unknown> {
+  const mode = payload.zsxqMode === 'owner-history' ? 'owner-history' : 'daily-ledger';
+  const targetDays = payload.targetDays ?? [];
+  return {
+    checkpoint: { mode, pagesFetched: 1, exhausted: true },
+    dayDrafts: targetDays.map(day => ({
+      day,
+      rawOwnerCount: qualifying,
+      qualifyingCount: qualifying,
+      filteredCount: 0,
+      exactDuplicateCount: qualifying,
+      semanticDuplicateCount: 0,
+      knownCompleteCount: qualifying,
+      repairCount: 0,
+      candidateCount: 0,
+      savedCount: 0,
+      failedCount: 0,
+      crossedDayBoundary: true,
+    })),
+    ownerAudit: {
+      mode,
+      pagesFetched: 1,
+      observed: qualifying,
+      qualifying,
+      exactDuplicates: qualifying,
+      semanticDuplicates: 0,
+      filtered: 0,
+      knownComplete: qualifying,
+      repaired: 0,
+      saved: 0,
+      failed: 0,
+      exhausted: true,
+      safetyCapReached: false,
+      completedDays: qualifying > 0 ? targetDays.length : 0,
+      emptyDays: qualifying > 0 ? 0 : targetDays.length,
+      failedDays: 0,
+    },
+  };
+}
+
 afterEach(async () => {
   for (const socket of sockets.splice(0)) socket.close();
   for (const handle of handles.splice(0)) await handle.close();
@@ -586,6 +629,7 @@ describe('local Bridge', () => {
       prepared: true,
       rejections: {},
       rejectionDetails: [],
+      ...dailyLedgerFacts(command.payload),
     }));
 
     await vi.waitFor(async () => {
@@ -727,6 +771,7 @@ describe('local Bridge', () => {
       prepared: true,
       rejections: {},
       rejectionDetails: [],
+      ...dailyLedgerFacts(currentCommand.payload, 1),
     }));
     await vi.waitFor(async () => {
       const status = await requestJson<{
@@ -783,6 +828,7 @@ describe('local Bridge', () => {
       prepared: true,
       rejections: {},
       rejectionDetails: [],
+      ...dailyLedgerFacts(currentCommand.payload, 1),
     }));
     currentSocket.send(envelope('job.result', firstJob.body.id, {
       document: document({
@@ -988,6 +1034,7 @@ describe('local Bridge', () => {
       prepared: true,
       rejections: {},
       rejectionDetails: [],
+      ...dailyLedgerFacts(currentPlan.payload, 1),
     }));
     current.send(envelope('job.progress', recovered.body.id, { stage: 'collecting' }));
     current.send(envelope('job.result', recovered.body.id, {
@@ -2492,6 +2539,12 @@ describe('local Bridge', () => {
     // 空库：列表通、读取返回 404 但**带明确的业务错误码**，同步是空操作。
     const list = await requestJson<{ entries: unknown[] }>(bridge.url, '/v1/library', { token });
     expect(list.status).toBe(200);
+    const zsxqIndex = await requestJson<{ entries: unknown[] }>(
+      bridge.url,
+      '/v1/library/zsxq-index',
+      { token },
+    );
+    expect(zsxqIndex).toMatchObject({ status: 200, body: { entries: [] } });
 
     const missing = await requestJson<{ error: { code: string } }>(
       bridge.url,

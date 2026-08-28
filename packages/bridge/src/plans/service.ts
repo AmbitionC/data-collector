@@ -7,6 +7,10 @@ import {
   type CollectionPlanId,
   type CollectionPlanTrigger,
   type JobRecord,
+  type ZsxqCollectionMode,
+  type ZsxqDayDraft,
+  type ZsxqOwnerAudit,
+  type ZsxqOwnerCheckpoint,
 } from '@data-collector/shared';
 import type { JobStore } from '../jobs/store.js';
 import type { NowcoderDiscoveryCandidate } from '../feJourney/nowcoderDiscovery.js';
@@ -18,6 +22,7 @@ import {
   type CompanyId,
 } from './nowcoderPlan.js';
 import type { CollectionPlanStore } from './store.js';
+import type { ZsxqDayLedgerStore } from './zsxqLedger.js';
 
 const PLAN_HOURS: Record<CollectionPlanId, number> = {
   'zsxq-chen-teacher': 8,
@@ -93,7 +98,11 @@ export interface CollectionPlanServiceDependencies {
     planId: 'zsxq-chen-teacher',
     attempt: CollectionPlanAttempt,
     force: boolean,
+    mode: ZsxqCollectionMode,
+    targetDays: readonly string[],
+    resumeCursor?: string,
   ) => Promise<true>;
+  zsxqLedger?: ZsxqDayLedgerStore;
   /** 当前知识星球 attempt 已可靠写入终态，可释放外部互斥门禁。 */
   onZsxqAttemptTerminal?: (batch: CollectionBatch) => void;
   shouldAutoSync: (job: JobRecord) => Promise<boolean>;
@@ -122,6 +131,9 @@ export interface ExtensionPlanResult {
   error?: string;
   needsAttention?: boolean;
   prepared?: boolean;
+  checkpoint?: ZsxqOwnerCheckpoint;
+  dayDrafts?: ZsxqDayDraft[];
+  ownerAudit?: ZsxqOwnerAudit;
 }
 
 function rotatedCompanies(now: string): CompanyId[] {
@@ -206,7 +218,11 @@ export class CollectionPlanService {
 
   async run(
     planId: CollectionPlanId,
-    options: { force?: boolean; trigger?: CollectionPlanTrigger } = {},
+    options: {
+      force?: boolean;
+      trigger?: CollectionPlanTrigger;
+      zsxqMode?: ZsxqCollectionMode;
+    } = {},
   ): Promise<CollectionBatch> {
     const running = this.dependencies.store.active(planId)[0];
     if (running && !options.force) {
@@ -225,6 +241,9 @@ export class CollectionPlanService {
       {
         trigger: options.trigger ?? 'manual',
         ...(options.force === undefined ? {} : { force: options.force }),
+        ...(planId === 'zsxq-chen-teacher'
+          ? { zsxqMode: options.zsxqMode ?? 'daily-ledger' }
+          : {}),
       },
     );
     if (this.dependencies.extensionConnected()) await this.execute(batch);
@@ -319,6 +338,8 @@ export class CollectionPlanService {
     const persisted = this.dependencies.store.get(result.batchId);
     if (!persisted) throw new Error(`采集批次不存在：${result.batchId}`);
     if (persisted.status !== 'running' || persisted.planId !== 'zsxq-chen-teacher') return persisted;
+    // 账本与批次必须共用同一道 attempt fence。迟到页不能先碰账本、再由批次层忽略。
+    if (persisted.preparationAttempt !== result.attempt) return persisted;
     if (result.error) {
       const terminal = await this.dependencies.store.finishPreparationWithError(
         result.batchId,
@@ -327,9 +348,19 @@ export class CollectionPlanService {
         result.needsAttention === true,
       );
       if (terminal.status === 'running') return terminal;
-      const reported = await this.persistTerminalBenchmark(terminal);
+      const finalized = await this.finalizeZsxqLedger(terminal);
+      const reported = await this.persistTerminalBenchmark(finalized);
       this.clearBatchRuntime(result.batchId);
       return reported;
+    }
+    if (result.checkpoint && result.ownerAudit) {
+      await this.dependencies.zsxqLedger?.recordPage(
+        result.batchId,
+        result.attempt,
+        result.checkpoint,
+        result.dayDrafts ?? [],
+        result.ownerAudit,
+      );
     }
     // 重连可能让旧一轮和新一轮 staging 短暂并行；迟到的 prepared:false
     // 既不能回退完成态，也不能覆盖已完成轮次的发现/拒绝统计。
@@ -345,6 +376,7 @@ export class CollectionPlanService {
         ...(result.coverage ? { coverage: result.coverage } : {}),
         ...(result.rejections ? { rejections: result.rejections } : {}),
         ...(result.rejectionDetails ? { rejectionDetails: result.rejectionDetails } : {}),
+        ...(result.ownerAudit ? { ownerAudit: result.ownerAudit } : {}),
       },
     );
     // 成功结果必须显式证明 staging 已完成；省略 prepared 的旧消息只能保持运行，
@@ -395,9 +427,52 @@ export class CollectionPlanService {
     if (reconciled.status !== 'running') {
       await this.surfaceSyncErrors(batchId);
       reconciled = this.dependencies.store.get(batchId) ?? reconciled;
+      reconciled = await this.finalizeZsxqLedger(reconciled);
       this.clearBatchRuntime(batchId);
     }
     return reconciled;
+  }
+
+  private async finalizeZsxqLedger(batch: CollectionBatch): Promise<CollectionBatch> {
+    const ledger = this.dependencies.zsxqLedger;
+    if (
+      !ledger
+      || batch.planId !== 'zsxq-chen-teacher'
+      || batch.status === 'running'
+      || !batch.preparationAttempt
+    ) return batch;
+    try {
+      const audit = await ledger.finalize(batch.id, batch.preparationAttempt, {
+        status: batch.status,
+        ...(batch.error ? { errorCode: batch.error.slice(0, 100) } : {}),
+      });
+      if (!audit && batch.status === 'completed') {
+        return this.dependencies.store.attention(
+          batch.id,
+          '知识星球逐日账本结算失败：扩展未提交只看星主审计事实',
+        );
+      }
+      if (!audit) return batch;
+      const audited = await this.dependencies.store.recordOwnerAudit(batch.id, audit);
+      if (
+        audit.failed > 0
+        || audit.failedDays > 0
+        || audit.safetyCapReached
+        || (audited.zsxqMode === 'owner-history' && audit.exhausted !== true)
+      ) {
+        const ledgerError =
+          `知识星球逐日账本未通过：failed=${audit.failed}，failedDays=${audit.failedDays}，`
+          + `exhausted=${String(audit.exhausted)}，safetyCapReached=${String(audit.safetyCapReached)}`;
+        return this.dependencies.store.attention(
+          batch.id,
+          batch.error ? `${batch.error}；${ledgerError}` : ledgerError,
+        );
+      }
+      return audited;
+    } catch (error) {
+      const message = `知识星球逐日账本结算失败：${error instanceof Error ? error.message : String(error)}`;
+      return this.dependencies.store.attention(batch.id, message);
+    }
   }
 
   async onJobTerminal(job: JobRecord): Promise<void> {
@@ -766,11 +841,23 @@ export class CollectionPlanService {
         const preparing = await this.dependencies.store.beginPreparation(batch.id);
         zsxqAttempt = preparing.preparationAttempt;
         if (!zsxqAttempt) throw new Error('知识星球采集尝试未生成');
+        const mode = preparing.zsxqMode ?? 'daily-ledger';
+        const ledgerRequest = this.dependencies.zsxqLedger?.requestFor(mode)
+          ?? { targetDays: [] as string[] };
+        await this.dependencies.zsxqLedger?.beginAttempt(
+          batch.id,
+          zsxqAttempt,
+          mode,
+          ledgerRequest.targetDays,
+        );
         const dispatched = await this.dependencies.collectZsxq(
           batch.id,
           batch.planId,
           zsxqAttempt,
           batch.force === true,
+          mode,
+          ledgerRequest.targetDays,
+          ledgerRequest.resumeCursor,
         );
         if (dispatched !== true) throw new Error('知识星球采集命令未派发');
         return;
@@ -786,7 +873,8 @@ export class CollectionPlanService {
             false,
           )
         : await this.dependencies.store.fail(batch.id, message);
-      const reported = await this.persistTerminalBenchmark(terminal);
+      const finalized = zsxqAttempt ? await this.finalizeZsxqLedger(terminal) : terminal;
+      const reported = await this.persistTerminalBenchmark(finalized);
       if (zsxqAttempt && reported.status !== 'running') {
         this.dependencies.onZsxqAttemptTerminal?.(reported);
       }

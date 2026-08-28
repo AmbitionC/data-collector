@@ -57,7 +57,7 @@ headless Chrome 不能通过用户手势可靠打开 Edge 原生 Side Panel surf
 10. `unzip -l artifacts/data-collector-extension-0.4.25.zip` 只显示八个允许文件。
 11. 打开“任务”页，确认两条固定计划显示上次/下次运行、结果计数与四家公司覆盖；“立即运行”后可观察到运行中和终态。
 12. 退出牛客或知识星球登录后补跑，对应批次应显示“需处理”并提供站点登录入口；登录后重试可恢复。
-13. 在已登录 Edge 对 `zsxq-chen-teacher` 验证“最新 / 精华 / 只看星主”三视图和 topic 去重；对 `nowcoder-agent-market` 验证 A/B 门槛、单公司 4 条上限以及无样本公司明确显示 0。
+13. 在已登录 Edge 对 `zsxq-chen-teacher` 验证“最新 / 精华”目标日核对、“只看星主”分页、前置精确/语义去重和逐日账本；历史模式还必须证明 API 耗尽、无失败/缺口且不封账当天。对 `nowcoder-agent-market` 验证 A/B 门槛、单公司 4 条上限以及无样本公司明确显示 0。
 
 ## 可复现打包
 

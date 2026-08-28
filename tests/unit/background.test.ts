@@ -3,7 +3,9 @@ import { JSDOM } from 'jsdom';
 import {
   TRUSTED_EXTENSION_ID,
   ZSXQ_COMPLETE_CONTENT_CAPABILITY,
+  zsxqSemanticSignature,
   type CollectedDocument,
+  type ZsxqLibraryIndexEntry,
 } from '@data-collector/shared';
 import {
   JobRunner,
@@ -329,6 +331,265 @@ describe('extension job runner', () => {
       contentCompletenessVersion: ZSXQ_COMPLETE_CONTENT_CAPABILITY,
     })).toBe(true);
     expect(trustedZsxqContentCompleteness({ contentComplete: false })).toBe(false);
+  });
+
+  it('processes owner history page-wise with exact and semantic dedupe before completion', async () => {
+    const tabs = new InMemoryTabs();
+    const bridge = new InMemoryBridge();
+    const ownerDocument = (id: string, title: string, text: string): CollectedDocument => ({
+      ...topic(id),
+      title,
+      text,
+      html: `<p>${text}</p>`,
+      publishedAt: '2026-08-24T10:00:00.000Z',
+      sourceMetadata: { authorRole: 'owner', topicId: id },
+    });
+    const exact = ownerDocument('80001', '投资复盘', '投资经营复盘正文'.repeat(20));
+    const semantic = ownerDocument('80002', '投资复盘副本', '投资经营复盘语义正文'.repeat(20));
+    const repair = ownerDocument('80003', '创业修复', '创业经营完整正文'.repeat(20));
+    const fresh = ownerDocument('80004', '财富新内容', '财富与职业认知完整正文'.repeat(20));
+    const irrelevant = ownerDocument('80005', '天气闲聊', '今天空气很好适合散步'.repeat(20));
+    const semanticStoredUrl = `${LIST_URL}/topic/79999`;
+    const knownIndex: ZsxqLibraryIndexEntry[] = [
+      { id: '111111111111', url: exact.canonicalUrl, topicId: '80001', contentComplete: true },
+      {
+        id: '222222222222',
+        url: semanticStoredUrl,
+        topicId: '79999',
+        contentComplete: true,
+        publishedAt: semantic.publishedAt,
+        authorRole: 'owner',
+        semanticSignature: zsxqSemanticSignature({
+          publishedAt: semantic.publishedAt!,
+          authorRole: 'owner',
+          text: semantic.text,
+        }),
+      },
+      { id: '333333333333', url: repair.canonicalUrl, topicId: '80003', contentComplete: false },
+    ];
+    tabs.sendMessage = async (_tabId, message) => {
+      const request = message as { type: string };
+      tabs.asked.push(request.type);
+      if (request.type === 'list.apiCollectOwnerPage') {
+        return {
+          ok: true,
+          ownerPage: {
+            documents: [exact, semantic, repair, fresh, irrelevant],
+            businessSkips: [{
+              url: `${LIST_URL}/topic/80006`,
+              reason: '打新内容',
+              publishedAt: '2026-08-24T09:00:00.000Z',
+            }],
+            rawCount: 6,
+            pageKey: 'start:80001,80002,80003,80004,80005,80006',
+            exhausted: true,
+            newestObservedAt: '2026-08-24T10:00:00.000Z',
+            oldestObservedAt: '2026-08-24T09:00:00.000Z',
+            context: { ownerId: '1001', ownerName: '陈老师', scope: 'by_owner' },
+          },
+        } as never;
+      }
+      throw new Error(`unexpected ${request.type}`);
+    };
+    const runner = new JobRunner({
+      tabs,
+      bridge,
+      waitForTabComplete: async () => undefined,
+      delay: async () => undefined,
+      knownZsxqIndex: async () => knownIndex,
+    });
+    const phases: Array<Record<string, unknown>> = [];
+
+    await runner.runZsxqCollectionPlan(
+      'owner-history-page-order',
+      PLAN_ATTEMPT,
+      result => {
+        if ('checkpoint' in result) expect(bridge.terminalWaits).toHaveLength(2);
+        phases.push(result as unknown as Record<string, unknown>);
+      },
+      { zsxqMode: 'owner-history', targetDays: [] },
+    );
+
+    expect(tabs.asked).toEqual(['list.apiCollectOwnerPage']);
+    expect(bridge.createdFor).toEqual([repair.canonicalUrl, fresh.canonicalUrl]);
+    expect(bridge.terminalWaits).toEqual([
+      { jobId: 'current-job', attempt: PLAN_ATTEMPT },
+      { jobId: 'current-job-2', attempt: PLAN_ATTEMPT },
+    ]);
+    expect(phases.at(-1)).toMatchObject({
+      prepared: true,
+      checkpoint: { mode: 'owner-history', pagesFetched: 1, exhausted: true },
+      ownerAudit: {
+        mode: 'owner-history', observed: 6, qualifying: 4,
+        exactDuplicates: 1, semanticDuplicates: 1, filtered: 2,
+        knownComplete: 1, repaired: 1, saved: 2, failed: 0,
+        exhausted: true, safetyCapReached: false,
+      },
+      dayDrafts: [expect.objectContaining({
+        day: '2026-08-24', qualifyingCount: 4, filteredCount: 2,
+        exactDuplicateCount: 1, semanticDuplicateCount: 1,
+        knownCompleteCount: 1, repairCount: 1, candidateCount: 2,
+        savedCount: 2, failedCount: 0, crossedDayBoundary: true,
+        itemFacts: [
+          expect.objectContaining({ url: exact.canonicalUrl, outcome: 'exact' }),
+          expect.objectContaining({ url: semantic.canonicalUrl, outcome: 'semantic' }),
+          expect.objectContaining({ url: repair.canonicalUrl, outcome: 'repaired' }),
+          expect.objectContaining({ url: fresh.canonicalUrl, outcome: 'saved' }),
+        ],
+      })],
+    });
+  });
+
+  it('collects the bounded latest and digest views before daily owner-ledger pages', async () => {
+    const tabs = new InMemoryTabs();
+    const bridge = new InMemoryBridge();
+    const known = {
+      ...topic('80011'),
+      title: '投资复盘',
+      text: '投资经营复盘正文'.repeat(20),
+      html: `<p>${'投资经营复盘正文'.repeat(20)}</p>`,
+      publishedAt: '2026-08-24T10:00:00.000Z',
+      sourceMetadata: { authorRole: 'owner', topicId: '80011' },
+    } satisfies CollectedDocument;
+    tabs.sendMessage = async (_tabId, message) => {
+      const request = message as { type: string };
+      tabs.asked.push(request.type);
+      if (request.type === 'list.apiCollectOwnerPage') {
+        return {
+          ok: true,
+          ownerPage: {
+            documents: [known],
+            businessSkips: [],
+            rawCount: 1,
+            pageKey: 'start:80011',
+            exhausted: true,
+            newestObservedAt: known.publishedAt,
+            oldestObservedAt: known.publishedAt,
+            context: { ownerId: '1001', ownerName: '陈老师', scope: 'by_owner' },
+          },
+        } as never;
+      }
+      throw new Error(`unexpected ${request.type}`);
+    };
+    const runner = new JobRunner({
+      tabs,
+      bridge,
+      waitForTabComplete: async () => undefined,
+      delay: async () => undefined,
+      knownZsxqIndex: async () => [{
+        id: '111111111111',
+        url: known.canonicalUrl,
+        topicId: '80011',
+        publishedAt: known.publishedAt,
+        authorRole: 'owner',
+        contentComplete: true,
+      }],
+    });
+    const collectViews = vi.spyOn(runner, 'collectZsxqPlanViews')
+      .mockImplementation(async (_tabId, _views, audit) => {
+        if (audit) audit.coverage['视图:最新'] = 1;
+        return [known];
+      });
+    const phases: Array<Record<string, unknown>> = [];
+
+    await runner.runZsxqCollectionPlan(
+      'daily-views-and-ledger',
+      PLAN_ATTEMPT,
+      phase => { phases.push(phase as unknown as Record<string, unknown>); },
+      { zsxqMode: 'daily-ledger', targetDays: ['2026-08-24'] },
+    );
+
+    expect(collectViews).toHaveBeenCalledWith(42, ['最新', '精华'], expect.any(Object));
+    expect(tabs.asked).toEqual(['list.apiCollectOwnerPage']);
+    expect(bridge.createdFor).toEqual([]);
+    expect(phases.at(-1)).toMatchObject({
+      discovered: 2,
+      coverage: { '视图:最新': 1 },
+      rejections: { 本机库已有完整正文: 2 },
+    });
+  });
+
+  it('does not request the next owner page when a page receipt fails', async () => {
+    const tabs = new InMemoryTabs();
+    const bridge = new InMemoryBridge();
+    const candidate = {
+      ...topic('80101'),
+      title: '投资经营复盘',
+      text: '投资创业经营完整正文'.repeat(20),
+      html: '<p>投资创业经营完整正文</p>',
+      publishedAt: '2026-08-24T10:00:00.000Z',
+      sourceMetadata: { authorRole: 'owner', topicId: '80101' },
+    } satisfies CollectedDocument;
+    let pageRequests = 0;
+    tabs.sendMessage = async () => {
+      pageRequests += 1;
+      return {
+        ok: true,
+        ownerPage: {
+          documents: [candidate],
+          businessSkips: Array.from({ length: 19 }, (_, index) => ({
+            url: `${LIST_URL}/topic/${80200 + index}`,
+            reason: '选题偏好过滤',
+            publishedAt: '2026-08-24T09:00:00.000Z',
+          })),
+          rawCount: 20,
+          pageKey: 'start:first-page',
+          nextCursor: '2026-08-24T08:59:59.999Z',
+          exhausted: false,
+          newestObservedAt: '2026-08-24T10:00:00.000Z',
+          oldestObservedAt: '2026-08-24T09:00:00.000Z',
+          context: { ownerId: '1001', scope: 'by_owner' },
+        },
+      } as never;
+    };
+    bridge.terminalAck = async () => { throw new Error('持久化回执失败'); };
+    const runner = new JobRunner({
+      tabs,
+      bridge,
+      waitForTabComplete: async () => undefined,
+      knownZsxqIndex: async () => [],
+    });
+    const phases: Array<Record<string, unknown>> = [];
+
+    await expect(runner.runZsxqCollectionPlan(
+      'owner-page-receipt-failure',
+      PLAN_ATTEMPT,
+      phase => { phases.push(phase as unknown as Record<string, unknown>); },
+      { zsxqMode: 'owner-history', targetDays: [] },
+    )).rejects.toThrow('持久化回执失败');
+
+    expect(pageRequests).toBe(1);
+    expect(phases).toEqual([]);
+  });
+
+  it('fails closed when an owner page count cannot account for every returned item', async () => {
+    const tabs = new InMemoryTabs();
+    const bridge = new InMemoryBridge();
+    tabs.sendMessage = async () => ({
+      ok: true,
+      ownerPage: {
+        documents: [],
+        businessSkips: [],
+        rawCount: 1,
+        pageKey: 'start:unaccounted',
+        exhausted: true,
+        context: { ownerId: '1001', scope: 'by_owner' },
+      },
+    }) as never;
+    const runner = new JobRunner({
+      tabs,
+      bridge,
+      waitForTabComplete: async () => undefined,
+      knownZsxqIndex: async () => [],
+    });
+
+    await expect(runner.runZsxqCollectionPlan(
+      'owner-page-unaccounted',
+      PLAN_ATTEMPT,
+      undefined,
+      { zsxqMode: 'owner-history', targetDays: [] },
+    )).rejects.toThrow(/OWNER_PAGE_INVALID.*rawCount/u);
+    expect(bridge.createdFor).toEqual([]);
   });
   it('retries transient tab edit failures after 1/3/9 seconds but not authentication failures', async () => {
     const waits: number[] = [];

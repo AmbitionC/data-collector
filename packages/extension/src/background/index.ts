@@ -143,6 +143,7 @@ const runner = new JobRunner({
       })
       .filter(([url]) => Boolean(url)));
   },
+  knownZsxqIndex: () => connection.zsxqIndex(),
 });
 let activePlanCollections = 0;
 connection.onCollect((requestId, url, interactive) => runner.runRemoteJob(requestId, url, interactive));
@@ -168,7 +169,12 @@ connection.onPlanCollect(async (requestId, payload) => {
           ...result,
         });
       },
-      { force: payload.force === true },
+      {
+        force: payload.force === true,
+        ...(payload.zsxqMode ? { zsxqMode: payload.zsxqMode } : {}),
+        ...(payload.targetDays ? { targetDays: payload.targetDays } : {}),
+        ...(payload.resumeCursor ? { resumeCursor: payload.resumeCursor } : {}),
+      },
     );
   } catch (error) {
     const message = error instanceof Error ? error.message : '知识星球计划采集失败';

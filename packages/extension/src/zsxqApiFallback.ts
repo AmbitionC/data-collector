@@ -47,6 +47,29 @@ export interface ZsxqApiCollection {
   coverage: Record<string, number>;
 }
 
+export interface ZsxqOwnerApiContext {
+  ownerId: string;
+  ownerName?: string;
+  scope: 'by_owner';
+}
+
+export interface ZsxqOwnerPageRequest {
+  cursor?: string;
+  context?: ZsxqOwnerApiContext;
+}
+
+export interface ZsxqOwnerPage {
+  documents: CollectedDocument[];
+  businessSkips: Array<{ url: string; reason: string; publishedAt: string }>;
+  rawCount: number;
+  pageKey: string;
+  nextCursor?: string;
+  exhausted: boolean;
+  newestObservedAt?: string;
+  oldestObservedAt?: string;
+  context: ZsxqOwnerApiContext;
+}
+
 function shanghaiPublicationDay(publishedAt: string | undefined): string | undefined {
   if (!publishedAt || !Number.isFinite(Date.parse(publishedAt))) return undefined;
   return new Intl.DateTimeFormat('en-CA', {
@@ -339,6 +362,195 @@ function viewScopes(payload: unknown): Record<ZsxqPlanView, string> {
     最新: scopes.get('最新')!,
     精华: scopes.get('精华')!,
     只看星主: scopes.get('只看星主')!,
+  };
+}
+
+function provenOwnerScope(payload: unknown): 'by_owner' {
+  const data = responseData(payload);
+  const menus = data?.menus;
+  const optionalMenus = data?.optional_menus;
+  if (!Array.isArray(menus) || (optionalMenus !== undefined && !Array.isArray(optionalMenus))) {
+    throw coverageError('ZSXQ_API_VIEW_UNPROVEN', '知识星球接口未返回可核验菜单');
+  }
+  const scopes = new Set<string>();
+  for (const menu of [...menus, ...(optionalMenus ?? [])]) {
+    if (!isRecord(menu)) continue;
+    const title = typeof menu.title === 'string'
+      ? menu.title.replace(/^[\s#]+|[\s#]+$/gu, '')
+      : '';
+    if (title !== '只看星主' || menu.preset !== true || typeof menu.preset_type !== 'string') {
+      continue;
+    }
+    scopes.add(menu.preset_type.trim());
+  }
+  if (scopes.size !== 1 || !scopes.has('by_owner')) {
+    throw coverageError(
+      'ZSXQ_API_VIEW_UNPROVEN',
+      `只看星主菜单 scope 应为 by_owner，实际为 ${[...scopes].join('、') || '缺失'}`,
+    );
+  }
+  return 'by_owner';
+}
+
+function ownerPageDocument(
+  groupId: string,
+  topic: Record<string, unknown>,
+  groupOwner: Record<string, unknown>,
+  collectedAt: string,
+  feed: string,
+  index: number,
+): { topicId: string; createTime: string; document: CollectedDocument } {
+  const topicId = identifier(topic.topic_id ?? topic.topicId);
+  let record: TopicRecord | undefined;
+  if (topicId) {
+    const responsePath = `${API_ROOT}/groups/${groupId}/topics`;
+    const directPayload = { succeeded: true, resp_data: { topics: [topic] } };
+    for (const candidate of harvestTopics(directPayload, 40, { responsePath })) {
+      if (candidate.topicId !== topicId) continue;
+      record = preferredTopicRecord(record, candidate);
+    }
+  }
+  if (!topicId || !record) {
+    throw coverageError(
+      'ZSXQ_API_TOPIC_UNPROVEN',
+      `${feed}第 ${index + 1} 条 topic${topicId ? `（${topicId}）` : ''}无法形成可核验正文记录`,
+    );
+  }
+  const createTime = createTimeOf(topic);
+  if (!createTime) {
+    throw coverageError(
+      'ZSXQ_API_PUBLISHED_AT_UNPROVEN',
+      `${feed}帖子 ${topicId} 缺少可核验发布时间`,
+    );
+  }
+  const document = documentFromTopic(
+    groupId,
+    '只看星主',
+    topic,
+    { ...record, createTime },
+    groupOwner,
+    collectedAt,
+  );
+  if (document.sourceMetadata?.authorRole !== 'owner') {
+    throw new Error(
+      `AUTHOR_IDENTITY_UNPROVEN：${feed}帖子 ${topicId} 未证明为星主发布`,
+    );
+  }
+  return { topicId, createTime, document };
+}
+
+/**
+ * Fetches exactly one signed `by_owner` page. The caller persists the returned
+ * cursor only after all jobs derived from this page have reached a terminal state.
+ */
+export async function collectZsxqApiOwnerPage(
+  groupId: string,
+  request: ZsxqOwnerPageRequest,
+  dependencies: ZsxqApiFallbackDependencies,
+): Promise<ZsxqOwnerPage> {
+  const fetcher = dependencies.fetcher ?? fetch.bind(globalThis);
+  const requestId = dependencies.requestId ?? (() => crypto.randomUUID());
+  const common = { fetcher, requestId, aduid: dependencies.aduid };
+  let context = request.context;
+  if (!context) {
+    const [groupPayload, menuPayload] = await Promise.all([
+      apiGet(`${API_ROOT}/groups/${groupId}`, common),
+      apiGet(`${API_ROOT}/groups/${groupId}/menus`, common),
+    ]);
+    const group = responseData(groupPayload)?.group;
+    const groupOwner = isRecord(group) && isRecord(group.owner) ? group.owner : undefined;
+    const ownerId = groupOwner ? identifier(groupOwner.user_id ?? groupOwner.userId) : undefined;
+    if (!groupOwner || !ownerId) {
+      throw new Error('AUTHOR_IDENTITY_UNPROVEN：知识星球接口未返回可核验的星主身份');
+    }
+    context = {
+      ownerId,
+      ...(nameOf(groupOwner) ? { ownerName: nameOf(groupOwner)! } : {}),
+      scope: provenOwnerScope(menuPayload),
+    };
+  }
+  if (context.scope !== 'by_owner' || !/^\d+$/u.test(context.ownerId)) {
+    throw coverageError('ZSXQ_API_VIEW_UNPROVEN', '续传的只看星主上下文无效');
+  }
+  if (request.cursor && !Number.isFinite(Date.parse(request.cursor))) {
+    throw coverageError('ZSXQ_API_CURSOR_UNPROVEN', '只看星主续传游标不是有效时间');
+  }
+
+  const responsePath = `${API_ROOT}/groups/${groupId}/topics`;
+  const url = new URL(responsePath);
+  url.searchParams.set('scope', context.scope);
+  url.searchParams.set('count', String(TOPIC_PAGE_SIZE));
+  if (request.cursor) url.searchParams.set('end_time', request.cursor);
+  const payload = await apiGet(url.href, common);
+  const topics = topicNodes(payload, '「只看星主」分页', TOPIC_PAGE_SIZE);
+  const owner = {
+    user_id: context.ownerId,
+    ...(context.ownerName ? { name: context.ownerName } : {}),
+  };
+  const collectedAt = (dependencies.now ?? (() => new Date()))().toISOString();
+  const verified = topics.map((topic, index) =>
+    ownerPageDocument(groupId, topic, owner, collectedAt, '「只看星主」分页', index));
+  const ids = verified.map(item => item.topicId);
+  if (new Set(ids).size !== ids.length) {
+    throw coverageError('ZSXQ_API_CURSOR_UNPROVEN', '只看星主单页返回了重复 topic_id');
+  }
+  const times = verified.map(item => Date.parse(item.createTime));
+  for (let index = 1; index < times.length; index += 1) {
+    if (times[index]! > times[index - 1]!) {
+      throw coverageError('ZSXQ_API_ORDER_UNPROVEN', '只看星主分页未按发布时间倒序返回');
+    }
+  }
+  if (request.cursor && times.some(time => time > Date.parse(request.cursor!))) {
+    throw coverageError('ZSXQ_API_CURSOR_UNPROVEN', '只看星主分页未遵守 end_time 游标');
+  }
+
+  const documents: CollectedDocument[] = [];
+  const businessSkips: ZsxqOwnerPage['businessSkips'] = [];
+  for (const item of verified) {
+    const excluded = excludedBy(item.document.text);
+    const links = [...item.document.html.matchAll(/\bhref="([^"]+)"/giu)].map(match => match[1]!);
+    const advertisement = advertisementIn(links);
+    const reason = excluded
+      ? `${excluded.label}（按选题偏好跳过，命中：${excluded.hits.join('、')}）`
+      : advertisement
+        ? `${advertisement.label}（按硬证据跳过，依据：${advertisement.hits.join('；')}）`
+        : undefined;
+    if (reason) {
+      businessSkips.push({
+        url: item.document.canonicalUrl,
+        reason,
+        publishedAt: item.createTime,
+      });
+    } else {
+      documents.push(item.document);
+    }
+  }
+  if (JSON.stringify({ documents, businessSkips }).length > TOPIC_MESSAGE_CHARACTER_LIMIT) {
+    throw coverageError(
+      'ZSXQ_API_PAYLOAD_LIMIT',
+      `单页已核验内容超过 ${TOPIC_MESSAGE_CHARACTER_LIMIT} 字符安全上限`,
+    );
+  }
+
+  const exhausted = verified.length < TOPIC_PAGE_SIZE;
+  const newestObservedAt = verified.at(0)?.createTime;
+  const oldestObservedAt = verified.at(-1)?.createTime;
+  const nextCursor = !exhausted && oldestObservedAt
+    ? new Date(Date.parse(oldestObservedAt) - 1).toISOString()
+    : undefined;
+  if (request.cursor && nextCursor && Date.parse(nextCursor) >= Date.parse(request.cursor)) {
+    throw coverageError('ZSXQ_API_CURSOR_UNPROVEN', '只看星主分页游标没有前进');
+  }
+  return {
+    documents,
+    businessSkips,
+    rawCount: verified.length,
+    pageKey: `${request.cursor ?? 'start'}:${ids.join(',')}`,
+    ...(nextCursor ? { nextCursor } : {}),
+    exhausted,
+    ...(newestObservedAt ? { newestObservedAt } : {}),
+    ...(oldestObservedAt ? { oldestObservedAt } : {}),
+    context,
   };
 }
 

@@ -29,6 +29,7 @@ import { commercialSignals } from './adFilter.js';
 import {
   CONTENT_BUILD_ID,
   CONTENT_API_COLLECT_REQUEST,
+  CONTENT_API_COLLECT_OWNER_PAGE_REQUEST,
   CONTENT_DIAGNOSE_REQUEST,
   CONTENT_DOCUMENT_REQUEST,
   CONTENT_ADVANCE_REQUEST,
@@ -43,7 +44,11 @@ import {
   CONTENT_LIST_REQUEST,
   isCurrentContentRequest,
 } from './contentProtocol.js';
-import { collectZsxqApiViews } from './zsxqApiFallback.js';
+import {
+  collectZsxqApiOwnerPage,
+  collectZsxqApiViews,
+  type ZsxqOwnerApiContext,
+} from './zsxqApiFallback.js';
 
 /**
  * 帖子号索引。帖子号不在 DOM 上，只能从应用自己的接口响应里取（见 inject.ts）。
@@ -145,6 +150,7 @@ interface ExtractMessage {
     | typeof CONTENT_LIST_REQUEST
     | typeof CONTENT_SELECT_VIEW_REQUEST
     | typeof CONTENT_API_COLLECT_REQUEST
+    | typeof CONTENT_API_COLLECT_OWNER_PAGE_REQUEST
     | typeof CONTENT_RESTORE_REQUEST
     | typeof CONTENT_ADVANCE_REQUEST
     | typeof CONTENT_REFRESH_TOPICS_REQUEST
@@ -162,10 +168,13 @@ interface ExtractMessage {
     | 'list.refreshTopics'
     | 'list.focusLast'
     | 'list.selectView'
-    | 'list.apiCollect';
+    | 'list.apiCollect'
+    | 'list.apiCollectOwnerPage';
   /** list.highlight：要滚过去并高亮的那一条。 */
   key?: string;
   label?: ZsxqPlanView;
+  cursor?: string;
+  context?: ZsxqOwnerApiContext;
   overrides?: {
     userCategory?: string;
     userTags?: string[];
@@ -1614,6 +1623,7 @@ if (!alreadyRegistered) chrome.runtime.onMessage.addListener((message: unknown, 
     request.type !== 'list.focusLast' &&
     request.type !== 'list.selectView' &&
     request.type !== 'list.apiCollect' &&
+    request.type !== 'list.apiCollectOwnerPage' &&
     !currentRequest
   ) {
     return false;
@@ -1628,6 +1638,41 @@ if (!alreadyRegistered) chrome.runtime.onMessage.addListener((message: unknown, 
         }
       : response);
   };
+
+  if (
+    request.type === 'list.apiCollectOwnerPage'
+    || request.type === CONTENT_API_COLLECT_OWNER_PAGE_REQUEST
+  ) {
+    const groupId = /\/group\/(\d+)/u.exec(location.pathname)?.[1];
+    if (!groupId) {
+      respond({
+        ok: false,
+        error: { code: 'UNSUPPORTED_LAYOUT', message: 'ZSXQ_API_FALLBACK_FAILED：当前地址没有星球编号' },
+      });
+      return false;
+    }
+    void collectZsxqApiOwnerPage(groupId, {
+      ...(request.cursor ? { cursor: request.cursor } : {}),
+      ...(request.context ? { context: request.context } : {}),
+    }, { aduid: zsxqAduid() }).then(
+      ownerPage => respond({ ok: true, ownerPage }),
+      error => {
+        const message = error instanceof Error ? error.message : '知识星球只看星主分页失败';
+        respond({
+          ok: false,
+          error: {
+            code: message.startsWith('AUTH_REQUIRED')
+              ? 'AUTH_REQUIRED'
+              : message.startsWith('AUTHOR_IDENTITY_UNPROVEN')
+                ? 'AUTHOR_IDENTITY_UNPROVEN'
+                : 'COLLECTION_FAILED',
+            message,
+          },
+        });
+      },
+    );
+    return true;
+  }
 
   if (request.type === 'list.apiCollect' || request.type === CONTENT_API_COLLECT_REQUEST) {
     const groupId = /\/group\/(\d+)/u.exec(location.pathname)?.[1];

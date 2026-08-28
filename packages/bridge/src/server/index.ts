@@ -40,6 +40,7 @@ import {
   clearLibrary,
   deleteEntries,
   listLibrary,
+  loadZsxqLibraryIndex,
   pendingIds,
   readEntry,
   syncEntries,
@@ -59,6 +60,7 @@ import {
 import {
   CollectionPlanService,
   CollectionPlanStore,
+  ZsxqDayLedgerStore,
   filterProcessedNowcoderDocuments,
   loadProcessedNowcoderHistory,
   pendingNowcoderPlanJobs,
@@ -308,9 +310,11 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
   const jobs = await JobStore.open(config.jobsFile);
   await jobs.recover();
   let planStore: CollectionPlanStore | undefined;
+  let zsxqLedger: ZsxqDayLedgerStore | undefined;
   let planStoreError: string | undefined;
   try {
     planStore = await CollectionPlanStore.open(config.plansFile);
+    zsxqLedger = await ZsxqDayLedgerStore.open(config.zsxqLedgerFile);
   } catch (error) {
     planStoreError = error instanceof Error ? error.message : String(error);
     console.warn(`[plans] ${planStoreError}`);
@@ -617,7 +621,15 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
         canStartZsxqAttempt: () => persistingJobIds.size === 0 && !updateCheckInFlight,
         discoverNowcoder: knownUrls => discoverNowcoderPlanCandidates(collectorFetcher, knownUrls),
         dispatch,
-        collectZsxq: async (batchId, planId, attempt, force) => {
+        collectZsxq: async (
+          batchId,
+          planId,
+          attempt,
+          force,
+          mode,
+          targetDays,
+          resumeCursor,
+        ) => {
           const targetSocket = extensionSocket;
           const artifactBuildId = await refreshArtifactBuildId();
           if (
@@ -634,9 +646,13 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
             planId,
             attempt,
             ...(force ? { force: true } : {}),
+            zsxqMode: mode,
+            targetDays: [...targetDays],
+            ...(resumeCursor ? { resumeCursor } : {}),
           })));
           return true;
         },
+        ...(zsxqLedger ? { zsxqLedger } : {}),
         onZsxqAttemptTerminal: () => resumeDeferredUpdate(),
         shouldAutoSync: async job => {
           const document = await storedDocumentFor(job);
@@ -1203,11 +1219,23 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
       const input = z.object({
         planId: z.enum(COLLECTION_PLAN_IDS),
         force: z.boolean().optional(),
-      }).strict().parse(await readJson(request));
+        zsxqMode: z.enum(['daily-ledger', 'owner-history']).optional(),
+      }).strict().superRefine((value, context) => {
+        if (value.zsxqMode && value.planId !== 'zsxq-chen-teacher') {
+          context.addIssue({
+            code: 'custom',
+            path: ['zsxqMode'],
+            message: '只有知识星球计划支持逐日或历史模式',
+          });
+        }
+      }).parse(await readJson(request));
       if (input.planId === 'zsxq-chen-teacher') await refreshArtifactBuildId();
       return sendJson(response, 202, await collectionPlans.run(
         input.planId,
-        input.force === undefined ? {} : { force: input.force },
+        {
+          ...(input.force === undefined ? {} : { force: input.force }),
+          ...(input.zsxqMode ? { zsxqMode: input.zsxqMode } : {}),
+        },
       ));
     }
     if (request.method === 'GET' && requestUrl.pathname === '/v1/fe-journey/status') {
@@ -1227,6 +1255,9 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
     }
     if (request.method === 'GET' && requestUrl.pathname === '/v1/library') {
       return sendJson(response, 200, { entries: await listLibrary(config.libraryRoot) });
+    }
+    if (request.method === 'GET' && requestUrl.pathname === '/v1/library/zsxq-index') {
+      return sendJson(response, 200, { entries: await loadZsxqLibraryIndex(config.libraryRoot) });
     }
     if (request.method === 'GET' && requestUrl.pathname === '/v1/library/entry') {
       const id = requestUrl.searchParams.get('id')?.trim() ?? '';

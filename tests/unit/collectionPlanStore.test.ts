@@ -21,6 +21,30 @@ function job(id: string, status: JobRecord['status'], errorCode?: string): JobRe
 }
 
 describe('CollectionPlanStore', () => {
+  it('persists the ZSXQ owner mode and typed audit across preparation attempts', async () => {
+    const root = await temporaryDirectories.create('plan-store-zsxq-owner-mode-');
+    const path = join(root, 'plans.json');
+    const store = await CollectionPlanStore.open(path, () => '2026-08-29T00:00:00.000Z');
+    const batch = await store.start('zsxq-chen-teacher', { zsxqMode: 'owner-history' });
+    const preparing = await store.beginPreparation(batch.id);
+    await store.recordPreparationResult(batch.id, preparing.preparationAttempt!, {
+      discovered: 1,
+      prepared: false,
+      ownerAudit: {
+        mode: 'owner-history', pagesFetched: 1, observed: 1, qualifying: 1,
+        exactDuplicates: 1, semanticDuplicates: 0, filtered: 0, knownComplete: 1,
+        repaired: 0, saved: 0, failed: 0, exhausted: false,
+        safetyCapReached: false, completedDays: 0, emptyDays: 0, failedDays: 0,
+      },
+    });
+
+    expect((await CollectionPlanStore.open(path)).latest('zsxq-chen-teacher', 1)[0])
+      .toMatchObject({
+        zsxqMode: 'owner-history',
+        ownerAudit: { mode: 'owner-history', pagesFetched: 1, exactDuplicates: 1 },
+      });
+  });
+
   it('persists a new ZSXQ attempt and rejects stale or terminal child attachments', async () => {
     const root = await temporaryDirectories.create('plan-store-zsxq-attempt-');
     const path = join(root, 'plans.json');

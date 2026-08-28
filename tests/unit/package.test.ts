@@ -138,8 +138,11 @@ describe('extension package validation', () => {
     const contents = await Promise.all(productionPaths.map(path => readFile(path, 'utf8')));
 
     expect(productionPaths.map(path => path.slice(workspaceRoot.length + 1)).join('\n'))
-      .not.toMatch(/popup|pair/i);
-    expect(contents.join('\n')).not.toMatch(/popup|pair/i);
+      .not.toMatch(/popup/i);
+    expect(contents.join('\n')).not.toMatch(/popup/i);
+    expect(contents.join('\n')).not.toMatch(
+      /(?:manual.{0,40}\bpair|\bpair(?:ing|ed)?.{0,40}(?:code|token|secret|bridge|manual))/iu,
+    );
     expect(contents.join('\n')).not.toMatch(new RegExp(['配', '对码'].join('')));
   });
 

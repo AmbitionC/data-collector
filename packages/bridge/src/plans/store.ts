@@ -10,6 +10,8 @@ import {
   type CollectionPlanId,
   type CollectionPlanTrigger,
   type JobRecord,
+  type ZsxqCollectionMode,
+  type ZsxqOwnerAudit,
 } from '@data-collector/shared';
 
 interface StoredBatch extends CollectionBatch {
@@ -99,7 +101,11 @@ export class CollectionPlanStore {
 
   start(
     planId: CollectionPlanId,
-    options: { force?: boolean; trigger?: CollectionPlanTrigger } = {},
+    options: {
+      force?: boolean;
+      trigger?: CollectionPlanTrigger;
+      zsxqMode?: ZsxqCollectionMode;
+    } = {},
   ): Promise<CollectionBatch> {
     return this.serializeMutation(async () => {
       const startedAt = this.now();
@@ -118,6 +124,9 @@ export class CollectionPlanStore {
         deliveryIds: [],
         trigger: options.trigger ?? 'manual',
         ...(options.force === true ? { force: true } : {}),
+        ...(planId === 'zsxq-chen-teacher' && options.zsxqMode
+          ? { zsxqMode: options.zsxqMode }
+          : {}),
         ...(planId === 'nowcoder-agent-market'
           ? { selectionStatus: 'collecting' as const, rounds: 0 }
           : { preparationStatus: 'collecting' as const }),
@@ -149,6 +158,7 @@ export class CollectionPlanStore {
       delete batch.coverage;
       delete batch.rejections;
       delete batch.rejectionDetails;
+      delete batch.ownerAudit;
       await this.persist();
       return publicBatch(batch);
     });
@@ -248,6 +258,7 @@ export class CollectionPlanStore {
       coverage?: Record<string, number>;
       rejections?: Record<string, number>;
       rejectionDetails?: readonly CollectionPlanRejection[];
+      ownerAudit?: ZsxqOwnerAudit;
     },
   ): Promise<CollectionBatch> {
     return this.serializeTransactionalMutation(async () => {
@@ -265,6 +276,7 @@ export class CollectionPlanStore {
       if (result.rejectionDetails) {
         batch.rejectionDetails = result.rejectionDetails.map(detail => ({ ...detail }));
       }
+      if (result.ownerAudit) batch.ownerAudit = { ...result.ownerAudit };
       batch.preparationStatus = result.prepared ? 'completed' : 'collecting';
       await this.persist();
       return publicBatch(batch);
@@ -349,6 +361,18 @@ export class CollectionPlanStore {
       const batch = this.require(batchId);
       if (!batch.deliveryIds.includes(contentId)) batch.deliveryIds.push(contentId);
       await this.persist();
+    });
+  }
+
+  recordOwnerAudit(batchId: string, audit: ZsxqOwnerAudit): Promise<CollectionBatch> {
+    return this.serializeMutation(async () => {
+      const batch = this.require(batchId);
+      if (batch.planId !== 'zsxq-chen-teacher') {
+        throw new Error('只有知识星球批次支持只看星主审计');
+      }
+      batch.ownerAudit = { ...audit };
+      await this.persist();
+      return publicBatch(batch);
     });
   }
 

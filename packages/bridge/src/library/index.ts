@@ -2,6 +2,7 @@ export { MarkdownLibrary, type MarkdownLibraryOptions, type SavedContent } from 
 export { assertInsideRoot, assertSafeWritePath, safeSlug } from './paths.js';
 export { isDelivered, pendingIds, syncEntries, type SyncOutcome } from './sync.js';
 export type { SyncInfo, SyncState } from './writer.js';
+export { loadZsxqLibraryIndex } from './zsxqIndex.js';
 export {
   clearLibrary,
   deleteEntries,

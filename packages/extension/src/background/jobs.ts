@@ -1,21 +1,28 @@
 import {
   canonicalizeUrl,
+  isHighConfidenceZsxqDuplicate,
   mergeZsxqDocumentCopies,
   parseSupportedUrl,
   unionZsxqViewDocuments,
+  zsxqSemanticSignature,
   ZSXQ_COMPLETE_CONTENT_CAPABILITY,
   ZSXQ_PLAN_VIEWS,
   type CollectedDocument,
   type CollectionPlanAttempt,
   type CollectionPlanRejection,
   type CollectionPlanId,
+  type ZsxqCollectionMode,
+  type ZsxqDayDraft,
+  type ZsxqLibraryIndexEntry,
+  type ZsxqOwnerAudit,
+  type ZsxqOwnerCheckpoint,
   type ZsxqPlanView,
 } from '@data-collector/shared';
 import { linkedArticleUrl } from '../extractors/index.js';
 import type { HookStats } from '../topicIndex.js';
 import type { OwnedTabPurpose } from './ownedTabs.js';
 import { RemoteJobScheduler } from './remoteJobScheduler.js';
-import type { ZsxqApiCollection } from '../zsxqApiFallback.js';
+import type { ZsxqApiCollection, ZsxqOwnerPage } from '../zsxqApiFallback.js';
 import {
   CONTENT_BUILD_ID,
   CONTENT_EXTRACTION_PROTOCOL,
@@ -259,6 +266,7 @@ export type ExtractionResponse = (
   | { ok: true; refresh: { toggled: boolean; category?: string } }
   | { ok: true; selected: { label: ZsxqPlanView; topicIds: string[] } }
   | { ok: true; apiCollection: ZsxqApiCollection }
+  | { ok: true; ownerPage: ZsxqOwnerPage }
   | { ok: false; error: { code: string; message: string } }
 ) & {
   /** 旧内容脚本没有这两个字段；生产采集必须验证它们。 */
@@ -318,6 +326,7 @@ interface PayloadMap {
   refresh: { toggled: boolean; category?: string };
   selected: { label: ZsxqPlanView; topicIds: string[] };
   apiCollection: ZsxqApiCollection;
+  ownerPage: ZsxqOwnerPage;
 }
 
 const TRANSIENT_TAB_ERROR = /Tabs cannot be edited right now|tab.*(?:temporarily|busy)|No tab with id/i;
@@ -416,6 +425,8 @@ export interface JobRunnerOptions {
    * 固定计划优先使用它，避免完整长文每天重抓，同时允许修复历史半篇内容。
    */
   knownContent?: () => Promise<ReadonlyMap<string, boolean | undefined> | undefined>;
+  /** 正文无关的知识星球精确/语义去重索引；逐日与历史模式必须可用。 */
+  knownZsxqIndex?: () => Promise<readonly ZsxqLibraryIndexEntry[]>;
 }
 
 /** 内容脚本在标签页 complete 后可能仍未注册消息监听，这类错误可短暂重试。 */
@@ -483,6 +494,7 @@ export function trustedZsxqContentCompleteness(entry: {
 
 const ZSXQ_PLAN_ITEMS_PER_VIEW = 20;
 const ZSXQ_PLAN_MAX_ROUNDS = 12;
+const ZSXQ_OWNER_MAX_PAGES = 10_000;
 // 内容侧最长会用 44.5 秒证明列表耗尽；给消息派发/事件循环留下足够余量，不能让
 // background 的超时先抢跑，把一个合法的稳定性证明误报成页面脚本失联。
 const CONTENT_SCRIPT_REQUEST_TIMEOUT_MS = 60_000;
@@ -500,6 +512,57 @@ function lifeTeacherCategory(document: CollectedDocument): string {
   };
   // 标题表达主问题，优先级高于正文里顺带提到的词。
   return categoryOf(document.title) ?? categoryOf(document.text) ?? '其他';
+}
+
+function emptyOwnerDayDraft(day: string): ZsxqDayDraft {
+  return {
+    day,
+    rawOwnerCount: 0,
+    qualifyingCount: 0,
+    filteredCount: 0,
+    exactDuplicateCount: 0,
+    semanticDuplicateCount: 0,
+    knownCompleteCount: 0,
+    repairCount: 0,
+    candidateCount: 0,
+    savedCount: 0,
+    failedCount: 0,
+    crossedDayBoundary: false,
+    itemFacts: [],
+  };
+}
+
+function mergeOwnerDayDraft(left: ZsxqDayDraft | undefined, right: ZsxqDayDraft): ZsxqDayDraft {
+  if (!left) return { ...right };
+  return {
+    day: right.day,
+    rawOwnerCount: left.rawOwnerCount + right.rawOwnerCount,
+    qualifyingCount: left.qualifyingCount + right.qualifyingCount,
+    filteredCount: left.filteredCount + right.filteredCount,
+    exactDuplicateCount: left.exactDuplicateCount + right.exactDuplicateCount,
+    semanticDuplicateCount: left.semanticDuplicateCount + right.semanticDuplicateCount,
+    knownCompleteCount: left.knownCompleteCount + right.knownCompleteCount,
+    repairCount: left.repairCount + right.repairCount,
+    candidateCount: left.candidateCount + right.candidateCount,
+    savedCount: left.savedCount + right.savedCount,
+    failedCount: left.failedCount + right.failedCount,
+    crossedDayBoundary: left.crossedDayBoundary || right.crossedDayBoundary,
+    itemFacts: [...new Map(
+      [...(left.itemFacts ?? []), ...(right.itemFacts ?? [])]
+        .map(fact => [`${fact.url}:${fact.outcome}:${fact.mappedUrl}`, fact]),
+    ).values()],
+  };
+}
+
+interface ZsxqPlanPhaseResult {
+  discovered: number;
+  prepared: boolean;
+  coverage?: Record<string, number>;
+  rejections?: Record<string, number>;
+  rejectionDetails?: CollectionPlanRejection[];
+  checkpoint?: ZsxqOwnerCheckpoint;
+  dayDrafts?: ZsxqDayDraft[];
+  ownerAudit?: ZsxqOwnerAudit;
 }
 
 export class JobRunner {
@@ -864,17 +927,515 @@ export class JobRunner {
     return job.id;
   }
 
+  /**
+   * 日常任务仍核对「最新 / 精华」两个有界视图，但只处理账本点名的上海自然日。
+   * 成员帖、已完整 URL 和高置信语义重复都在详情补全与建 Job 之前淘汰。
+   */
+  private async runZsxqDailyViews(
+    tabId: number,
+    batchId: string,
+    attempt: CollectionPlanAttempt,
+    targetDays: readonly string[],
+  ): Promise<Omit<ZsxqPlanPhaseResult, 'prepared'>> {
+    if (!this.options.knownZsxqIndex) {
+      throw new Error('BRIDGE_UPDATE_REQUIRED：Bridge 未提供知识星球紧凑去重索引');
+    }
+    let knownEntries: readonly ZsxqLibraryIndexEntry[];
+    try {
+      knownEntries = await this.options.knownZsxqIndex();
+    } catch (error) {
+      throw new Error(
+        `BRIDGE_UPDATE_REQUIRED：无法读取知识星球紧凑去重索引：${error instanceof Error ? error.message : error}`,
+      );
+    }
+    const byUrl = new Map(knownEntries.map(entry => [entry.url, entry]));
+    const byTopicId = new Map(knownEntries
+      .filter((entry): entry is ZsxqLibraryIndexEntry & { topicId: string } => Boolean(entry.topicId))
+      .map(entry => [entry.topicId, entry]));
+    const completeSemantic = knownEntries.filter(entry =>
+      entry.contentComplete === true && entry.semanticSignature !== undefined);
+    const audit: ZsxqPlanExtractionAudit = { businessSkips: new Map(), coverage: {} };
+    const collectViews = () => retryTransientTabOperation(
+      () => this.collectZsxqPlanViews(tabId, ['最新', '精华'], audit),
+      milliseconds => this.wait(milliseconds),
+    );
+    const collectApiViews = async (): Promise<CollectedDocument[]> => {
+      const fallback = await this.ask(tabId, {
+        type: this.contentMessageType('list.apiCollect'),
+      });
+      if (!fallback.ok) throw new Error(fallback.error.message);
+      const collection = payloadOf(fallback, 'apiCollection');
+      Object.assign(audit.coverage, collection.coverage);
+      return collection.documents.filter(document => {
+        const labels = String(document.sourceMetadata?.viewLabels ?? '');
+        return labels.includes('最新') || labels.includes('精华');
+      });
+    };
+    let documents: CollectedDocument[];
+    try {
+      documents = await collectViews();
+    } catch (error) {
+      if (isZsxqPlanDomCoverageIncomplete(error)) {
+        documents = await collectApiViews();
+      } else {
+        if (!isBlankZsxqPlanShell(error)) throw error;
+        await this.options.tabs.reload(tabId);
+        await this.options.waitForTabComplete(tabId, 30_000);
+        try {
+          documents = await collectViews();
+        } catch (reloadedError) {
+          if (!isBlankZsxqPlanShell(reloadedError)) throw reloadedError;
+          documents = await collectApiViews();
+        }
+      }
+    }
+
+    const targetSet = new Set(targetDays);
+    const staged: Array<{ id: string; document: CollectedDocument }> = [];
+    const rejections: Record<string, number> = {};
+    const rejectionDetails: CollectionPlanRejection[] = [];
+    const reject = (document: CollectedDocument, reason: string, evidence?: string): void => {
+      rejections[reason] = (rejections[reason] ?? 0) + 1;
+      rejectionDetails.push({
+        url: document.canonicalUrl,
+        reason,
+        ...(evidence ? { evidence } : {}),
+      });
+    };
+    const documentUrls = new Set(documents.map(document => document.canonicalUrl));
+    for (const [key, skipped] of audit.businessSkips) {
+      if (documentUrls.has(skipped.url ?? key)) continue;
+      rejections[skipped.reason] = (rejections[skipped.reason] ?? 0) + 1;
+      if (skipped.url) rejectionDetails.push({ url: skipped.url, reason: skipped.reason });
+    }
+    for (const document of documents) {
+      const authorRole = document.sourceMetadata?.authorRole;
+      if (authorRole !== 'owner' && authorRole !== 'member') {
+        throw new Error(
+          `AUTHOR_IDENTITY_UNPROVEN：无法证明知识星球帖子作者身份：${document.canonicalUrl}`,
+        );
+      }
+      if (authorRole === 'member') {
+        reject(document, '非星主');
+        continue;
+      }
+      const publishedDay = shanghaiPublicationDay(document.publishedAt);
+      if (!publishedDay) {
+        throw new Error(
+          `PUBLISHED_AT_UNPROVEN：无法证明知识星球帖子发布时间：${document.canonicalUrl}`,
+        );
+      }
+      if (!targetSet.has(publishedDay)) {
+        reject(document, '非目标日期');
+        continue;
+      }
+      const topicId = typeof document.sourceMetadata?.topicId === 'string'
+        ? document.sourceMetadata.topicId
+        : undefined;
+      const exact = byUrl.get(document.canonicalUrl) ?? (topicId ? byTopicId.get(topicId) : undefined);
+      if (exact?.contentComplete === true) {
+        reject(document, '本机库已有完整正文');
+        continue;
+      }
+      const signature = zsxqSemanticSignature({
+        publishedAt: document.publishedAt!,
+        authorRole: 'owner',
+        text: document.text,
+      });
+      const semantic = completeSemantic.find(entry => entry.semanticSignature
+        && isHighConfidenceZsxqDuplicate(entry.semanticSignature, signature));
+      if (semantic) {
+        reject(document, '高置信语义重复', semantic.url);
+        continue;
+      }
+
+      const completedDocument = await this.withLinkedArticle(document);
+      if (!/投资|创业|商业模式|经营|财富|职业|职场|认知/u.test(
+        `${completedDocument.title}\n${completedDocument.text}`,
+      )) {
+        reject(document, '非投资创业主题');
+        continue;
+      }
+      if (completedDocument.truncated) {
+        throw new Error(
+          `CONTENT_COVERAGE_INCOMPLETE：知识星球「最新 / 精华」正文不完整：`
+          + `${document.canonicalUrl}（${zsxqIncompleteEvidence(document, completedDocument)}）`,
+        );
+      }
+      const plannedDocument: CollectedDocument = {
+        ...completedDocument,
+        truncated: false,
+        userCategory: lifeTeacherCategory(completedDocument),
+        sourceMetadata: {
+          ...(completedDocument.sourceMetadata ?? {}),
+          planId: 'zsxq-chen-teacher',
+          batchId,
+          collectionMode: 'daily-ledger',
+        },
+      };
+      const job = await this.options.bridge.createJob(plannedDocument.canonicalUrl, {
+        batchId,
+        planId: 'zsxq-chen-teacher',
+        attempt,
+      });
+      staged.push({ id: job.id, document: plannedDocument });
+    }
+    for (const item of staged) {
+      this.options.bridge.send('job.progress', item.id, { stage: 'collecting' });
+      this.sendDocumentResult(item.id, item.document);
+    }
+    await Promise.all(staged.map(item => this.options.bridge.waitForJobTerminal(item.id, attempt)));
+    return {
+      discovered: documents.length + [...audit.businessSkips].filter(([key, skipped]) =>
+        !documentUrls.has(skipped.url ?? key)).length,
+      coverage: { ...audit.coverage },
+      rejections,
+      rejectionDetails,
+    };
+  }
+
+  private async runZsxqOwnerPages(
+    tabId: number,
+    batchId: string,
+    attempt: CollectionPlanAttempt,
+    mode: ZsxqCollectionMode,
+    targetDays: readonly string[],
+    resumeCursor: string | undefined,
+    reportPhase?: (result: ZsxqPlanPhaseResult) => Promise<void> | void,
+    prelude?: Omit<ZsxqPlanPhaseResult, 'prepared'>,
+  ): Promise<{ discovered: number }> {
+    if (!this.options.knownZsxqIndex) {
+      throw new Error('BRIDGE_UPDATE_REQUIRED：Bridge 未提供知识星球紧凑去重索引');
+    }
+    let knownEntries: ZsxqLibraryIndexEntry[];
+    try {
+      knownEntries = [...await this.options.knownZsxqIndex()];
+    } catch (error) {
+      throw new Error(
+        `BRIDGE_UPDATE_REQUIRED：无法读取知识星球紧凑去重索引：${error instanceof Error ? error.message : error}`,
+      );
+    }
+    const byUrl = new Map<string, ZsxqLibraryIndexEntry>();
+    const byTopicId = new Map<string, ZsxqLibraryIndexEntry>();
+    const completeSemantic: ZsxqLibraryIndexEntry[] = [];
+    const remember = (entry: ZsxqLibraryIndexEntry): void => {
+      byUrl.set(entry.url, entry);
+      if (entry.topicId) byTopicId.set(entry.topicId, entry);
+      if (entry.contentComplete === true && entry.semanticSignature) completeSemantic.push(entry);
+    };
+    for (const entry of knownEntries) remember(entry);
+
+    const audit: ZsxqOwnerAudit = {
+      mode,
+      pagesFetched: 0,
+      observed: 0,
+      qualifying: 0,
+      exactDuplicates: 0,
+      semanticDuplicates: 0,
+      filtered: 0,
+      knownComplete: 0,
+      repaired: 0,
+      saved: 0,
+      failed: 0,
+      exhausted: false,
+      safetyCapReached: false,
+      completedDays: 0,
+      emptyDays: 0,
+      failedDays: 0,
+    };
+    const accumulatedDays = new Map<string, ZsxqDayDraft>();
+    const rejectionDetails: CollectionPlanRejection[] = [...(prelude?.rejectionDetails ?? [])];
+    const rejections: Record<string, number> = { ...(prelude?.rejections ?? {}) };
+    const reject = (url: string, reason: string, evidence?: string): void => {
+      rejections[reason] = (rejections[reason] ?? 0) + 1;
+      if (rejectionDetails.length < 500) {
+        rejectionDetails.push({ url, reason, ...(evidence ? { evidence } : {}) });
+      }
+    };
+    let cursor = resumeCursor;
+    let context: ZsxqOwnerPage['context'] | undefined;
+    let newestObservedAt: string | undefined;
+    let oldestObservedAt: string | undefined;
+    const seenPageKeys = new Set<string>();
+    const seenItemUrls = new Set<string>();
+    let previousPageOldestTimestamp: number | undefined;
+
+    while (audit.pagesFetched < ZSXQ_OWNER_MAX_PAGES) {
+      const response = await this.ask(tabId, {
+        type: this.contentMessageType('list.apiCollectOwnerPage'),
+        ...(cursor ? { cursor } : {}),
+        ...(context ? { context } : {}),
+      });
+      if (!response.ok) throw new Error(response.error.message);
+      const page = payloadOf(response, 'ownerPage');
+      const accounted = page.documents.length + page.businessSkips.length;
+      if (!Number.isInteger(page.rawCount) || page.rawCount < 0 || page.rawCount > 20
+        || page.rawCount !== accounted) {
+        throw new Error(
+          `OWNER_PAGE_INVALID：rawCount=${String(page.rawCount)}，可核对项目=${accounted}`,
+        );
+      }
+      if (!page.pageKey || seenPageKeys.has(page.pageKey)) {
+        throw new Error(`OWNER_PAGE_INVALID：只看星主分页键缺失或重复：${String(page.pageKey)}`);
+      }
+      if (page.context.scope !== 'by_owner' || (!page.exhausted && !page.nextCursor)) {
+        throw new Error('OWNER_PAGE_INVALID：只看星主范围或下一页游标未经证明');
+      }
+      const pageNewestTimestamp = page.newestObservedAt
+        ? Date.parse(page.newestObservedAt)
+        : Number.NaN;
+      const pageOldestTimestamp = page.oldestObservedAt
+        ? Date.parse(page.oldestObservedAt)
+        : Number.NaN;
+      if (page.rawCount > 0 && (
+        !Number.isFinite(pageNewestTimestamp)
+        || !Number.isFinite(pageOldestTimestamp)
+        || pageNewestTimestamp < pageOldestTimestamp
+        || (previousPageOldestTimestamp !== undefined
+          && pageNewestTimestamp >= previousPageOldestTimestamp)
+      )) {
+        throw new Error('OWNER_PAGE_INVALID：只看星主分页时间顺序未经证明');
+      }
+      for (const item of [...page.documents, ...page.businessSkips]) {
+        if (seenItemUrls.has(item.url)) {
+          throw new Error(`OWNER_PAGE_INVALID：只看星主跨页项目重复：${item.url}`);
+        }
+        seenItemUrls.add(item.url);
+      }
+      seenPageKeys.add(page.pageKey);
+      if (Number.isFinite(pageOldestTimestamp)) previousPageOldestTimestamp = pageOldestTimestamp;
+      context = page.context;
+      audit.pagesFetched += 1;
+      audit.observed += page.rawCount;
+      newestObservedAt ??= page.newestObservedAt;
+      oldestObservedAt = page.oldestObservedAt ?? oldestObservedAt;
+      if (newestObservedAt) audit.newestObservedAt = newestObservedAt;
+      if (oldestObservedAt) audit.oldestObservedAt = oldestObservedAt;
+      const pageDays = new Map<string, ZsxqDayDraft>();
+      const dayFor = (publishedAt: string): ZsxqDayDraft => {
+        const day = shanghaiPublicationDay(publishedAt);
+        if (!day) throw new Error(`PUBLISHED_AT_UNPROVEN：知识星球发布时间无效：${publishedAt}`);
+        const existing = pageDays.get(day);
+        if (existing) return existing;
+        const created = emptyOwnerDayDraft(day);
+        pageDays.set(day, created);
+        return created;
+      };
+      for (const skipped of page.businessSkips) {
+        const draft = dayFor(skipped.publishedAt);
+        draft.rawOwnerCount += 1;
+        draft.filteredCount += 1;
+        audit.filtered += 1;
+        reject(skipped.url, skipped.reason);
+      }
+
+      const staged: Array<{
+        jobId: string;
+        document: CollectedDocument;
+        draft: ZsxqDayDraft;
+        repair: boolean;
+      }> = [];
+      for (const document of page.documents) {
+        const publishedAt = document.publishedAt;
+        const topicId = typeof document.sourceMetadata?.topicId === 'string'
+          ? document.sourceMetadata.topicId
+          : undefined;
+        if (document.sourceMetadata?.authorRole !== 'owner' || !publishedAt) {
+          throw new Error(
+            `AUTHOR_IDENTITY_UNPROVEN：只看星主分页项目身份或发布时间未证明：${document.canonicalUrl}`,
+          );
+        }
+        const draft = dayFor(publishedAt);
+        draft.rawOwnerCount += 1;
+        const exact = byUrl.get(document.canonicalUrl) ?? (topicId ? byTopicId.get(topicId) : undefined);
+        if (exact?.contentComplete === true) {
+          draft.qualifyingCount += 1;
+          draft.exactDuplicateCount += 1;
+          draft.knownCompleteCount += 1;
+          audit.qualifying += 1;
+          audit.exactDuplicates += 1;
+          audit.knownComplete += 1;
+          draft.itemFacts?.push({
+            url: document.canonicalUrl,
+            day: draft.day,
+            outcome: 'exact',
+            mappedUrl: exact.url,
+          });
+          reject(document.canonicalUrl, '本机库已有完整正文');
+          continue;
+        }
+        const signature = zsxqSemanticSignature({ publishedAt, authorRole: 'owner', text: document.text });
+        const semantic = completeSemantic.find(entry =>
+          entry.semanticSignature
+          && isHighConfidenceZsxqDuplicate(entry.semanticSignature, signature));
+        if (semantic) {
+          draft.qualifyingCount += 1;
+          draft.semanticDuplicateCount += 1;
+          audit.qualifying += 1;
+          audit.semanticDuplicates += 1;
+          draft.itemFacts?.push({
+            url: document.canonicalUrl,
+            day: draft.day,
+            outcome: 'semantic',
+            mappedUrl: semantic.url,
+          });
+          reject(document.canonicalUrl, '高置信语义重复', semantic.url);
+          continue;
+        }
+
+        const completedDocument = await this.withLinkedArticle(document);
+        if (!/投资|创业|商业模式|经营|财富|职业|职场|认知/u.test(
+          `${completedDocument.title}\n${completedDocument.text}`,
+        )) {
+          draft.filteredCount += 1;
+          audit.filtered += 1;
+          reject(document.canonicalUrl, '非投资创业主题');
+          continue;
+        }
+        if (completedDocument.truncated) {
+          draft.failedCount += 1;
+          audit.failed += 1;
+          reject(
+            document.canonicalUrl,
+            '正文不完整',
+            zsxqIncompleteEvidence(document, completedDocument),
+          );
+          continue;
+        }
+        draft.qualifyingCount += 1;
+        draft.candidateCount += 1;
+        audit.qualifying += 1;
+        const repair = exact !== undefined;
+        if (repair) {
+          draft.repairCount += 1;
+          audit.repaired += 1;
+        }
+        const plannedDocument: CollectedDocument = {
+          ...completedDocument,
+          truncated: false,
+          userCategory: lifeTeacherCategory(completedDocument),
+          sourceMetadata: {
+            ...(completedDocument.sourceMetadata ?? {}),
+            planId: 'zsxq-chen-teacher',
+            batchId,
+            collectionMode: mode,
+          },
+        };
+        const job = await this.options.bridge.createJob(plannedDocument.canonicalUrl, {
+          batchId,
+          planId: 'zsxq-chen-teacher',
+          attempt,
+        });
+        staged.push({ jobId: job.id, document: plannedDocument, draft, repair });
+      }
+
+      for (const item of staged) {
+        this.options.bridge.send('job.progress', item.jobId, { stage: 'collecting' });
+        this.sendDocumentResult(item.jobId, item.document);
+      }
+      try {
+        await Promise.all(staged.map(item =>
+          this.options.bridge.waitForJobTerminal(item.jobId, attempt)));
+      } catch (error) {
+        for (const item of staged) item.draft.failedCount += 1;
+        audit.failed += staged.length;
+        throw error;
+      }
+      for (const item of staged) {
+        item.draft.savedCount += 1;
+        audit.saved += 1;
+        item.draft.itemFacts?.push({
+          url: item.document.canonicalUrl,
+          day: item.draft.day,
+          outcome: item.repair ? 'repaired' : 'saved',
+          mappedUrl: item.document.canonicalUrl,
+        });
+        const savedEntry: ZsxqLibraryIndexEntry = {
+          id: item.jobId,
+          url: item.document.canonicalUrl,
+          ...(typeof item.document.sourceMetadata?.topicId === 'string'
+            ? { topicId: item.document.sourceMetadata.topicId }
+            : {}),
+          publishedAt: item.document.publishedAt!,
+          authorRole: 'owner',
+          contentComplete: true,
+          semanticSignature: zsxqSemanticSignature({
+            publishedAt: item.document.publishedAt!,
+            authorRole: 'owner',
+            text: item.document.text,
+          }),
+        };
+        remember(savedEntry);
+      }
+
+      const oldestPageDay = page.oldestObservedAt
+        ? shanghaiPublicationDay(page.oldestObservedAt)
+        : undefined;
+      const crossed = (day: string): boolean =>
+        page.exhausted || (oldestPageDay !== undefined && oldestPageDay < day);
+      for (const draft of pageDays.values()) draft.crossedDayBoundary = crossed(draft.day);
+      for (const targetDay of targetDays) {
+        if (!crossed(targetDay)) continue;
+        const draft = pageDays.get(targetDay) ?? emptyOwnerDayDraft(targetDay);
+        draft.crossedDayBoundary = true;
+        pageDays.set(targetDay, draft);
+      }
+      for (const draft of pageDays.values()) {
+        accumulatedDays.set(draft.day, mergeOwnerDayDraft(accumulatedDays.get(draft.day), draft));
+      }
+      audit.exhausted = page.exhausted;
+      const checkpoint: ZsxqOwnerCheckpoint = {
+        mode,
+        pagesFetched: audit.pagesFetched,
+        exhausted: page.exhausted,
+        ...(!page.exhausted && page.nextCursor ? { cursor: page.nextCursor } : {}),
+        ...(newestObservedAt ? { newestObservedAt } : {}),
+        ...(oldestObservedAt ? { oldestObservedAt } : {}),
+      };
+      const phase: ZsxqPlanPhaseResult = {
+        discovered: (prelude?.discovered ?? 0) + audit.observed,
+        prepared: false,
+        ...(prelude?.coverage ? { coverage: prelude.coverage } : {}),
+        rejections: { ...rejections },
+        rejectionDetails: [...rejectionDetails],
+        checkpoint,
+        dayDrafts: [...pageDays.values()],
+        ownerAudit: { ...audit },
+      };
+      await reportPhase?.(phase);
+      if (audit.failed > 0) {
+        throw new Error(`CONTENT_COVERAGE_INCOMPLETE：${audit.failed} 条知识星球正文未能完整保存`);
+      }
+      const targetDaysCrossed = targetDays.every(day =>
+        accumulatedDays.get(day)?.crossedDayBoundary === true);
+      if (page.exhausted || (mode === 'daily-ledger' && targetDaysCrossed)) {
+        const completedDays = [...accumulatedDays.values()]
+          .filter(draft => draft.crossedDayBoundary && draft.failedCount === 0);
+        audit.completedDays = completedDays.filter(draft => draft.qualifyingCount > 0).length;
+        audit.emptyDays = completedDays.filter(draft => draft.qualifyingCount === 0).length;
+        await reportPhase?.({ ...phase, prepared: true, ownerAudit: { ...audit } });
+        return { discovered: (prelude?.discovered ?? 0) + audit.observed };
+      }
+      if (!page.nextCursor) {
+        throw new Error('CONTENT_COVERAGE_INCOMPLETE：只看星主分页未耗尽但缺少下一游标');
+      }
+      cursor = page.nextCursor;
+    }
+
+    audit.safetyCapReached = true;
+    throw new Error(`CONTENT_COVERAGE_INCOMPLETE：只看星主已达到 ${ZSXQ_OWNER_MAX_PAGES} 页安全上限，未证明耗尽`);
+  }
+
   async runZsxqCollectionPlan(
     batchId: string,
     attempt: CollectionPlanAttempt,
-    reportPhase?: (result: {
-      discovered: number;
-      prepared: boolean;
-      coverage?: Record<string, number>;
-      rejections?: Record<string, number>;
-      rejectionDetails?: CollectionPlanRejection[];
-    }) => Promise<void> | void,
-    options: { force?: boolean } = {},
+    reportPhase?: (result: ZsxqPlanPhaseResult) => Promise<void> | void,
+    options: {
+      force?: boolean;
+      zsxqMode?: ZsxqCollectionMode;
+      targetDays?: readonly string[];
+      resumeCursor?: string;
+    } = {},
   ): Promise<{ discovered: number }> {
     const groupUrl = 'https://wx.zsxq.com/group/48844584441158';
     let tabId: number | undefined;
@@ -887,6 +1448,27 @@ export class JobRunner {
       if (tab.id === undefined) throw new Error('浏览器未返回知识星球标签页 ID');
       tabId = tab.id;
       await this.options.waitForTabComplete(tabId, 30_000);
+      if (options.zsxqMode) {
+        let prelude: Omit<ZsxqPlanPhaseResult, 'prepared'> | undefined;
+        if (options.zsxqMode === 'daily-ledger') {
+          prelude = await this.runZsxqDailyViews(
+            tabId,
+            batchId,
+            attempt,
+            options.targetDays ?? [],
+          );
+        }
+        return await this.runZsxqOwnerPages(
+          tabId,
+          batchId,
+          attempt,
+          options.zsxqMode,
+          options.targetDays ?? [],
+          options.resumeCursor,
+          reportPhase,
+          prelude,
+        );
+      }
       const collectViews = () => retryTransientTabOperation(
         async () => {
           const audit: ZsxqPlanExtractionAudit = { businessSkips: new Map(), coverage: {} };

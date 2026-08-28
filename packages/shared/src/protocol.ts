@@ -7,6 +7,10 @@ import {
   collectionPlanAttemptSchema,
   collectionPlanIdSchema,
   collectionPlanRejectionSchema,
+  zsxqCollectionModeSchema,
+  zsxqDayDraftSchema,
+  zsxqOwnerAuditSchema,
+  zsxqOwnerCheckpointSchema,
 } from './plans.js';
 
 export const EXTENSION_REPLACED_CLOSE_CODE = 4009;
@@ -152,7 +156,18 @@ export const planCollectPayloadSchema = z.object({
   batchId: z.string().trim().min(1).max(200),
   attempt: collectionPlanAttemptSchema,
   force: z.boolean().optional(),
-}).strict();
+  zsxqMode: zsxqCollectionModeSchema.optional(),
+  targetDays: z.array(z.string().regex(/^\d{4}-\d{2}-\d{2}$/u)).max(3660).optional(),
+  resumeCursor: z.iso.datetime().optional(),
+}).strict().superRefine((payload, context) => {
+  if (payload.zsxqMode && payload.planId !== 'zsxq-chen-teacher') {
+    context.addIssue({
+      code: 'custom',
+      path: ['zsxqMode'],
+      message: '只有知识星球计划支持逐日或历史模式',
+    });
+  }
+});
 
 export const extensionPlanResultPayloadSchema = z.object({
   batchId: z.string().trim().min(1).max(200),
@@ -164,6 +179,9 @@ export const extensionPlanResultPayloadSchema = z.object({
   error: z.string().trim().min(1).max(2_000).optional(),
   needsAttention: z.boolean().optional(),
   prepared: z.boolean().optional(),
+  checkpoint: zsxqOwnerCheckpointSchema.optional(),
+  dayDrafts: z.array(zsxqDayDraftSchema).max(3660).optional(),
+  ownerAudit: zsxqOwnerAuditSchema.optional(),
 }).strict();
 
 export const planResultPayloadSchema = z.union([

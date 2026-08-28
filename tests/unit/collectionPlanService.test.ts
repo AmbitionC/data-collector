@@ -11,6 +11,7 @@ import { JobStore } from '../../packages/bridge/src/jobs/store.js';
 import {
   CollectionPlanService,
   CollectionPlanStore,
+  ZsxqDayLedgerStore,
   planDueState,
 } from '../../packages/bridge/src/plans/index.js';
 import { writePlanBenchmark } from '../../packages/bridge/src/plans/benchmark.js';
@@ -50,6 +51,9 @@ async function fixture(options: {
     planId: 'zsxq-chen-teacher',
     attempt: CollectionPlanAttempt,
     force: boolean,
+    mode: 'daily-ledger' | 'owner-history',
+    targetDays: readonly string[],
+    resumeCursor?: string,
   ) => Promise<true>;
 } = {}) {
   const root = await temporaryDirectories.create('collection-plan-service-');
@@ -64,6 +68,9 @@ async function fixture(options: {
     planId: CollectionPlanId;
     attempt?: string;
     force?: boolean;
+    mode?: 'daily-ledger' | 'owner-history';
+    targetDays?: readonly string[];
+    resumeCursor?: string;
   }> = [];
   const synced: string[] = [];
   const shouldAutoSync = options.shouldAutoSync ?? (async () => false);
@@ -76,15 +83,22 @@ async function fixture(options: {
     planId: 'zsxq-chen-teacher',
     attempt: CollectionPlanAttempt,
     force: boolean,
+    mode: 'daily-ledger' | 'owner-history',
+    targetDays: readonly string[],
+    resumeCursor?: string,
   ) => {
     planMessages.push({
       batchId,
       planId,
       attempt,
       ...(force ? { force: true } : {}),
+      mode,
+      targetDays,
+      ...(resumeCursor ? { resumeCursor } : {}),
     });
     return true as const;
   });
+  const zsxqLedger = await ZsxqDayLedgerStore.open(join(root, 'zsxq-ledger.json'), now);
   const service = new CollectionPlanService({
     store,
     jobs,
@@ -93,6 +107,7 @@ async function fixture(options: {
     discoverNowcoder: discover,
     dispatch: async job => { dispatched.push(job.id); },
     collectZsxq,
+    zsxqLedger,
     shouldAutoSync,
     pendingNowcoderJobs: deliveryBatchId =>
       options.pendingNowcoderJobs?.(jobs.list(), deliveryBatchId) ?? Promise.resolve([]),
@@ -121,11 +136,13 @@ async function fixture(options: {
     dispatched,
     planMessages,
     synced,
+    zsxqLedger,
     setConnected(value: boolean) { connected = value; },
     setNow(value: string) { currentNow = value; },
     async reopen() {
       const reopenedStore = await CollectionPlanStore.open(store.path, now);
       const reopenedJobs = await JobStore.open(jobs.path, { now, id: () => crypto.randomUUID() });
+      const reopenedLedger = await ZsxqDayLedgerStore.open(zsxqLedger.path, now);
       const reopenedService = new CollectionPlanService({
         store: reopenedStore,
         jobs: reopenedJobs,
@@ -134,6 +151,7 @@ async function fixture(options: {
         discoverNowcoder: discover,
         dispatch: async job => { dispatched.push(job.id); },
         collectZsxq,
+        zsxqLedger: reopenedLedger,
         shouldAutoSync,
         pendingNowcoderJobs: deliveryBatchId =>
           options.pendingNowcoderJobs?.(reopenedJobs.list(), deliveryBatchId) ?? Promise.resolve([]),
@@ -180,6 +198,53 @@ function currentZsxqAttempt(store: CollectionPlanStore, batchId: string): Collec
   return attempt;
 }
 
+function dailyLedgerFacts(day = '2026-08-22') {
+  const publishedAt = `${day}T10:00:00.000Z`;
+  return {
+    checkpoint: {
+      mode: 'daily-ledger' as const,
+      pagesFetched: 1,
+      exhausted: true,
+      newestObservedAt: publishedAt,
+      oldestObservedAt: publishedAt,
+    },
+    dayDrafts: [{
+      day,
+      rawOwnerCount: 0,
+      qualifyingCount: 0,
+      filteredCount: 0,
+      exactDuplicateCount: 0,
+      semanticDuplicateCount: 0,
+      knownCompleteCount: 0,
+      repairCount: 0,
+      candidateCount: 0,
+      savedCount: 0,
+      failedCount: 0,
+      crossedDayBoundary: true,
+    }],
+    ownerAudit: {
+      mode: 'daily-ledger' as const,
+      pagesFetched: 1,
+      observed: 0,
+      qualifying: 0,
+      exactDuplicates: 0,
+      semanticDuplicates: 0,
+      filtered: 0,
+      knownComplete: 0,
+      repaired: 0,
+      saved: 0,
+      failed: 0,
+      newestObservedAt: publishedAt,
+      oldestObservedAt: publishedAt,
+      exhausted: true,
+      safetyCapReached: false,
+      completedDays: 0,
+      emptyDays: 0,
+      failedDays: 0,
+    },
+  };
+}
+
 async function stageSavedZsxqJob(
   context: Awaited<ReturnType<typeof fixture>>,
   id: string,
@@ -201,6 +266,7 @@ async function stageSavedZsxqJob(
     attempt,
     discovered: 1,
     prepared: true,
+    ...dailyLedgerFacts(),
   });
   await context.jobs.transition(child.id, 'collecting');
   const saved = await context.jobs.transition(child.id, 'saved', {
@@ -233,6 +299,54 @@ async function saveJobs(
 }
 
 describe('CollectionPlanService', () => {
+  it('dispatches owner history from the ledger and finalizes a continuous exhausted day', async () => {
+    const context = await fixture({ now: '2026-08-25T01:05:00.000Z' });
+    const batch = await context.service.run('zsxq-chen-teacher', {
+      force: true,
+      zsxqMode: 'owner-history',
+    });
+    expect(context.planMessages).toEqual([expect.objectContaining({
+      batchId: batch.id,
+      mode: 'owner-history',
+      targetDays: [],
+    })]);
+    const attempt = currentZsxqAttempt(context.store, batch.id);
+    const audit = {
+      mode: 'owner-history' as const,
+      pagesFetched: 1, observed: 1, qualifying: 1, exactDuplicates: 1,
+      semanticDuplicates: 0, filtered: 0, knownComplete: 1, repaired: 0,
+      saved: 0, failed: 0, newestObservedAt: '2026-08-24T10:00:00.000Z',
+      oldestObservedAt: '2026-08-24T10:00:00.000Z', exhausted: true,
+      safetyCapReached: false, completedDays: 0, emptyDays: 0, failedDays: 0,
+    };
+    const completed = await context.service.onExtensionPlanResult({
+      batchId: batch.id,
+      attempt,
+      discovered: 1,
+      prepared: true,
+      checkpoint: {
+        mode: 'owner-history', pagesFetched: 1, exhausted: true,
+        newestObservedAt: audit.newestObservedAt, oldestObservedAt: audit.oldestObservedAt,
+      },
+      dayDrafts: [{
+        day: '2026-08-24', rawOwnerCount: 1, qualifyingCount: 1, filteredCount: 0,
+        exactDuplicateCount: 1, semanticDuplicateCount: 0, knownCompleteCount: 1,
+        repairCount: 0, candidateCount: 0, savedCount: 0, failedCount: 0,
+        crossedDayBoundary: true,
+      }],
+      ownerAudit: audit,
+    });
+
+    expect(completed).toMatchObject({
+      status: 'completed',
+      zsxqMode: 'owner-history',
+      ownerAudit: { exhausted: true, completedDays: 1, emptyDays: 0, failedDays: 0 },
+    });
+    expect(context.zsxqLedger.snapshot().days['2026-08-24']).toMatchObject({
+      status: 'completed_content', qualifyingCount: 1,
+    });
+  });
+
   it('calculates 08:00/09:00 due state in Asia/Shanghai', () => {
     expect(planDueState('zsxq-chen-teacher', '2026-08-23T00:01:00.000Z')).toMatchObject({ due: true });
     expect(planDueState('nowcoder-agent-market', '2026-08-23T00:59:00.000Z')).toMatchObject({ due: false });
@@ -978,6 +1092,8 @@ describe('CollectionPlanService', () => {
       planId: 'zsxq-chen-teacher',
       attempt,
       force: true,
+      mode: 'daily-ledger',
+      targetDays: ['2026-08-22'],
     }]);
 
     const ownerJob = await context.jobs.create({
@@ -1066,6 +1182,8 @@ describe('CollectionPlanService', () => {
       planId: 'zsxq-chen-teacher',
       attempt: currentAttempt,
       force: true,
+      mode: 'daily-ledger',
+      targetDays: ['2026-08-22'],
     }]);
     expect(reopened.store.latest('zsxq-chen-teacher', 1)[0]).toMatchObject({
       status: 'running',
@@ -1119,6 +1237,8 @@ describe('CollectionPlanService', () => {
       batchId: batch.id,
       planId: 'zsxq-chen-teacher',
       attempt: expect.stringMatching(/^[a-f0-9]{16}$/),
+      mode: 'daily-ledger',
+      targetDays: ['2026-08-22'],
     }]);
   });
 
@@ -1244,6 +1364,7 @@ describe('CollectionPlanService', () => {
       attempt: currentAttempt!,
       discovered: 2,
       prepared: true,
+      ...dailyLedgerFacts(),
     });
     expect(prepared).toMatchObject({ status: 'running', accepted: 1, saved: 0 });
 
@@ -1324,6 +1445,7 @@ describe('CollectionPlanService', () => {
       attempt,
       discovered: 1,
       prepared: true,
+      ...dailyLedgerFacts(),
     });
     await context.jobs.transition(child.id, 'collecting');
     const saved = await context.jobs.transition(child.id, 'saved', {
