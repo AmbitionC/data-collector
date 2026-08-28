@@ -297,6 +297,49 @@ describe('ZSXQ API fallback', () => {
     })]);
   });
 
+  it('binds an opaque inline web marker to its signed article descriptor', async () => {
+    const topicId = '2858814484148141';
+    const createTime = '2024-09-11T05:39:00.000Z';
+    const articleId = '0ewht8wi02rl';
+    const articleUrl = `https://articles.zsxq.com/id_${articleId}.html`;
+    const preview = topic(
+      topicId,
+      createTime,
+      '央行资产负债表解析，完整正文见关联长文...',
+    );
+    const full = topic(
+      topicId,
+      createTime,
+      `央行资产负债表解析。每个月央行都会公布资产负债表。<e type="web" id="${articleId}" title="央行资产负债表解析" />`,
+    );
+    (full.talk as Record<string, unknown>).article = {
+      article_id: articleId,
+      article_url: articleUrl,
+      title: '央行资产负债表解析',
+    };
+    const fetcher = async (input: RequestInfo | URL): Promise<Response> => {
+      const url = String(input);
+      if (url === `${API}/groups/${GROUP_ID}`) return groupResponse();
+      if (url === `${API}/groups/${GROUP_ID}/menus`) return menuResponse();
+      if (url === `${API}/topics/${topicId}`) {
+        return response(JSON.stringify({ succeeded: true, resp_data: { topic: full } }));
+      }
+      return topicResponse([preview]);
+    };
+
+    const result = await collectZsxqApiOwnerPage(GROUP_ID, {}, {
+      fetcher,
+      aduid: 'test-device',
+      requestId: () => 'test-request',
+    });
+
+    expect(result.documents).toEqual([expect.objectContaining({
+      truncated: false,
+      html: expect.stringContaining(articleUrl),
+      sourceMetadata: expect.objectContaining({ sourceMediaProven: true }),
+    })]);
+  });
+
   it('filters an explicit property-market preview before requesting topic detail', async () => {
     const topicId = '14422558414184542';
     const requested: string[] = [];

@@ -915,7 +915,7 @@ function sourceAssetsOf(candidate: Record<string, unknown>): SourceAssets {
     const ids: string[] = [];
     for (const key of [
       'image_id', 'imageId', 'file_id', 'fileId', 'video_id', 'videoId',
-      'audio_id', 'audioId', 'media_id', 'mediaId', 'id',
+      'audio_id', 'audioId', 'media_id', 'mediaId', 'article_id', 'articleId', 'id',
     ]) {
       const candidate = value[key];
       if (typeof candidate === 'string' || (typeof candidate === 'number' && Number.isSafeInteger(candidate))) {
@@ -1018,6 +1018,12 @@ function sourceAssetsOf(candidate: Record<string, unknown>): SourceAssets {
       } else {
         const title = assetLabel(value, ['title', 'name']);
         attachments.set(url, { url, ...(title ? { title } : {}) });
+        // ZSXQ represents a linked long-form article twice: an opaque inline
+        // `<e type="web" ... />` placeholder in text and a signed `article`
+        // descriptor carrying the canonical URL. Treat that descriptor as the
+        // structured backing resource, just like an entry in `files`.
+        structuredFileCount += 1;
+        for (const id of idsOf(value)) structuredFileIds.add(id);
       }
     }
 
