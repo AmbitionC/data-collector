@@ -745,6 +745,7 @@ export function parseTopicJson(body: string): unknown {
     'user_id', 'userId',
     'group_id', 'groupId',
     'menu_id', 'menuId',
+    'file_id', 'fileId',
   ]);
   let rewritten = '';
   let copiedUntil = 0;

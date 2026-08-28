@@ -26,6 +26,8 @@ const STICKY_TOPIC_COUNT = 3;
 const PLAN_LOOKBACK_MS = 15 * 24 * 60 * 60 * 1_000;
 const PLAN_ITEMS_PER_VIEW = 20;
 const MAX_VIEW_PAGES = 12;
+const MAX_TOPIC_FILES = 20;
+const DETAIL_BODY_KEYS = ['talk', 'article', 'question', 'answer', 'task', 'solution'] as const;
 const EXPECTED_SCOPES: Record<ZsxqPlanView, string> = {
   最新: 'all',
   精华: 'digests',
@@ -209,6 +211,96 @@ async function apiGet(
 function responseData(payload: unknown): Record<string, unknown> | undefined {
   if (!isRecord(payload)) return undefined;
   return isRecord(payload.resp_data) ? payload.resp_data : undefined;
+}
+
+function safeDownloadUrl(value: unknown): string | undefined {
+  if (typeof value !== 'string' || !value.trim()) return undefined;
+  try {
+    const url = new URL(value);
+    return url.protocol === 'http:' || url.protocol === 'https:' ? url.href : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Topic detail responses expose attachment metadata but deliberately omit the downloadable URL.
+ * Resolve only file objects reachable through the expected topic body; comments and quoted topics
+ * must never cause unrelated authenticated file requests.
+ */
+async function hydrateTopicFileUrls(
+  payload: unknown,
+  topicId: string,
+  dependencies: Required<Pick<ZsxqApiFallbackDependencies, 'fetcher' | 'requestId'>>
+    & Pick<ZsxqApiFallbackDependencies, 'aduid'>,
+): Promise<unknown> {
+  const cloned: unknown = structuredClone(payload);
+  const data = responseData(cloned);
+  const topic = isRecord(data?.topic)
+    ? data.topic
+    : data && identifier(data.topic_id ?? data.topicId) ? data : undefined;
+  if (!topic || identifier(topic.topic_id ?? topic.topicId) !== topicId) return cloned;
+
+  const filesById = new Map<string, Record<string, unknown>[]>();
+  let visited = 0;
+  const visit = (value: unknown, depth: number): void => {
+    if (depth > 8 || visited >= 500) return;
+    visited += 1;
+    if (Array.isArray(value)) {
+      for (const item of value) visit(item, depth + 1);
+      return;
+    }
+    if (!isRecord(value)) return;
+    for (const key of ['files', 'attachments'] as const) {
+      if (!Array.isArray(value[key])) continue;
+      for (const rawFile of value[key]) {
+        if (!isRecord(rawFile)) continue;
+        const alreadyResolved = [
+          rawFile.download_url, rawFile.downloadUrl, rawFile.file_url, rawFile.fileUrl,
+          rawFile.url, rawFile.href,
+        ].some(candidate => safeDownloadUrl(candidate) !== undefined);
+        if (alreadyResolved) continue;
+        const fileId = identifier(rawFile.file_id ?? rawFile.fileId);
+        if (!fileId) {
+          throw coverageError(
+            'ZSXQ_API_FILE_UNPROVEN',
+            `帖子 ${topicId} 的附件缺少可核验 file_id`,
+          );
+        }
+        const copies = filesById.get(fileId) ?? [];
+        copies.push(rawFile);
+        filesById.set(fileId, copies);
+      }
+    }
+    for (const key of ['text', 'content', ...DETAIL_BODY_KEYS] as const) {
+      if (key in value) visit(value[key], depth + 1);
+    }
+  };
+  for (const key of DETAIL_BODY_KEYS) {
+    if (key in topic) visit(topic[key], 0);
+  }
+  if (filesById.size > MAX_TOPIC_FILES) {
+    throw coverageError(
+      'ZSXQ_API_FILE_UNPROVEN',
+      `帖子 ${topicId} 包含 ${filesById.size} 个待解析附件，超过安全上限 ${MAX_TOPIC_FILES}`,
+    );
+  }
+
+  await Promise.all([...filesById].map(async ([fileId, files]) => {
+    const filePayload = await apiGet(
+      `${API_ROOT}/files/${fileId}/download_url`,
+      dependencies,
+    );
+    const downloadUrl = safeDownloadUrl(responseData(filePayload)?.download_url);
+    if (!downloadUrl) {
+      throw coverageError(
+        'ZSXQ_API_FILE_UNPROVEN',
+        `帖子 ${topicId} 的附件 ${fileId} 未返回有效下载地址`,
+      );
+    }
+    for (const file of files) file.download_url = downloadUrl;
+  }));
+  return cloned;
 }
 
 function topicNodes(
@@ -560,7 +652,12 @@ export async function collectZsxqApiOwnerPage(
     // The feed can return only a `...` preview while claiming a structurally valid body. Prefer the
     // signed detail endpoint; the background DOM detail collector remains a fail-closed fallback.
     if (!excluded && !advertisement && relevant && document.truncated === true) {
-      const detailPayload = await apiGet(`${API_ROOT}/topics/${item.topicId}`, common);
+      const rawDetailPayload = await apiGet(`${API_ROOT}/topics/${item.topicId}`, common);
+      const detailPayload = await hydrateTopicFileUrls(
+        rawDetailPayload,
+        item.topicId,
+        common,
+      );
       const detail = ownerDetailDocument(
         groupId,
         item.topicId,

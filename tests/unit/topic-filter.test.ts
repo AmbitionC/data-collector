@@ -82,6 +82,9 @@ describe('楼市与相亲', () => {
 
   it('短列表预览只露出明确标题时也能前置过滤', () => {
     expect(excludedBy('本周楼市分析 本期先看北京的成交和库存。')?.label).toBe('楼市内容');
+    expect(excludedBy(
+      '2026一季度营收和利润数据统计结果（楼市触底确定性进一步增强） 正文预览...',
+    )?.label).toBe('楼市内容');
     expect(excludedBy('北京跌涨比数据：周六 8.97，后续不再追踪。')?.label).toBe('楼市内容');
     expect(excludedBy('发相亲帖了，相亲帖有特别的标签。')?.label).toBe('相亲情感内容');
     expect(excludedBy('入群必看 欢迎加入星球，建议先看精华和只看星主。')?.label)

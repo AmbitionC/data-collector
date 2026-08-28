@@ -125,6 +125,85 @@ describe('ZSXQ API fallback', () => {
     })]);
   });
 
+  it('resolves a detail attachment by exact file id before proving the topic complete', async () => {
+    const topicId = '22255848145158551';
+    const fileId = '9223372036854775802';
+    const createTime = '2026-05-13T23:00:00.000Z';
+    const preview = topic(topicId, createTime, '沪深300所有公司的人均薪酬绝对数据，完整说明和附件在后面...');
+    const full = topic(
+      topicId,
+      createTime,
+      '沪深300所有公司的人均薪酬绝对数据。算法以支付给职工的现金和总人数计算，可供填报志愿、换行业与求职参考。',
+    );
+    (full.talk as Record<string, unknown>).files = [{
+      file_id: fileId,
+      name: '沪深300_2025年度平均薪酬.pdf',
+      hash: 'sha256-placeholder',
+      size: 12345,
+      duration: 0,
+      download_count: 8,
+      create_time: createTime,
+    }];
+    const requested: string[] = [];
+    const fetcher = async (input: RequestInfo | URL): Promise<Response> => {
+      const url = String(input);
+      requested.push(url);
+      if (url === `${API}/groups/${GROUP_ID}`) return groupResponse();
+      if (url === `${API}/groups/${GROUP_ID}/menus`) return menuResponse();
+      if (url === `${API}/topics/${topicId}`) {
+        return response(JSON.stringify({ succeeded: true, resp_data: { topic: full } }));
+      }
+      if (url === `${API}/files/${fileId}/download_url`) {
+        return response(JSON.stringify({
+          succeeded: true,
+          resp_data: { download_url: 'https://files.zsxq.com/沪深300_2025年度平均薪酬.pdf' },
+        }));
+      }
+      return topicResponse([preview]);
+    };
+
+    const result = await collectZsxqApiOwnerPage(GROUP_ID, {}, {
+      fetcher,
+      aduid: 'test-device',
+      requestId: () => 'test-request',
+    });
+
+    expect(requested).toContain(`${API}/files/${fileId}/download_url`);
+    expect(result.documents).toEqual([expect.objectContaining({
+      truncated: false,
+      text: expect.stringContaining('填报志愿、换行业与求职参考'),
+      html: expect.stringContaining('沪深300_2025年度平均薪酬.pdf'),
+    })]);
+  });
+
+  it('filters an explicit property-market preview before requesting topic detail', async () => {
+    const topicId = '14422558414184542';
+    const requested: string[] = [];
+    const fetcher = async (input: RequestInfo | URL): Promise<Response> => {
+      const url = String(input);
+      requested.push(url);
+      if (url === `${API}/groups/${GROUP_ID}`) return groupResponse();
+      if (url === `${API}/groups/${GROUP_ID}/menus`) return menuResponse();
+      return topicResponse([topic(
+        topicId,
+        '2026-05-01T00:00:00.000Z',
+        '2026一季度营收和利润数据统计结果（楼市触底确定性进一步增强） 正文预览...',
+      )]);
+    };
+
+    const result = await collectZsxqApiOwnerPage(GROUP_ID, {}, {
+      fetcher,
+      aduid: 'test-device',
+      requestId: () => 'test-request',
+    });
+
+    expect(requested).not.toContain(`${API}/topics/${topicId}`);
+    expect(result.documents).toEqual([]);
+    expect(result.businessSkips).toEqual([expect.objectContaining({
+      reason: expect.stringContaining('楼市内容'),
+    })]);
+  });
+
   it('filters an irrelevant preview before requesting topic detail', async () => {
     const topicId = '690000000000000097';
     const requested: string[] = [];

@@ -11,17 +11,19 @@ import {
 } from '../../packages/extension/src/topicIndex.js';
 
 describe('harvestTopics', () => {
-  it('preserves every int64 identity field used to prove the topic and its owner', () => {
+  it('preserves every int64 identity field used to prove topics, owners and attachments', () => {
     const payload = parseTopicJson(String.raw`{
       "topic_id":9223372036854775807,
       "group_id":9223372036854775806,
       "menuId":9223372036854775805,
-      "owner":{"user_id":9223372036854775804,"userId":9223372036854775803}
+      "owner":{"user_id":9223372036854775804,"userId":9223372036854775803},
+      "files":[{"file_id":9223372036854775802,"fileId":9223372036854775801}]
     }`) as {
       topic_id: unknown;
       group_id: unknown;
       menuId: unknown;
       owner: { user_id: unknown; userId: unknown };
+      files: Array<{ file_id: unknown; fileId: unknown }>;
     };
 
     expect(payload).toEqual({
@@ -32,6 +34,10 @@ describe('harvestTopics', () => {
         user_id: '9223372036854775804',
         userId: '9223372036854775803',
       },
+      files: [{
+        file_id: '9223372036854775802',
+        fileId: '9223372036854775801',
+      }],
     });
   });
 
