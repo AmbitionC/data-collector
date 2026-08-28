@@ -62,6 +62,40 @@ describe('harvestTopics', () => {
     expect(records[1]?.text).toContain('长期投资');
   });
 
+  it('treats a proven talk.article descriptor as the complete linked-article resource', () => {
+    const articleUrl = 'https://articles.zsxq.com/id_usrkt5tdw0go.html';
+    const payload = {
+      succeeded: true,
+      resp_data: {
+        topic: {
+          topic_id: '55522281552252554',
+          type: 'talk',
+          create_time: '2026-04-05T02:01:00.000Z',
+          talk: {
+            text: '中概股近期性价比分析\n近期中概迎来一波明显下跌，完整论证见关联长文...',
+            article: {
+              article_id: 'usrkt5tdw0go',
+              article_url: articleUrl,
+              title: '中概股近期性价比分析',
+            },
+          },
+        },
+      },
+    };
+
+    const [record] = harvestTopics(payload, 40, {
+      responsePath: 'https://api.zsxq.com/v2/topics/55522281552252554',
+    });
+
+    expect(record).toMatchObject({
+      topicId: '55522281552252554',
+      fullTextTruncated: false,
+      sourceBodyProven: true,
+      sourceMediaProven: true,
+      attachments: [{ url: articleUrl, title: '中概股近期性价比分析' }],
+    });
+  });
+
   it('handles a flat array and a differently named wrapper', () => {
     const records = harvestTopics([
       { data: { topic_id: 700000000000001, question: { text: '怎么看当前的估值水平' } } },

@@ -176,6 +176,46 @@ describe('ZSXQ API fallback', () => {
     })]);
   });
 
+  it('preserves a signed talk.article descriptor and clears the intentional preview tail', async () => {
+    const topicId = '55522281552252554';
+    const createTime = '2026-04-05T02:01:00.000Z';
+    const articleUrl = 'https://articles.zsxq.com/id_usrkt5tdw0go.html';
+    const preview = topic(
+      topicId,
+      createTime,
+      '中概股近期性价比分析\n近期中概迎来一波明显下跌，完整论证见关联长文...',
+    );
+    const full = structuredClone(preview);
+    (full.talk as Record<string, unknown>).article = {
+      article_id: 'usrkt5tdw0go',
+      article_url: articleUrl,
+      title: '中概股近期性价比分析',
+    };
+    const requested: string[] = [];
+    const fetcher = async (input: RequestInfo | URL): Promise<Response> => {
+      const url = String(input);
+      requested.push(url);
+      if (url === `${API}/groups/${GROUP_ID}`) return groupResponse();
+      if (url === `${API}/groups/${GROUP_ID}/menus`) return menuResponse();
+      if (url === `${API}/topics/${topicId}`) {
+        return response(JSON.stringify({ succeeded: true, resp_data: { topic: full } }));
+      }
+      return topicResponse([preview]);
+    };
+
+    const result = await collectZsxqApiOwnerPage(GROUP_ID, {}, {
+      fetcher,
+      aduid: 'test-device',
+      requestId: () => 'test-request',
+    });
+
+    expect(requested).toContain(`${API}/topics/${topicId}`);
+    expect(result.documents).toEqual([expect.objectContaining({
+      truncated: false,
+      html: expect.stringContaining(articleUrl),
+    })]);
+  });
+
   it('filters an explicit property-market preview before requesting topic detail', async () => {
     const topicId = '14422558414184542';
     const requested: string[] = [];

@@ -856,6 +856,28 @@ function attachmentUrlOf(value: unknown, depth = 0): string | undefined {
   return undefined;
 }
 
+function normalizedLinkedArticleUrl(value: unknown): string | undefined {
+  const normalized = normalizedAssetUrl(value);
+  if (!normalized) return undefined;
+  try {
+    const url = new URL(normalized);
+    if (
+      url.hostname.toLowerCase() !== 'articles.zsxq.com'
+      || url.username
+      || url.password
+      || url.port
+      || !/^\/id_[A-Za-z0-9]+\.html\/?$/u.test(url.pathname)
+    ) return undefined;
+    url.hostname = 'articles.zsxq.com';
+    url.pathname = url.pathname.replace(/\/+$/u, '');
+    url.search = '';
+    url.hash = '';
+    return url.href;
+  } catch {
+    return undefined;
+  }
+}
+
 /** 只遍历已知正文分支；评论/引用/作者头像绝不能混进当前帖资源。 */
 function sourceAssetsOf(candidate: Record<string, unknown>): SourceAssets {
   const images = new Map<string, TopicRecordImage>();
@@ -989,6 +1011,16 @@ function sourceAssetsOf(candidate: Record<string, unknown>): SourceAssets {
     }
     if (!isRecord(value)) return;
 
+    if ('article_url' in value || 'articleUrl' in value) {
+      const url = normalizedLinkedArticleUrl(value.article_url ?? value.articleUrl);
+      if (!url || attachments.size >= SOURCE_ATTACHMENT_LIMIT) {
+        markIssue(!url ? 'article:unresolved' : 'article:limit');
+      } else {
+        const title = assetLabel(value, ['title', 'name']);
+        attachments.set(url, { url, ...(title ? { title } : {}) });
+      }
+    }
+
     if ('images' in value) {
       const rawImages = value.images;
       if (!Array.isArray(rawImages)) markIssue('images:not-array');
@@ -1064,6 +1096,7 @@ function sourceAssetsOf(candidate: Record<string, unknown>): SourceAssets {
     const recognized = new Set([
       'text', 'title', 'content', ...TOPIC_BODY_KEYS,
       'images', 'files', 'attachments', 'audio', 'audios', 'video', 'videos',
+      'article_url', 'articleUrl', 'article_id', 'articleId',
     ]);
     for (const [key, nested] of Object.entries(value)) {
       if (recognized.has(key)) continue;
@@ -1183,14 +1216,19 @@ export function harvestTopics(
       const text = parts.join(' ').slice(0, RAW_TEXT_LIMIT);
       // 对号只需要前若干字，归档要的是全文，两者分开留。
       const rawFullText = rawParts.join('\n\n');
-      const fullTextTruncated = extractedBody.truncated
-        || rawFullText.length > FULL_TEXT_LIMIT
-        || rawParts.some(hasZsxqApiPreviewTail);
       const fullText = rawFullText.slice(0, FULL_TEXT_LIMIT);
       const sourceBodyProven = provenBodyNodes.has(node);
       const assets = sourceBodyProven
         ? sourceAssetsOf(node)
         : { images: [], attachments: [], proven: false, issues: [] };
+      // talk.article is the platform's explicit representation of “preview text + linked full
+      // article”. In that closed schema, the trailing ellipsis belongs to the authored preview;
+      // the complete content resource is the exact articles.zsxq.com URL preserved below.
+      const hasLinkedArticle = assets.attachments.some(attachment =>
+        normalizedLinkedArticleUrl(attachment.url) !== undefined);
+      const fullTextTruncated = extractedBody.truncated
+        || rawFullText.length > FULL_TEXT_LIMIT
+        || (!hasLinkedArticle && rawParts.some(hasZsxqApiPreviewTail));
       if (
         normalizeForMatch(text)
         || assets.images.length > 0

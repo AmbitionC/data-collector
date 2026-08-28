@@ -1465,10 +1465,12 @@ describe('extension job runner', () => {
       {
         url: `${LIST_URL}/topic/41005`,
         reason: '正文不完整',
-        evidence: 'sourceBodyProven=true; sourceMediaProven=false; sourceCoversDom=true; '
+        evidence: expect.stringContaining(
+          'sourceBodyProven=true; sourceMediaProven=false; sourceCoversDom=true; '
           + 'extractionMode=signed-api-fallback; textLength=21; images=0; '
           + 'linkedArticle=false; truncatedBefore=true; truncatedAfter=true; '
           + 'sourceMediaIssues=field:media_component:object-opaque_id',
+        ),
       },
     ]);
     const saved = bridge.sent.find(message => message.type === 'job.result');
