@@ -1313,6 +1313,8 @@ describe('CollectionPlanService', () => {
 
   it('keeps a reconnected ZSXQ attempt running until the current attempt and all children finish', async () => {
     const context = await fixture({ shouldAutoSync: async () => true });
+    const runtimeId = '11111111-1111-4111-8111-111111111111';
+    await context.service.onExtensionConnected({ runtimeId });
     const first = await context.service.run('zsxq-chen-teacher', { force: true });
     const firstAttempt = first.preparationAttempt;
     expect(firstAttempt).toMatch(/^[a-f0-9]{16}$/);
@@ -1332,7 +1334,7 @@ describe('CollectionPlanService', () => {
     });
     await context.service.onJobTerminal(firstSaved);
 
-    await context.service.onExtensionConnected();
+    await context.service.onExtensionConnected({ runtimeId });
     const current = context.store.latest('zsxq-chen-teacher', 1)[0]!;
     const currentAttempt = current.preparationAttempt;
     expect(currentAttempt).toBe(firstAttempt);
@@ -1354,6 +1356,22 @@ describe('CollectionPlanService', () => {
       deliveryIds: [expect.stringMatching(/^[a-f0-9]{12}$/)],
     });
     expect(context.synced).toEqual([firstChild.id]);
+  });
+
+  it('restarts an unfinished ZSXQ attempt when a new extension worker takes over', async () => {
+    const context = await fixture();
+    await context.service.onExtensionConnected({
+      runtimeId: '11111111-1111-4111-8111-111111111111',
+    });
+    const batch = await context.service.run('zsxq-chen-teacher', { force: true });
+    const firstAttempt = currentZsxqAttempt(context.store, batch.id);
+
+    await context.service.onExtensionConnected({
+      runtimeId: '22222222-2222-4222-8222-222222222222',
+    });
+
+    expect(currentZsxqAttempt(context.store, batch.id)).not.toBe(firstAttempt);
+    expect(context.planMessages).toHaveLength(2);
   });
 
   it('does not report a no-change success when relevant ZSXQ content stayed incomplete', async () => {

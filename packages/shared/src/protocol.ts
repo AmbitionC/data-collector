@@ -114,6 +114,8 @@ export const bridgeAuthorizedPayloadSchema = z.object({
 export const extensionHelloPayloadSchema = z.object({
   version: z.string().trim().regex(/^\d+\.\d+\.\d+$/).max(50),
   buildId: z.string().trim().min(1).max(200).optional(),
+  /** 同一 Service Worker 的网络重连保持不变；worker 重启后换新。 */
+  runtimeId: z.string().uuid().optional(),
   capabilities: z.array(z.string().trim().min(1).max(100)).max(20).optional(),
 }).strict();
 

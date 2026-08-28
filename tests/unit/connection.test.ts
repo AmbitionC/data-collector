@@ -214,6 +214,7 @@ describe('extension Bridge connection', () => {
       type: 'extension.hello',
       payload: {
         version: APP_VERSION,
+        runtimeId: expect.stringMatching(/^[0-9a-f-]{36}$/),
         capabilities: [ZSXQ_COMPLETE_CONTENT_CAPABILITY],
       },
     });

@@ -100,6 +100,8 @@ const JOB_TERMINAL_ACK_TIMEOUT_MS = 10 * 60_000;
 const RECENT_JOB_TERMINAL_LIMIT = 100;
 
 export class BridgeConnection {
+  /** 区分同一 worker 的 WebSocket 重连与 Service Worker 真正重启。 */
+  private readonly runtimeId = crypto.randomUUID();
   private socket: SocketLike | undefined;
   private pingTimer: unknown;
   private reconnectTimer: unknown;
@@ -283,6 +285,7 @@ export class BridgeConnection {
       this.send('extension.hello', 'extension', {
         version: APP_VERSION,
         ...(runningBuildId ? { buildId: runningBuildId } : {}),
+        runtimeId: this.runtimeId,
         capabilities: [ZSXQ_COMPLETE_CONTENT_CAPABILITY],
       });
       this.startKeepalive();

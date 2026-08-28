@@ -381,6 +381,7 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
   const extensionRuntime = new WeakMap<WebSocket, {
     version: string;
     buildId?: string;
+    runtimeId?: string;
     capabilities: string[];
   }>();
   const extensionHasZsxqProtocol = (socket = extensionSocket): boolean => {
@@ -825,6 +826,7 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
       extensionRuntime.set(socket, {
         version: hello.version,
         ...(hello.buildId ? { buildId: hello.buildId } : {}),
+        ...(hello.runtimeId ? { runtimeId: hello.runtimeId } : {}),
         capabilities: [...(hello.capabilities ?? [])],
       });
       extensionReady = true;
@@ -843,6 +845,7 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
       }
       await collectionPlans?.onExtensionConnected({
         runDue: options.enableCollectionPlanScheduler ?? options.enableFeJourneyScheduler ?? false,
+        ...(hello.runtimeId ? { runtimeId: hello.runtimeId } : {}),
       }).catch(error => {
         console.warn(`[plans] 扩展重连补跑失败：${error instanceof Error ? error.message : error}`);
       });

@@ -178,7 +178,11 @@ export class CollectionPlanService {
    * 同一 Bridge 进程里的 WebSocket 重连不得把这个活跃 attempt 当成进程恢复并换代；
    * Bridge 真正重启后此表为空，持久化中的未完成 attempt 仍会按原逻辑恢复重派。
    */
-  private readonly liveZsxqAttempts = new Map<string, CollectionPlanAttempt>();
+  private readonly liveZsxqAttempts = new Map<string, {
+    attempt: CollectionPlanAttempt;
+    runtimeId?: string;
+  }>();
+  private extensionRuntimeId: string | undefined;
   private readonly syncedJobs = new Set<string>();
   private readonly coveredJobs = new Set<string>();
   private readonly advancingBatches = new Set<string>();
@@ -264,7 +268,19 @@ export class CollectionPlanService {
     }
   }
 
-  async onExtensionConnected(options: { runDue?: boolean } = {}): Promise<void> {
+  async onExtensionConnected(options: { runDue?: boolean; runtimeId?: string } = {}): Promise<void> {
+    if (
+      options.runtimeId !== undefined
+      && this.extensionRuntimeId !== undefined
+      && options.runtimeId !== this.extensionRuntimeId
+    ) {
+      // 新 Service Worker 不可能继续旧 worker 内存里的采集协程；释放门禁，让持久化
+      // 游标按相同批次的新 attempt 恢复。普通网络重连的 runtimeId 相同，不会换代。
+      for (const [batchId, live] of this.liveZsxqAttempts) {
+        if (live.runtimeId !== options.runtimeId) this.liveZsxqAttempts.delete(batchId);
+      }
+    }
+    if (options.runtimeId !== undefined) this.extensionRuntimeId = options.runtimeId;
     const recent = this.dependencies.store.latest(undefined, 100);
     const persistedBatches = recent.concat(
       this.dependencies.store.active().filter(batch => !recent.some(item => item.id === batch.id)),
@@ -844,7 +860,7 @@ export class CollectionPlanService {
   }
 
   private releaseLiveZsxqAttempt(batchId: string, attempt: CollectionPlanAttempt): void {
-    if (this.liveZsxqAttempts.get(batchId) === attempt) {
+    if (this.liveZsxqAttempts.get(batchId)?.attempt === attempt) {
       this.liveZsxqAttempts.delete(batchId);
     }
   }
@@ -862,7 +878,10 @@ export class CollectionPlanService {
         const preparing = await this.dependencies.store.beginPreparation(batch.id);
         zsxqAttempt = preparing.preparationAttempt;
         if (!zsxqAttempt) throw new Error('知识星球采集尝试未生成');
-        this.liveZsxqAttempts.set(batch.id, zsxqAttempt);
+        this.liveZsxqAttempts.set(batch.id, {
+          attempt: zsxqAttempt,
+          ...(this.extensionRuntimeId ? { runtimeId: this.extensionRuntimeId } : {}),
+        });
         const mode = preparing.zsxqMode ?? 'daily-ledger';
         const ledgerRequest = this.dependencies.zsxqLedger?.requestFor(mode)
           ?? { targetDays: [] as string[] };
