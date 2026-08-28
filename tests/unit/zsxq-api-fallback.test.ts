@@ -50,6 +50,53 @@ function menuResponse(): Response {
 }
 
 describe('ZSXQ API fallback', () => {
+  it('retries a transient signed API transport failure before failing the owner page', async () => {
+    const fetcher = vi.fn(async () => {
+      if (fetcher.mock.calls.length < 3) throw new TypeError('network stalled');
+      return topicResponse([]);
+    });
+
+    const result = await collectZsxqApiOwnerPage(GROUP_ID, {
+      context: { ownerId: '1001', ownerName: '陈老师', scope: 'by_owner' },
+    }, {
+      fetcher,
+      aduid: 'test-device',
+      requestId: () => 'test-request',
+    });
+
+    expect(fetcher).toHaveBeenCalledTimes(3);
+    expect(result).toMatchObject({ rawCount: 0, exhausted: true });
+  });
+
+  it('aborts every stalled signed API attempt within a bounded transport deadline', async () => {
+    vi.useFakeTimers();
+    try {
+      const fetcher = vi.fn((_input: RequestInfo | URL, init?: RequestInit) =>
+        new Promise<Response>((_resolve, reject) => {
+          init?.signal?.addEventListener('abort', () => {
+            reject(new DOMException('aborted', 'AbortError'));
+          }, { once: true });
+        }));
+      const pending = collectZsxqApiOwnerPage(GROUP_ID, {
+        context: { ownerId: '1001', ownerName: '陈老师', scope: 'by_owner' },
+      }, {
+        fetcher,
+        aduid: 'test-device',
+        requestId: () => 'test-request',
+      });
+      const rejected = expect(pending).rejects.toThrow(/已重试 3 次.*aborted/u);
+
+      await vi.advanceTimersByTimeAsync(0);
+      await vi.advanceTimersByTimeAsync(10_001);
+      await vi.advanceTimersByTimeAsync(10_001);
+      await vi.advanceTimersByTimeAsync(10_001);
+      await rejected;
+      expect(fetcher).toHaveBeenCalledTimes(3);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('collects a linked article from its exact signed endpoint with complete HTML and media', async () => {
     const articleId = 'usr4im0hkfdhc2';
     const articleUrl = `https://articles.zsxq.com/id_${articleId}.html`;

@@ -28,6 +28,8 @@ const PLAN_LOOKBACK_MS = 15 * 24 * 60 * 60 * 1_000;
 const PLAN_ITEMS_PER_VIEW = 20;
 const MAX_VIEW_PAGES = 12;
 const MAX_TOPIC_FILES = 20;
+const API_TRANSPORT_TIMEOUT_MS = 10_000;
+const API_TRANSPORT_ATTEMPTS = 3;
 const DETAIL_BODY_KEYS = ['talk', 'article', 'question', 'answer', 'task', 'solution'] as const;
 const EXPECTED_SCOPES: Record<ZsxqPlanView, string> = {
   最新: 'all',
@@ -174,16 +176,33 @@ async function apiGet(
   dependencies: Required<Pick<ZsxqApiFallbackDependencies, 'fetcher' | 'requestId'>>
     & Pick<ZsxqApiFallbackDependencies, 'aduid'>,
 ): Promise<unknown> {
-  let response: Response;
-  try {
-    response = await dependencies.fetcher(url, {
-      credentials: 'include',
-      headers: await signedHeaders(url, dependencies.aduid, dependencies.requestId()),
-    });
-  } catch (error) {
-    throw new Error(`ZSXQ_API_FALLBACK_FAILED：知识星球接口请求失败：${error instanceof Error ? error.message : error}`);
+  let response: Response | undefined;
+  let body: string | undefined;
+  let transportError: unknown;
+  for (let attempt = 1; attempt <= API_TRANSPORT_ATTEMPTS; attempt += 1) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), API_TRANSPORT_TIMEOUT_MS);
+    try {
+      response = await dependencies.fetcher(url, {
+        credentials: 'include',
+        headers: await signedHeaders(url, dependencies.aduid, dependencies.requestId()),
+        signal: controller.signal,
+      });
+      body = await response.text();
+      transportError = undefined;
+      break;
+    } catch (error) {
+      transportError = error;
+    } finally {
+      clearTimeout(timeout);
+    }
   }
-  const body = await response.text();
+  if (!response || body === undefined) {
+    const detail = transportError instanceof Error ? transportError.message : String(transportError);
+    throw new Error(
+      `ZSXQ_API_FALLBACK_FAILED：知识星球接口请求失败（已重试 ${API_TRANSPORT_ATTEMPTS} 次）：${detail}`,
+    );
+  }
   let payload: unknown;
   try {
     payload = parseTopicJson(body);
