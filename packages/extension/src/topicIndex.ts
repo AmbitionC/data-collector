@@ -902,7 +902,7 @@ function sourceAssetsOf(candidate: Record<string, unknown>): SourceAssets {
 
   const rememberInlineAssets = (text: string): void => {
     const textOnlyTypes = new Set([
-      'at', 'mention', 'user', 'topic', 'hashtag', 'emoji', 'br',
+      'at', 'mention', 'user', 'topic', 'hashtag', 'emoji', 'br', 'text_bold',
     ]);
     const imageTypes = new Set(['image', 'img', 'photo']);
     const attachmentTypes = new Set([

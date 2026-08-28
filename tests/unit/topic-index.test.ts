@@ -865,6 +865,24 @@ describe('正文被折叠时用接口那份补齐', () => {
     });
     expect(unknownMedia?.sourceMediaProven).toBe(false);
 
+    const [boldText] = harvestTopics({
+      succeeded: true,
+      resp_data: {
+        topics: [{
+          topic_id: '903100000000018',
+          talk: {
+            text: '正文里的加粗只是排版，不是媒体。<e type="text_bold">关键结论</e>',
+          },
+        }],
+      },
+    }, 400, {
+      responsePath: 'https://api.zsxq.com/v2/groups/48844584441158/topics',
+    });
+    expect(boldText).toMatchObject({
+      sourceBodyProven: true,
+      sourceMediaProven: true,
+    });
+
     for (const marker of [
       '<e type="image" image_id="missing-image" />',
       '<e type="file" file_id="missing-file" />',
