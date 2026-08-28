@@ -74,6 +74,16 @@ describe('补齐 PATH', () => {
     const merged = gitSearchPath('darwin', { PATH: '/usr/bin:/opt/homebrew/bin' }).split(':');
     expect(merged.filter(item => item === '/opt/homebrew/bin')).toHaveLength(1);
   });
+
+  it('始终把当前 Node 的 bin 放在最前，npm 子脚本不会切回系统旧 node', () => {
+    const merged = gitSearchPath(
+      'darwin',
+      { PATH: '/usr/local/bin:/usr/bin:/bin' },
+      '/Users/me/.nvm/versions/node/v22.3.0/bin/node',
+    ).split(':');
+    expect(merged[0]).toBe('/Users/me/.nvm/versions/node/v22.3.0/bin');
+    expect(merged.indexOf('/opt/homebrew/bin')).toBeLessThan(merged.indexOf('/usr/bin'));
+  });
 });
 
 describe('解析出一个真能跑的 git', () => {

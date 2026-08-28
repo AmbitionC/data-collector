@@ -60,10 +60,18 @@ export function gitCandidates(platform: NodeJS.Platform): string[] {
 }
 
 /** 把常见安装目录前置进 PATH。前置而不是追加：登录项自带的 `/usr/bin` 会抢在前面。 */
-export function gitSearchPath(platform: NodeJS.Platform, env: NodeJS.ProcessEnv): string {
+export function gitSearchPath(
+  platform: NodeJS.Platform,
+  env: NodeJS.ProcessEnv,
+  execPath: string = process.execPath,
+): string {
   const current = env.PATH ?? '';
   if (platform === 'win32') return current;
-  return [...new Set([...GIT_SEARCH_DIRS, ...current.split(':').filter(Boolean)])].join(':');
+  return [...new Set([
+    dirname(execPath),
+    ...GIT_SEARCH_DIRS,
+    ...current.split(':').filter(Boolean),
+  ])].join(':');
 }
 
 export function gitEnvironment(
