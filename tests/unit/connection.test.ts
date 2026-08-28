@@ -1328,8 +1328,30 @@ describe('extension Bridge connection', () => {
     await expect(connection.zsxqIndex()).resolves.toEqual(entries);
     expect(fetcher).toHaveBeenCalledWith(
       'http://127.0.0.1:17321/v1/library/zsxq-index',
-      { headers: { authorization: `Bearer ${'x'.repeat(43)}` } },
+      expect.objectContaining({
+        headers: { authorization: `Bearer ${'x'.repeat(43)}` },
+        signal: expect.any(AbortSignal),
+      }),
     );
+  });
+
+  it('aborts a stalled compact ZSXQ index request instead of hanging the plan', async () => {
+    const storage = new MemoryStorage({ bridgeToken: 'x'.repeat(43) });
+    let signal: AbortSignal | undefined;
+    const fetcher = vi.fn<typeof fetch>(async (_input, init) => {
+      signal = init?.signal ?? undefined;
+      return new Promise<Response>(() => undefined);
+    });
+    const deps = dependencies(storage, () => new MemorySocket(), fetcher);
+    const connection = new BridgeConnection(deps);
+    const pending = connection.zsxqIndex();
+    const rejected = expect(pending).rejects.toThrow(/去重索引请求超时/u);
+
+    await flushPromises();
+    expect(deps.setTimeout).toHaveBeenCalled();
+    deps.setTimeout.mock.calls.at(-1)![0]();
+    await rejected;
+    expect(signal?.aborted).toBe(true);
   });
 
   it('proxies fixed collection plan status and run requests with extension authorization', async () => {

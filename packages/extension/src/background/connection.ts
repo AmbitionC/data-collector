@@ -607,10 +607,13 @@ export class BridgeConnection {
   /** 固定知识星球计划使用的正文无关紧凑索引，供打开帖子前去重。 */
   async zsxqIndex(): Promise<ZsxqLibraryIndexEntry[]> {
     const { baseUrl, token } = await this.authorized();
-    const fetcher = this.dependencies.fetch;
-    const response = await fetcher(`${baseUrl}/v1/library/zsxq-index`, {
+    const response = await this.fetchWithDeadline(
+      `${baseUrl}/v1/library/zsxq-index`,
+      {
       headers: { authorization: `Bearer ${token}` },
-    });
+      },
+      '知识星球去重索引请求超时',
+    );
     if (!response.ok) throw new Error(`读取知识星球去重索引失败：HTTP ${response.status}`);
     const body = (await response.json()) as { entries?: unknown };
     if (!Array.isArray(body.entries)) throw new Error('知识星球去重索引响应无效');
@@ -684,6 +687,30 @@ export class BridgeConnection {
     const settings = await this.settings();
     if (!settings.token) throw new Error('浏览器扩展仍在自动连接 Bridge');
     return { baseUrl: `http://127.0.0.1:${settings.port}`, token: settings.token };
+  }
+
+  private async fetchWithDeadline(
+    url: string,
+    init: RequestInit,
+    timeoutMessage: string,
+    timeoutMs = 15_000,
+  ): Promise<Response> {
+    const controller = new AbortController();
+    let timeoutHandle: unknown;
+    const timeout = new Promise<never>((_resolve, reject) => {
+      timeoutHandle = this.dependencies.setTimeout(() => {
+        controller.abort();
+        reject(new Error(timeoutMessage));
+      }, timeoutMs);
+    });
+    try {
+      return await Promise.race([
+        this.dependencies.fetch(url, { ...init, signal: controller.signal }),
+        timeout,
+      ]);
+    } finally {
+      if (timeoutHandle !== undefined) this.dependencies.clearTimeout(timeoutHandle);
+    }
   }
 
   async reveal(path: string): Promise<void> {
