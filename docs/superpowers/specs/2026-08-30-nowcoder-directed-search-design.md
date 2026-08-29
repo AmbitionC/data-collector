@@ -21,7 +21,7 @@
 1. **复用现有可信链路。** 搜索只负责发现；详情采集、稳定内容 ID、本机库、证据等级、30 天规则、Agent 研发岗位判断、问题簇去重和收件箱同步继续复用现有实现。
 2. **不模拟搜索页 DOM。** Side Panel 提供与 Browser Use 等价的关键词和“最新”能力，Bridge 直接请求牛客搜索 JSON 接口；扩展只打开详情 URL。页面 DOM 改版不应破坏搜索。
 3. **当前运行闭环。** 定向运行的交付只能来自该运行的搜索会话和详情任务，不得用历史 pending 内容凑足目标。
-4. **精确终态。** `completed` 必须同时满足 `deliveryIds.length === accepted === delivered === target`，且 ID、URL、问题簇均唯一。少一篇就进入 `completed_with_attention`，不产生部分交付。
+4. **精确终态。** 私有 `completed` 必须同时满足 `deliveryIds.length === deliveryItems.length === publicDeliveryItems.length === accepted === delivered === target`，且 ID、URL、问题簇均唯一；私有记录中的全部 job 属于当前 run/attempt。公开响应单独以去除 job ID 的 `publicDeliveryItems` 验证同样的 target、ID/URL/簇和 marker 不变量。少一篇就进入 `completed_with_attention`，且没有可消费的部分批次。
 5. **证据优先。** 无法证明“最新”的搜索结果不能静默降级；无法证明扩展构建、详情完整性或当前批次归属时不能交付。
 6. **长任务可控制。** 运行中可停止；取消、重试和 Side Panel 重开均有确定语义，晚到结果不能复活已取消批次。
 7. **最小权限。** 不增加 `<all_urls>`、Cookie 权限或扩展 CSP 外网连接；搜索仍由只监听回环的 Bridge 执行。
@@ -37,6 +37,7 @@
 - 浏览器扩展声明牛客详情能力并支持批次取消；
 - 更新协议、产品文档、冒烟和构建产物 E2E；
 - 使用新版插件采集并发布 10 篇面经及有效知识点。
+- 将“用户显式启动、明确勾选交付 Agent Journey 的定向运行”列为普通手动采集之外的第三类授权例外；CLI 必须显式携带 `--deliver`。
 
 ### 3.2 非目标
 
@@ -44,7 +45,7 @@
 - 不绕过登录、验证码、付费墙或站点访问控制；
 - 不采集评论、Cookie、LocalStorage 或搜索页整屏 HTML；
 - 不让用户勾选绕过 30 天、A/B 证据、Agent 岗位、完整性或去重门槛；
-- 不改变知识星球计划、普通手动采集或已入库同步的产品边界；
+- 不改变知识星球计划、普通“保存这一页/批量保存本页”采集或已入库显式同步的产品边界；
 - 不修改或部署 `fe-journey-faas`。
 
 ## 4. 总体架构
@@ -55,17 +56,19 @@ Side Panel / CLI
   -> Bridge 创建持久 SearchSession
      -> 牛客 JSON Search（order=create）
      -> 规范化、全局最新排序、历史去重、候选预览
-  -> Bridge 创建 Directed Batch（先持久化，再派发）
+  -> Bridge 创建 Directed Run（先持久化，再派发）
      -> WebSocket job.collect
      -> Data Collector 扩展后台详情标签页（并发 <= 2）
      -> 专用 Nowcoder extractor
      -> Bridge 本机库 / 候选索引
      -> 30 天 + Agent 研发岗位 + A/B + 问题簇选择
      -> 不足则从同一 SearchSession 自动补位
-     -> 达标后精确同步 target 条到资源仓库 inbox
+     -> 达标后写入隔离 staging
+     -> 全部校验通过后发布唯一 exact-batch marker
+     -> marker 存在后 target 条才对 manifest 可消费
 ```
 
-搜索请求不经过扩展页面 CSP；详情请求使用用户现有浏览器会话。Bridge 在派发前要求在线扩展声明 `nowcoder-detail-v1`，且运行中的扩展构建标记与磁盘产物完全一致。
+搜索请求不经过扩展页面 CSP；详情请求使用用户现有浏览器会话。Bridge 在开始时冻结扩展版本/build/capability 证据，活跃定向运行持有 artifact lease；每次派发、结果落库、补位和发布前都复核磁盘产物与在线扩展仍是同一 build。Service Worker runtime ID 可因同 build 重启而变化，但所有 runtime ID 都写入审计；build 变化立即 attention。
 
 ## 5. 用户体验
 
@@ -77,7 +80,8 @@ Side Panel / CLI
 - **目标篇数**：1–10，默认 10。
 - **排序**：只读显示“最新发布”；请求固定为 `order=create`。
 - **预览候选**：按钮建立或刷新持久搜索会话。
-- **开始采集**：默认勾选当前可采集候选，选中项只决定优先级；系统可从其余候选继续补位。
+- **交付授权**：明确勾选“达到目标后交付到 Agent Journey 收件箱”；未勾选不能启动自动交付运行。
+- **采集并交付 N 篇**：默认勾选当前可采集候选，选中项只决定优先级；系统可从其余候选继续补位。按钮文案必须把自动交付副作用写出来。
 
 表单草稿和最后一个会话 ID 可存入 `chrome.storage.local`；不得存正文、Cookie、token 或完整搜索响应。
 
@@ -99,9 +103,9 @@ Side Panel / CLI
 界面按同一批次展示：
 
 ```text
-搜索中 -> 候选已就绪 -> 详情采集中 -> 最终筛选 -> 同步中
+搜索中 -> 候选已就绪 -> 详情采集中 -> 最终筛选 -> 发布准备 -> 发布 marker
                                       |-> 需处理
-                                      |-> 已取消
+                                      |-> 已取消（仅进入 publishing 前）
                                       `-> 已完成
 ```
 
@@ -126,10 +130,22 @@ type NowcoderDirectedRunSpec = {
   maxDetails: 24;
   searchSessionId: string;
   idempotencyKey: string;
+  deliveryMode: 'agent-journey-inbox';
 };
 ```
 
 定时计划继续使用当前 preset 和 `CollectionBatch`。Side Panel 与 CLI 只创建 `NowcoderDirectedRun`，不得把任意查询覆盖到预设配置中。定向 store 采用自己的版本化、原子、0600 持久文件，并在启动时兼容空状态；固定计划 store 无需因该功能升级格式。
+
+`NowcoderDirectedRun` 另外持久化：
+
+- `status: running | cancelling | publishing | cancelled | completed | completed_with_attention | failed`；
+- `phase: collecting | selecting | staging | publishing`、当前轮次、候选 cursor、当前轮 job IDs；
+- `attempt`、`retryOf`、冻结扩展 build/capability、观察到的 runtime IDs；
+- 私有 `deliveryItems[]` 每项为 `{ jobId, stableContentId, canonicalUrl, contentHash, clusterId }`；公开 API 使用去掉 jobId 的 `publicDeliveryItems[]`，并提供不可逆 `lineageId` 供对账；
+- `publishReceipt`，包含 exact IDs、entry hashes、marker path/hash 和发布时间；
+- `activeOwnedTabs`、`peakOwnedTabs`、`terminalOwnedTabs`。
+
+store 每次改变 phase/cursor/job ownership/publish receipt 都先原子持久化再产生外部动作。Bridge 启动时按这些 checkpoint 对 JobStore、staging 和 marker 对账：采集中只重派同 attempt 未终态 job；选择阶段不重新搜索；staging/publishing 阶段按 receipt/marker 幂等续写；marker 已存在则只能完成，不能回退为取消。
 
 ### 6.2 搜索会话
 
@@ -152,12 +168,12 @@ type NowcoderDirectedRunSpec = {
 - `GET /v1/nowcoder/search-sessions/:sessionId`：恢复预览；
 - `POST /v1/nowcoder/runs`：从会话创建幂等定向批次，请求只可携带该会话内的 `selectedCandidateIds`；
 - `GET /v1/nowcoder/runs/:runId`：精确读取定向运行；
-- `POST /v1/nowcoder/runs/:runId/cancel`：幂等取消；
-- `POST /v1/nowcoder/runs/:runId/retry`：按原规格创建带 lineage 的新 attempt。
+- `POST /v1/nowcoder/runs/:runId/cancel`：持久状态进入 `publishing` 之前幂等取消；进入 `publishing` 后返回 409 并继续收敛；
+- `POST /v1/nowcoder/runs/:runId/retry`：body 必须携带新的 retry idempotency key，按原冻结候选创建带 lineage 的新 run ID/attempt。
 
 扩展内部消息使用对应的 `nowcoder.search.preview`、`nowcoder.search.run`、`nowcoder.run.status`、`nowcoder.run.cancel` 和 `nowcoder.run.retry`。未知字段、过期会话、非会话候选 ID、重复活跃 queryHash 或错误 idempotency key 均在 Bridge 边界拒绝。详情仍走普通 `job.collect`；取消由 Bridge 发送带 job ID 和运行 attempt 的 `job.cancel`，不引入搜索页内容脚本协议。
 
-CLI 提供同一协议的无 UI 入口，支持重复 `--query`、`--target`、`--wait` 和机器可读单 JSON 输出。后续交付 Skill 只能调用该 CLI 或固定计划 CLI，不调用 Browser Use。
+CLI 提供同一协议的无 UI 入口，支持重复 `--query`、`--target`、必填 `--latest`、必填 `--deliver`、`--wait` 和机器可读单 JSON 输出。后续交付 Skill 只能调用该 CLI 或固定计划 CLI，不调用 Browser Use。
 
 ### 6.4 批次审计
 
@@ -169,8 +185,8 @@ CLI 提供同一协议的无 UI 入口，支持重复 `--query`、`--target`、`
 - 搜索会话 ID、queryHash、查询、provider、`order=create`、sortVerified、页码、排名和发布时间；
 - run/batch/attempt/idempotency/retry lineage；
 - 搜索命中、详情调度、详情保存、合格、交付和拒绝计数；
-- owned tab 配置上限、观察峰值和终态遗留数量；
-- 每个交付项的 current-batch job ID、稳定内容 ID、规范 URL、content hash 和 cluster ID。
+- 按 run/attempt 归属的真实 owned tab 配置上限、观察峰值和终态遗留数量，不用全局 scheduler 计数冒充标签页；
+- `deliveryItems` 中每个 current-run job ID、稳定内容 ID、规范 URL、content hash 和 cluster ID，以及 exact-batch marker receipt。
 
 私有报告使用模式 `0600` 原子写入，不保存正文、HTML、作者、Cookie、认证头或本机绝对源文件路径。
 
@@ -179,22 +195,24 @@ CLI 提供同一协议的无 UI 入口，支持重复 `--query`、`--target`、`
 ### 7.1 幂等
 
 - `idempotencyKey` 在同一规范 request body 下重放返回同一批次；不同 body 重用同一 key 返回冲突。
-- 同一 queryHash 只能有一个活跃定向批次，重复点击返回现有批次。
+- 全局最多一个活跃定向运行；同一请求/幂等键重放返回现有运行，不同查询在活跃期返回 409。这样 Bridge 只持有一个底层 artifact lease，且用户不会同时启动两个争夺相同浏览器容量和 inbox 发布锁的运行。
 - 搜索会话候选 ID 由会话 ID 和规范 URL 派生，UI 不能注入任意 URL。
 
 ### 7.2 重试
 
-- 重试创建新 attempt，保留 `retryOf` 和原始 run spec，并使用原会话冻结的候选集合，不重新搜索偷偷更换内容；
+- 重试请求必须提供新的 retry idempotency key；它创建新 run ID/attempt，保留 `retryOf` 和原始 run spec，并使用原会话冻结的候选集合，不重新搜索偷偷更换内容；相同 retry key 重放返回同一个新 run；
+- 原会话 TTL 只限制首次 start；已有 run 即使会话过期也可从自身冻结候选创建 retry；
 - 已由原 attempt 成功交付或已在永久来源历史处置的 URL 不再进入新 attempt；
 - 临时失败允许按现有冷却规则重试，永久质量拒绝不盲目重采；
 - 原批次和新批次的证据、计数、交付 ID 不相互覆盖。
 
 ### 7.3 取消
 
-- 取消先持久化 `cancelling/cancelled` 意图，再停止发现和后续补位；
+- 取消先持久化 `cancelling` 意图，再停止发现和后续补位；
 - Bridge 向扩展发送当前批次任务取消，扩展中止排队/活跃任务并只关闭自己登记的标签页；批次与 job 都携带不可猜测 attempt，旧 attempt 的结果、回执和取消消息不得影响新 attempt；
 - 每个 job result/result save/sync 入口检查批次取消 fence，晚到结果可保留为本机证据，但不得计入批次选择或触发同步；
 - 重复取消返回同一终态；Side Panel 关闭不等于取消；
+- 取消截止点与交付线性化点是两个不同事实：状态原子进入 `publishing` 后取消返回 409；exact-batch marker 仍是内容“可被 manifest 消费”的交付线性化点。`publishing` 之前成功取消时不存在 marker；进入 `publishing` 后服务必须完成或 attention，不能宣称 cancelled；
 - 取消终态要求 owned tabs 为 0，`deliveryIds=[]`。
 
 ## 8. 选择与交付规则
@@ -211,7 +229,18 @@ CLI 提供同一协议的无 UI 入口，支持重复 `--query`、`--target`、`
 
 每条拒绝记录稳定 reason code 和中文说明。用户选择不改变这些规则。
 
-永久来源历史仅在文件不存在时视为空；JSON 损坏、schema 错误或 I/O 失败必须让定向运行进入 attention，禁止 fail-open 造成重复发布。收件箱同步必须返回逐稳定内容 ID 的 durable receipt；只有 receipt 集合与最终接受集合精确相等时才可完成。
+永久来源历史仅在文件不存在时视为空；JSON 损坏、schema 错误或 I/O 失败必须让定向运行进入 attention，禁止 fail-open 造成重复发布。
+
+定向交付不用现有逐条 `syncEntries(..., atomic:true)` 冒充外部事务，而使用专用 exact-batch publisher：
+
+1. 在目标仓库不可消费的隔离 staging 中生成全部条目和 hash；
+2. 校验 exact `deliveryItems`、当前 run/attempt、本机源文件和最终目录冲突；
+3. 在同一锁内把条目幂等移动到最终 inbox 目录；此时没有 marker，manifest 必须忽略它们；
+4. 最后原子写入唯一 batch marker，内容为 run ID、attempt、恰好 `run.spec.target` 个稳定 ID/目录/hash 和整体 hash；这是交付线性化点；每条交付元数据用 `deliveryKind: 'nowcoder-directed'`、`deliveryBatchId` 和定向 lineage 字段标识，不伪装成固定计划 ID；
+5. `.codex/skills/data-collector-delivery/scripts/inbox-manifest.mjs` 对 directed run 只认 marker 精确列出的条目并复核 hash，marker 缺失、少一条、多一条或 hash 不同都停止；
+6. marker 写入后 store 持久化 `publishReceipt`、私有 `deliveryItems`、公开 `publicDeliveryItems`、`deliveryIds` 和 completed。若进程在 marker 后崩溃，重启从 marker 恢复 completed；不会重投第二批。
+
+marker 前崩溃或取消可能保留不可消费的 staging/无 marker 目录供诊断和重试，但不能生成 manifest。只有 receipt 集合与最终接受集合精确相等时才可完成。
 
 本次真实验收的 `target=10`，且要求 10 条均有当前批次详情 job。任何历史候选池、跨批次手工拼接或部分交付都不算通过。
 
@@ -222,7 +251,9 @@ CLI 提供同一协议的无 UI 入口，支持重复 `--query`、`--target`、`
 - 只接受 canonical HTTPS Nowcoder 详情 URL；
 - 不扩大 manifest host permissions 和 CSP；
 - 详情任务继续共享两槽优先级调度器，峰值不超过 2；
-- 取消或终态后 owned tab 必须为 0；
+- `OwnedTabRegistry` 按 requestId/runId/attempt 记录真实 tab 创建和关闭；一个活跃 directed run 与普通任务的计数互不串账；第二个 directed run 在前一个终态前被 Bridge 拒绝；
+- 取消立即关闭对应 request 的 owned tab，并以 AbortSignal race 终止页面完成等待、提取重试和关联长文等待；取消或终态后当前 run 的 owned tab 必须为 0；
+- 活跃定向运行持有 artifact lease；同 build 的 Service Worker runtime 重启可恢复，build/capability 改变必须 attention；
 - 搜索和采集阶段不调用模型；
 - 搜索失败、验证码、登录或布局异常显式 attention，不以低质量结果补数。
 
@@ -233,7 +264,7 @@ CLI 提供同一协议的无 UI 入口，支持重复 `--query`、`--target`、`
 ### 10.1 共享契约
 
 - 查询 NFKC、空白、数量、长度、控制字符、target 边界和未知字段；
-- preset/directed 判别式 run spec；
+- 独立 directed run spec、私有 `deliveryItems`/公开 `publicDeliveryItems`/计数/ID/URL/cluster 精确性及公开响应无 job ID；
 - HTTP 请求/响应、取消、重试、精确 batch schema；
 - `nowcoder-detail-v1` capability 和旧扩展拒绝。
 
@@ -245,7 +276,10 @@ CLI 提供同一协议的无 UI 入口，支持重复 `--query`、`--target`、`
 - 会话原子持久化、过期恢复和 candidate ownership；
 - idempotency 重放、同 queryHash 活跃冲突、retry lineage；
 - 当前批次 exact target、24 条预算、无历史池补数；
-- 取消发现、排队、补位和同步，晚结果不能复活；
+- 首轮、refill、selection、staging、marker 前后 Bridge 重启恢复，不重复派发、搜索或发布；
+- 取消发现、排队、活跃等待、补位和进入 `publishing` 前的发布准备，晚结果不能复活；进入 `publishing` 后返回冲突并收敛；
+- 第 N 条 staging/move 失败、marker 写入失败、marker 后崩溃与发布期取消的线性化测试；
+- retry 新 key、过期 session、重复 retry 和冻结候选测试；
 - 批次审计、私有模式和无敏感字段。
 
 ### 10.3 扩展与 Side Panel
@@ -254,7 +288,9 @@ CLI 提供同一协议的无 UI 入口，支持重复 `--query`、`--target`、`
 - 较旧预览响应不能覆盖较新的查询；
 - worker/Side Panel 重启后从 Bridge 恢复；
 - connection payload、Bearer、401/409/timeout 中文错误；
-- cancel 关闭 owned tabs，不关闭用户标签页；
+- cancel 有界终止 active wait/retry/linked-article，关闭当前 run owned tabs，不关闭用户标签页；
+- 普通任务与唯一活跃 directed run 并发时 per-run owned-tab 峰值/终态互不串账；第二个 directed run 被拒绝；
+- 中途 artifact 替换、不同 build 扩展重连进入 attention；同 build runtime 重启从 Bridge checkpoint 恢复；
 - 构建产物中输入关键词 -> 最新预览 -> 采集 -> 补位 -> exact terminal；
 - 扩展 trace 只打开详情 URL，从不打开 `/search`，不执行 type/click 排序操作；
 - 微信、知识星球、普通详情采集和现有固定计划无回归。
@@ -264,9 +300,9 @@ CLI 提供同一协议的无 UI 入口，支持重复 `--query`、`--target`、`
 - 安装带新版本和 build ID 的扩展，Bridge health 证明在线且 capability 完整；
 - 由 CLI/Side Panel 创建 directed run，target 为 10；
 - batch 审计证明 `order=create`、`codexBrowserUse=false`、模型调用/Token 为 0；
-- `deliveryIds` 恰好 10 个唯一 ID，全部关联当前批次 job；
+- 私有 `deliveryIds`/`deliveryItems`、公开 `publicDeliveryItems`、accepted/delivered/target 都恰好 10，URL 与 cluster 唯一；私有项全部关联当前 run/attempt job，公开项不泄漏 job ID；
 - owned tab 峰值不超过 2，终态为 0；
-- 精确 current-batch manifest 恰好 10 条可消费内容；
+- exact-batch marker 与精确 current-run manifest 都恰好 10 条；无 marker 的 partial inbox/staging 不可消费；
 - 资源仓库按自身 Skills 完成面经、知识点、简约清新 SVG 图、树/历史/热度验证、push 和 `sync-content`；
 - 线上成功后只清理已确认消费的当前批次 inbox 条目。
 
@@ -276,7 +312,7 @@ CLI 提供同一协议的无 UI 入口，支持重复 `--query`、`--target`、`
 
 以后处理“搜索/收集牛客大厂 Agent 面经”时，默认流程是：
 
-1. 用 Data Collector directed CLI 或 Side Panel 提交关键词和目标数量；
+1. 用 Data Collector directed CLI（显式 `--deliver`）或 Side Panel（显式勾选交付授权）提交关键词和目标数量；
 2. Bridge 按最新搜索并由浏览器扩展采集详情；
 3. 只消费终态 `completed` 的 exact-batch manifest；
 4. 使用资源仓库 Skills 整理和发布；
