@@ -208,6 +208,7 @@ export class NowcoderDirectedSelectionCoordinator {
         processed.eligible,
         run.buildEvidence.frozenAt,
         run.spec.target,
+        'latest-search',
       );
     } catch {
       return await this.finishSystemic(context, 'DIRECTED_SELECTION_INVARIANT_FAILED');

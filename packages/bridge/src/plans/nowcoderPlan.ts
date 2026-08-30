@@ -121,11 +121,12 @@ function repeatsQuestionSequence(left: CollectedDocument, right: CollectedDocume
     && hammingDistance64(simHash64(left.text), simHash64(right.text)) <= 9;
 }
 
-/** 30 天内 A/B 级真实面经，按公司轮转优先保证多样性，再由充足来源补满目标。 */
+/** A/B 级真实面经，固定计划限 30 天；定向搜索沿已验证的 latest 顺序继续补位。 */
 export function selectNowcoderPlanCandidates(
   documents: readonly CollectedDocument[],
   now: string,
   target: number = FE_JOURNEY_PRESET.nowcoder.planTargetAccepted,
+  mode: 'fixed-plan' | 'latest-search' = 'fixed-plan',
 ): NowcoderPlanSelection {
   if (!Number.isInteger(target) || target < 1 || target > 10) {
     throw new RangeError('目标数量必须在 1–10 之间');
@@ -148,7 +149,11 @@ export function selectNowcoderPlanCandidates(
   for (const raw of documents) {
     const document = enrichNowcoderEvidence(raw);
     const recentAt = recencyOf(document);
-    if (recentAt === undefined || recentAt < cutoff || recentAt > currentTime) {
+    if (
+      recentAt === undefined
+      || recentAt > currentTime
+      || (mode === 'fixed-plan' && recentAt < cutoff)
+    ) {
       reject(document, '超过30天', 'OUTSIDE_30_DAYS');
       continue;
     }

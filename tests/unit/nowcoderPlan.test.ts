@@ -56,6 +56,17 @@ describe('Nowcoder fixed collection plan selection', () => {
       .toThrow('目标数量');
   });
 
+  it('keeps the fixed-plan 30-day window but lets directed latest search continue to older hits', () => {
+    const olderValid = interview('tencent', 29_999, '2026-06-15T04:00:00.000Z');
+
+    expect(selectNowcoderPlanCandidates(
+      [olderValid], '2026-08-23T01:00:00.000Z', 1,
+    ).accepted).toEqual([]);
+    expect(selectNowcoderPlanCandidates(
+      [olderValid], '2026-08-23T01:00:00.000Z', 1, 'latest-search',
+    ).accepted).toHaveLength(1);
+  });
+
   it('fills exactly ten slots without a company cap while preserving available diversity', () => {
     const candidates = [
       ...Array.from({ length: 10 }, (_, index) => interview('alibaba', 32_000 + index)),
