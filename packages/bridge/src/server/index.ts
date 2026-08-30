@@ -931,11 +931,13 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
       observedAt: new Date().toISOString(),
     };
   };
+  const nowcoderTargetRoot = router.directedSyncTarget('nowcoder')?.root;
   const directedSessionController = directedStore
     ? new NowcoderDirectedSessionController({
         store: directedStore,
         jobs,
         libraryRoot: config.libraryRoot,
+        ...(nowcoderTargetRoot ? { targetRoot: nowcoderTargetRoot } : {}),
         ...(options.fetch ? { fetch: options.fetch } : {}),
       })
     : undefined;
@@ -990,7 +992,6 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
         reportRecoveryFailure: error => quarantineDirectedError(error.code, error.message),
       })
     : undefined;
-  const nowcoderTargetRoot = router.directedSyncTarget('nowcoder')?.root;
   if (directedService) {
     directedSelection = new NowcoderDirectedSelectionCoordinator({
       store: directedStore!,

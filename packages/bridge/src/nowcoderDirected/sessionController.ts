@@ -5,7 +5,7 @@ import {
   type NowcoderSearchSession,
 } from '@data-collector/shared';
 import type { JobStore } from '../jobs/store.js';
-import { listLibrary } from '../library/manage.js';
+import { loadStrictProcessedNowcoderHistory } from '../plans/nowcoderProcessedHistory.js';
 import { discoverNowcoderDirectedCandidates } from './discovery.js';
 import type { NowcoderDirectedStore } from './store.js';
 
@@ -25,6 +25,7 @@ export interface NowcoderDirectedSessionControllerOptions {
   store: NowcoderDirectedStore;
   jobs: JobStore;
   libraryRoot: string;
+  targetRoot?: string;
   fetch?: typeof fetch;
   now?: () => Date;
   id?: () => string;
@@ -44,13 +45,14 @@ export class NowcoderDirectedSessionController {
 
   async create(rawRequest: NowcoderSearchPreviewRequest): Promise<NowcoderSearchSession> {
     const request = nowcoderSearchPreviewRequestSchema.parse(rawRequest);
-    const knownUrls = new Set([
-      ...(await listLibrary(this.options.libraryRoot)).map(entry => entry.url),
-      ...this.options.jobs.list().map(job => job.url),
-    ]);
     const now = new Date(this.now().getTime());
     let discovery: Awaited<ReturnType<typeof discoverNowcoderDirectedCandidates>>;
     try {
+      const knownUrls = new Set<string>();
+      if (this.options.targetRoot) {
+        const { snapshot } = await loadStrictProcessedNowcoderHistory(this.options.targetRoot);
+        for (const entry of snapshot.hashesByUrl) knownUrls.add(entry.url);
+      }
       discovery = await discoverNowcoderDirectedCandidates(
         this.fetcher,
         request,

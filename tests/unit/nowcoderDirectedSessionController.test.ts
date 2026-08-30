@@ -30,7 +30,7 @@ function searchResponse(
 }
 
 describe('NowcoderDirectedSessionController', () => {
-  it('persists one normalized 30-minute session from JSON latest search and excludes local/job URLs', async () => {
+  it('excludes only published history while allowing local and old-job URLs to be recollected', async () => {
     const root = await temporaryDirectories.create('nowcoder-directed-session-controller-');
     const storePath = join(root, 'directed.json');
     const store = await NowcoderDirectedStore.open(storePath);
@@ -46,6 +46,18 @@ describe('NowcoderDirectedSessionController', () => {
       relativePath: 'nowcoder/known/index.md',
       updatedAt: NOW,
     }])}\n`, 'utf8');
+    await mkdir(join(root, '.codex'), { recursive: true });
+    await writeFile(join(root, '.codex', 'interview-source-history.json'), `${JSON.stringify({
+      schemaVersion: 1,
+      updatedAt: '2026-08-30',
+      records: {
+        aaaaaaaaaaaa: {
+          source: 'nowcoder', url: LOCAL_URL, contentHash: '1'.repeat(16),
+          clusterId: 'cluster-known', evidenceGrade: 'B', status: 'skipped',
+          publicFiles: [], knowledgeKeys: [], processedAt: NOW,
+        },
+      },
+    })}\n`, 'utf8');
     const bodies: unknown[] = [];
     const fetcher = vi.fn<typeof fetch>(async (_url, init) => {
       const body = JSON.parse(String(init?.body)) as { page: number };
@@ -64,6 +76,7 @@ describe('NowcoderDirectedSessionController', () => {
       store,
       jobs,
       libraryRoot: root,
+      targetRoot: root,
       fetch: fetcher,
       now: () => new Date(NOW),
       id: () => SESSION_ID,
@@ -92,6 +105,7 @@ describe('NowcoderDirectedSessionController', () => {
     expect(session.candidates.map(candidate => candidate.canonicalUrl)).toEqual([
       NEWEST_URL,
       OLDER_URL,
+      JOB_URL,
     ]);
     expect(fetcher.mock.calls.every(([url]) =>
       new URL(String(url)).hostname === 'gw-c.nowcoder.com')).toBe(true);
