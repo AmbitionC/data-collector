@@ -280,6 +280,7 @@ export class NowcoderDirectedSelectionCoordinator {
           revalidatedProcessed.eligible,
           run.buildEvidence.frozenAt,
           run.spec.target,
+          'latest-search',
         );
       } catch (error) {
         if (error instanceof NowcoderDirectedDocumentError) {

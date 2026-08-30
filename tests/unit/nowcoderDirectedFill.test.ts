@@ -130,7 +130,10 @@ function directedLocalEvidence(url: string, input: ReturnType<typeof organize>) 
 
 type DirectedTransactionTestContext = DirectedTransactionBoundaryContext;
 
-async function directedDocumentFixture(options: { omitDocumentPublishedAt?: boolean } = {}) {
+async function directedDocumentFixture(options: {
+  omitDocumentPublishedAt?: boolean;
+  publishedAt?: string;
+} = {}) {
   const root = await temporaryDirectories.create('nowcoder-directed-document-');
   await mkdir(join(root, '_catalog'), { recursive: true });
   const url = 'https://www.nowcoder.com/discuss/8001';
@@ -139,6 +142,7 @@ async function directedDocumentFixture(options: { omitDocumentPublishedAt?: bool
   const router = SinkRouter.build(undefined, { libraryRoot: root });
   const index = await FeJourneyCandidateIndex.open(root);
   const document = collected(url);
+  if (options.publishedAt) document.publishedAt = options.publishedAt;
   if (options.omitDocumentPublishedAt) delete document.publishedAt;
   const results = await saveCollectedDocument(router, index, document, undefined, {
     runId, attempt: ATTEMPT, currentJobId: jobId,
@@ -162,7 +166,7 @@ async function directedDocumentFixture(options: { omitDocumentPublishedAt?: bool
     spec: { target: 1, maxDetails: 24 },
     frozenCandidates: [{
       id: 'candidate-1', canonicalUrl: url, contentType: 'post', matchedQueries: ['Agent'],
-      page: 1, rank: 1, publishedAt: '2026-08-29T00:00:00.000Z',
+      page: 1, rank: 1, publishedAt: options.publishedAt ?? '2026-08-29T00:00:00.000Z',
     }],
     candidateCursor: 1,
     currentJobIds: [jobId],
@@ -321,6 +325,36 @@ describe('directed Nowcoder exact current-run fill planning', () => {
       .resolves.toEqual({ state: 'paused' });
     expect(guardBoundary).toHaveBeenCalledWith(fixture.run.id, fixture.run.attempt, 'before-staging');
     expect(checkpointCurrentRun).not.toHaveBeenCalled();
+  });
+
+  it('revalidates staging with the same latest-search policy for older exact search results', async () => {
+    const fixture = await directedDocumentFixture({ publishedAt: '2026-05-20T00:00:00.000Z' });
+    const history = { version: 1 as const, hashesByUrl: [], clusterIds: [] };
+    const checkpointCurrentRun = vi.fn(async () => undefined);
+    const store = {
+      persistHistorySnapshotCurrent: vi.fn(async () => ({
+        snapshot: history,
+        digest: processedNowcoderHistoryDigest(history),
+      })),
+      checkpointCurrentRun,
+      selectionCheckpointFingerprint: vi.fn(() => 'committed-older-search-result'),
+    } as unknown as NowcoderDirectedStore;
+    const service = {
+      guardBoundary: vi.fn(async () => true),
+    } as unknown as NowcoderDirectedService;
+    const coordinator = new NowcoderDirectedSelectionCoordinator({
+      store, service: () => service, libraryRoot: fixture.root, targetRoot: fixture.root, now: () => NOW,
+    });
+
+    await expect(coordinator.reconcile({ run: fixture.run, jobs: [fixture.job] })).resolves.toEqual({
+      state: 'committed',
+      checkpointFingerprint: 'committed-older-search-result',
+    });
+    expect(checkpointCurrentRun).toHaveBeenCalledWith(
+      fixture.run.id,
+      fixture.run.attempt,
+      expect.objectContaining({ phase: 'staging', accepted: 1 }),
+    );
   });
 
   it('rebuilds the complete staging audit when an unaccepted snapshot changes during the guard', async () => {
