@@ -20,7 +20,11 @@ const outputDirectory = join(packageRoot, 'dist');
  * `unknown` 不是可审计的身份，不允许进入部署链路。
  */
 function buildStamp() {
-  const git = args => execFileSync('git', args, { cwd: workspaceRoot });
+  // 定向采集实现会跨多个包变更，binary diff 很容易超过 Node 默认的 1 MiB。
+  const git = args => execFileSync('git', args, {
+    cwd: workspaceRoot,
+    maxBuffer: 32 * 1024 * 1024,
+  });
   const commit = git(['rev-parse', '--short=7', 'HEAD']).toString('utf8').trim();
   if (!/^[0-9a-f]{7}$/i.test(commit)) {
     throw new Error(`git 返回了无效的构建提交号：${JSON.stringify(commit)}`);

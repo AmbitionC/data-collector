@@ -2,9 +2,11 @@ import {
   APP_VERSION,
   EXTENSION_REPLACED_CLOSE_CODE,
   EXTENSION_REPLACED_CLOSE_REASON,
+  NOWCODER_DETAIL_CAPABILITY,
   ZSXQ_COMPLETE_CONTENT_CAPABILITY,
   bridgeAuthorizedPayloadSchema,
   collectionPlanAttemptSchema,
+  jobCancelPayloadSchema,
   jobCollectPayloadSchema,
   jobFailedPayloadSchema,
   jobSavedPayloadSchema,
@@ -12,6 +14,7 @@ import {
   wsEnvelopeSchema,
   type CollectionPlanAttempt,
   type CollectionPlanId,
+  type NowcoderDirectedRunAttempt,
   type ZsxqCollectionMode,
   type ZsxqLibraryIndexEntry,
 } from '@data-collector/shared';
@@ -44,7 +47,23 @@ interface ConnectionDependencies {
   clearTimeout: (handle: unknown) => void;
 }
 
-type CollectHandler = (requestId: string, url: string, interactive: boolean) => void | Promise<void>;
+export interface DirectedRemoteJobOwnership {
+  directedRunId: string;
+  directedRunAttempt: NowcoderDirectedRunAttempt;
+}
+
+type CollectHandler = (
+  requestId: string,
+  url: string,
+  interactive: boolean,
+  ownership?: DirectedRemoteJobOwnership,
+) => void | Promise<void>;
+type CancelHandler = (
+  requestId: string,
+  directedRunId: string,
+  directedRunAttempt: NowcoderDirectedRunAttempt,
+) => void | Promise<void>;
+type JobAcknowledgedHandler = (requestId: string) => void | Promise<void>;
 type PlanCollectHandler = (
   requestId: string,
   payload: {
@@ -107,6 +126,8 @@ export class BridgeConnection {
   private reconnectTimer: unknown;
   private reconnectAttempt = 0;
   private collectHandler: CollectHandler | undefined;
+  private cancelHandler: CancelHandler | undefined;
+  private jobAcknowledgedHandler: JobAcknowledgedHandler | undefined;
   private planCollectHandler: PlanCollectHandler | undefined;
   private stopped = false;
   private startPromise: Promise<void> | undefined;
@@ -125,6 +146,14 @@ export class BridgeConnection {
 
   onCollect(handler: CollectHandler): void {
     this.collectHandler = handler;
+  }
+
+  onCancel(handler: CancelHandler): void {
+    this.cancelHandler = handler;
+  }
+
+  onJobAcknowledged(handler: JobAcknowledgedHandler): void {
+    this.jobAcknowledgedHandler = handler;
   }
 
   onPlanCollect(handler: PlanCollectHandler): void {
@@ -171,6 +200,7 @@ export class BridgeConnection {
         routing?: unknown;
         update?: unknown;
         buildId?: unknown;
+        directedRunActive?: unknown;
       };
       await this.dependencies.storage.set({
         ...(health.routing && typeof health.routing === 'object'
@@ -180,6 +210,9 @@ export class BridgeConnection {
         ...(health.update && typeof health.update === 'object' ? { update: health.update } : {}),
         // 磁盘上那份产物的构建标记。和本扩展烙进来的一比就知道自己是不是最新的。
         ...(typeof health.buildId === 'string' ? { buildId: health.buildId } : {}),
+        ...(typeof health.directedRunActive === 'boolean'
+          ? { directedRunActive: health.directedRunActive }
+          : {}),
       });
       if (typeof health.version === 'string') this.bridgeVersion = health.version;
     } catch {
@@ -215,6 +248,7 @@ export class BridgeConnection {
           trustedExtensionId?: unknown;
           routing?: unknown;
           buildId?: unknown;
+          directedRunActive?: unknown;
         };
         if (typeof health.trustedExtensionId !== 'string') {
           throw new Error('Bridge health response is missing trustedExtensionId');
@@ -227,6 +261,9 @@ export class BridgeConnection {
         }
         if (typeof health.buildId === 'string') {
           await this.dependencies.storage.set({ buildId: health.buildId });
+        }
+        if (typeof health.directedRunActive === 'boolean') {
+          await this.dependencies.storage.set({ directedRunActive: health.directedRunActive });
         }
       } catch {
         await this.markDisconnected(generation);
@@ -286,7 +323,8 @@ export class BridgeConnection {
         version: APP_VERSION,
         ...(runningBuildId ? { buildId: runningBuildId } : {}),
         runtimeId: this.runtimeId,
-        capabilities: [ZSXQ_COMPLETE_CONTENT_CAPABILITY],
+        capabilities: [NOWCODER_DETAIL_CAPABILITY, ZSXQ_COMPLETE_CONTENT_CAPABILITY]
+          .sort((left, right) => left.localeCompare(right)),
       });
       this.startKeepalive();
     };
@@ -765,14 +803,42 @@ export class BridgeConnection {
     isCurrent: () => boolean,
     authorize: (token: string) => Promise<void>,
   ): Promise<void> {
+    let message;
     try {
-      const message = wsEnvelopeSchema.parse(JSON.parse(raw));
-      if (!isCurrent()) return;
-      if (message.type === 'bridge.authorized') {
-        const payload = bridgeAuthorizedPayloadSchema.parse(message.payload);
+      message = wsEnvelopeSchema.parse(JSON.parse(raw));
+    } catch {
+      if (isCurrent()) {
+        await this.transition(generation, { bridgeStatus: 'protocol_error' });
+      }
+      return;
+    }
+    if (!isCurrent()) return;
+
+    if (message.type === 'bridge.authorized') {
+      let payload;
+      try {
+        payload = bridgeAuthorizedPayloadSchema.parse(message.payload);
+      } catch {
+        await this.transition(generation, { bridgeStatus: 'protocol_error' });
+        return;
+      }
+      try {
         await authorize(payload.token);
-      } else if (message.type === 'job.collect') {
-        const payload = jobCollectPayloadSchema.parse(message.payload);
+      } catch {
+        // 授权落盘/连接切换属于运行时故障，不得伪报协议损坏。
+      }
+      return;
+    }
+
+    if (message.type === 'job.collect') {
+      let payload;
+      try {
+        payload = jobCollectPayloadSchema.parse(message.payload);
+      } catch {
+        await this.transition(generation, { bridgeStatus: 'protocol_error' });
+        return;
+      }
+      try {
         if (isCurrent()) {
           await this.transitionJob(generation, isCurrent, {
             lastJobId: message.requestId,
@@ -785,11 +851,58 @@ export class BridgeConnection {
           // transitionJob=false 只表示侧栏状态已被更新的一条覆盖，绝不表示这个任务可丢弃。
           // 牛客一批会快速下发 12 条，存储写入重叠时每条仍必须进入采集队列。
           if (isCurrent()) {
-            await this.collectHandler?.(message.requestId, payload.url, payload.interactive);
+            if (payload.directedRunId && payload.directedRunAttempt) {
+              await this.collectHandler?.(
+                message.requestId,
+                payload.url,
+                false,
+                {
+                  directedRunId: payload.directedRunId,
+                  directedRunAttempt: payload.directedRunAttempt,
+                },
+              );
+            } else {
+              await this.collectHandler?.(message.requestId, payload.url, payload.interactive);
+            }
           }
         }
-      } else if (message.type === 'plan.collect') {
-        const payload = planCollectPayloadSchema.parse(message.payload);
+      } catch {
+        // 采集器运行时失败由任务终态表达，不能污染连接协议状态。
+      }
+      return;
+    }
+
+    if (message.type === 'job.cancel') {
+      let payload;
+      try {
+        payload = jobCancelPayloadSchema.parse(message.payload);
+      } catch {
+        await this.transition(generation, { bridgeStatus: 'protocol_error' });
+        return;
+      }
+      try {
+        if (isCurrent()) {
+          await this.cancelHandler?.(
+            message.requestId,
+            payload.directedRunId,
+            payload.directedRunAttempt,
+          );
+        }
+      } catch {
+        // 物理标签页关闭可重试；只有载荷解析失败才是协议错误。
+      }
+      return;
+    }
+
+    if (message.type === 'plan.collect') {
+      let payload;
+      try {
+        payload = planCollectPayloadSchema.parse(message.payload);
+      } catch {
+        await this.transition(generation, { bridgeStatus: 'protocol_error' });
+        return;
+      }
+      try {
         if (isCurrent()) await this.planCollectHandler?.(message.requestId, {
           batchId: payload.batchId,
           planId: payload.planId,
@@ -799,9 +912,22 @@ export class BridgeConnection {
           ...(payload.targetDays ? { targetDays: payload.targetDays } : {}),
           ...(payload.resumeCursor ? { resumeCursor: payload.resumeCursor } : {}),
         });
-      } else if (message.type === 'job.saved' && isCurrent()) {
+      } catch {
+        // 计划处理器错误不是 WebSocket 协议错误。
+      }
+      return;
+    }
+
+    if (message.type === 'job.saved' && isCurrent()) {
+      let payload;
+      try {
         // Bridge 的 job.saved 载荷为 { outputPath, results }（多 sink 后的首要产出路径）。
-        const payload = jobSavedPayloadSchema.parse(message.payload);
+        payload = jobSavedPayloadSchema.parse(message.payload);
+      } catch {
+        await this.transition(generation, { bridgeStatus: 'protocol_error' });
+        return;
+      }
+      try {
         this.recordJobTerminal(message.requestId, {
           status: 'saved',
           ...(payload.attempt ? { attempt: payload.attempt } : {}),
@@ -821,8 +947,26 @@ export class BridgeConnection {
             ? { lastOutputPath: payload.outputPath }
             : {}),
         });
-      } else if (message.type === 'job.failed' && isCurrent()) {
-        const payload = jobFailedPayloadSchema.parse(message.payload);
+      } catch {
+        // 侧栏状态写失败不代表协议载荷无效。
+      }
+      try {
+        await this.jobAcknowledgedHandler?.(message.requestId);
+      } catch {
+        // Bridge 终态已持久化；本地 lifecycle 释放失败只能局部重试。
+      }
+      return;
+    }
+
+    if (message.type === 'job.failed' && isCurrent()) {
+      let payload;
+      try {
+        payload = jobFailedPayloadSchema.parse(message.payload);
+      } catch {
+        await this.transition(generation, { bridgeStatus: 'protocol_error' });
+        return;
+      }
+      try {
         this.recordJobTerminal(message.requestId, {
           status: 'failed',
           message: payload.message,
@@ -833,10 +977,13 @@ export class BridgeConnection {
           lastJobStatus: 'failed',
           lastJobError: payload.message,
         });
+      } catch {
+        // 侧栏状态写失败不代表协议载荷无效。
       }
-    } catch {
-      if (isCurrent()) {
-        await this.transition(generation, { bridgeStatus: 'protocol_error' });
+      try {
+        await this.jobAcknowledgedHandler?.(message.requestId);
+      } catch {
+        // Bridge 终态已持久化；本地 lifecycle 释放失败只能局部重试。
       }
     }
   }

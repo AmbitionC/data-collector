@@ -22,6 +22,82 @@ export interface AssetResult {
   failed: number;
 }
 
+export type AssetWriter = (asset: {
+  filename: string;
+  bytes: Uint8Array;
+}) => Promise<string>;
+
+export interface AssetCollisionFingerprint {
+  sha256: string;
+  byteLength: number;
+}
+
+export interface AssetCollisionMetadata extends AssetCollisionFingerprint {
+  filename: string;
+  mime: string;
+  relativeUrl: string;
+}
+
+export type AssetFingerprint = (bytes: Uint8Array) => AssetCollisionFingerprint;
+
+function defaultAssetFingerprint(bytes: Uint8Array): AssetCollisionFingerprint {
+  return {
+    sha256: createHash('sha256').update(bytes).digest('hex'),
+    byteLength: bytes.byteLength,
+  };
+}
+
+/**
+ * Directed collision authority. Only fixed-size digest metadata survives each sequential write;
+ * fetched response buffers become unreachable as soon as the current loop iteration finishes.
+ */
+export class AssetCollisionTracker {
+  private readonly assets = new Map<string, AssetCollisionMetadata>();
+
+  constructor(private readonly fingerprint: AssetFingerprint = defaultAssetFingerprint) {}
+
+  async resolve(
+    input: {
+      filename: string;
+      bytes: Uint8Array;
+      mime: string;
+      fingerprint?: AssetCollisionFingerprint;
+    },
+    write: () => Promise<string>,
+  ): Promise<string> {
+    const fingerprint = input.fingerprint ?? this.fingerprint(input.bytes);
+    const existing = this.assets.get(input.filename);
+    if (existing) {
+      if (existing.sha256 !== fingerprint.sha256
+        || existing.byteLength !== fingerprint.byteLength
+        || existing.mime !== input.mime) {
+        throw new Error('asset filename collision');
+      }
+      return existing.relativeUrl;
+    }
+    const relativeUrl = await write();
+    this.assets.set(input.filename, {
+      filename: input.filename,
+      sha256: fingerprint.sha256,
+      byteLength: fingerprint.byteLength,
+      mime: input.mime,
+      relativeUrl,
+    });
+    return relativeUrl;
+  }
+
+  /** @internal Instrumentation surface for bounded-memory regression tests. */
+  metadataSnapshot(): readonly AssetCollisionMetadata[] {
+    return [...this.assets.values()].map(item => ({ ...item }));
+  }
+}
+
+class AssetWriterError extends Error {
+  constructor(readonly writerCause: unknown) {
+    super('asset writer failed', { cause: writerCause });
+  }
+}
+
 async function atomicWrite(root: string, path: string, bytes: Uint8Array): Promise<void> {
   await assertSafeWritePath(root, path);
   const temporary = `${path}.${process.pid}.${randomBytes(6).toString('hex')}.tmp`;
@@ -208,6 +284,8 @@ export async function downloadAssets(options: {
   libraryRoot: string;
   fetch: typeof fetch;
   resolveAddresses?: ResolveAddresses;
+  /** Directed transactions can persist the exact fetched manifest without rescanning paths. */
+  writeAsset?: AssetWriter;
 }): Promise<AssetResult> {
   const assetsDirectory = assertInsideRoot(
     options.libraryRoot,
@@ -217,6 +295,7 @@ export async function downloadAssets(options: {
   let html = options.html;
   let downloaded = 0;
   let failed = 0;
+  const writtenAssets = new AssetCollisionTracker();
 
   for (const image of options.images.slice(0, 30)) {
     try {
@@ -237,25 +316,43 @@ export async function downloadAssets(options: {
         const declaredSize = Number(response.headers.get('content-length') ?? 0);
         if (declaredSize > MAX_IMAGE_BYTES) throw new Error('图片超过 10 MB');
         const bytes = await readResponseBytes(response);
-        const digest = createHash('sha256').update(bytes).digest('hex').slice(0, 16);
+        const fullDigest = createHash('sha256').update(bytes).digest('hex');
+        const digest = fullDigest.slice(0, 16);
         const hint = safeSlug(image.alt ?? 'image', 28);
         const filename = `${digest}-${hint}${extension || extname(new URL(image.url).pathname)}`;
-        const target = assertInsideRoot(options.libraryRoot, join(assetsDirectory, filename));
-        await mkdir(assetsDirectory, { recursive: true });
-        await assertSafeWritePath(options.libraryRoot, assetsDirectory);
-        await atomicWrite(options.libraryRoot, target, bytes);
-        const relativeUrl = relative(options.entryDirectory, target).split('\\').join('/');
+        let relativeUrl: string;
+        if (options.writeAsset) {
+          try {
+            relativeUrl = await writtenAssets.resolve({
+              filename,
+              bytes,
+              mime: mime!,
+              fingerprint: { sha256: fullDigest, byteLength: bytes.byteLength },
+            }, async () => await options.writeAsset!({ filename, bytes }));
+          } catch (error) {
+            throw new AssetWriterError(error);
+          }
+        } else {
+          const target = assertInsideRoot(options.libraryRoot, join(assetsDirectory, filename));
+          await mkdir(assetsDirectory, { recursive: true });
+          await assertSafeWritePath(options.libraryRoot, assetsDirectory);
+          await atomicWrite(options.libraryRoot, target, bytes);
+          relativeUrl = relative(options.entryDirectory, target).split('\\').join('/');
+        }
         html = replaceUrl(html, image.url, relativeUrl);
         downloaded += 1;
       } finally {
         clearTimeout(timer);
       }
-    } catch {
+    } catch (error) {
+      if (error instanceof AssetWriterError) throw error.writerCause;
       failed += 1;
     }
   }
 
-  if (downloaded === 0) await rmdir(assetsDirectory).catch(() => undefined);
+  if (downloaded === 0 && !options.writeAsset) {
+    await rmdir(assetsDirectory).catch(() => undefined);
+  }
 
   return { html, downloaded, failed };
 }

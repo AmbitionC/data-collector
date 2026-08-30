@@ -138,6 +138,13 @@ describe('extension build stamp', () => {
     expect(second).not.toBe(first);
   });
 
+  it('can fingerprint a tracked diff larger than Node default stdout buffering', async () => {
+    const root = await fixture();
+    await writeFile(join(root, 'tracked.txt'), 'large local revision\n'.repeat(80_000));
+
+    await expect(buildId(root)).resolves.toMatch(/^v9\.8\.7 · [0-9a-f]{7}\+dirty\.[0-9a-f]{12}$/u);
+  });
+
   it('changes when an untracked file content changes', async () => {
     const root = await fixture();
     await writeFile(join(root, 'notes.txt'), 'first draft\n');

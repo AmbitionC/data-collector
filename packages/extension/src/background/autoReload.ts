@@ -26,6 +26,8 @@ export interface UpdateSignal {
   updateMessage?: string | undefined;
   /** 正在采集：service worker 一重启就断在半路。 */
   busy?: boolean | undefined;
+  /** Bridge has a durable directed run whose worker/runtime must not be replaced. */
+  directedRunActive?: boolean | undefined;
   /** 兼容旧调用；侧栏常开不再阻止重载，任务明细会从持久化状态恢复。 */
   panelOpen?: boolean | undefined;
 }
@@ -70,7 +72,7 @@ export function hasNewBuild(signal: UpdateSignal): boolean {
  */
 export function shouldAutoReload(signal: UpdateSignal): boolean {
   if (!hasNewBuild(signal)) return false;
-  if (signal.busy) return false;
+  if (signal.busy || signal.directedRunActive) return false;
   return signal.triedBuildId !== signal.builtBuildId;
 }
 

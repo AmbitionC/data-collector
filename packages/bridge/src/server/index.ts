@@ -20,6 +20,14 @@ import {
   extensionPlanResultPayloadSchema,
   planStartedPayloadSchema,
   jobResultPayloadSchema,
+  nowcoderDirectedCancelRequestSchema,
+  nowcoderDirectedCancelResponseSchema,
+  nowcoderDirectedRetryRequestSchema,
+  nowcoderDirectedRetryResponseSchema,
+  nowcoderDirectedStartRequestSchema,
+  nowcoderDirectedStartResponseSchema,
+  nowcoderSearchPreviewRequestSchema,
+  nowcoderSearchPreviewResponseSchema,
   wsEnvelopeSchema,
   stableContentId,
   type CollectedDocument,
@@ -46,7 +54,12 @@ import {
   readEntry,
   syncEntries,
 } from '../library/index.js';
-import { buildStampCommit, updateWorkspace, type UpdateOutcome } from '../autoUpdate.js';
+import {
+  buildStampCommit,
+  shouldDeferArtifactUpdate,
+  updateWorkspace,
+  type UpdateOutcome,
+} from '../autoUpdate.js';
 import { runTool, terminateActiveToolProcesses } from '../git.js';
 import {
   FeJourneyCollector,
@@ -72,8 +85,25 @@ import {
 } from '../plans/index.js';
 import { writePlanBenchmark } from '../plans/benchmark.js';
 import {
+  NowcoderDirectedBoundaryError,
+  NowcoderDirectedService,
+} from '../nowcoderDirected/service.js';
+import { NowcoderDirectedStore } from '../nowcoderDirected/store.js';
+import { NowcoderDirectedPublisher } from '../nowcoderDirected/publisher.js';
+import {
+  NowcoderDirectedSearchError,
+  NowcoderDirectedSessionController,
+} from '../nowcoderDirected/sessionController.js';
+import { projectOrganized } from '../library/storedDocument.js';
+import { NowcoderDirectedSelectionCoordinator } from '../nowcoderDirected/selection.js';
+import {
+  ArtifactReaderCoordinator,
+  type ArtifactReaderCoordinatorLike,
+  type ArtifactReaderHandle,
+  type ArtifactUpdateIntent,
+} from '../artifactReaderCoordinator.js';
+import {
   acquireArtifactLease,
-  type ArtifactLease,
 } from '../../../../scripts/artifact-lease.mjs';
 
 /** 删除请求：要么给明确的 id 列表，要么显式 all:true —— 不接受隐式全删。 */
@@ -119,6 +149,7 @@ const createJobSchema = z.object({
   }
 });
 const progressSchema = z.object({ stage: z.enum(['collecting']) });
+const SERVER_CLOSE_FAILED_MESSAGE = '本机服务未能安全关闭';
 const errorSchema = z.object({
   code: z.string().min(1).max(100),
   message: z.string().min(1).max(1000),
@@ -135,6 +166,86 @@ const runFeJourneySchema = z.object({
   nowcoder: z.boolean().default(true),
   github: z.boolean().default(true),
 }).strict();
+
+const DIRECTED_ROUTE_ERRORS: Record<string, {
+  status: number;
+  code: string;
+  message: string;
+}> = {
+  '搜索会话已过期': {
+    status: 410,
+    code: 'NOWCODER_SESSION_EXPIRED',
+    message: '牛客搜索会话已过期',
+  },
+  '所选候选不属于搜索会话': {
+    status: 409,
+    code: 'NOWCODER_CANDIDATE_NOT_OWNED',
+    message: '所选候选不属于该牛客搜索会话',
+  },
+  '幂等键已用于不同请求': {
+    status: 409,
+    code: 'NOWCODER_IDEMPOTENCY_CONFLICT',
+    message: '牛客定向幂等键已用于不同请求',
+  },
+  '重试必须使用新的幂等键': {
+    status: 409,
+    code: 'NOWCODER_IDEMPOTENCY_CONFLICT',
+    message: '牛客定向重试必须使用新的幂等键',
+  },
+  '已有活跃定向运行': {
+    status: 409,
+    code: 'NOWCODER_ACTIVE_RUN_CONFLICT',
+    message: '已有活跃的牛客定向运行',
+  },
+  '定向运行尝试已过期': {
+    status: 409,
+    code: 'NOWCODER_ATTEMPT_STALE',
+    message: '牛客定向运行尝试已过期',
+  },
+  '定向运行已越过取消截止点': {
+    status: 409,
+    code: 'NOWCODER_PUBLISHING_CANCEL_CONFLICT',
+    message: '牛客定向运行已越过取消截止点',
+  },
+};
+
+function directedRouteError(error: unknown): HttpError {
+  if (error instanceof HttpError) return error;
+  if (error instanceof z.ZodError) {
+    return new HttpError(400, 'INVALID_REQUEST', '牛客定向请求参数无效');
+  }
+  if (error instanceof NowcoderDirectedSearchError) {
+    return new HttpError(503, error.code, error.message);
+  }
+  if (error instanceof NowcoderDirectedBoundaryError) {
+    return new HttpError(error.status, error.code, error.message);
+  }
+  const known = error instanceof Error ? DIRECTED_ROUTE_ERRORS[error.message] : undefined;
+  if (known) return new HttpError(known.status, known.code, known.message);
+  return new HttpError(
+    503,
+    'NOWCODER_DIRECTED_UNAVAILABLE',
+    '牛客定向服务暂时不可用',
+  );
+}
+
+async function directedRoute<T>(operation: () => Promise<T> | T): Promise<T> {
+  try {
+    return await operation();
+  } catch (error) {
+    throw directedRouteError(error);
+  }
+}
+
+function directedRouteId(raw: string): string {
+  try {
+    const id = decodeURIComponent(raw).trim();
+    if (id.length === 0) throw new Error('empty');
+    return id;
+  } catch {
+    throw new HttpError(400, 'INVALID_REQUEST', '牛客定向资源 ID 无效');
+  }
+}
 
 export interface StartBridgeOptions extends ConfigOverrides {
   fetch?: typeof fetch;
@@ -155,6 +266,8 @@ export interface StartBridgeOptions extends ConfigOverrides {
   runUpdate?: (repoRoot: string) => Promise<UpdateOutcome>;
   /** 可注入的 artifact build-id 读取实现（测试竞态用）。 */
   readArtifactBuildId?: (repoRoot: string) => Promise<string | undefined>;
+  /** 可注入的进程内 artifact reader 协调器（确定性竞态测试用）。 */
+  artifactReaderCoordinator?: ArtifactReaderCoordinatorLike;
   /** 更新完成后怎么退出（默认 process.exit(0)，交给登录项拉起来）。测试用。 */
   exit?: () => void;
   /** 只有常驻 CLI 服务显式开启固定周期；嵌入式/测试启动不产生后台网络请求。 */
@@ -309,9 +422,49 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
     currentArtifactBuildId = await readArtifactBuildId(repoRoot);
     return currentArtifactBuildId;
   };
+  let resumeDeferredUpdate = (): void => undefined;
+  let resumeArtifactIdle = (): void => undefined;
+  const artifactReaders = options.artifactReaderCoordinator ?? new ArtifactReaderCoordinator({
+      acquirePhysical: async () => repoRoot
+        ? await acquireArtifactLease(repoRoot, { role: 'artifact-reader' })
+        : { release: async () => undefined },
+    });
+  artifactReaders.setOnIdle(() => resumeArtifactIdle());
   const access = await AccessTokenManager.open(config.authFile);
-  const jobs = await JobStore.open(config.jobsFile);
-  await jobs.recover();
+  // Legacy files do not have directed pins. Load the directed run store first, then install
+  // its exact active proof set before terminal pruning can discard recovery evidence.
+  const jobs = await JobStore.open(config.jobsFile, { deferPrune: true });
+  let directedStore: NowcoderDirectedStore | undefined;
+  let directedError: {
+    code: 'DIRECTED_STORE_UNAVAILABLE' | 'DIRECTED_RECOVERY_FAILED';
+    message: string;
+  } | undefined;
+  const quarantineDirectedError = (
+    code: 'DIRECTED_STORE_UNAVAILABLE' | 'DIRECTED_RECOVERY_FAILED',
+    message: string,
+  ): void => {
+    directedError = { code, message };
+    console.warn(`[nowcoder-directed] ${message}`);
+  };
+  try {
+    directedStore = await NowcoderDirectedStore.open(
+      join(config.configDir, 'nowcoder-directed.json'),
+    );
+  } catch {
+    quarantineDirectedError('DIRECTED_STORE_UNAVAILABLE', '牛客定向状态不可用');
+  }
+  if (directedStore) await jobs.reconcileDirectedPins(
+    directedStore.reconciliationSnapshots().map(snapshot => ({
+      runId: snapshot.id,
+      attempt: snapshot.attempt,
+      jobIds: snapshot.currentJobIds,
+    })),
+  );
+  // Ordinary/fixed-plan jobs keep the existing recovery behavior. Directed jobs are recovered
+  // later from the durable current-run/current-round fence so an old attempt never becomes queued.
+  await jobs.recover(new Set(
+    jobs.list().filter(job => job.directedRunId !== undefined).map(job => job.id),
+  ));
   let planStore: CollectionPlanStore | undefined;
   let zsxqLedger: ZsxqDayLedgerStore | undefined;
   let planStoreError: string | undefined;
@@ -361,7 +514,7 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
     | {
         type: 'job.saved';
         payload: {
-          outputPath: string;
+          outputPath?: string;
           results: SinkResult[];
           attempt?: CollectionPlanAttempt;
         };
@@ -427,7 +580,55 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
   };
   const isZsxqJob = (job: Pick<JobRecord, 'url'>): boolean =>
     descriptorForHost(new URL(job.url).hostname)?.id === 'zsxq';
+  const publishDurableJobNotice = (job: JobRecord): void => {
+    if (job.status === 'saved') {
+      publishJobNotice(job, {
+        type: 'job.saved',
+        payload: {
+          ...(job.outputPath ?? job.markdownOutput?.outputPath
+            ? { outputPath: job.outputPath ?? job.markdownOutput!.outputPath }
+            : {}),
+          results: [],
+          ...(job.planAttempt ? { attempt: job.planAttempt } : {}),
+        },
+        zsxq: isZsxqJob(job),
+      });
+      return;
+    }
+    if (job.status === 'failed' || job.status === 'needs_attention') {
+      publishJobNotice(job, {
+        type: 'job.failed',
+        payload: {
+          code: job.errorCode ?? (job.status === 'failed' ? 'CANCELLED' : 'COLLECTION_FAILED'),
+          message: job.errorMessage ?? '牛客定向采集已终止',
+          ...(job.planAttempt ? { attempt: job.planAttempt } : {}),
+        },
+        zsxq: isZsxqJob(job),
+      });
+    }
+  };
   let collectionPlans: CollectionPlanService | undefined;
+  let directedService: NowcoderDirectedService | undefined;
+  let directedSelection: NowcoderDirectedSelectionCoordinator | undefined;
+  const notifyJobTerminal = async (
+    job: JobRecord,
+    fixedPlanRejection?: string,
+  ): Promise<void> => {
+    try {
+      if (fixedPlanRejection !== undefined) {
+        await collectionPlans?.onJobRejected(job, fixedPlanRejection);
+      } else {
+        await collectionPlans?.onJobTerminal(job);
+      }
+    } catch (error) {
+      console.warn(`[plans] 任务终态同步失败：${error instanceof Error ? error.message : error}`);
+    }
+    try {
+      await directedService?.onJobTerminal(job);
+    } catch (error) {
+      console.warn(`[nowcoder-directed] 任务终态同步失败：${error instanceof Error ? error.message : error}`);
+    }
+  };
   const planStartAcks = new PlanStartAcks();
   const hasActiveZsxqAttempt = (): boolean => planStore?.active('zsxq-chen-teacher')
     .some(batch => batch.preparationAttempt !== undefined) === true;
@@ -440,6 +641,7 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
   // 这条连接本身就是安全交接点；不能再等它主动断开，否则旧 Bridge 会永久驻留。
   let restartHandoffSocket: WebSocket | undefined;
   let restartHandoffReady = false;
+  let restartIntent: ArtifactUpdateIntent | undefined;
   let updateCheckInFlight = false;
   let updateCheckDeferred = false;
   const updateDrainWaiters = new Set<() => void>();
@@ -469,10 +671,20 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
    * 都是磁盘上的 durable 状态，新进程启动会 recover；拿它们挡重启会让离线任务永久锁死升级。
    */
   const maybeRestart = (): void => {
-    if (!restartPending) return;
+    if (closing || !restartPending) return;
     // 新 build-id 可能已经落盘，但打包子进程还在收尾。先记住交接，
     // 等 runUpdate 真正返回后再退出，避免杀掉尚未完成的更新。
     if (updateCheckInFlight) return;
+    if (shouldDeferArtifactUpdate(
+      artifactReaders.snapshot(),
+      directedService?.hasActiveRun() ?? false,
+    )) return;
+    if (!restartIntent) {
+      const intent = artifactReaders.tryBeginUpdate(directedService?.hasActiveRun() ?? false);
+      if (!intent) return;
+      intent.handoffToRestart();
+      restartIntent = intent;
+    }
     if (
       extensionSocket?.readyState === WebSocket.OPEN
       && !(restartHandoffReady && extensionSocket === restartHandoffSocket)
@@ -482,28 +694,47 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
     restartPending = false;
     restartHandoffSocket = undefined;
     restartHandoffReady = false;
+    restartIntent.release();
+    restartIntent = undefined;
     console.warn('[update] 新版本已构建，本机服务重启以生效');
     exit();
   };
 
   const checkForUpdate = async (): Promise<void> => {
     if (closing || !repoRoot || !enableAutoUpdate || updateCheckInFlight) return;
-    if (zsxqPersistingJobIds.size > 0 || hasActiveZsxqAttempt()) {
+    const readerState = artifactReaders.snapshot();
+    if (
+      zsxqPersistingJobIds.size > 0
+      || hasActiveZsxqAttempt()
+      || shouldDeferArtifactUpdate(readerState, directedService?.hasActiveRun() ?? false)
+    ) {
+      updateCheckDeferred = true;
+      return;
+    }
+    const updateIntent = artifactReaders.tryBeginUpdate(directedService?.hasActiveRun() ?? false);
+    if (!updateIntent) {
       updateCheckDeferred = true;
       return;
     }
     updateCheckDeferred = false;
     updateCheckInFlight = true;
+    let handedToRestart = false;
     try {
       try {
         update = await runUpdate(repoRoot);
         if (update.changed) console.warn(`[update] ${update.message}`);
         // 构建失败时产物还是旧的，重启只会把好好的服务换成同一份代码——没有意义。
-        if (update.changed && !update.buildFailed) restartPending = true;
+        if (update.changed && !update.buildFailed) {
+          restartPending = true;
+          updateIntent.handoffToRestart();
+          restartIntent = updateIntent;
+          handedToRestart = true;
+        }
       } catch (error) {
         console.warn(`[update] 检查更新失败：${error instanceof Error ? error.message : error}`);
       }
     } finally {
+      if (!handedToRestart) updateIntent.release();
       updateCheckInFlight = false;
       for (const resolveDrain of updateDrainWaiters) resolveDrain();
       updateDrainWaiters.clear();
@@ -521,21 +752,25 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
       });
     }
   };
-  const resumeDeferredUpdate = (): void => {
+  resumeDeferredUpdate = (): void => {
     setImmediate(() => {
       if (closing) return;
       if (
         updateCheckDeferred
         && zsxqPersistingJobIds.size === 0
         && !hasActiveZsxqAttempt()
+        && !shouldDeferArtifactUpdate(
+          artifactReaders.snapshot(),
+          directedService?.hasActiveRun() ?? false,
+        )
       ) void trackOperation(checkForUpdate());
     });
   };
-  const updateTimer = repoRoot && enableAutoUpdate
-    ? setInterval(() => void trackOperation(checkForUpdate()), options.updateIntervalMs ?? 10 * 60_000)
-    : undefined;
-  updateTimer?.unref?.();
-  void trackOperation(checkForUpdate());
+  resumeArtifactIdle = (): void => {
+    resumeDeferredUpdate();
+    setImmediate(maybeRestart);
+  };
+  let updateTimer: NodeJS.Timeout | undefined;
 
   const dispatch = async (job: JobRecord, targetSocket = extensionSocket): Promise<void> => {
     if (
@@ -545,6 +780,8 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
       targetSocket.readyState !== WebSocket.OPEN ||
       job.status !== 'queued'
     ) return;
+    if (job.directedRunId && !directedService?.canDispatch(job)) return;
+    if (job.directedRunId && !await directedService?.guardJobBoundary(job, 'before-dispatch')) return;
     const zsxqJob = isZsxqJob(job);
     // 恢复中的子任务也必须服从完整正文能力门禁。artifact 可能在 Bridge 运行中
     // 被打包流程原地替换，所以每次 dispatch 都重新读磁盘，不能信启动时快照。
@@ -560,10 +797,11 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
       job.planId === 'zsxq-chen-teacher'
       && !collectionPlans?.isCurrentJobAttempt(job)
     ) {
-      await jobs.transition(job.id, 'failed', {
+      const failed = await jobs.transition(job.id, 'failed', {
         errorCode: 'STALE_PLAN_ATTEMPT',
         errorMessage: '知识星球采集尝试已过期',
       });
+      await notifyJobTerminal(failed);
       return;
     }
     const jobSource = descriptorForHost(new URL(job.url).hostname)?.id;
@@ -571,10 +809,11 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
       !candidateIndex &&
       (jobSource === 'nowcoder' || jobSource === 'github')
     ) {
-      await jobs.transition(job.id, 'failed', {
+      const failed = await jobs.transition(job.id, 'failed', {
         errorCode: 'FE_JOURNEY_INDEX_UNAVAILABLE',
         errorMessage: candidateIndexError ?? 'fe-journey 候选索引不可用',
       });
+      await notifyJobTerminal(failed);
       return;
     }
     await jobs.transition(job.id, 'dispatched');
@@ -594,10 +833,63 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
         return;
       }
     }
-    targetSocket.send(JSON.stringify(envelope('job.collect', job.id, {
-      url: job.url,
-      interactive: !job.batchId,
+    const latest = jobs.get(job.id);
+    if (!latest) return;
+    if (
+      latest.directedRunId
+      && !await directedService?.guardJobBoundary(latest, 'before-job-collect-send')
+    ) {
+      if (latest.status === 'dispatched') await jobs.transition(latest.id, 'queued');
+      return;
+    }
+    // The final directed guard awaits a disk artifact read. The authenticated socket can be
+    // replaced during that await, so re-read every send fence immediately before the frame.
+    const sendCandidate = jobs.get(latest.id);
+    if (
+      targetSocket !== extensionSocket
+      || !extensionReady
+      || targetSocket.readyState !== WebSocket.OPEN
+    ) {
+      if (sendCandidate?.status === 'dispatched') await jobs.transition(sendCandidate.id, 'queued');
+      return;
+    }
+    if (!sendCandidate || sendCandidate.status !== 'dispatched') return;
+    if (
+      sendCandidate.directedRunId
+      && (
+        !directedService?.ownsCurrentJob(sendCandidate)
+        || !directedService.acceptsResult(sendCandidate)
+      )
+    ) {
+      const fenced = await jobs.transition(sendCandidate.id, 'failed', {
+        errorCode: 'STALE_DIRECTED_RUN',
+        errorMessage: '牛客定向运行已变化，任务未派发',
+      });
+      await notifyJobTerminal(fenced);
+      return;
+    }
+    const collectFrame = () => targetSocket.send(JSON.stringify(envelope('job.collect', sendCandidate.id, {
+      url: sendCandidate.url,
+      interactive: sendCandidate.directedRunId ? false : !sendCandidate.batchId,
+      ...(sendCandidate.directedRunId && sendCandidate.directedRunAttempt
+        ? {
+            directedRunId: sendCandidate.directedRunId,
+            directedRunAttempt: sendCandidate.directedRunAttempt,
+          }
+        : {}),
     })));
+    if (sendCandidate.directedRunId) {
+      await directedService?.dispatchCurrent(sendCandidate, () => {
+        if (
+          targetSocket !== extensionSocket
+          || !extensionReady
+          || targetSocket.readyState !== WebSocket.OPEN
+        ) throw new Error('扩展连接已在定向派发截止点变化');
+        collectFrame();
+      });
+    } else {
+      collectFrame();
+    }
   };
 
   const dispatchQueued = async (targetSocket = extensionSocket): Promise<void> => {
@@ -606,16 +898,137 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
   const collectorFetcher = options.fetch ?? fetch;
 
   const storedDocumentFor = async (job: JobRecord): Promise<CollectedDocument | undefined> => {
+    if (job.directedRunId && !directedService?.ownsCurrentJob(job)) return undefined;
     if (!job.outputPath) return undefined;
     try {
-      const raw = JSON.parse(await readFile(join(dirname(job.outputPath), 'source.json'), 'utf8')) as {
-        document?: CollectedDocument;
-      };
-      return raw.document;
+      return projectOrganized(JSON.parse(
+        await readFile(join(dirname(job.outputPath), 'source.json'), 'utf8'),
+      ) as unknown).document;
     } catch {
       return undefined;
     }
   };
+
+  const directedLiveEvidence = async () => {
+    const socket = extensionSocket;
+    const runtime = socket ? extensionRuntime.get(socket) : undefined;
+    const artifactBuildId = await refreshArtifactBuildId();
+    const socketStillCurrent = Boolean(
+      socket
+      && socket === extensionSocket
+      && socket.readyState === WebSocket.OPEN
+      && runtime,
+    );
+    return {
+      applicationVersion: APP_VERSION,
+      ...(startupExtensionBuildId ? { bridgeBuildId: startupExtensionBuildId } : {}),
+      ...(artifactBuildId ? { artifactBuildId } : {}),
+      extensionOnline: socketStillCurrent,
+      ...(runtime?.version ? { extensionVersion: runtime.version } : {}),
+      ...(runtime?.buildId ? { extensionBuildId: runtime.buildId } : {}),
+      ...(runtime?.runtimeId ? { extensionRuntimeId: runtime.runtimeId } : {}),
+      ...(runtime ? { extensionCapabilities: [...runtime.capabilities] } : {}),
+      observedAt: new Date().toISOString(),
+    };
+  };
+  const directedSessionController = directedStore
+    ? new NowcoderDirectedSessionController({
+        store: directedStore,
+        jobs,
+        libraryRoot: config.libraryRoot,
+        ...(options.fetch ? { fetch: options.fetch } : {}),
+      })
+    : undefined;
+  const directedPublisher = directedStore
+    ? new NowcoderDirectedPublisher({
+        store: directedStore,
+        libraryRoot: config.libraryRoot,
+        resolveTarget: source => router.syncTarget(source),
+        finalizePublished: async (runId, attempt) => {
+          if (!directedService) throw new Error('牛客定向服务尚未就绪');
+          return await directedService.finalizePublished(runId, attempt);
+        },
+      })
+    : undefined;
+  directedService = directedStore
+    ? new NowcoderDirectedService({
+        store: directedStore,
+        jobs,
+        dispatch,
+        sendCancel: async job => {
+          const socket = extensionSocket;
+          if (!socket || !extensionReady || socket.readyState !== WebSocket.OPEN) return;
+          socket.send(JSON.stringify(envelope('job.cancel', job.id, {
+            directedRunId: job.directedRunId,
+            directedRunAttempt: job.directedRunAttempt,
+          })));
+        },
+        acknowledgeTerminal: async job => { publishDurableJobNotice(job); },
+        replayProvenTerminal: async job => {
+          const socket = extensionSocket;
+          if (!socket || !extensionReady || socket.readyState !== WebSocket.OPEN) return;
+          socket.send(JSON.stringify(envelope('job.collect', job.id, {
+            url: job.url,
+            interactive: false,
+            directedRunId: job.directedRunId,
+            directedRunAttempt: job.directedRunAttempt,
+          })));
+        },
+        ownedTabsClear: async snapshot => directedStore!.hasCompleteTabClearEvidence(
+          snapshot.id,
+          snapshot.attempt,
+        ),
+        isPersistenceInFlight: jobId => persistingJobIds.has(jobId),
+        artifactReaders,
+        liveEvidence: directedLiveEvidence,
+        reconcileSelection: async context => directedSelection
+          ? await directedSelection.reconcile(context)
+          : { state: 'paused' },
+        recoverPublisher: async context => {
+          await directedPublisher!.recover(context);
+        },
+        reportRecoveryFailure: error => quarantineDirectedError(error.code, error.message),
+      })
+    : undefined;
+  const nowcoderTargetRoot = router.directedSyncTarget('nowcoder')?.root;
+  if (directedService) {
+    directedSelection = new NowcoderDirectedSelectionCoordinator({
+      store: directedStore!,
+      service: () => directedService!,
+      libraryRoot: config.libraryRoot,
+      ...(nowcoderTargetRoot ? { targetRoot: nowcoderTargetRoot } : {}),
+    });
+  }
+  if (directedService) {
+    try {
+      // Reacquire the durable run reader before the updater gets its first opportunity. With no
+      // extension hello yet, live recovery pauses without dropping the reader or changing phase.
+      await directedService.initialize();
+    } catch {
+      quarantineDirectedError('DIRECTED_RECOVERY_FAILED', '牛客定向运行恢复不可用');
+    }
+  }
+  const requireDirectedHttp = () => {
+    const controller = directedSessionController;
+    const store = directedStore;
+    const service = directedService;
+    if (!controller || !store || !service) {
+      throw new HttpError(
+        503,
+        'NOWCODER_DIRECTED_UNAVAILABLE',
+        '牛客定向服务暂时不可用',
+      );
+    }
+    return { controller, store, service };
+  };
+  if (repoRoot && enableAutoUpdate) {
+    updateTimer = setInterval(
+      () => void trackOperation(checkForUpdate()),
+      options.updateIntervalMs ?? 10 * 60_000,
+    );
+    updateTimer.unref?.();
+    void trackOperation(checkForUpdate());
+  }
 
   collectionPlans = planStore
     ? new CollectionPlanService({
@@ -623,7 +1036,9 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
         jobs,
         extensionConnected: () => extensionReady && extensionSocket?.readyState === WebSocket.OPEN,
         canCollectZsxq: extensionCanCollectZsxq,
-        canStartZsxqAttempt: () => persistingJobIds.size === 0 && !updateCheckInFlight,
+        canStartZsxqAttempt: () => persistingJobIds.size === 0
+          && !updateCheckInFlight
+          && artifactReaders.snapshot().updateState === 'idle',
         discoverNowcoder: knownUrls => discoverNowcoderPlanCandidates(collectorFetcher, knownUrls),
         dispatch,
         collectZsxq: async (
@@ -819,14 +1234,16 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
     const parsedEnvelope = wsEnvelopeSchema.parse(JSON.parse(messageText(data)));
     if (parsedEnvelope.type === 'extension.hello') {
       const hello = extensionHelloPayloadSchema.parse(parsedEnvelope.payload);
-      if (!extensionReady) await jobs.recover(persistingJobIds);
-      // recover 会触发文件 I/O；等待期间这个 socket 可能已被新版连接替换。
-      if (socket !== extensionSocket) return;
-      // /health 动态读磁盘 build-id：手工 package 或自更新收尾时，新扩展可能在
-      // runUpdate 置位 restartPending 前先换连。若 hello 精确匹配新产物且不再是
-      // Bridge 启动时那份，这条连接本身就是可验证的重启交接点。
+      // Record authenticated socket evidence while this socket is deliberately not ready. Active
+      // directed recovery validates/appends it before any reconnect path can dispatch work.
       const helloArtifactBuildId = await refreshArtifactBuildId();
       if (socket !== extensionSocket) return;
+      extensionRuntime.set(socket, {
+        version: hello.version,
+        ...(hello.buildId ? { buildId: hello.buildId } : {}),
+        ...(hello.runtimeId ? { runtimeId: hello.runtimeId } : {}),
+        capabilities: [...(hello.capabilities ?? [])],
+      });
       if (
         hello.buildId !== undefined
         && hello.buildId === helloArtifactBuildId
@@ -835,12 +1252,22 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
         restartPending = true;
         restartHandoffSocket = socket;
       }
-      extensionRuntime.set(socket, {
-        version: hello.version,
-        ...(hello.buildId ? { buildId: hello.buildId } : {}),
-        ...(hello.runtimeId ? { runtimeId: hello.runtimeId } : {}),
-        capabilities: [...(hello.capabilities ?? [])],
-      });
+      if (directedService) {
+        try {
+          await directedService.observeExtensionEvidence();
+        } catch {
+          quarantineDirectedError('DIRECTED_RECOVERY_FAILED', '牛客定向运行恢复不可用');
+        }
+      }
+      if (socket !== extensionSocket) return;
+      if (!extensionReady) {
+        await jobs.recover(new Set([
+          ...persistingJobIds,
+          ...jobs.list().filter(job => job.directedRunId !== undefined).map(job => job.id),
+        ]));
+      }
+      // recover 会触发文件 I/O；等待期间这个 socket 可能已被新版连接替换。
+      if (socket !== extensionSocket) return;
       extensionReady = true;
       extensionVersion = hello.version;
       extensionBuildId = hello.buildId;
@@ -861,6 +1288,15 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
       }).catch(error => {
         console.warn(`[plans] 扩展重连补跑失败：${error instanceof Error ? error.message : error}`);
       });
+      if (socket !== extensionSocket) return;
+      if (directedService) {
+        try {
+          await directedService.reconcileAll();
+          if (directedError?.code === 'DIRECTED_RECOVERY_FAILED') directedError = undefined;
+        } catch {
+          quarantineDirectedError('DIRECTED_RECOVERY_FAILED', '牛客定向运行恢复不可用');
+        }
+      }
       if (socket !== extensionSocket) return;
       await dispatchQueued(socket);
       return;
@@ -906,6 +1342,62 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
     }
     const job = jobs.get(parsedEnvelope.requestId);
     if (!job) throw new Error(`任务不存在：${parsedEnvelope.requestId}`);
+    if (
+      job.directedRunId
+      && directedService?.acceptsCancellationTerminal(job)
+      && (parsedEnvelope.type === 'job.result' || parsedEnvelope.type === 'job.error')
+    ) {
+      let kind: 'cancelled_after_close' | 'remote_terminal_after_close';
+      if (parsedEnvelope.type === 'job.error') {
+        const terminalError = errorSchema.parse(parsedEnvelope.payload);
+        kind = terminalError.code === 'CANCELLED'
+          ? 'cancelled_after_close'
+          : 'remote_terminal_after_close';
+      } else {
+        // Validate the terminal frame, but never interpret or persist its document while cancelling.
+        jobResultPayloadSchema.parse(parsedEnvelope.payload);
+        kind = 'remote_terminal_after_close';
+      }
+      if (await directedService.onCancellationTerminal(job, kind)) return;
+    }
+    if (
+      job.directedRunId
+      && (parsedEnvelope.type === 'job.result' || parsedEnvelope.type === 'job.error')
+    ) {
+      if (parsedEnvelope.type === 'job.result') {
+        jobResultPayloadSchema.parse(parsedEnvelope.payload);
+      } else {
+        errorSchema.parse(parsedEnvelope.payload);
+      }
+      // A terminal frame is also the durable proof that this exact job no longer owns a remote
+      // tab. Persist that proof before JobStore or any sink transition so a crash cannot cause a
+      // cancelling restart to redispatch the job.
+      if (!await directedService?.recordRemoteTerminalEvidence(job)) return;
+      const durable = jobs.get(job.id);
+      if (durable && (
+        durable.status === 'saved'
+        || durable.status === 'failed'
+        || durable.status === 'needs_attention'
+      )) {
+        // Terminal tuples are acknowledged at least once, including after reconnect/replay. The
+        // acknowledgement is emitted only after both proof and JobStore terminal state are durable.
+        publishDurableJobNotice(durable);
+        await notifyJobTerminal(durable);
+        return;
+      }
+    }
+    // Directed progress/result/error is fenced before parsing or touching JobStore/sinks/index.
+    if (job.directedRunId) {
+      if (!directedService?.acceptsResult(job)) return;
+      const boundary = parsedEnvelope.type === 'job.progress'
+        ? 'before-progress'
+        : parsedEnvelope.type === 'job.result'
+          ? 'before-result'
+          : parsedEnvelope.type === 'job.error'
+            ? 'before-error'
+            : undefined;
+      if (boundary && !await directedService.guardJobBoundary(job, boundary)) return;
+    }
     const zsxqJob = isZsxqJob(job);
     let artifactBuildId: string | undefined;
     if (zsxqJob) {
@@ -948,7 +1440,7 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
       // 必须在第一个 await 前打标；否则换连 hello 可以在状态落盘间隙把它重派。
       persistingJobIds.add(job.id);
       let holdsZsxqPersistenceLease = false;
-      let artifactLease: ArtifactLease | undefined;
+      let artifactReader: ArtifactReaderHandle | undefined;
       try {
         if (zsxqJob) {
           // updater 已经在跑时先等它完整结束；随后下面会重新读取 artifact 并拒绝旧 A。
@@ -956,13 +1448,16 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
           const updateDrain = acquireZsxqPersistenceLease(job.id);
           holdsZsxqPersistenceLease = true;
           if (updateDrain) await updateDrain;
-          // 进程内租约必须先落位，再发生文件系统上的第一次 await；这样本进程 updater
-          // 与手工/另一 Bridge 进程的 package 都不可能从两层租约之间穿过去。
-          if (repoRoot) {
-            artifactLease = await acquireArtifactLease(repoRoot, { role: 'zsxq-sink' });
+          // 外部 package 只持有文件租约而没有本进程 update intent；此时仍须先等它
+          // 释放，再读取最终 build-id。若本进程已进入 restart，则先复核 A/B 并拒绝旧结果。
+          if (artifactReaders.snapshot().updateState === 'idle') {
+            artifactReader = await artifactReaders.acquireReader('zsxq-persistence');
           }
+        } else if (job.directedRunId) {
+          artifactReader = await artifactReaders.acquireReader('nowcoder-directed-persistence');
         }
         let current = job;
+        if (job.directedRunId && !directedService?.acceptsResult(job)) return;
         if (job.status === 'queued' || job.status === 'dispatched') {
           current = await jobs.transition(job.id, 'collecting');
         }
@@ -976,12 +1471,13 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
               errorCode: 'EXTENSION_UPDATE_REQUIRED',
               errorMessage: '扩展构建已落后于当前磁盘产物，已拒绝知识星球正文入库',
             });
-            try {
-              await collectionPlans?.onJobRejected(terminal, '扩展构建已过期');
-            } catch (error) {
-              console.warn(`[plans] 过期扩展终态同步失败：${error instanceof Error ? error.message : error}`);
-            }
+            await notifyJobTerminal(terminal, '扩展构建已过期');
             return;
+          }
+          // 先完成上面的 A/B 构建复核：若 updater 已把 A 换成 B，旧结果应进入
+          // needs_attention，而不是因 restart intent 拒绝 reader 后误报普通保存失败。
+          if (!artifactReader) {
+            artifactReader = await artifactReaders.acquireReader('zsxq-persistence');
           }
         }
         // 所有知识星球入库都必须带新版扩展给出的显式完整证明。
@@ -1002,13 +1498,15 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
             errorCode: 'INCOMPLETE_CONTENT',
             errorMessage: '知识星球正文不完整，已拒绝归档和交付',
           });
-          try {
-            await collectionPlans?.onJobRejected(terminal, '正文不完整');
-          } catch (error) {
-            console.warn(`[plans] 正文不完整终态同步失败：${error instanceof Error ? error.message : error}`);
-          }
+          await notifyJobTerminal(terminal, '正文不完整');
           return;
         }
+        // This is the final fence before candidate preparation, Markdown save and index commit.
+        if (current.directedRunId && !directedService?.acceptsResult(current)) return;
+        if (
+          current.directedRunId
+          && !await directedService?.guardJobBoundary(current, 'before-result-save')
+        ) return;
         const override = sinkOverrides.get(job.id);
         const document: CollectedDocument = job.batchId && job.planId
           ? {
@@ -1025,6 +1523,13 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
           candidateIndex,
           document,
           override,
+          current.directedRunId && current.directedRunAttempt
+            ? {
+                runId: current.directedRunId,
+                attempt: current.directedRunAttempt,
+                currentJobId: current.id,
+              }
+            : undefined,
         );
         const succeeded = sinkResults.filter(sinkResult => sinkResult.ok);
         if (succeeded.length === 0) {
@@ -1033,8 +1538,17 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
             .join('；');
           throw new Error(`所有落地目标均失败：${detail || '无可用目标'}`);
         }
-        const primary = succeeded[0]!;
-        const saved = await jobs.transition(job.id, 'saved', { outputPath: primary.outputRef });
+        const markdownResults = succeeded.filter(sinkResult =>
+          router.isTrustedLocalEvidenceResult(sinkResult));
+        if (current.directedRunId && markdownResults.length !== 1) {
+          throw new Error('定向牛客结果未形成可验证的本机 Markdown 快照');
+        }
+        const markdown = markdownResults[0];
+        const primary = current.directedRunId ? markdown! : succeeded[0]!;
+        const saved = await jobs.transition(job.id, 'saved', {
+          outputPath: primary.outputRef,
+          ...(markdown ? { markdownOutput: { sinkId: 'markdown', outputPath: markdown.outputRef } } : {}),
+        });
         publishJobNotice(saved, {
           type: 'job.saved',
           payload: {
@@ -1044,50 +1558,44 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
           },
           zsxq: isZsxqJob(saved),
         });
-        try {
-          await collectionPlans?.onJobTerminal(saved);
-        } catch (error) {
-          // job 已经持久化为 saved；批次会在连接恢复时从子任务重新 reconcile。
-          console.warn(`[plans] 已保存任务终态同步失败：${error instanceof Error ? error.message : error}`);
-        }
+        await notifyJobTerminal(saved);
         return;
       } catch (error) {
         const latest = jobs.get(job.id);
         if (
           latest &&
+          (!latest.directedRunId || directedService?.acceptsResult(latest)) &&
           latest.status !== 'saved' &&
           latest.status !== 'failed' &&
           latest.status !== 'needs_attention'
         ) {
           const message = error instanceof Error ? error.message : '内容落地失败';
+          const directedSaveCode = typeof error === 'object' && error !== null && 'code' in error
+            && (error.code === 'DIRECTED_LOCAL_LIBRARY_CORRUPT'
+              || error.code === 'DIRECTED_CANDIDATE_CATALOG_CORRUPT')
+            ? error.code
+            : undefined;
+          const errorCode = directedSaveCode ?? 'SAVE_FAILED';
           console.warn(`[jobs] 任务 ${latest.id} 落地失败：${message}`);
           const failed = await jobs.transition(latest.id, 'failed', {
-            errorCode: 'SAVE_FAILED',
+            errorCode,
             errorMessage: message,
           });
           publishJobNotice(failed, {
             type: 'job.failed',
             payload: {
-              code: 'SAVE_FAILED',
+              code: errorCode,
               message,
               ...(failed.planAttempt ? { attempt: failed.planAttempt } : {}),
             },
             zsxq: isZsxqJob(failed),
           });
-          try {
-            await collectionPlans?.onJobTerminal(failed);
-          } catch (planError) {
-            console.warn(`[plans] 保存失败终态同步失败：${planError instanceof Error ? planError.message : planError}`);
-          }
+          await notifyJobTerminal(failed);
           return;
         }
         throw error;
       } finally {
         try {
-          // 直到所有 sink 与 job/plan 终态都完成才放开 stable artifact；package 随后
-          // 才能把 A 原子替成 B。release 自身会复核 token，不会误删后来者的锁。
-          if (artifactLease) await artifactLease.release();
-        } finally {
           if (holdsZsxqPersistenceLease) zsxqPersistingJobIds.delete(job.id);
           persistingJobIds.delete(job.id);
           if (persistingJobIds.size === 0) {
@@ -1100,22 +1608,28 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
             maybeRestart();
             resumeDeferredUpdate();
           });
+        } finally {
+          // The short logical reader deliberately outlives sink/index, terminal notification,
+          // directed selection/finalization, and the persisting-job fence itself. If terminal
+          // handling releases the run reader, this operation reader still owns the physical lease.
+          if (artifactReader) await artifactReader.release();
         }
       }
     }
     if (parsedEnvelope.type === 'job.error') {
       const error = errorSchema.parse(parsedEnvelope.payload);
+      if (job.directedRunId && !directedService?.acceptsResult(job)) return;
       sinkOverrides.delete(job.id);
       const status = error.needsAttention ? 'needs_attention' : 'failed';
       const terminal = await jobs.transition(job.id, status, {
         errorCode: error.code,
         errorMessage: error.message,
       });
-      if (isZsxqJob(job) && error.code === 'INCOMPLETE_CONTENT') {
-        await collectionPlans?.onJobRejected(terminal, '正文不完整');
-      } else {
-        await collectionPlans?.onJobTerminal(terminal);
-      }
+      publishDurableJobNotice(terminal);
+      await notifyJobTerminal(
+        terminal,
+        isZsxqJob(job) && error.code === 'INCOMPLETE_CONTENT' ? '正文不完整' : undefined,
+      );
       resumeDeferredUpdate();
       return;
     }
@@ -1133,6 +1647,7 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
         version: APP_VERSION,
         trustedExtensionId: TRUSTED_EXTENSION_ID,
         extensionConnected: extensionReady && extensionSocket?.readyState === WebSocket.OPEN,
+        directedRunActive: directedService?.hasActiveRun() ?? false,
         ...(extensionReady && extensionVersion ? { extensionVersion } : {}),
         ...(extensionReady && extensionBuildId ? { extensionBuildId } : {}),
         ...(extensionReady && extensionSocket ? {
@@ -1142,6 +1657,7 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
         // 同步去向：采集只落本机库，这里说明「之后会同步到哪」。
         syncTargets: router.describeSyncTargets(),
         ...(planStoreError ? { planError: planStoreError } : {}),
+        ...(directedError ? { directedError } : {}),
         // 扩展据此判断「我加载的是不是当前这一版」，是就不打扰，不是就自己重新加载。
         ...(buildId ? { buildId } : {}),
         ...(update ? { update } : {}),
@@ -1162,6 +1678,111 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
 
     const token = bearerToken(request) ?? '';
     if (!access.verify(token)) throw new HttpError(401, 'UNAUTHORIZED', '访问令牌无效');
+
+    const nowcoderSessionMatch = requestUrl.pathname.match(
+      /^\/v1\/nowcoder\/search-sessions\/([^/]+)$/u,
+    );
+    const nowcoderRunMatch = requestUrl.pathname.match(/^\/v1\/nowcoder\/runs\/([^/]+)$/u);
+    const nowcoderCancelMatch = requestUrl.pathname.match(
+      /^\/v1\/nowcoder\/runs\/([^/]+)\/cancel$/u,
+    );
+    const nowcoderRetryMatch = requestUrl.pathname.match(
+      /^\/v1\/nowcoder\/runs\/([^/]+)\/retry$/u,
+    );
+
+    if (request.method === 'POST' && requestUrl.pathname === '/v1/nowcoder/search-sessions') {
+      const { controller } = requireDirectedHttp();
+      return await directedRoute(async () => {
+        const input = nowcoderSearchPreviewRequestSchema.parse(await readJson(request));
+        const session = await controller.create(input);
+        return sendJson(
+          response,
+          201,
+          nowcoderSearchPreviewResponseSchema.parse({ session }),
+        );
+      });
+    }
+    if (request.method === 'GET' && nowcoderSessionMatch?.[1]) {
+      const { store } = requireDirectedHttp();
+      const id = directedRouteId(nowcoderSessionMatch[1]);
+      const session = store.getSession(id);
+      if (!session) {
+        throw new HttpError(
+          404,
+          'NOWCODER_SESSION_NOT_FOUND',
+          '牛客搜索会话不存在',
+        );
+      }
+      return sendJson(response, 200, nowcoderSearchPreviewResponseSchema.parse({ session }));
+    }
+    if (request.method === 'POST' && requestUrl.pathname === '/v1/nowcoder/runs') {
+      const { store, service } = requireDirectedHttp();
+      return await directedRoute(async () => {
+        const input = nowcoderDirectedStartRequestSchema.parse(await readJson(request));
+        if (!store.getSession(input.searchSessionId)) {
+          throw new HttpError(
+            404,
+            'NOWCODER_SESSION_NOT_FOUND',
+            '牛客搜索会话不存在',
+          );
+        }
+        const result = await service.startRun(input);
+        return sendJson(
+          response,
+          result.created ? 202 : 200,
+          nowcoderDirectedStartResponseSchema.parse({ run: result.run }),
+        );
+      });
+    }
+    if (request.method === 'GET' && nowcoderRunMatch?.[1]) {
+      const { store } = requireDirectedHttp();
+      const id = directedRouteId(nowcoderRunMatch[1]);
+      const run = store.getRun(id);
+      if (!run) {
+        throw new HttpError(404, 'NOWCODER_RUN_NOT_FOUND', '牛客定向运行不存在');
+      }
+      return sendJson(response, 200, nowcoderDirectedStartResponseSchema.parse({ run }));
+    }
+    if (request.method === 'POST' && nowcoderCancelMatch?.[1]) {
+      const { store, service } = requireDirectedHttp();
+      return await directedRoute(async () => {
+        const id = directedRouteId(nowcoderCancelMatch[1]!);
+        const input = nowcoderDirectedCancelRequestSchema.parse(await readJson(request));
+        const current = store.getRun(id);
+        if (!current) {
+          throw new HttpError(404, 'NOWCODER_RUN_NOT_FOUND', '牛客定向运行不存在');
+        }
+        if (current.attempt !== input.attempt) {
+          throw new HttpError(
+            409,
+            'NOWCODER_ATTEMPT_STALE',
+            '牛客定向运行尝试已过期',
+          );
+        }
+        const run = await service.cancelRun(id, input.attempt);
+        return sendJson(
+          response,
+          200,
+          nowcoderDirectedCancelResponseSchema.parse({ run }),
+        );
+      });
+    }
+    if (request.method === 'POST' && nowcoderRetryMatch?.[1]) {
+      const { store, service } = requireDirectedHttp();
+      return await directedRoute(async () => {
+        const id = directedRouteId(nowcoderRetryMatch[1]!);
+        const input = nowcoderDirectedRetryRequestSchema.parse(await readJson(request));
+        if (!store.getRun(id)) {
+          throw new HttpError(404, 'NOWCODER_RUN_NOT_FOUND', '牛客定向运行不存在');
+        }
+        const result = await service.retryRun(id, input);
+        return sendJson(
+          response,
+          result.created ? 202 : 200,
+          nowcoderDirectedRetryResponseSchema.parse({ run: result.run }),
+        );
+      });
+    }
 
     if (request.method === 'POST' && requestUrl.pathname === '/v1/jobs') {
       const input = createJobSchema.parse(await readJson(request));
@@ -1212,10 +1833,11 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
         // 在计划预检与 JobStore 落盘之间可能恰好发生重连换代。
         // 二次原子校验是最终权威；旧代任务绝不回传 202。
         if (job.status === 'queued') {
-          await jobs.transition(job.id, 'failed', {
+          const failed = await jobs.transition(job.id, 'failed', {
             errorCode: 'STALE_PLAN_ATTEMPT',
             errorMessage: error instanceof Error ? error.message : '固定采集计划尝试已过期',
           }).catch(() => undefined);
+          if (failed) await notifyJobTerminal(failed);
         }
         throw new HttpError(
           409,
@@ -1455,6 +2077,7 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
   const address = server.address() as AddressInfo;
   const url = `http://${config.host}:${address.port}`;
   let closePromise: Promise<void> | undefined;
+  const closeFailedError = new Error(SERVER_CLOSE_FAILED_MESSAGE);
   return {
     url,
     wsUrl: `ws://${config.host}:${address.port}/v1/extension`,
@@ -1474,8 +2097,32 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
         const serverClosed = server.listening ? once(server, 'close').then(() => undefined) : Promise.resolve();
         server.close();
         // 先等所有入口彻底关闭，保证不会再登记新操作；再排空关闭前已经接收的工作。
-        await Promise.all([serverClosed, websocketClosed]);
-        await drainActiveOperations();
+        let cleanupFailed = false;
+        const endpointResults = await Promise.allSettled([serverClosed, websocketClosed]);
+        if (endpointResults.some(result => result.status === 'rejected')) cleanupFailed = true;
+        try {
+          await drainActiveOperations();
+        } catch {
+          cleanupFailed = true;
+        }
+        try {
+          await directedService?.close();
+        } catch {
+          cleanupFailed = true;
+        }
+        try {
+          restartIntent?.release();
+        } catch {
+          cleanupFailed = true;
+        } finally {
+          restartIntent = undefined;
+        }
+        try {
+          await artifactReaders.close();
+        } catch {
+          cleanupFailed = true;
+        }
+        if (cleanupFailed) throw closeFailedError;
       })();
       return closePromise;
     },

@@ -4,6 +4,7 @@ import type { ResolveAddresses } from '../library/assets.js';
 import { MarkdownLibrarySink } from './markdownLibrarySink.js';
 import { RepoInboxSink } from './repoInboxSink.js';
 import type { ContentSink, SinkResult } from './types.js';
+import type { LocalDocumentEvidence } from '../library/storedDocument.js';
 import { DEFAULT_SINKS_CONFIG, type SinksConfig } from './config.js';
 
 const FALLBACK_SINK_ID = 'markdown';
@@ -23,8 +24,11 @@ export type RouterWarn = (message: string) => void;
  * 未在路由表中的来源回退到本机 Markdown 库（保持 0.2.0 行为）。
  */
 export class SinkRouter {
+  private readonly trustedLocalResults = new WeakSet<object>();
+
   private constructor(
     private readonly sinks: Map<string, ContentSink>,
+    private readonly localEvidenceSink: MarkdownLibrarySink,
     private readonly routes: Record<string, string[]>,
     private readonly warn: RouterWarn,
   ) {}
@@ -35,7 +39,16 @@ export class SinkRouter {
     warn: RouterWarn = () => {},
   ): SinkRouter {
     const sinks = new Map<string, ContentSink>();
+    const localEvidenceSink = new MarkdownLibrarySink({
+      root: options.libraryRoot,
+      ...(options.fetch ? { fetch: options.fetch } : {}),
+      ...(options.resolveAddresses ? { resolveAddresses: options.resolveAddresses } : {}),
+    });
+    // `markdown` is a reserved internal capability. Configuration may neither
+    // replace it with a repo sink nor manufacture another trusted instance.
+    sinks.set(FALLBACK_SINK_ID, localEvidenceSink);
     for (const [id, definition] of Object.entries(config.sinks)) {
+      if (id === FALLBACK_SINK_ID) continue;
       if (definition.type === 'markdown') {
         sinks.set(
           id,
@@ -62,14 +75,7 @@ export class SinkRouter {
         );
       }
     }
-    if (!sinks.has(FALLBACK_SINK_ID)) {
-      sinks.set(FALLBACK_SINK_ID, new MarkdownLibrarySink({
-        root: options.libraryRoot,
-        ...(options.fetch ? { fetch: options.fetch } : {}),
-        ...(options.resolveAddresses ? { resolveAddresses: options.resolveAddresses } : {}),
-      }));
-    }
-    return new SinkRouter(sinks, config.routes, warn);
+    return new SinkRouter(sinks, localEvidenceSink, config.routes, warn);
   }
 
   /**
@@ -111,11 +117,37 @@ export class SinkRouter {
   syncTarget(source: string): ContentSink | undefined {
     const ids = this.routes[source] ?? [];
     for (const id of ids) {
-      if (id === FALLBACK_SINK_ID) continue;
       const sink = this.sinks.get(id);
-      if (sink) return sink;
+      if (sink && !(sink instanceof MarkdownLibrarySink)) return sink;
     }
     return undefined;
+  }
+
+  /** Trusted directed destination: an exact-capable repo inbox, never a Markdown alias. */
+  directedSyncTarget(source: string): {
+    type: 'repo-inbox';
+    exactCapable: true;
+    id: string;
+    root: string;
+    sink: RepoInboxSink;
+  } | undefined {
+    for (const id of this.routes[source] ?? []) {
+      const sink = this.sinks.get(id);
+      if (!(sink instanceof RepoInboxSink)) continue;
+      return {
+        type: 'repo-inbox',
+        exactCapable: true,
+        id: sink.id,
+        root: sink.root,
+        sink,
+      };
+    }
+    return undefined;
+  }
+
+  /** Object-identity authority; a user-controlled sinkId cannot satisfy it. */
+  isTrustedLocalEvidenceResult(result: SinkResult): boolean {
+    return this.trustedLocalResults.has(result);
   }
 
   /** 可选的同步去向说明（供侧栏展示「这一条会同步到哪」）。 */
@@ -150,7 +182,11 @@ export class SinkRouter {
    * 用户在「已入库」页显式发起（见 library/sync.ts）。采集时就直接投递会让用户
    * 失去中间那道核对，出问题也分不清是采错了还是投错了。
    */
-  async save(input: OrganizedDocument, override?: readonly string[]): Promise<SinkResult[]> {
+  async save(
+    input: OrganizedDocument,
+    override?: readonly string[],
+    localEvidence?: LocalDocumentEvidence,
+  ): Promise<SinkResult[]> {
     const ids = override && override.length > 0
       ? this.resolveSinkIds(input.document.source, override)
       : [FALLBACK_SINK_ID];
@@ -159,14 +195,27 @@ export class SinkRouter {
       const sink = this.sinks.get(id);
       if (!sink) continue;
       try {
-        results.push(await sink.save(input));
+        const result = sink === this.localEvidenceSink
+          ? await this.localEvidenceSink.saveLocal(input, localEvidence)
+          : await sink.save(input);
+        if (sink === this.localEvidenceSink) this.trustedLocalResults.add(result);
+        results.push(result);
       } catch (error) {
-        results.push({
+        const code = typeof error === 'object' && error !== null && 'code' in error
+          && typeof error.code === 'string'
+          ? error.code
+          : undefined;
+        const result: SinkResult = {
           sinkId: id,
           ok: false,
           outputRef: '',
-          detail: { error: error instanceof Error ? error.message : String(error) },
-        });
+          detail: {
+            error: error instanceof Error ? error.message : String(error),
+            ...(code ? { code } : {}),
+          },
+        };
+        if (sink === this.localEvidenceSink) this.trustedLocalResults.add(result);
+        results.push(result);
       }
     }
     return results;

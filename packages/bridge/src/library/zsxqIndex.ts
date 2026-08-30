@@ -9,6 +9,7 @@ import {
   ZSXQ_COMPLETE_CONTENT_CAPABILITY,
   type ZsxqLibraryIndexEntry,
 } from '@data-collector/shared';
+import { projectOrganized } from './storedDocument.js';
 import { assertInsideRoot } from './paths.js';
 
 interface CatalogCandidate {
@@ -107,8 +108,7 @@ export async function loadZsxqLibraryIndex(root: string): Promise<ZsxqLibraryInd
       const sourcePath = assertInsideRoot(root, join(dirname(markdownPath), 'source.json'));
       const realSourcePath = await realpath(sourcePath);
       assertInsideRoot(realRoot, realSourcePath);
-      const stored = JSON.parse(await readFile(realSourcePath, 'utf8')) as unknown;
-      if (!isRecord(stored)) throw new Error(`留存快照不是对象：${entry.id}`);
+      const stored = projectOrganized(JSON.parse(await readFile(realSourcePath, 'utf8')) as unknown);
       const document = collectedDocumentSchema.parse(stored.document);
       if (
         document.source !== 'zsxq'

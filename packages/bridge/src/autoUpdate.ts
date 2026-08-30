@@ -34,6 +34,25 @@ export interface UpdateHost {
   now(): string;
 }
 
+export interface ArtifactUpdateDeferralState {
+  startIntents: number;
+  pendingReaders: number;
+  activeReaders: number;
+  physicalBusy?: boolean;
+}
+
+/** Pure update/restart gate shared by server arbitration and focused deterministic tests. */
+export function shouldDeferArtifactUpdate(
+  state: ArtifactUpdateDeferralState,
+  activeDirectedRun: boolean,
+): boolean {
+  return activeDirectedRun
+    || state.startIntents > 0
+    || state.pendingReaders > 0
+    || state.activeReaders > 0
+    || state.physicalBusy === true;
+}
+
 const SHORT = 12;
 
 /**

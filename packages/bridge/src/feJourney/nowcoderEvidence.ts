@@ -234,11 +234,17 @@ export function analyzeNowcoderEvidence(document: CollectedDocument): NowcoderEv
 
 export function enrichNowcoderEvidence(document: CollectedDocument): CollectedDocument {
   if (document.source !== 'nowcoder') return document;
-  const evidence = analyzeNowcoderEvidence(document);
+  const sourceMetadata = { ...(document.sourceMetadata ?? {}) };
+  for (const key of [
+    'company', 'companyLabel', 'businessUnit', 'role', 'interviewRound', 'interviewDate',
+    'contentAccess', 'questionCount', 'agentRelevant', 'evidenceGrade', 'evidenceReasons',
+  ]) delete sourceMetadata[key];
+  const sanitized = { ...document, sourceMetadata };
+  const evidence = analyzeNowcoderEvidence(sanitized);
   return {
-    ...document,
+    ...sanitized,
     sourceMetadata: {
-      ...(document.sourceMetadata ?? {}),
+      ...sourceMetadata,
       ...evidence,
     },
   };

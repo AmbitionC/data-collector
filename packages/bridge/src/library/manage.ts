@@ -2,6 +2,7 @@ import { readdir, readFile, rm, rmdir } from 'node:fs/promises';
 import { dirname, join, relative } from 'node:path';
 import { atomicWriteText } from './writer.js';
 import { assertInsideRoot } from './paths.js';
+import { withCatalogTransaction } from './catalogTransaction.js';
 
 /**
  * 已入库内容的查看与管理。
@@ -114,7 +115,7 @@ export type AfterLibraryEntriesRemoved = (ids: readonly string[]) => Promise<voi
  * 删除若干条目：连同各自的目录（正文 + assets）一起删，并更新索引。
  * ids 为空数组时不做任何事；传 'all' 由调用方展开成全部 id，这里不接受隐式全删。
  */
-export async function deleteEntries(
+async function deleteEntriesLocked(
   root: string,
   ids: readonly string[],
   afterRemove?: AfterLibraryEntriesRemoved,
@@ -156,6 +157,18 @@ export async function deleteEntries(
   return { deleted, missing };
 }
 
+export async function deleteEntries(
+  root: string,
+  ids: readonly string[],
+  afterRemove?: AfterLibraryEntriesRemoved,
+): Promise<DeleteOutcome> {
+  if (ids.length === 0) return { deleted: 0, missing: 0 };
+  return await withCatalogTransaction(
+    root,
+    async () => await deleteEntriesLocked(root, ids, afterRemove),
+  );
+}
+
 /**
  * 条目删掉之后，把因此变空的上级目录一并收走。
  *
@@ -182,6 +195,9 @@ export async function clearLibrary(
   root: string,
   afterRemove?: AfterLibraryEntriesRemoved,
 ): Promise<DeleteOutcome> {
-  const entries = await readCatalog(root);
-  return deleteEntries(root, entries.map(entry => entry.id), afterRemove);
+  return await withCatalogTransaction(root, async () => {
+    const entries = await readCatalog(root);
+    if (entries.length === 0) return { deleted: 0, missing: 0 };
+    return await deleteEntriesLocked(root, entries.map(entry => entry.id), afterRemove);
+  });
 }

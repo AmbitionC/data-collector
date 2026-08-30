@@ -80,7 +80,7 @@ export const JOB_STATUSES = [
 ] as const;
 export type JobStatus = (typeof JOB_STATUSES)[number];
 
-export interface JobRecord {
+interface JobRecordBase {
   id: string;
   url: string;
   requestedBy: 'codex' | 'cli' | 'extension';
@@ -88,6 +88,8 @@ export interface JobRecord {
   createdAt: string;
   updatedAt: string;
   outputPath?: string;
+  /** Exact successful local Markdown sink output used by directed snapshot validation. */
+  markdownOutput?: { sinkId: 'markdown'; outputPath: string };
   errorCode?: string;
   errorMessage?: string;
   batchId?: string;
@@ -95,6 +97,19 @@ export interface JobRecord {
   /** 计划子任务所属的 staging 尝试；换代后旧任务结果不得落地。 */
   planAttempt?: import('./plans.js').CollectionPlanAttempt;
 }
+
+/** 定向运行归属不可半写：run ID 与 fence token 必须成对保存。 */
+export type DirectedRunJobOwnership =
+  | {
+    directedRunId: string;
+    directedRunAttempt: import('./nowcoderDirected.js').NowcoderDirectedRunAttempt;
+  }
+  | {
+    directedRunId?: never;
+    directedRunAttempt?: never;
+  };
+
+export type JobRecord = JobRecordBase & DirectedRunJobOwnership;
 
 export interface WsEnvelope<TType extends string = string, TPayload = unknown> {
   protocolVersion: 1;

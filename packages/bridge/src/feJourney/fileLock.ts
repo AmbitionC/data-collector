@@ -1,8 +1,9 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { mkdir, realpath } from 'node:fs/promises';
-import { join } from 'node:path';
+import { lstat, mkdir, realpath } from 'node:fs/promises';
+import { isAbsolute, join, relative, sep } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
+import { AsyncLocalStorage } from 'node:async_hooks';
 
 const LOCK_WAIT_SECONDS = 5 * 60;
 const RELEASE_WAIT_MS = 5_000;
@@ -12,6 +13,13 @@ process.stdout.write('${READY_MARKER}\\n');
 process.stdin.resume();
 process.stdin.once('end', () => process.exit(0));
 `;
+
+interface CatalogLockLease {
+  key: string;
+  active: boolean;
+}
+
+const catalogLockContext = new AsyncLocalStorage<ReadonlyMap<string, CatalogLockLease>>();
 
 interface LockCommand {
   command: string;
@@ -119,19 +127,82 @@ async function releaseLock(child: ChildProcessWithoutNullStreams): Promise<void>
   await exited;
 }
 
-export async function withFeJourneyCandidateLock<T>(
+async function validateOptionalLockLeaf(catalogDirectory: string, lockPath: string): Promise<void> {
+  try {
+    const lockMetadata = await lstat(lockPath);
+    if (lockMetadata.isSymbolicLink() || !lockMetadata.isFile()
+      || await realpath(lockPath) !== lockPath) throw new Error('定向候选锁文件无效');
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    const parent = await lstat(catalogDirectory);
+    if (parent.isSymbolicLink() || !parent.isDirectory()
+      || await realpath(catalogDirectory) !== catalogDirectory) throw error;
+  }
+}
+
+async function withCatalogDirectoryLock<T>(
+  catalogDirectory: string,
+  operation: () => Promise<T>,
+): Promise<T> {
+  const key = await realpath(catalogDirectory);
+  if (catalogLockContext.getStore()?.get(key)?.active) return await operation();
+  const lockPath = join(key, 'fe-journey.lock');
+  await validateOptionalLockLeaf(key, lockPath);
+  const command = lockCommand(lockPath);
+  const child = spawn(command.command, command.args, { stdio: 'pipe' });
+  await waitForLock(child);
+  const lease: CatalogLockLease = { key, active: true };
+  try {
+    const held = new Map(catalogLockContext.getStore() ?? []);
+    held.set(key, lease);
+    return await catalogLockContext.run(held, operation);
+  } finally {
+    // Detached descendants retain the ALS store. Invalidate their lease before releasing the OS
+    // holder so stale async context can never be mistaken for current lock authority.
+    lease.active = false;
+    await releaseLock(child);
+  }
+}
+
+/** True only inside this process's unforgeable async lease for the same physical catalog. */
+export async function libraryCatalogLockHeld(libraryRoot: string): Promise<boolean> {
+  const held = catalogLockContext.getStore();
+  if (!held) return false;
+  try {
+    return held.get(await realpath(join(libraryRoot, '_catalog')))?.active === true;
+  } catch {
+    return false;
+  }
+}
+
+/** Acquire the shared cross-process authority used by every internal catalog writer. */
+export async function withLibraryCatalogLock<T>(
   libraryRoot: string,
   operation: () => Promise<T>,
 ): Promise<T> {
   const catalogDirectory = join(libraryRoot, '_catalog');
   await mkdir(catalogDirectory, { recursive: true });
-  const lockPath = join(await realpath(catalogDirectory), 'fe-journey.lock');
-  const command = lockCommand(lockPath);
-  const child = spawn(command.command, command.args, { stdio: 'pipe' });
-  await waitForLock(child);
-  try {
-    return await operation();
-  } finally {
-    await releaseLock(child);
-  }
+  return await withCatalogDirectoryLock(await realpath(catalogDirectory), operation);
 }
+
+/** Acquire the same authority only inside an already canonical, preflighted library. */
+export async function withExistingLibraryCatalogLock<T>(
+  canonicalLibraryRoot: string,
+  operation: () => Promise<T>,
+): Promise<T> {
+  const catalogDirectory = join(canonicalLibraryRoot, '_catalog');
+  const metadata = await lstat(catalogDirectory);
+  if (metadata.isSymbolicLink() || !metadata.isDirectory()
+    || await realpath(catalogDirectory) !== catalogDirectory) throw new Error('定向候选锁目录无效');
+  const lockPath = join(catalogDirectory, 'fe-journey.lock');
+  const rel = relative(canonicalLibraryRoot, lockPath);
+  if (rel === '..' || rel.startsWith(`..${sep}`) || isAbsolute(rel)) {
+    throw new Error('定向候选锁越出本机库');
+  }
+  await validateOptionalLockLeaf(catalogDirectory, lockPath);
+  return await withCatalogDirectoryLock(catalogDirectory, operation);
+}
+
+/** Backward-compatible Fe Journey names; both catalogs intentionally share one lock file. */
+export const withFeJourneyCandidateLock = withLibraryCatalogLock;
+export const withExistingFeJourneyCandidateLock = withExistingLibraryCatalogLock;

@@ -6,6 +6,7 @@ import { assertInsideRoot } from './paths.js';
 import { atomicWriteText, SOURCE_FILE, type SyncInfo } from './writer.js';
 import { withCatalogTransaction } from './catalogTransaction.js';
 import { deliveryRevision } from './deliveryRevision.js';
+import { projectOrganized } from './storedDocument.js';
 import {
   stableContentId,
   ZSXQ_COMPLETE_CONTENT_CAPABILITY,
@@ -56,6 +57,8 @@ export type ResolveTarget = (source: string) => ContentSink | undefined;
 export interface SyncEntriesOptions {
   /** Delivery scope for a pooled fixed-plan item; capture scope remains immutable. */
   deliveryBatchId?: string;
+  /** Distinguishes directed delivery from the preset fixed plan for downstream curation. */
+  deliveryKind?: 'nowcoder-directed';
   /** Fixed plan responsible for this delivery, including one-off captures without capture metadata. */
   deliveryPlanId?: CollectionPlanId;
   /** Persist catalog delivery state only when every requested entry succeeds. */
@@ -93,7 +96,11 @@ async function readOrganized(root: string, entry: LibraryCatalogEntry): Promise<
     }
     throw error;
   }
-  return JSON.parse(raw) as OrganizedDocument;
+  try {
+    return projectOrganized(JSON.parse(raw) as unknown);
+  } catch (error) {
+    throw new Error(`source.json 无效：${messageOf(error)}`);
+  }
 }
 
 function assertZsxqSourceMatchesCatalog(
@@ -269,6 +276,7 @@ export async function syncEntries(
                   ? { sourceBatchId: captureBatchId }
                   : {}),
                 ...(options.deliveryPlanId ? { planId: options.deliveryPlanId } : {}),
+                ...(options.deliveryKind ? { deliveryKind: options.deliveryKind } : {}),
                 deliveryBatchId: options.deliveryBatchId,
               },
             },

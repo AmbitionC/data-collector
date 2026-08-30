@@ -122,6 +122,20 @@ describe('extension package validation', () => {
     expect(extensionVersion).toBe(packageVersion);
   });
 
+  it('keeps workspace shared dependencies on the released shared contract version', async () => {
+    const workspaceRoot = join(import.meta.dirname, '..', '..');
+    const rootVersion = JSON.parse(await readFile(join(workspaceRoot, 'package.json'), 'utf8')).version;
+    const dependencyVersion = async (path: string): Promise<string> =>
+      (JSON.parse(await readFile(join(workspaceRoot, path), 'utf8')) as {
+        dependencies: { '@data-collector/shared': string };
+      }).dependencies['@data-collector/shared'];
+
+    await expect(Promise.all([
+      dependencyVersion('packages/bridge/package.json'),
+      dependencyVersion('packages/extension/package.json'),
+    ])).resolves.toEqual([rootVersion, rootVersion]);
+  });
+
   it('contains no legacy popup or manual-pairing language in extension production inputs', async () => {
     const workspaceRoot = join(import.meta.dirname, '..', '..');
     const paths = [

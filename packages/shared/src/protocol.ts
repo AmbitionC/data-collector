@@ -12,6 +12,10 @@ import {
   zsxqOwnerAuditSchema,
   zsxqOwnerCheckpointSchema,
 } from './plans.js';
+import {
+  NOWCODER_DIRECTED_MAX_OWNED_TABS,
+  nowcoderDirectedRunAttemptSchema,
+} from './nowcoderDirected.js';
 
 export const EXTENSION_REPLACED_CLOSE_CODE = 4009;
 export const EXTENSION_REPLACED_CLOSE_REASON = 'replaced';
@@ -127,11 +131,73 @@ export const collectJobPayloadSchema = z.object({
   sinks: z.array(z.string().trim().min(1).max(100)).max(10).optional(),
 });
 
+const directedRunOwnershipShape = {
+  directedRunId: z.string().trim().min(1).max(200).optional(),
+  directedRunAttempt: nowcoderDirectedRunAttemptSchema.optional(),
+};
+
+function requirePairedDirectedRunOwnership(
+  payload: { directedRunId?: string | undefined; directedRunAttempt?: string | undefined },
+  context: z.RefinementCtx,
+): void {
+  if (Boolean(payload.directedRunId) !== Boolean(payload.directedRunAttempt)) {
+    context.addIssue({
+      code: 'custom',
+      path: payload.directedRunId ? ['directedRunAttempt'] : ['directedRunId'],
+      message: 'directedRunId 与 directedRunAttempt 必须同时提供',
+    });
+  }
+}
+
 export const jobCollectPayloadSchema = z.object({
   url: z.string().url().max(4096),
   /** 只有用户直接发起的单条任务可把登录页交给用户；自动批次必须自行回收页面。 */
   interactive: z.boolean().default(true),
+  ...directedRunOwnershipShape,
+}).strict().superRefine((payload, context) => {
+  requirePairedDirectedRunOwnership(payload, context);
+  if (payload.directedRunId && payload.interactive !== false) {
+    context.addIssue({
+      code: 'custom',
+      path: ['interactive'],
+      message: '牛客定向任务必须以非交互模式采集',
+    });
+  }
+});
+
+/** Bridge 用 run/attempt fence 取消扩展拥有的详情任务。 */
+export const jobCancelPayloadSchema = z.object({
+  directedRunId: z.string().trim().min(1).max(200),
+  directedRunAttempt: nowcoderDirectedRunAttemptSchema,
 }).strict();
+
+/** 只统计本 directed run 实际创建并登记的详情标签页。 */
+export const directedTelemetryPayloadSchema = z.object({
+  directedRunId: z.string().trim().min(1).max(200),
+  directedRunAttempt: nowcoderDirectedRunAttemptSchema,
+  activeOwnedTabs: z.number().int().min(0).max(NOWCODER_DIRECTED_MAX_OWNED_TABS),
+  peakOwnedTabs: z.number().int().min(0).max(NOWCODER_DIRECTED_MAX_OWNED_TABS),
+  terminalOwnedTabs: z.number().int().min(0).max(NOWCODER_DIRECTED_MAX_OWNED_TABS).optional(),
+}).strict().superRefine((payload, context) => {
+  if (payload.activeOwnedTabs > payload.peakOwnedTabs) {
+    context.addIssue({ code: 'custom', path: ['activeOwnedTabs'], message: '当前 owned tab 不能超过峰值' });
+  }
+});
+
+export const jobCollectEnvelopeSchema = wsEnvelopeSchema.extend({
+  type: z.literal('job.collect'),
+  payload: jobCollectPayloadSchema,
+});
+
+export const jobCancelEnvelopeSchema = wsEnvelopeSchema.extend({
+  type: z.literal('job.cancel'),
+  payload: jobCancelPayloadSchema,
+});
+
+export const directedTelemetryEnvelopeSchema = wsEnvelopeSchema.extend({
+  type: z.literal('nowcoder.directed.telemetry'),
+  payload: directedTelemetryPayloadSchema,
+});
 
 export const jobResultPayloadSchema = z.object({
   document: collectedDocumentSchema,

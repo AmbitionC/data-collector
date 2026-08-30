@@ -68,6 +68,37 @@ describe('owned browser tabs', () => {
     expect(storage.values[OWNED_TABS_STORAGE_KEY]).toMatchObject({ owned: [] });
   });
 
+  it('retains ownership when physical removal fails and forgets only after a later success', async () => {
+    const storage = new MemorySessionStorage();
+    const remove = vi.fn()
+      .mockRejectedValueOnce(new Error('Tabs cannot be edited right now'))
+      .mockResolvedValueOnce(undefined);
+    const registry = new OwnedTabRegistry(storage, { remove }, () => 3_100);
+    await registry.track({ id: 31, url: 'https://www.nowcoder.com/discuss/31' }, 'remote-job');
+
+    await expect(registry.close(31)).rejects.toThrow('Tabs cannot be edited right now');
+    expect(storage.values[OWNED_TABS_STORAGE_KEY]).toMatchObject({ owned: [{ id: 31 }] });
+
+    await expect(registry.close(31)).resolves.toBeUndefined();
+    expect(storage.values[OWNED_TABS_STORAGE_KEY]).toMatchObject({ owned: [] });
+  });
+
+  it('persists partial stale cleanup and retains every tab whose removal was not proven', async () => {
+    const storage = new MemorySessionStorage();
+    const remove = vi.fn(async (id: number) => {
+      if (id === 51) throw new Error('Chrome is busy');
+      if (id === 52) throw new Error('No tab with id: 52');
+    });
+    const registry = new OwnedTabRegistry(storage, { remove }, () => 3_200);
+    await registry.track({ id: 50, url: 'https://www.nowcoder.com/discuss/50' }, 'remote-job');
+    await registry.track({ id: 51, url: 'https://www.nowcoder.com/discuss/51' }, 'remote-job');
+    await registry.track({ id: 52, url: 'https://www.nowcoder.com/discuss/52' }, 'remote-job');
+
+    await expect(registry.cleanupStale()).rejects.toThrow('Chrome is busy');
+    expect(remove.mock.calls.map(([id]) => id)).toEqual([50, 51, 52]);
+    expect(storage.values[OWNED_TABS_STORAGE_KEY]).toMatchObject({ owned: [{ id: 51 }] });
+  });
+
   it('best-effort closes a newly created tab when session tracking cannot be persisted', async () => {
     const persistenceError = new Error('session storage unavailable');
     const storage: OwnedTabsStorage = {

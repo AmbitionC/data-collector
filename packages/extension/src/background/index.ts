@@ -70,8 +70,21 @@ const tabs: TabsApi = {
   },
 };
 
-function waitForTabComplete(tabId: number, timeoutMs = 30_000): Promise<void> {
+function tabWaitAbortError(signal?: AbortSignal): Error {
+  if (signal?.reason instanceof Error) return signal.reason;
+  const error = new Error('牛客定向采集已取消');
+  error.name = 'AbortError';
+  return error;
+}
+
+function waitForTabComplete(
+  tabId: number,
+  timeoutMs = 30_000,
+  signal?: AbortSignal,
+): Promise<void> {
+  if (signal?.aborted) return Promise.reject(tabWaitAbortError(signal));
   return chrome.tabs.get(tabId).then(tab => {
+    if (signal?.aborted) throw tabWaitAbortError(signal);
     if (tab.status === 'complete') return;
     return new Promise<void>((resolve, reject) => {
       const timeout = setTimeout(() => {
@@ -90,13 +103,20 @@ function waitForTabComplete(tabId: number, timeoutMs = 30_000): Promise<void> {
           reject(new Error('采集标签页已关闭'));
         }
       };
+      const onAbort = () => {
+        cleanup();
+        reject(tabWaitAbortError(signal));
+      };
       const cleanup = () => {
         clearTimeout(timeout);
         chrome.tabs.onUpdated.removeListener(onUpdated);
         chrome.tabs.onRemoved.removeListener(onRemoved);
+        signal?.removeEventListener('abort', onAbort);
       };
       chrome.tabs.onUpdated.addListener(onUpdated);
       chrome.tabs.onRemoved.addListener(onRemoved);
+      signal?.addEventListener('abort', onAbort, { once: true });
+      if (signal?.aborted) onAbort();
     });
   });
 }
@@ -147,7 +167,11 @@ const runner = new JobRunner({
 });
 let activePlanCollections = 0;
 const activePlanAttempts = new Set<string>();
-connection.onCollect((requestId, url, interactive) => runner.runRemoteJob(requestId, url, interactive));
+connection.onCollect((requestId, url, interactive, ownership) =>
+  runner.runRemoteJob(requestId, url, interactive, ownership));
+connection.onCancel((requestId, directedRunId, directedRunAttempt) =>
+  runner.cancelRemoteJob(requestId, directedRunId, directedRunAttempt));
+connection.onJobAcknowledged(requestId => runner.acknowledgeRemoteJob(requestId));
 connection.onPlanCollect(async (requestId, payload) => {
   connection.send('plan.started', requestId, {
     planId: payload.planId,
@@ -231,6 +255,7 @@ function updateSignal(values: Record<string, unknown>): UpdateSignal {
     triedBuildId: values.autoReloadTried as string | undefined,
     buildFailed: update?.buildFailed === true,
     updateMessage: update?.message,
+    directedRunActive: values.directedRunActive === true,
     busy: isCollecting({
       batch: values.batch as { phase?: string; updatedAt?: number } | undefined,
       lastJobStatus: values.lastJobStatus as string | undefined,
@@ -257,6 +282,7 @@ async function status() {
     'buildId',
     'autoReloadTried',
     'batchItems',
+    'directedRunActive',
   ]);
   const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
   let supported = false;
@@ -445,7 +471,7 @@ chrome.runtime.onMessage.addListener((message: unknown, _sender, sendResponse) =
       return { reloading: true };
     }
     if (request.type === 'connection.retry') {
-      await connection.retry();
+      await startExtension(true);
       return status();
     }
     if (request.type === 'library.reveal' && typeof (request as { path?: unknown }).path === 'string') {
@@ -480,6 +506,7 @@ async function maybeAutoReload(): Promise<void> {
     'batch',
     'lastJobStatus',
     'lastJobUpdatedAt',
+    'directedRunActive',
   ]);
   const signal: UpdateSignal = {
     ...updateSignal(values),
@@ -491,29 +518,32 @@ async function maybeAutoReload(): Promise<void> {
 
 chrome.runtime.onInstalled.addListener(() => {
   void chrome.alarms.create('bridge-reconnect', { periodInMinutes: 1 });
-  void startExtension();
+  void startExtension().catch(() => undefined);
 });
 chrome.runtime.onStartup.addListener(() => {
-  void startExtension();
+  void startExtension().catch(() => undefined);
 });
 chrome.alarms.onAlarm.addListener(alarm => {
   if (alarm.name !== 'bridge-reconnect') return;
   // 连不上也要接着看一眼：产物可能是用户自己构建的，不必等服务活过来。
-  void connection
-    .start()
+  void startExtension()
     .catch(() => undefined)
     .then(() => maybeAutoReload());
 });
 let staleTabsCleaned = false;
-async function startExtension(): Promise<void> {
-  let cleanup: Promise<void> | undefined;
+let staleTabsCleanup: Promise<void> | undefined;
+async function startExtension(forceRetry = false): Promise<void> {
   if (!staleTabsCleaned) {
-    staleTabsCleaned = true;
-    cleanup = ownedTabs.cleanupStale();
+    staleTabsCleanup ??= ownedTabs.cleanupStale()
+      .then(() => { staleTabsCleaned = true; })
+      .finally(() => { staleTabsCleanup = undefined; });
+    // Await the exact flight before it can clear the shared slot. Reading the slot again after an
+    // unrelated await could mistake a rejected cleanup for success and open the Bridge socket.
+    await staleTabsCleanup;
   }
   await configureSidePanel();
-  await cleanup;
-  await connection.start();
+  if (forceRetry) await connection.retry();
+  else await connection.start();
 }
 
-void startExtension();
+void startExtension().catch(() => undefined);

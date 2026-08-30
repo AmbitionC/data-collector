@@ -1,7 +1,8 @@
-import { mkdir, readFile, readdir, rm, symlink, writeFile } from 'node:fs/promises';
-import { dirname, isAbsolute, join, relative } from 'node:path';
+import { chmod, mkdir, readFile, readdir, realpath, rm, symlink, writeFile } from 'node:fs/promises';
+import { dirname, isAbsolute, join, posix, relative, sep, win32 } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
+  stableContentId,
   ZSXQ_COMPLETE_CONTENT_CAPABILITY,
   type CollectedDocument,
 } from '@data-collector/shared';
@@ -12,7 +13,15 @@ import {
   safeSlug,
 } from '../../packages/bridge/src/library/index.js';
 import { downloadAssets, readResponseBytes } from '../../packages/bridge/src/library/assets.js';
-import { atomicWriteText } from '../../packages/bridge/src/library/writer.js';
+import {
+  atomicWriteText,
+  isSafeCatalogRelativePath,
+  normalizeStoredCatalogRelativePath,
+  preflightDirectedLocalLibrary,
+  readDirectedCatalogFile,
+  toCatalogRelativePath,
+} from '../../packages/bridge/src/library/writer.js';
+import { deliveryRevision } from '../../packages/bridge/src/library/deliveryRevision.js';
 import { createTemporaryDirectoryTracker } from '../helpers/temp.js';
 
 const URL = 'https://mp.weixin.qq.com/s/library-test';
@@ -55,15 +64,303 @@ function collected(overrides: Partial<CollectedDocument> = {}): CollectedDocumen
   };
 }
 
+function directedNowcoder(url: string, title = 'Agent 开发面经') {
+  return organize(collected({
+    source: 'nowcoder',
+    kind: 'post',
+    url,
+    canonicalUrl: url,
+    title,
+    html: `<p>${title} 的完整正文</p>`,
+    text: `${title} 的完整正文，包含 Agent 架构、工具调用和评测设计。`,
+    images: [],
+    feJourney: {
+      candidateKinds: ['interview'],
+      qualityScore: 90,
+      qualitySignals: [],
+      exclusionReasons: [],
+      contentHash: '0123456789abcdef',
+      simHash: '1111111111111111',
+      clusterId: 'cluster-directed',
+    },
+  }));
+}
+
+function directedLocalEvidence(url: string, input: ReturnType<typeof directedNowcoder>) {
+  return {
+    nowcoderDirected: {
+      runId: 'run-library-boundary',
+      attempt: '0123456789abcdef' as const,
+      currentJobId: `job-${stableContentId(url)}`,
+      stableContentId: stableContentId(url),
+      canonicalUrl: url,
+      contentHash: '0123456789abcdef',
+      clusterId: 'cluster-directed',
+      deliveryRevision: deliveryRevision(input),
+    },
+  };
+}
+
 describe('library paths', () => {
   it('creates safe readable slugs', () => {
     expect(safeSlug('../../危险 标题 / test')).toBe('危险-标题-test');
     expect(safeSlug('CON')).not.toBe('CON');
     expect(safeSlug('')).toBe('untitled');
   });
+
+  it('stores Windows-native relative paths in a portable POSIX catalog protocol', () => {
+    const windowsRelative = win32.relative(
+      'C:\\library',
+      'C:\\library\\牛客网\\面经\\2026\\agent\\index.md',
+    );
+    const persisted = toCatalogRelativePath(windowsRelative, win32.sep);
+
+    expect(persisted).toBe('牛客网/面经/2026/agent/index.md');
+    expect(isSafeCatalogRelativePath(persisted)).toBe(true);
+    for (const unsafe of [
+      '../outside.md',
+      'a\\b/index.md',
+      'C:/outside.md',
+      '/outside.md',
+      'a//index.md',
+      'a/../index.md',
+      'a/C:/index.md',
+      'a/C:foo/index.md',
+      'a/file:stream',
+      'a/trailing./index.md',
+      'a/trailing /index.md',
+      'a/CON/index.md',
+    ]) expect(isSafeCatalogRelativePath(unsafe)).toBe(false);
+  });
+
+  it('migrates only an unmixed Windows-native legacy catalog path into the POSIX protocol', () => {
+    expect(normalizeStoredCatalogRelativePath(
+      '牛客网\\人工智能\\2026\\agent\\index.md',
+      win32.sep,
+    )).toBe('牛客网/人工智能/2026/agent/index.md');
+
+    for (const unsafe of [
+      '..\\outside.md',
+      'C:\\outside.md',
+      '\\\\server\\share\\index.md',
+      '牛客网\\人工智能/2026\\index.md',
+      '牛客网\\人工智能\\..\\outside.md',
+      '牛客网\\CON\\index.md',
+    ]) expect(() => normalizeStoredCatalogRelativePath(unsafe, win32.sep)).toThrow();
+  });
+
+  it('fails closed when a catalog proven present disappears before the directed transaction read', async () => {
+    const missing = Object.assign(new Error('catalog disappeared'), { code: 'ENOENT' });
+    const io = { readFile: async () => { throw missing; } };
+
+    await expect(readDirectedCatalogFile('/library/_catalog/index.json', true, io))
+      .rejects.toMatchObject({
+        code: 'DIRECTED_LOCAL_LIBRARY_CORRUPT',
+        message: '本机目录格式无效',
+      });
+    await expect(readDirectedCatalogFile('/library/_catalog/index.json', false, io))
+      .resolves.toEqual([]);
+  });
 });
 
 describe('Markdown library', () => {
+  it.each(['source-symlink', 'source-directory', 'source-unreadable'] as const)(
+    'rejects a directed save with corrupt existing %s before changing library bytes',
+    async kind => {
+      const workspace = await temporaryDirectory();
+      const root = join(workspace, 'library');
+      const url = 'https://www.nowcoder.com/discuss/directed-source-boundary';
+      const library = new MarkdownLibrary({ root });
+      const initial = directedNowcoder(url, '初始 Agent 面经');
+      const saved = await library.save(initial);
+      const sourcePath = join(dirname(saved.markdownPath), 'source.json');
+      const catalogPath = join(root, '_catalog', 'index.json');
+      const originalCatalog = await readFile(catalogPath, 'utf8');
+      const originalCatalogLeaves = (await readdir(join(root, '_catalog'))).sort();
+      const originalMarkdown = await readFile(saved.markdownPath, 'utf8');
+      const originalSource = await readFile(sourcePath, 'utf8');
+      const outside = join(workspace, 'outside-source.json');
+      if (kind === 'source-symlink') {
+        await rm(sourcePath);
+        await writeFile(outside, '{"outside":true}\n');
+        await symlink(outside, sourcePath);
+      } else if (kind === 'source-directory') {
+        await rm(sourcePath);
+        await mkdir(sourcePath);
+      } else {
+        await chmod(sourcePath, 0o000);
+      }
+
+      const incoming = directedNowcoder(url, '不应写入的 Agent 面经');
+      try {
+        await expect(library.save(incoming, directedLocalEvidence(url, incoming)))
+          .rejects.toMatchObject({
+            code: 'DIRECTED_LOCAL_LIBRARY_CORRUPT',
+            message: '本机目录格式无效',
+          });
+      } finally {
+        if (kind === 'source-unreadable') await chmod(sourcePath, 0o600);
+      }
+
+      expect(await readFile(catalogPath, 'utf8')).toBe(originalCatalog);
+      expect(await readFile(saved.markdownPath, 'utf8')).toBe(originalMarkdown);
+      if (kind === 'source-symlink') {
+        expect(await readFile(outside, 'utf8')).toBe('{"outside":true}\n');
+      } else if (kind === 'source-unreadable') {
+        expect(await readFile(sourcePath, 'utf8')).toBe(originalSource);
+      }
+      expect((await readdir(join(root, '_catalog'))).sort()).toEqual(originalCatalogLeaves);
+    },
+  );
+
+  it('allows a true missing source.json leaf and repairs it during a directed save', async () => {
+    const root = await temporaryDirectory();
+    const url = 'https://www.nowcoder.com/discuss/directed-missing-source';
+    const library = new MarkdownLibrary({ root });
+    const initial = directedNowcoder(url, '旧 Agent 面经');
+    const saved = await library.save(initial);
+    const sourcePath = join(dirname(saved.markdownPath), 'source.json');
+    await rm(sourcePath);
+    const incoming = directedNowcoder(url, '修复后的 Agent 面经');
+
+    const repaired = await library.save(incoming, directedLocalEvidence(url, incoming));
+    expect(repaired).toMatchObject({
+      id: stableContentId(url),
+    });
+    expect(await readFile(join(dirname(repaired.markdownPath), 'source.json'), 'utf8'))
+      .toContain('修复后的 Agent 面经');
+    expect(JSON.parse(await readFile(join(root, '_catalog', 'index.json'), 'utf8')))
+      .toEqual([expect.objectContaining({
+        id: stableContentId(url),
+        relativePath: relative(await realpath(root), repaired.markdownPath).split(sep).join('/'),
+      })]);
+    // The interrupted/legacy directory is never overwritten in place; the catalog switches to
+    // the complete immutable replacement as one transaction.
+    await expect(readFile(sourcePath, 'utf8')).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
+  it('round-trips an ordinary writer catalog through consecutive directed saves', async () => {
+    const root = await temporaryDirectory();
+    const library = new MarkdownLibrary({ root });
+    const firstUrl = 'https://www.nowcoder.com/discuss/portable-roundtrip-1';
+    const secondUrl = 'https://www.nowcoder.com/discuss/portable-roundtrip-2';
+    const first = directedNowcoder(firstUrl, '跨平台目录面经一');
+    await library.save(first);
+    await library.save(first, directedLocalEvidence(firstUrl, first));
+    const second = directedNowcoder(secondUrl, '跨平台目录面经二');
+    await library.save(second, directedLocalEvidence(secondUrl, second));
+
+    const catalog = JSON.parse(await readFile(join(root, '_catalog', 'index.json'), 'utf8')) as Array<{
+      relativePath: string;
+    }>;
+    expect(catalog).toHaveLength(2);
+    expect(catalog.every(entry => isSafeCatalogRelativePath(entry.relativePath))).toBe(true);
+    expect(catalog.every(entry => !entry.relativePath.includes('\\'))).toBe(true);
+  });
+
+  it.each([
+    'missing-ancestor',
+    'catalog-directory',
+    'catalog-symlink',
+    'identity',
+    'traversal',
+    'duplicate',
+    'entry-symlink',
+  ] as const)('fails closed on directed strict-catalog case %s', async kind => {
+    const workspace = await temporaryDirectory();
+    const root = join(workspace, 'library');
+    const catalogDirectory = join(root, '_catalog');
+    await mkdir(root);
+    if (kind === 'missing-ancestor') {
+      await expect(preflightDirectedLocalLibrary(root)).rejects.toMatchObject({
+        code: 'DIRECTED_LOCAL_LIBRARY_CORRUPT',
+      });
+      return;
+    }
+    await mkdir(catalogDirectory);
+    const url = 'https://www.nowcoder.com/discuss/strict-catalog';
+    const relativePath = posix.join('牛客网', '面经', '2026', 'strict', 'index.md');
+    const entryPath = join(root, relativePath);
+    await mkdir(dirname(entryPath), { recursive: true });
+    await writeFile(entryPath, '# strict\n');
+    const entry = {
+      id: stableContentId(url),
+      source: 'nowcoder',
+      title: 'Agent 面经',
+      url,
+      category: '人工智能',
+      relativePath,
+      updatedAt: '2026-08-30T00:00:00.000Z',
+    };
+    const catalogPath = join(catalogDirectory, 'index.json');
+    if (kind === 'catalog-directory') {
+      await mkdir(catalogPath);
+    } else if (kind === 'catalog-symlink') {
+      const outsideCatalog = join(workspace, 'outside-catalog.json');
+      await writeFile(outsideCatalog, `${JSON.stringify([entry])}\n`);
+      await symlink(outsideCatalog, catalogPath);
+    } else if (kind === 'entry-symlink') {
+      await rm(entryPath);
+      const outsideEntry = join(workspace, 'outside-entry.md');
+      await writeFile(outsideEntry, '# outside\n');
+      await symlink(outsideEntry, entryPath);
+      await writeFile(catalogPath, `${JSON.stringify([entry])}\n`);
+    } else {
+      const catalog = kind === 'identity'
+        ? [{ ...entry, id: 'wrong-stable-id' }]
+        : kind === 'traversal'
+          ? [{ ...entry, relativePath: '../outside.md' }]
+          : [entry, { ...entry }];
+      await writeFile(catalogPath, `${JSON.stringify(catalog)}\n`);
+    }
+
+    await expect(preflightDirectedLocalLibrary(root)).rejects.toMatchObject({
+      code: 'DIRECTED_LOCAL_LIBRARY_CORRUPT',
+      message: '本机目录格式无效',
+    });
+    expect(await readFile(join(workspace, kind === 'traversal' ? 'outside.md' : 'outside-entry.md'), 'utf8')
+      .catch(() => 'unchanged')).not.toContain('Agent 面经');
+  });
+
+  it('refuses to overwrite a malformed catalog during a directed save', async () => {
+    const root = await temporaryDirectory();
+    const catalogPath = join(root, '_catalog', 'index.json');
+    await mkdir(dirname(catalogPath), { recursive: true });
+    await writeFile(catalogPath, '[{"id":42}]\n');
+    const url = 'https://www.nowcoder.com/discuss/directed-corrupt-catalog';
+    const organized = organize(collected({
+      source: 'nowcoder',
+      kind: 'post',
+      url,
+      canonicalUrl: url,
+      title: 'Agent 开发面经',
+      images: [],
+      feJourney: {
+        candidateKinds: ['interview'], qualityScore: 90, qualitySignals: [], exclusionReasons: [],
+        contentHash: '0123456789abcdef', simHash: '1111111111111111', clusterId: 'cluster-directed',
+      },
+    }));
+    const library = new MarkdownLibrary({ root });
+
+    await expect(library.save(organized, {
+      nowcoderDirected: {
+        runId: 'run-1', attempt: '0123456789abcdef', currentJobId: 'nowcoder-job-1',
+        stableContentId: stableContentId(url), canonicalUrl: url,
+        contentHash: '0123456789abcdef', clusterId: 'cluster-directed',
+        deliveryRevision: deliveryRevision(organized),
+      },
+    })).rejects.toThrow('本机目录格式无效');
+    await expect(library.save(organized, {
+      nowcoderDirected: {
+        runId: 'run-1', attempt: '0123456789abcdef', currentJobId: 'nowcoder-job-1',
+        stableContentId: stableContentId(url), canonicalUrl: url,
+        contentHash: '0123456789abcdef', clusterId: 'cluster-directed',
+        deliveryRevision: deliveryRevision(organized),
+      },
+    })).rejects.toMatchObject({ code: 'DIRECTED_LOCAL_LIBRARY_CORRUPT' });
+    expect(await readFile(catalogPath, 'utf8')).toBe('[{"id":42}]\n');
+  });
+
   it('removes a text temp file when its final atomic rename fails', async () => {
     const root = await temporaryDirectory();
     const target = join(root, 'blocked-target');

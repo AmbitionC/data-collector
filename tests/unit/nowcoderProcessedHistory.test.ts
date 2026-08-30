@@ -1,10 +1,14 @@
-import { mkdir, writeFile } from 'node:fs/promises';
+import { mkdir, symlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import type { CollectedDocument } from '@data-collector/shared';
 import {
   filterProcessedNowcoderDocuments,
   loadProcessedNowcoderHistory,
+  loadStrictProcessedNowcoderHistory,
+  processedNowcoderHistoryDigest,
+  historyFromSnapshot,
+  StrictNowcoderHistoryError,
 } from '../../packages/bridge/src/plans/nowcoderProcessedHistory.js';
 import { createTemporaryDirectoryTracker } from '../helpers/temp.js';
 
@@ -110,5 +114,87 @@ describe('processed Nowcoder history', () => {
     );
 
     expect(result).toEqual({ eligible: [candidate], rejected: [] });
+  });
+
+  it('strict mode distinguishes a genuinely missing leaf from corrupt history', async () => {
+    const missing = await temporaryDirectories.create('nowcoder-strict-history-missing-');
+    const empty = await loadStrictProcessedNowcoderHistory(missing);
+    expect(empty.snapshot).toEqual({ version: 1, hashesByUrl: [], clusterIds: [] });
+    expect(empty.digest).toBe(processedNowcoderHistoryDigest(empty.snapshot));
+
+    const malformed = await temporaryDirectories.create('nowcoder-strict-history-malformed-');
+    await mkdir(join(malformed, '.codex'), { recursive: true });
+    await writeFile(join(malformed, '.codex', 'interview-source-history.json'), '{not-json');
+    await expect(loadStrictProcessedNowcoderHistory(malformed)).rejects.toMatchObject({
+      code: 'DIRECTED_HISTORY_CORRUPT',
+    });
+
+    const symlinked = await temporaryDirectories.create('nowcoder-strict-history-symlink-');
+    await mkdir(join(symlinked, '.codex'), { recursive: true });
+    await symlink(
+      join(malformed, '.codex', 'interview-source-history.json'),
+      join(symlinked, '.codex', 'interview-source-history.json'),
+    );
+    await expect(loadStrictProcessedNowcoderHistory(symlinked)).rejects.toMatchObject({
+      code: 'DIRECTED_HISTORY_CORRUPT',
+    });
+  });
+
+  it('strict mode canonicalizes byte-sorted URL/hash/cluster snapshots deterministically', async () => {
+    const repo = await temporaryDirectories.create('nowcoder-strict-history-order-');
+    await mkdir(join(repo, '.codex'), { recursive: true });
+    await writeFile(join(repo, '.codex', 'interview-source-history.json'), JSON.stringify({
+      schemaVersion: 1,
+      updatedAt: '2026-08-30',
+      records: {
+        'bbbbbbbbbbbb': {
+          source: 'nowcoder', url: 'https://www.nowcoder.com/discuss/2',
+          contentHash: 'bbbbbbbbbbbbbbbb', clusterId: 'cluster-b', evidenceGrade: 'B',
+          status: 'merged', publicFiles: [], knowledgeKeys: [], processedAt: '2026-08-30T00:00:00.000Z',
+        },
+        'aaaaaaaaaaaa': {
+          source: 'nowcoder', url: 'https://www.nowcoder.com/discuss/1',
+          contentHash: 'aaaaaaaaaaaaaaaa', clusterId: 'cluster-a', evidenceGrade: 'A',
+          status: 'published', articleKey: 'a', publicFiles: ['interview/a.md'], knowledgeKeys: [],
+          processedAt: '2026-08-30T00:00:00.000Z',
+        },
+      },
+    }));
+
+    const first = await loadStrictProcessedNowcoderHistory(repo);
+    const second = await loadStrictProcessedNowcoderHistory(repo);
+    expect(first).toEqual(second);
+    expect(first.snapshot.hashesByUrl.map(item => item.url)).toEqual([
+      'https://www.nowcoder.com/discuss/1',
+      'https://www.nowcoder.com/discuss/2',
+    ]);
+    expect(first.snapshot.clusterIds).toEqual(['cluster-a', 'cluster-b']);
+  });
+
+  it('rejects non-canonical or malformed persisted snapshots before digest/use', () => {
+    const malformed = {
+      version: 1 as const,
+      hashesByUrl: [{
+        url: 'https://www.nowcoder.com/discuss/2',
+        hashes: ['bbbbbbbbbbbbbbbb', 'aaaaaaaaaaaaaaaa'],
+      }],
+      clusterIds: ['cluster-b', 'cluster-a'],
+    };
+    expect(() => processedNowcoderHistoryDigest(malformed)).toThrow(StrictNowcoderHistoryError);
+    expect(() => historyFromSnapshot(malformed)).toThrow(StrictNowcoderHistoryError);
+  });
+
+  it('classifies an oversized persisted normalized set as the strict history limit', () => {
+    const oversized = {
+      version: 1 as const,
+      hashesByUrl: [],
+      clusterIds: Array.from({ length: 100_001 }, (_, index) => `cluster-${index}`),
+    };
+    try {
+      processedNowcoderHistoryDigest(oversized);
+      throw new Error('expected strict limit error');
+    } catch (error) {
+      expect(error).toMatchObject({ code: 'DIRECTED_HISTORY_LIMIT_EXCEEDED' });
+    }
   });
 });

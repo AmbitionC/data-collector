@@ -16,7 +16,15 @@ import {
   startBridge,
   type StartBridgeOptions,
 } from './server/index.js';
-import { COLLECTION_PLAN_IDS, type CollectionPlanId } from '@data-collector/shared';
+import {
+  COLLECTION_PLAN_IDS,
+  nowcoderDirectedCancelResponseSchema,
+  nowcoderDirectedRetryResponseSchema,
+  nowcoderDirectedStartResponseSchema,
+  nowcoderSearchPreviewResponseSchema,
+  type CollectionPlanId,
+  type PublicNowcoderDirectedRun,
+} from '@data-collector/shared';
 
 export interface CliIo {
   stdout(value: string): void;
@@ -86,6 +94,374 @@ async function authenticatedToken(args: string[]): Promise<{ baseUrl: string; to
   const token = access.token();
   if (!token) throw new Error('扩展尚未自动连接，请先启动 Bridge 并在 Edge 中打开 Data Collector 侧边栏');
   return { baseUrl: `http://${config.host}:${config.port}`, token };
+}
+
+type NowcoderAction = 'preview' | 'run' | 'status' | 'cancel' | 'retry';
+
+export interface ParsedNowcoderCommand {
+  action: NowcoderAction;
+  queries: string[];
+  target?: number;
+  sessionId?: string;
+  runId?: string;
+  idempotencyKey?: string;
+  waitMs?: number;
+}
+
+interface ResponseSchema<T> {
+  safeParse(value: unknown): { success: true; data: T } | { success: false };
+}
+
+class NowcoderCliError extends Error {
+  constructor(readonly code: string, message: string) {
+    super(message);
+  }
+}
+
+const NOWCODER_USAGE = [
+  '用法：data-collector nowcoder preview --query Q... --target N --latest',
+  '或：data-collector nowcoder run (--session ID | --query Q... --target N) --latest --deliver --idempotency-key KEY [--wait MS]',
+  '或：data-collector nowcoder status --run ID',
+  '或：data-collector nowcoder cancel --run ID',
+  '或：data-collector nowcoder retry --run ID --idempotency-key KEY [--wait MS]',
+].join('；');
+
+function nowcoderUsage(): never {
+  throw new NowcoderCliError('CLI_USAGE_ERROR', NOWCODER_USAGE);
+}
+
+function parseNowcoderCommand(args: string[]): ParsedNowcoderCommand {
+  const rawAction = args[1];
+  if (!['preview', 'run', 'status', 'cancel', 'retry'].includes(rawAction ?? '')) {
+    return nowcoderUsage();
+  }
+  const action = rawAction as NowcoderAction;
+  const values = new Map<string, string>();
+  const queries: string[] = [];
+  const switches = new Set<string>();
+  const valueFlags = new Set([
+    '--query', '--target', '--session', '--run', '--idempotency-key', '--wait',
+    '--port', '--library', '--config',
+  ]);
+  const switchFlags = new Set(['--latest', '--deliver']);
+  for (let index = 2; index < args.length; index += 1) {
+    const flag = args[index];
+    if (!flag || (!valueFlags.has(flag) && !switchFlags.has(flag))) return nowcoderUsage();
+    if (switchFlags.has(flag)) {
+      if (switches.has(flag)) return nowcoderUsage();
+      switches.add(flag);
+      continue;
+    }
+    const value = args[index + 1];
+    if (!value || value.startsWith('--')) return nowcoderUsage();
+    index += 1;
+    if (flag === '--query') {
+      queries.push(value);
+    } else {
+      if (values.has(flag)) return nowcoderUsage();
+      values.set(flag, value);
+    }
+  }
+
+  const parseInteger = (flag: string, minimum: number, maximum: number): number | undefined => {
+    const raw = values.get(flag);
+    if (raw === undefined) return undefined;
+    const parsed = Number(raw);
+    if (!Number.isInteger(parsed) || parsed < minimum || parsed > maximum) return nowcoderUsage();
+    return parsed;
+  };
+  parseInteger('--port', 0, 65_535);
+  const target = parseInteger('--target', 1, 10);
+  const waitMs = parseInteger('--wait', 100, 30 * 60 * 1_000);
+  const nonempty = (flag: string): string | undefined => {
+    const value = values.get(flag);
+    if (value !== undefined && value.trim().length === 0) return nowcoderUsage();
+    return value;
+  };
+  const sessionId = nonempty('--session');
+  const runId = nonempty('--run');
+  const idempotencyKey = nonempty('--idempotency-key');
+  const connectionFlags = new Set(['--port', '--library', '--config']);
+  const actionFlags = new Set([...values.keys()].filter(flag => !connectionFlags.has(flag)));
+  const onlyActionFlags = (...allowed: string[]): boolean => (
+    [...actionFlags].every(flag => allowed.includes(flag))
+  );
+
+  if (action === 'preview') {
+    if (queries.length < 1 || target === undefined || !switches.has('--latest')
+      || switches.size !== 1 || !onlyActionFlags('--target')) return nowcoderUsage();
+  } else if (action === 'run') {
+    const queryMode = queries.length > 0;
+    const sessionMode = sessionId !== undefined;
+    if (queryMode === sessionMode || !switches.has('--latest') || !switches.has('--deliver')
+      || switches.size !== 2 || idempotencyKey === undefined
+      || !onlyActionFlags('--target', '--session', '--idempotency-key', '--wait')
+      || (queryMode && target === undefined) || (sessionMode && target !== undefined)) {
+      return nowcoderUsage();
+    }
+  } else if (action === 'status' || action === 'cancel') {
+    if (queries.length > 0 || runId === undefined || switches.size > 0
+      || !onlyActionFlags('--run')) return nowcoderUsage();
+  } else if (queries.length > 0 || runId === undefined || idempotencyKey === undefined
+    || switches.size > 0 || !onlyActionFlags('--run', '--idempotency-key', '--wait')) {
+    return nowcoderUsage();
+  }
+
+  return {
+    action,
+    queries,
+    ...(target === undefined ? {} : { target }),
+    ...(sessionId === undefined ? {} : { sessionId }),
+    ...(runId === undefined ? {} : { runId }),
+    ...(idempotencyKey === undefined ? {} : { idempotencyKey }),
+    ...(waitMs === undefined ? {} : { waitMs }),
+  };
+}
+
+export function parseNowcoderCliArgs(args: string[]): ParsedNowcoderCommand {
+  return parseNowcoderCommand(['nowcoder', ...args]);
+}
+
+function safeHttpError(value: unknown): NowcoderCliError | undefined {
+  if (typeof value !== 'object' || value === null) return undefined;
+  const error = (value as { error?: unknown }).error;
+  if (typeof error !== 'object' || error === null) return undefined;
+  const code = (error as { code?: unknown }).code;
+  const message = (error as { message?: unknown }).message;
+  if (typeof code !== 'string' || !/^[A-Z][A-Z0-9_]{1,99}$/u.test(code)
+    || typeof message !== 'string' || message.trim().length < 1 || message.length > 500) {
+    return undefined;
+  }
+  return new NowcoderCliError(code, message);
+}
+
+export interface NowcoderCliDependencies {
+  authenticate: (args: string[]) => Promise<{ baseUrl: string; token: string }>;
+  fetch: typeof fetch;
+  sleep: (milliseconds: number) => Promise<void>;
+  now: () => number;
+}
+
+async function nowcoderRequest<T>(
+  dependencies: NowcoderCliDependencies,
+  baseUrl: string,
+  token: string,
+  path: string,
+  init: RequestInit,
+  expectedStatuses: readonly number[],
+  schema: ResponseSchema<T>,
+): Promise<T> {
+  let response: Response;
+  try {
+    response = await dependencies.fetch(`${baseUrl}${path}`, {
+      ...init,
+      headers: {
+        authorization: `Bearer ${token}`,
+        ...(init.body === undefined ? {} : { 'content-type': 'application/json' }),
+      },
+    });
+  } catch {
+    throw new NowcoderCliError('CLI_TRANSPORT_ERROR', '无法连接 Data Collector Bridge');
+  }
+  let body: unknown;
+  try {
+    body = await response.json();
+  } catch {
+    throw new NowcoderCliError('CLI_PROTOCOL_ERROR', 'Bridge 返回了无效响应');
+  }
+  if (!response.ok) {
+    throw safeHttpError(body)
+      ?? new NowcoderCliError('CLI_PROTOCOL_ERROR', 'Bridge 返回了无效响应');
+  }
+  if (!expectedStatuses.includes(response.status)) {
+    throw new NowcoderCliError('CLI_PROTOCOL_ERROR', 'Bridge 返回了无效响应');
+  }
+  const parsed = schema.safeParse(body);
+  if (!parsed.success) {
+    throw new NowcoderCliError('CLI_PROTOCOL_ERROR', 'Bridge 返回了无效响应');
+  }
+  return parsed.data;
+}
+
+async function nowcoderCredentials(
+  dependencies: NowcoderCliDependencies,
+  args: string[],
+): Promise<{ baseUrl: string; token: string }> {
+  try {
+    return await dependencies.authenticate(args);
+  } catch {
+    throw new NowcoderCliError('CLI_AUTH_UNAVAILABLE', 'Bridge 访问令牌不可用');
+  }
+}
+
+async function getNowcoderRun(
+  dependencies: NowcoderCliDependencies,
+  baseUrl: string,
+  token: string,
+  runId: string,
+): Promise<PublicNowcoderDirectedRun> {
+  const response = await nowcoderRequest(
+    dependencies,
+    baseUrl,
+    token,
+    `/v1/nowcoder/runs/${encodeURIComponent(runId)}`,
+    {},
+    [200],
+    nowcoderDirectedStartResponseSchema,
+  );
+  if (response.run.id !== runId) {
+    throw new NowcoderCliError('CLI_PROTOCOL_ERROR', 'Bridge 返回了无效响应');
+  }
+  return response.run;
+}
+
+function nowcoderRunIsTerminal(run: PublicNowcoderDirectedRun): boolean {
+  return run.status === 'cancelled' || run.status === 'completed'
+    || run.status === 'completed_with_attention' || run.status === 'failed';
+}
+
+async function waitForNowcoderRun(
+  dependencies: NowcoderCliDependencies,
+  baseUrl: string,
+  token: string,
+  initial: PublicNowcoderDirectedRun,
+  waitMs: number,
+): Promise<{ run: PublicNowcoderDirectedRun; timedOut: boolean }> {
+  const deadline = dependencies.now() + waitMs;
+  let run = initial;
+  while (!nowcoderRunIsTerminal(run) && dependencies.now() < deadline) {
+    const remaining = deadline - dependencies.now();
+    await dependencies.sleep(Math.min(100, remaining));
+    run = await getNowcoderRun(dependencies, baseUrl, token, run.id);
+  }
+  return { run, timedOut: !nowcoderRunIsTerminal(run) };
+}
+
+export async function runNowcoderCli(
+  args: string[],
+  io: CliIo,
+  overrides: Partial<NowcoderCliDependencies> = {},
+): Promise<number> {
+  const dependencies: NowcoderCliDependencies = {
+    authenticate: authenticatedToken,
+    fetch,
+    sleep: milliseconds => new Promise(resolveTimeout => setTimeout(resolveTimeout, milliseconds)),
+    now: Date.now,
+    ...overrides,
+  };
+  const commandArgs = args[0] === 'nowcoder' ? args : ['nowcoder', ...args];
+  const write = (value: unknown): void => io.stdout(`${JSON.stringify(value)}\n`);
+  try {
+    const command = parseNowcoderCommand(commandArgs);
+    const { baseUrl, token } = await nowcoderCredentials(dependencies, commandArgs);
+    if (command.action === 'preview') {
+      const preview = await nowcoderRequest(
+        dependencies,
+        baseUrl,
+        token,
+        '/v1/nowcoder/search-sessions',
+        {
+          method: 'POST',
+          body: JSON.stringify({ queries: command.queries, target: command.target, sort: 'latest' }),
+        },
+        [201],
+        nowcoderSearchPreviewResponseSchema,
+      );
+      write(preview);
+      return 0;
+    }
+
+    if (command.action === 'status') {
+      const run = await getNowcoderRun(dependencies, baseUrl, token, command.runId as string);
+      write(run);
+      return 0;
+    }
+
+    if (command.action === 'cancel') {
+      const runId = command.runId as string;
+      const current = await getNowcoderRun(dependencies, baseUrl, token, runId);
+      const cancelled = await nowcoderRequest(
+        dependencies,
+        baseUrl,
+        token,
+        `/v1/nowcoder/runs/${encodeURIComponent(runId)}/cancel`,
+        { method: 'POST', body: JSON.stringify({ attempt: current.attempt }) },
+        [200],
+        nowcoderDirectedCancelResponseSchema,
+      );
+      if (cancelled.run.id !== runId) {
+        throw new NowcoderCliError('CLI_PROTOCOL_ERROR', 'Bridge 返回了无效响应');
+      }
+      write(cancelled.run);
+      return 0;
+    }
+
+    let response: { run: PublicNowcoderDirectedRun };
+    if (command.action === 'retry') {
+      response = await nowcoderRequest(
+        dependencies,
+        baseUrl,
+        token,
+        `/v1/nowcoder/runs/${encodeURIComponent(command.runId as string)}/retry`,
+        { method: 'POST', body: JSON.stringify({ idempotencyKey: command.idempotencyKey }) },
+        [200, 202],
+        nowcoderDirectedRetryResponseSchema,
+      );
+    } else {
+      let searchSessionId = command.sessionId;
+      if (!searchSessionId) {
+        const preview = await nowcoderRequest(
+          dependencies,
+          baseUrl,
+          token,
+          '/v1/nowcoder/search-sessions',
+          {
+            method: 'POST',
+            body: JSON.stringify({ queries: command.queries, target: command.target, sort: 'latest' }),
+          },
+          [201],
+          nowcoderSearchPreviewResponseSchema,
+        );
+        searchSessionId = preview.session.id;
+      }
+      response = await nowcoderRequest(
+        dependencies,
+        baseUrl,
+        token,
+        '/v1/nowcoder/runs',
+        {
+          method: 'POST',
+          body: JSON.stringify({
+            searchSessionId,
+            selectedCandidateIds: [],
+            idempotencyKey: command.idempotencyKey,
+            deliveryAuthorized: true,
+          }),
+        },
+        [200, 202],
+        nowcoderDirectedStartResponseSchema,
+      );
+    }
+    if (command.waitMs === undefined) {
+      write(response.run);
+      return 0;
+    }
+    const waited = await waitForNowcoderRun(
+      dependencies,
+      baseUrl,
+      token,
+      response.run,
+      command.waitMs,
+    );
+    write(waited.run);
+    return !waited.timedOut && waited.run.status === 'completed' ? 0 : 1;
+  } catch (error) {
+    const safe = error instanceof NowcoderCliError
+      ? error
+      : new NowcoderCliError('CLI_PROTOCOL_ERROR', 'Bridge 返回了无效响应');
+    write({ error: { code: safe.code, message: safe.message } });
+    return 1;
+  }
 }
 
 async function collect(args: string[], io: CliIo): Promise<number> {
@@ -464,9 +840,10 @@ export async function runCli(args: string[], io: CliIo = PROCESS_IO): Promise<nu
     if (command === 'health') return await health(args, io);
     if (command === 'fe-journey') return await feJourney(args, io);
     if (command === 'plans') return await plans(args, io);
+    if (command === 'nowcoder') return await runNowcoderCli(args, io);
     if (command === 'bridge') return await bridge(args, io);
     io.stderr(
-      '用法：data-collector <bridge install|bridge start|bridge status|bridge uninstall|collect URL|plans status|plans run|plans batches|fe-journey collect|fe-journey status|fe-journey rebuild-index|health>\n',
+      '用法：data-collector <bridge install|bridge start|bridge status|bridge uninstall|collect URL|nowcoder preview|nowcoder run|nowcoder status|nowcoder cancel|nowcoder retry|plans status|plans run|plans batches|fe-journey collect|fe-journey status|fe-journey rebuild-index|health>\n',
     );
     return 2;
   } catch (error) {

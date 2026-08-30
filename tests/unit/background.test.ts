@@ -2065,6 +2065,222 @@ describe('extension job runner', () => {
     expect(tabs.removed).toEqual([42, 42, 42, 42]);
   });
 
+  it('caches cancel-before-collect and replays the exact terminal without opening a tab', async () => {
+    const tabs = new InMemoryTabs();
+    const bridge = new InMemoryBridge();
+    const runner = new JobRunner({ tabs, bridge, waitForTabComplete: async () => undefined });
+    const ownership = {
+      directedRunId: 'directed-cancel-before-collect',
+      directedRunAttempt: PLAN_ATTEMPT,
+    };
+
+    await runner.cancelRemoteJob('directed-job-1', ownership.directedRunId, PLAN_ATTEMPT);
+    const first = bridge.sent.at(-1);
+    // The Bridge can durably fail/ack the tombstone before an earlier collect frame finishes
+    // crossing an asynchronous storage transition. That late collect must still see cancellation.
+    await runner.acknowledgeRemoteJob('directed-job-1');
+    await runner.runRemoteJob('directed-job-1', URL, true, ownership);
+
+    expect(tabs.created).toEqual([]);
+    expect(bridge.sent).toHaveLength(2);
+    expect(bridge.sent[1]).toEqual(first);
+    expect(bridge.sent[0]).toMatchObject({
+      type: 'job.error',
+      requestId: 'directed-job-1',
+      payload: {
+        code: 'CANCELLED',
+        needsAttention: false,
+        message: expect.stringContaining('已取消'),
+      },
+    });
+  });
+
+  it('shares one directed lifecycle and replays a cached normal terminal until durable ack', async () => {
+    const tabs = new InMemoryTabs();
+    const bridge = new InMemoryBridge();
+    const runner = new JobRunner({ tabs, bridge, waitForTabComplete: async () => undefined });
+    const ownership = {
+      directedRunId: 'directed-terminal-replay',
+      directedRunAttempt: PLAN_ATTEMPT,
+    };
+
+    await runner.runRemoteJob('directed-job-2', URL, false, ownership);
+    const terminal = bridge.sent.find(message => message.type === 'job.result');
+    await runner.runRemoteJob('directed-job-2', URL, false, ownership);
+
+    expect(tabs.created).toHaveLength(1);
+    expect(bridge.sent.filter(message => message.type === 'job.result')).toEqual([
+      terminal,
+      terminal,
+    ]);
+
+    await runner.acknowledgeRemoteJob('directed-job-2');
+    await runner.runRemoteJob('directed-job-2', URL, false, ownership);
+    expect(tabs.created).toHaveLength(2);
+  });
+
+  it('retries a transient normal-terminal close on duplicate collect without opening a new tab', async () => {
+    const tabs = new InMemoryTabs();
+    const bridge = new InMemoryBridge();
+    let removeAttempts = 0;
+    tabs.remove = async id => {
+      removeAttempts += 1;
+      if (removeAttempts === 1) throw new Error('Tabs cannot be edited right now');
+      tabs.removed.push(id);
+    };
+    const runner = new JobRunner({ tabs, bridge, waitForTabComplete: async () => undefined });
+    const ownership = {
+      directedRunId: 'directed-normal-close-retry',
+      directedRunAttempt: PLAN_ATTEMPT,
+    };
+
+    await runner.runRemoteJob('directed-job-normal-close', URL, false, ownership);
+    expect(tabs.created).toHaveLength(1);
+    expect(bridge.sent.some(message =>
+      message.requestId === 'directed-job-normal-close' && message.type === 'job.result')).toBe(false);
+
+    await runner.runRemoteJob('directed-job-normal-close', URL, false, ownership);
+    const terminal = bridge.sent.find(message =>
+      message.requestId === 'directed-job-normal-close' && message.type === 'job.result');
+    expect(removeAttempts).toBe(2);
+    expect(tabs.created).toHaveLength(1);
+    expect(terminal).toBeDefined();
+
+    await runner.runRemoteJob('directed-job-normal-close', URL, false, ownership);
+    expect(tabs.created).toHaveLength(1);
+    expect(bridge.sent.filter(message =>
+      message.requestId === 'directed-job-normal-close' && message.type === 'job.result')).toEqual([
+      terminal,
+      terminal,
+    ]);
+  });
+
+  it('aborts a queued directed job without consuming a slot or opening its tab', async () => {
+    const tabs = new InMemoryTabs();
+    const bridge = new InMemoryBridge();
+    const releases: Array<() => void> = [];
+    const runner = new JobRunner({
+      tabs,
+      bridge,
+      waitForTabComplete: async () => new Promise<void>(resolve => { releases.push(resolve); }),
+    });
+    const ownership = {
+      directedRunId: 'directed-queued-cancel',
+      directedRunAttempt: PLAN_ATTEMPT,
+    };
+    const first = runner.runRemoteJob('ordinary-slot-1', `${URL}-1`, false);
+    const second = runner.runRemoteJob('ordinary-slot-2', `${URL}-2`, false);
+    await vi.waitFor(() => expect(tabs.created).toHaveLength(2));
+    const queued = runner.runRemoteJob('directed-job-3', `${URL}-3`, false, ownership);
+
+    await runner.cancelRemoteJob('directed-job-3', ownership.directedRunId, PLAN_ATTEMPT);
+    releases.splice(0).forEach(release => release());
+    await Promise.all([first, second, queued]);
+
+    expect(tabs.created.map(tab => tab.url)).toEqual([`${URL}-1`, `${URL}-2`]);
+    expect(bridge.sent).toContainEqual(expect.objectContaining({
+      type: 'job.error',
+      requestId: 'directed-job-3',
+      payload: expect.objectContaining({ code: 'CANCELLED', needsAttention: false }),
+    }));
+  });
+
+  it('aborts an active directed wait, closes its tab, and emits no late result or auth handoff', async () => {
+    const tabs = new InMemoryTabs();
+    const bridge = new InMemoryBridge();
+    let observedSignal: AbortSignal | undefined;
+    const runner = new JobRunner({
+      tabs,
+      bridge,
+      waitForTabComplete: async (_tabId, _timeoutMs, signal) => {
+        observedSignal = signal;
+        await new Promise<void>((_resolve, reject) => {
+          signal?.addEventListener('abort', () => reject(signal.reason), { once: true });
+        });
+      },
+    });
+    const ownership = {
+      directedRunId: 'directed-active-cancel',
+      directedRunAttempt: PLAN_ATTEMPT,
+    };
+    const running = runner.runRemoteJob('directed-job-4', URL, true, ownership);
+    await vi.waitFor(() => expect(tabs.created).toHaveLength(1));
+
+    await runner.cancelRemoteJob('directed-job-4', ownership.directedRunId, PLAN_ATTEMPT);
+    await running;
+
+    expect(observedSignal?.aborted).toBe(true);
+    expect(tabs.removed).toEqual([42]);
+    expect(tabs.handedOff).toEqual([]);
+    expect(bridge.sent.filter(message => message.requestId === 'directed-job-4')).toEqual([
+      expect.objectContaining({
+        type: 'job.error',
+        payload: expect.objectContaining({ code: 'CANCELLED', needsAttention: false }),
+      }),
+    ]);
+  });
+
+  it('keeps failed physical tab removal retryable and withholds cancellation terminal proof', async () => {
+    const tabs = new InMemoryTabs();
+    const bridge = new InMemoryBridge();
+    let removeAttempts = 0;
+    tabs.remove = async id => {
+      removeAttempts += 1;
+      if (removeAttempts === 1) throw new Error('Tabs cannot be edited right now');
+      tabs.removed.push(id);
+    };
+    const runner = new JobRunner({
+      tabs,
+      bridge,
+      waitForTabComplete: async (_tabId, _timeoutMs, signal) => {
+        await new Promise<void>((_resolve, reject) => {
+          signal?.addEventListener('abort', () => reject(signal.reason), { once: true });
+        });
+      },
+    });
+    const ownership = {
+      directedRunId: 'directed-close-retry',
+      directedRunAttempt: PLAN_ATTEMPT,
+    };
+    const running = runner.runRemoteJob('directed-job-5', URL, false, ownership);
+    await vi.waitFor(() => expect(tabs.created).toHaveLength(1));
+
+    await expect(runner.cancelRemoteJob(
+      'directed-job-5',
+      ownership.directedRunId,
+      PLAN_ATTEMPT,
+    )).rejects.toThrow('Tabs cannot be edited right now');
+    await expect(running).resolves.toBeUndefined();
+    expect(bridge.sent.some(message => message.requestId === 'directed-job-5')).toBe(false);
+
+    await runner.cancelRemoteJob('directed-job-5', ownership.directedRunId, PLAN_ATTEMPT);
+    expect(tabs.removed).toEqual([42]);
+    expect(bridge.sent.at(-1)).toMatchObject({
+      type: 'job.error',
+      requestId: 'directed-job-5',
+      payload: { code: 'CANCELLED', needsAttention: false },
+    });
+  });
+
+  it('rejects a mismatched cancellation tuple without consuming the owned lifecycle', async () => {
+    const tabs = new InMemoryTabs();
+    const bridge = new InMemoryBridge();
+    const runner = new JobRunner({ tabs, bridge, waitForTabComplete: async () => undefined });
+    const ownership = {
+      directedRunId: 'directed-tuple-fence',
+      directedRunAttempt: PLAN_ATTEMPT,
+    };
+
+    await runner.runRemoteJob('directed-job-6', URL, false, ownership);
+    await expect(runner.cancelRemoteJob(
+      'directed-job-6',
+      'wrong-run',
+      PLAN_ATTEMPT,
+    )).rejects.toThrow(/tuple|ownership|归属/i);
+    expect(tabs.created).toHaveLength(1);
+    expect(tabs.removed).toHaveLength(1);
+  });
+
   it('retries the content-script message while it is not ready, then succeeds', async () => {
     const tabs = new InMemoryTabs();
     const bridge = new InMemoryBridge();
@@ -4895,6 +5111,7 @@ function backgroundChromeMock(withSidePanel: boolean) {
     installedListeners,
     startupListeners,
     messageListeners,
+    alarmListeners,
     setPanelBehavior,
   };
 }
@@ -4908,6 +5125,57 @@ class BackgroundSocket {
 }
 
 describe('background bootstrap', () => {
+  it('retries transient stale-tab cleanup through the reconnect alarm before opening a socket', async () => {
+    vi.resetModules();
+    const mock = backgroundChromeMock(true);
+    const ownedTabsKey = 'dataCollectorOwnedTabs';
+    let sessionState: Record<string, unknown> = {
+      [ownedTabsKey]: {
+        version: 1,
+        owned: [{
+          id: 91,
+          url: 'https://www.nowcoder.com/discuss/91',
+          purpose: 'remote-job',
+          createdAt: 1,
+        }],
+      },
+    };
+    mock.chromeMock.storage.session.get.mockImplementation(async () => structuredClone(sessionState));
+    mock.chromeMock.storage.session.set.mockImplementation(async values => {
+      sessionState = { ...sessionState, ...structuredClone(values) };
+    });
+    mock.chromeMock.tabs.remove
+      .mockRejectedValueOnce(new Error('Tabs cannot be edited right now'))
+      .mockResolvedValueOnce(undefined);
+    let releaseInitialPanel!: () => void;
+    const initialPanel = new Promise<void>(resolve => { releaseInitialPanel = resolve; });
+    mock.setPanelBehavior
+      .mockImplementationOnce(() => initialPanel)
+      .mockResolvedValue(undefined);
+    const sockets: CleanupGateSocket[] = [];
+    class CleanupGateSocket extends BackgroundSocket {
+      constructor() {
+        super();
+        sockets.push(this);
+      }
+    }
+    vi.stubGlobal('chrome', mock.chromeMock);
+    vi.stubGlobal('WebSocket', CleanupGateSocket);
+    vi.stubGlobal('fetch', vi.fn<typeof fetch>());
+
+    await import('../../packages/extension/src/background/index.js');
+    await vi.waitFor(() => expect(mock.chromeMock.tabs.remove).toHaveBeenCalledTimes(1));
+    releaseInitialPanel();
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect(sockets).toHaveLength(0);
+    expect(sessionState[ownedTabsKey]).toMatchObject({ owned: [{ id: 91 }] });
+
+    mock.alarmListeners[0]!({ name: 'bridge-reconnect' });
+    await vi.waitFor(() => expect(mock.chromeMock.tabs.remove).toHaveBeenCalledTimes(2));
+    expect(sessionState[ownedTabsKey]).toMatchObject({ owned: [] });
+    expect(sockets).toHaveLength(1);
+  });
+
   it('configures toolbar action opening at initialization, install, and startup', async () => {
     vi.resetModules();
     const mock = backgroundChromeMock(true);
@@ -4916,12 +5184,12 @@ describe('background bootstrap', () => {
     vi.stubGlobal('fetch', vi.fn<typeof fetch>());
 
     await import('../../packages/extension/src/background/index.js');
-    expect(mock.setPanelBehavior).toHaveBeenCalledTimes(1);
+    await vi.waitFor(() => expect(mock.setPanelBehavior).toHaveBeenCalledTimes(1));
     expect(mock.setPanelBehavior).toHaveBeenLastCalledWith({ openPanelOnActionClick: true });
 
     mock.installedListeners[0]!();
     mock.startupListeners[0]!();
-    expect(mock.setPanelBehavior).toHaveBeenCalledTimes(3);
+    await vi.waitFor(() => expect(mock.setPanelBehavior).toHaveBeenCalledTimes(3));
   });
 
   it('guards missing Side Panel API and no longer accepts manual pairing messages', async () => {

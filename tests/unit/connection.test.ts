@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
   APP_VERSION,
+  NOWCODER_DETAIL_CAPABILITY,
   TRUSTED_EXTENSION_ID,
   ZSXQ_COMPLETE_CONTENT_CAPABILITY,
 } from '@data-collector/shared';
@@ -215,7 +216,7 @@ describe('extension Bridge connection', () => {
       payload: {
         version: APP_VERSION,
         runtimeId: expect.stringMatching(/^[0-9a-f-]{36}$/),
-        capabilities: [ZSXQ_COMPLETE_CONTENT_CAPABILITY],
+        capabilities: [NOWCODER_DETAIL_CAPABILITY, ZSXQ_COMPLETE_CONTENT_CAPABILITY],
       },
     });
   });
@@ -285,7 +286,7 @@ describe('extension Bridge connection', () => {
       type: 'extension.hello',
       payload: {
         version: APP_VERSION,
-        capabilities: [ZSXQ_COMPLETE_CONTENT_CAPABILITY],
+        capabilities: [NOWCODER_DETAIL_CAPABILITY, ZSXQ_COMPLETE_CONTENT_CAPABILITY],
       },
     });
     expect(storage.values.bridgeStatus).toBe('connected');
@@ -442,6 +443,21 @@ describe('extension Bridge connection', () => {
 
     // Bridge 侧新增的去向已进入扩展缓存，侧栏下次渲染即可见。
     expect(storage.values.routing).toEqual(nextRouting);
+  });
+
+  it('persists the redacted directed-run busy signal from health refreshes', async () => {
+    const storage = new MemoryStorage({ bridgeToken: 'x'.repeat(43) });
+    const socket = new MemorySocket();
+    const fetcher = vi.fn<typeof fetch>(async () => new Response(JSON.stringify({
+      version: APP_VERSION,
+      directedRunActive: true,
+    }), { status: 200, headers: { 'content-type': 'application/json' } }));
+    const connection = new BridgeConnection(dependencies(storage, () => socket, fetcher));
+
+    await connection.start();
+
+    expect(storage.values.directedRunActive).toBe(true);
+    expect(storage.writes.some(write => Object.hasOwn(write, 'directedRunActive'))).toBe(true);
   });
 
   it('refreshes routing on the periodic wake-up even while the socket stays connected', async () => {
@@ -1388,5 +1404,117 @@ describe('extension Bridge connection', () => {
       'http://127.0.0.1:17321/v1/plans/status',
       { headers: { authorization: `Bearer ${'x'.repeat(43)}` } },
     );
+  });
+
+  it('forwards exact directed ownership on collect and cancel without making handler failures connection-fatal', async () => {
+    const storage = new MemoryStorage({ bridgeToken: 'x'.repeat(43) });
+    const socket = new MemorySocket();
+    const collect = vi.fn(async () => undefined);
+    const cancel = vi.fn(async () => { throw new Error('tab close will retry'); });
+    const connection = new BridgeConnection(dependencies(storage, () => socket));
+    connection.onCollect(collect);
+    connection.onCancel(cancel);
+    await connection.start();
+    socket.emit('open');
+    await vi.waitFor(() => expect(socket.sent).toHaveLength(1));
+    const requestId = `nowcoder-job-${'a'.repeat(64)}`;
+
+    socket.emit('message', JSON.stringify({
+      protocolVersion: 1,
+      type: 'job.collect',
+      requestId,
+      timestamp: '2026-08-30T00:00:00.000Z',
+      payload: {
+        url: 'https://www.nowcoder.com/discuss/10001',
+        interactive: false,
+        directedRunId: 'run-directed',
+        directedRunAttempt: PLAN_ATTEMPT,
+      },
+    }));
+    await vi.waitFor(() => expect(collect).toHaveBeenCalledWith(
+      requestId,
+      'https://www.nowcoder.com/discuss/10001',
+      false,
+      { directedRunId: 'run-directed', directedRunAttempt: PLAN_ATTEMPT },
+    ));
+
+    socket.emit('message', JSON.stringify({
+      protocolVersion: 1,
+      type: 'job.cancel',
+      requestId,
+      timestamp: '2026-08-30T00:00:01.000Z',
+      payload: { directedRunId: 'run-directed', directedRunAttempt: PLAN_ATTEMPT },
+    }));
+    await vi.waitFor(() => expect(cancel).toHaveBeenCalledWith(
+      requestId,
+      'run-directed',
+      PLAN_ATTEMPT,
+    ));
+    await flushPromises();
+    expect(storage.values.bridgeStatus).toBe('connected');
+  });
+
+  it('treats malformed cancel as protocol-fatal but ignores cancel from a stale socket', async () => {
+    const storage = new MemoryStorage({ bridgeToken: 'x'.repeat(43) });
+    const oldSocket = new MemorySocket();
+    const currentSocket = new MemorySocket();
+    const socketFactory = vi.fn()
+      .mockReturnValueOnce(oldSocket)
+      .mockReturnValueOnce(currentSocket);
+    const cancel = vi.fn();
+    const connection = new BridgeConnection(dependencies(storage, socketFactory));
+    connection.onCancel(cancel);
+    await connection.start();
+    oldSocket.emit('open');
+    await vi.waitFor(() => expect(oldSocket.sent).toHaveLength(1));
+    oldSocket.emit('close');
+    await connection.start();
+    currentSocket.emit('open');
+    await vi.waitFor(() => expect(currentSocket.sent).toHaveLength(1));
+
+    oldSocket.emit('message', JSON.stringify({
+      protocolVersion: 1,
+      type: 'job.cancel',
+      requestId: `nowcoder-job-${'b'.repeat(64)}`,
+      timestamp: '2026-08-30T00:00:00.000Z',
+      payload: { directedRunId: 'stale', directedRunAttempt: PLAN_ATTEMPT },
+    }));
+    await flushPromises();
+    expect(cancel).not.toHaveBeenCalled();
+    expect(storage.values.bridgeStatus).toBe('connected');
+
+    currentSocket.emit('message', JSON.stringify({
+      protocolVersion: 1,
+      type: 'job.cancel',
+      requestId: `nowcoder-job-${'c'.repeat(64)}`,
+      timestamp: '2026-08-30T00:00:01.000Z',
+      payload: { directedRunId: 'current' },
+    }));
+    await vi.waitFor(() => expect(storage.values.bridgeStatus).toBe('protocol_error'));
+    expect(cancel).not.toHaveBeenCalled();
+  });
+
+  it('releases a directed lifecycle only after a matching durable Bridge acknowledgement', async () => {
+    const storage = new MemoryStorage({ bridgeToken: 'x'.repeat(43) });
+    const socket = new MemorySocket();
+    const acknowledged = vi.fn(() => { throw new Error('cleanup is already durable'); });
+    const connection = new BridgeConnection(dependencies(storage, () => socket));
+    connection.onJobAcknowledged(acknowledged);
+    await connection.start();
+    socket.emit('open');
+    await vi.waitFor(() => expect(socket.sent).toHaveLength(1));
+
+    socket.emit('message', JSON.stringify({
+      protocolVersion: 1,
+      type: 'job.failed',
+      requestId: `nowcoder-job-${'d'.repeat(64)}`,
+      timestamp: '2026-08-30T00:00:00.000Z',
+      payload: { code: 'CANCELLED', message: '定向采集已取消' },
+    }));
+
+    await vi.waitFor(() => expect(acknowledged).toHaveBeenCalledWith(
+      `nowcoder-job-${'d'.repeat(64)}`,
+    ));
+    expect(storage.values.bridgeStatus).toBe('connected');
   });
 });

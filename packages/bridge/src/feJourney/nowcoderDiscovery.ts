@@ -133,10 +133,14 @@ async function searchJsonPage(
   for (const rawRecord of data.records) {
     const contentData = recordValue(recordValue(rawRecord)?.contentData);
     if (!contentData) continue;
+    const returnedUrl = [contentData.url, contentData.detailUrl, contentData.detailURL, contentData.link,
+      contentData.contentUrl, contentData.contentURL, contentData.targetUrl, contentData.targetURL]
+      .map(value => typeof value === 'string' ? canonicalNowcoderDetail(value, base) : undefined)
+      .find((value): value is string => value !== undefined);
     const id = typeof contentData.id === 'string' || typeof contentData.id === 'number'
       ? String(contentData.id)
       : '';
-    const url = canonicalNowcoderDetail(`/discuss/${id}`, base);
+    const url = returnedUrl ?? canonicalNowcoderDetail(`/discuss/${id}`, base);
     if (!url) continue;
     hits.push({
       url,

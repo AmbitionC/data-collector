@@ -11,6 +11,7 @@ import {
   type CollectionPlanAttempt,
   type CollectionPlanRejection,
   type CollectionPlanId,
+  type NowcoderDirectedRunAttempt,
   type ZsxqCollectionMode,
   type ZsxqDayDraft,
   type ZsxqLibraryIndexEntry,
@@ -336,15 +337,19 @@ const TAB_RETRY_DELAYS = [1_000, 3_000, 9_000] as const;
 export async function retryTransientTabOperation<T>(
   operation: () => Promise<T>,
   wait: (milliseconds: number) => Promise<void>,
+  signal?: AbortSignal,
 ): Promise<T> {
   let lastError: unknown;
   for (let attempt = 0; attempt <= TAB_RETRY_DELAYS.length; attempt += 1) {
+    throwIfAborted(signal);
     try {
       return await operation();
     } catch (error) {
+      if (signal?.aborted || isAbortError(error)) throw error;
       lastError = error;
       const message = error instanceof Error ? error.message : String(error);
       if (!TRANSIENT_TAB_ERROR.test(message) || attempt === TAB_RETRY_DELAYS.length) throw error;
+      throwIfAborted(signal);
       await wait(TAB_RETRY_DELAYS[attempt]!);
     }
   }
@@ -399,7 +404,11 @@ export interface BatchProgress {
 export interface JobRunnerOptions {
   tabs: TabsApi;
   bridge: BridgeClient;
-  waitForTabComplete: (tabId: number, timeoutMs?: number) => Promise<void>;
+  waitForTabComplete: (
+    tabId: number,
+    timeoutMs?: number,
+    signal?: AbortSignal,
+  ) => Promise<void>;
   /** 可注入的延时（测试用）；缺省用 setTimeout。 */
   delay?: (ms: number) => Promise<void>;
   /** 生产环境开启：拒绝仍在应答但不具备当前完整性协议的旧内容脚本。 */
@@ -428,6 +437,57 @@ export interface JobRunnerOptions {
   knownContent?: () => Promise<ReadonlyMap<string, boolean | undefined> | undefined>;
   /** 正文无关的知识星球精确/语义去重索引；逐日与历史模式必须可用。 */
   knownZsxqIndex?: () => Promise<readonly ZsxqLibraryIndexEntry[]>;
+}
+
+export interface DirectedRemoteJobOwnership {
+  directedRunId: string;
+  directedRunAttempt: NowcoderDirectedRunAttempt;
+}
+
+interface RemoteJobTerminal {
+  type: 'job.result' | 'job.error';
+  payload: unknown;
+}
+
+interface DirectedRemoteJobLifecycle extends DirectedRemoteJobOwnership {
+  requestId: string;
+  controller: AbortController;
+  activeTabIds: Set<number>;
+  closingByTabId: Map<number, Promise<void>>;
+  cancelled: boolean;
+  collectObserved: boolean;
+  promise?: Promise<void>;
+  pendingTerminal?: RemoteJobTerminal;
+  terminal?: RemoteJobTerminal;
+}
+
+const DIRECTED_REMOTE_LIFECYCLE_LIMIT = 100;
+const DIRECTED_CANCELLED_MESSAGE = '牛客定向采集已取消，扩展拥有的页面已关闭';
+
+function cancelledTerminal(): RemoteJobTerminal {
+  return {
+    type: 'job.error',
+    payload: {
+      code: 'CANCELLED',
+      message: DIRECTED_CANCELLED_MESSAGE,
+      needsAttention: false,
+    },
+  };
+}
+
+function abortError(message = DIRECTED_CANCELLED_MESSAGE): Error {
+  const error = new Error(message);
+  error.name = 'AbortError';
+  return error;
+}
+
+function isAbortError(error: unknown): boolean {
+  return error instanceof Error && error.name === 'AbortError';
+}
+
+function throwIfAborted(signal?: AbortSignal): void {
+  if (!signal?.aborted) return;
+  throw signal.reason instanceof Error ? signal.reason : abortError();
 }
 
 /** 内容脚本在标签页 complete 后可能仍未注册消息监听，这类错误可短暂重试。 */
@@ -606,6 +666,7 @@ interface ZsxqPlanPhaseResult {
 
 export class JobRunner {
   private readonly remoteScheduler = new RemoteJobScheduler(2);
+  private readonly directedRemoteJobs = new Map<string, DirectedRemoteJobLifecycle>();
   private batchStopped = false;
 
   constructor(private readonly options: JobRunnerOptions) {}
@@ -624,9 +685,14 @@ export class JobRunner {
    * 所有知识星球任务只有在正文显式完整时才能进入 Bridge 的整理阶段。
    * 扩展自己先回报可见的 needs_attention；Bridge 仍保留同样的 sink 前硬门禁。
    */
-  private sendDocumentResult(requestId: string, document: CollectedDocument): boolean {
+  private sendDocumentResult(
+    requestId: string,
+    document: CollectedDocument,
+    send: (type: 'job.result' | 'job.error', payload: unknown) => void =
+      (type, payload) => this.options.bridge.send(type, requestId, payload),
+  ): boolean {
     if (document.source === 'zsxq' && document.truncated !== false) {
-      this.options.bridge.send('job.error', requestId, {
+      send('job.error', {
         code: 'INCOMPLETE_CONTENT',
         message: '知识星球正文补取后仍不完整，已拒绝入库和交付',
         needsAttention: true,
@@ -645,8 +711,115 @@ export class JobRunner {
           },
         }
       : document;
-    this.options.bridge.send('job.result', requestId, { document: attestedDocument });
+    send('job.result', { document: attestedDocument });
     return true;
+  }
+
+  private sameDirectedOwnership(
+    lifecycle: DirectedRemoteJobLifecycle,
+    ownership: DirectedRemoteJobOwnership,
+  ): boolean {
+    return lifecycle.directedRunId === ownership.directedRunId
+      && lifecycle.directedRunAttempt === ownership.directedRunAttempt;
+  }
+
+  private assertDirectedOwnership(
+    lifecycle: DirectedRemoteJobLifecycle,
+    ownership: DirectedRemoteJobOwnership,
+  ): void {
+    if (this.sameDirectedOwnership(lifecycle, ownership)) return;
+    throw new Error(`定向任务 ownership tuple 不匹配：${lifecycle.requestId}`);
+  }
+
+  private newDirectedLifecycle(
+    requestId: string,
+    ownership: DirectedRemoteJobOwnership,
+  ): DirectedRemoteJobLifecycle {
+    const existing = this.directedRemoteJobs.get(requestId);
+    if (existing) {
+      this.assertDirectedOwnership(existing, ownership);
+      return existing;
+    }
+    if (this.directedRemoteJobs.size >= DIRECTED_REMOTE_LIFECYCLE_LIMIT) {
+      throw new Error('定向采集任务终态等待 Bridge 回执，已达安全上限');
+    }
+    const lifecycle: DirectedRemoteJobLifecycle = {
+      requestId,
+      ...ownership,
+      controller: new AbortController(),
+      activeTabIds: new Set<number>(),
+      closingByTabId: new Map<number, Promise<void>>(),
+      cancelled: false,
+      collectObserved: false,
+    };
+    this.directedRemoteJobs.set(requestId, lifecycle);
+    return lifecycle;
+  }
+
+  private replayDirectedTerminal(lifecycle: DirectedRemoteJobLifecycle): void {
+    const terminal = lifecycle.terminal;
+    if (!terminal) return;
+    this.options.bridge.send(terminal.type, lifecycle.requestId, terminal.payload);
+  }
+
+  private finishDirectedTerminal(
+    lifecycle: DirectedRemoteJobLifecycle,
+    terminal: RemoteJobTerminal,
+  ): void {
+    if (lifecycle.activeTabIds.size > 0) {
+      throw new Error('定向采集页面尚未确认关闭，不能发送终态证明');
+    }
+    if (!lifecycle.terminal) lifecycle.terminal = terminal;
+    delete lifecycle.pendingTerminal;
+    this.replayDirectedTerminal(lifecycle);
+  }
+
+  private async retryPendingDirectedTerminal(
+    lifecycle: DirectedRemoteJobLifecycle,
+  ): Promise<void> {
+    const pending = lifecycle.pendingTerminal;
+    if (!pending) return;
+    await this.closeDirectedTabs(lifecycle);
+    this.finishDirectedTerminal(lifecycle, pending);
+  }
+
+  private async createRemoteTab(
+    input: { url: string; active: boolean; purpose: OwnedTabPurpose },
+    lifecycle?: DirectedRemoteJobLifecycle,
+  ): Promise<BrowserTab> {
+    throwIfAborted(lifecycle?.controller.signal);
+    const tab = await this.options.tabs.create(input);
+    if (tab.id !== undefined && lifecycle) lifecycle.activeTabIds.add(tab.id);
+    return tab;
+  }
+
+  private async closeRemoteTab(
+    tabId: number,
+    lifecycle?: DirectedRemoteJobLifecycle,
+  ): Promise<void> {
+    if (!lifecycle) {
+      await this.options.tabs.remove(tabId).catch(() => undefined);
+      return;
+    }
+    const existing = lifecycle.closingByTabId.get(tabId);
+    if (existing) return existing;
+    const closing = this.options.tabs.remove(tabId).then(() => {
+      lifecycle.activeTabIds.delete(tabId);
+    });
+    lifecycle.closingByTabId.set(tabId, closing);
+    try {
+      await closing;
+    } finally {
+      if (lifecycle.closingByTabId.get(tabId) === closing) {
+        lifecycle.closingByTabId.delete(tabId);
+      }
+    }
+  }
+
+  private async closeDirectedTabs(lifecycle: DirectedRemoteJobLifecycle): Promise<void> {
+    for (const tabId of [...lifecycle.activeTabIds].sort((left, right) => left - right)) {
+      await this.closeRemoteTab(tabId, lifecycle);
+    }
   }
 
   /**
@@ -1775,8 +1948,33 @@ export class JobRunner {
     }
   }
 
-  private wait(ms: number): Promise<void> {
-    return this.options.delay ? this.options.delay(ms) : new Promise(resolve => setTimeout(resolve, ms));
+  private withAbort<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {
+    throwIfAborted(signal);
+    if (!signal) return promise;
+    return new Promise<T>((resolve, reject) => {
+      const onAbort = () => reject(
+        signal.reason instanceof Error ? signal.reason : abortError(),
+      );
+      const cleanup = () => signal.removeEventListener('abort', onAbort);
+      signal.addEventListener('abort', onAbort, { once: true });
+      promise.then(
+        value => {
+          cleanup();
+          resolve(value);
+        },
+        error => {
+          cleanup();
+          reject(error);
+        },
+      );
+    });
+  }
+
+  private wait(ms: number, signal?: AbortSignal): Promise<void> {
+    const pending = this.options.delay
+      ? this.options.delay(ms)
+      : new Promise<void>(resolve => setTimeout(resolve, ms));
+    return this.withAbort(pending, signal);
   }
 
   /**
@@ -1784,16 +1982,21 @@ export class JobRunner {
    * 并在中途补注入一次——插件更新后已打开的标签页里没有内容脚本，
    * 注入即可自愈，不必刷新页面（刷新会丢掉「精华」这类应用内分类状态）。
    */
-  private async ask(tabId: number, message: unknown): Promise<ExtractionResponse> {
+  private async ask(
+    tabId: number,
+    message: unknown,
+    signal?: AbortSignal,
+  ): Promise<ExtractionResponse> {
     let lastError: unknown;
     const requestType = typeof (message as { type?: unknown })?.type === 'string'
       ? (message as { type: string }).type
       : '未知请求';
     for (let attempt = 0; attempt < 4; attempt += 1) {
+      throwIfAborted(signal);
       try {
         let timeout: ReturnType<typeof setTimeout> | undefined;
         try {
-          const rawResponse = await Promise.race([
+          const rawResponse = await this.withAbort(Promise.race([
             this.options.tabs.sendMessage(tabId, message),
             new Promise<never>((_resolve, reject) => {
               timeout = setTimeout(
@@ -1801,7 +2004,8 @@ export class JobRunner {
                 CONTENT_SCRIPT_REQUEST_TIMEOUT_MS,
               );
             }),
-          ]);
+          ]), signal);
+          throwIfAborted(signal);
           if (typeof rawResponse !== 'object' || rawResponse === null) {
             throw new Error(
               'CONTENT_SCRIPT_OUTDATED：页面内容脚本未识别当前版本请求',
@@ -1825,17 +2029,19 @@ export class JobRunner {
           if (timeout !== undefined) clearTimeout(timeout);
         }
       } catch (error) {
+        if (isAbortError(error) || signal?.aborted) throw error;
         const recoverable = isContentScriptNotReady(error) || isContentScriptOutdated(error);
         if (!recoverable || attempt === 3) throw error;
         lastError = error;
         if (attempt === 0) {
+          throwIfAborted(signal);
           try {
             await this.options.tabs.inject(tabId);
           } catch {
             // 注入失败（如页面不在允许的站点）就按原来的重试节奏继续。
           }
         }
-        await this.wait(150);
+        await this.wait(150, signal);
       }
     }
     throw lastError;
@@ -1858,6 +2064,7 @@ export class JobRunner {
     retryUnsupportedLayout = false,
     stabilizeZsxq = false,
     maxAttempts = 5,
+    signal?: AbortSignal,
   ): Promise<ExtractionResponse> {
     let last: ExtractionResponse | undefined;
     let bestDocument: CollectedDocument | undefined;
@@ -1865,12 +2072,13 @@ export class JobRunner {
     let stableForMs = 0;
     let tainted = false;
     for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+      throwIfAborted(signal);
       const delayMs = zsxqSampleDelayMs(attempt);
-      if (delayMs > 0) await this.wait(delayMs);
+      if (delayMs > 0) await this.wait(delayMs, signal);
       const response = await this.ask(tabId, {
         type: this.contentMessageType('extract.document'),
         ...(overrides ? { overrides } : {}),
-      });
+      }, signal);
       if (response.ok) {
         if (!stabilizeZsxq) return response;
         const candidate = payloadOf(response, 'document');
@@ -1928,7 +2136,10 @@ export class JobRunner {
    * 列表 API 命中本地全文上限、或展开未能证明完成时，改开该 topic 的详情页取稳定全文。
    * 详情正文必须显式完整、不短于列表正文且与其兼容，才足以清除列表上的瞬态风险。
    */
-  private async withTopicDetail(document: CollectedDocument): Promise<CollectedDocument> {
+  private async withTopicDetail(
+    document: CollectedDocument,
+    lifecycle?: DirectedRemoteJobLifecycle,
+  ): Promise<CollectedDocument> {
     let tabId: number | undefined;
     const failed = (reason: string): CollectedDocument => ({
       ...document,
@@ -1939,20 +2150,25 @@ export class JobRunner {
       truncated: true,
     });
     try {
-      const tab = await this.options.tabs.create({
+      const tab = await this.createRemoteTab({
         url: document.canonicalUrl,
         active: false,
         purpose: 'remote-job',
-      });
+      }, lifecycle);
       if (tab.id === undefined) return failed('tab-id-missing');
       tabId = tab.id;
-      await this.options.waitForTabComplete(tabId, 30_000);
+      await this.options.waitForTabComplete(
+        tabId,
+        30_000,
+        lifecycle?.controller.signal,
+      );
       const response = await this.extractWithRetry(
         tabId,
         undefined,
         false,
         true,
         ZSXQ_MAX_STABILITY_SAMPLES,
+        lifecycle?.controller.signal,
       );
       if (!response.ok) return failed(`extract-${response.error.code}`);
       const detail = payloadOf(response, 'document');
@@ -2003,12 +2219,13 @@ export class JobRunner {
         truncated: false,
       };
     } catch (error) {
+      if (isAbortError(error) || lifecycle?.controller.signal.aborted) throw error;
       const reason = error instanceof Error
         ? error.message.replace(/\s+/gu, ' ').slice(0, 160)
         : String(error).slice(0, 160);
       return failed(`detail-error:${reason || 'unknown'}`);
     } finally {
-      if (tabId !== undefined) await this.options.tabs.remove(tabId).catch(() => undefined);
+      if (tabId !== undefined) await this.closeRemoteTab(tabId, lifecycle);
     }
   }
 
@@ -2024,7 +2241,9 @@ export class JobRunner {
   private async withLinkedArticle(
     document: CollectedDocument,
     signedApiTabId?: number,
+    lifecycle?: DirectedRemoteJobLifecycle,
   ): Promise<CollectedDocument> {
+    throwIfAborted(lifecycle?.controller.signal);
     if (document.source !== 'zsxq') return document;
     if (document.kind === 'article') {
       return { ...document, truncated: document.truncated === true };
@@ -2033,7 +2252,7 @@ export class JobRunner {
     // 原帖详情，再以恢复后的 HTML 重新判断有没有链接长文；否则会把“详情完整但仍引用
     // 一篇长文”的帖子错当作已经全部补齐。
     const topicDocument = document.truncated === true
-      ? await this.withTopicDetail(document)
+      ? await this.withTopicDetail(document, lifecycle)
       : document;
     const articleUrl = linkedArticleUrl(topicDocument.html);
     if (!articleUrl) {
@@ -2081,7 +2300,7 @@ export class JobRunner {
         const apiResponse = await this.ask(signedApiTabId, {
           type: this.contentMessageType('document.apiCollectArticle'),
           articleUrl,
-        });
+        }, lifecycle?.controller.signal);
         if (apiResponse.ok) {
           const article = payloadOf(apiResponse, 'document');
           if (article.source !== 'zsxq') signedApiFailure = 'article-source-mismatch';
@@ -2112,6 +2331,7 @@ export class JobRunner {
           }
         }
       } catch (error) {
+        if (isAbortError(error) || lifecycle?.controller.signal.aborted) throw error;
         signedApiFailure = (error instanceof Error ? error.message : String(error))
           .replace(/\s+/gu, ' ')
           .slice(0, 240);
@@ -2121,14 +2341,18 @@ export class JobRunner {
     // 详情页仍不完整或取证失败时，后面即使拿到完整文章也只能保留正文，不能清除 taint。
     let tabId: number | undefined;
     try {
-      const tab = await this.options.tabs.create({
+      const tab = await this.createRemoteTab({
         url: articleUrl,
         active: false,
         purpose: 'linked-article',
-      });
+      }, lifecycle);
       if (tab.id === undefined) return failed('tab-id-missing');
       tabId = tab.id;
-      await this.options.waitForTabComplete(tabId, 30_000);
+      await this.options.waitForTabComplete(
+        tabId,
+        30_000,
+        lifecycle?.controller.signal,
+      );
       /*
        * **轮询重试，别只等一次。**
        *
@@ -2149,6 +2373,7 @@ export class JobRunner {
         false,
         true,
         ZSXQ_MAX_STABILITY_SAMPLES,
+        lifecycle?.controller.signal,
       );
       if (response.ok) {
         const article = payloadOf(response, 'document');
@@ -2166,32 +2391,147 @@ export class JobRunner {
       // 试满还是没拿到长文：如实标成截断，归档侧才知道这条不完整。
       return failed(`extract-${response.error.code}`);
     } catch (error) {
+      if (isAbortError(error) || lifecycle?.controller.signal.aborted) throw error;
       const reason = error instanceof Error
         ? error.message.replace(/\s+/gu, ' ').slice(0, 160)
         : String(error).slice(0, 160);
       return failed(`article-error:${reason || 'unknown'}`);
     } finally {
-      if (tabId !== undefined) await this.options.tabs.remove(tabId).catch(() => undefined);
+      if (tabId !== undefined) await this.closeRemoteTab(tabId, lifecycle);
     }
   }
 
-  async runRemoteJob(requestId: string, rawUrl: string, interactive = true): Promise<void> {
-    return this.remoteScheduler.run(
-      () => this.runRemoteJobNow(requestId, rawUrl, interactive),
-      interactive ? 'interactive' : 'batch',
-    );
+  async runRemoteJob(
+    requestId: string,
+    rawUrl: string,
+    interactive = true,
+    ownership?: DirectedRemoteJobOwnership,
+  ): Promise<void> {
+    if (!ownership) {
+      return this.remoteScheduler.run(
+        () => this.runRemoteJobNow(requestId, rawUrl, interactive),
+        interactive ? 'interactive' : 'batch',
+      );
+    }
+
+    const existing = this.directedRemoteJobs.get(requestId);
+    const lifecycle = this.newDirectedLifecycle(requestId, ownership);
+    // Set before any await: an acknowledgement racing a delayed collect must retain a
+    // cancel-before-collect tombstone until this exact tuple has observed that collect.
+    lifecycle.collectObserved = true;
+    if (existing) {
+      if (lifecycle.terminal) {
+        this.replayDirectedTerminal(lifecycle);
+        return;
+      }
+      if (lifecycle.promise) {
+        await lifecycle.promise.catch(() => undefined);
+        if (lifecycle.terminal) this.replayDirectedTerminal(lifecycle);
+      }
+      if (!lifecycle.terminal && lifecycle.pendingTerminal) {
+        await this.retryPendingDirectedTerminal(lifecycle).catch(() => undefined);
+      }
+      return;
+    }
+
+    const work = this.remoteScheduler.run(
+      () => this.runRemoteJobNow(requestId, rawUrl, false, lifecycle),
+      'batch',
+      { signal: lifecycle.controller.signal },
+    ).catch(error => {
+      if (!isAbortError(error) && !lifecycle.controller.signal.aborted) throw error;
+      if (lifecycle.activeTabIds.size > 0) throw error;
+      if (!lifecycle.terminal) this.finishDirectedTerminal(lifecycle, cancelledTerminal());
+    });
+    const tracked = work.finally(() => {
+      if (lifecycle.promise === tracked) delete lifecycle.promise;
+    });
+    lifecycle.promise = tracked;
+    // WebSocket handler 的运行时失败不应把连接标为 protocol_error；
+    // 关页失败会留在 lifecycle 中，由同 tuple 的下一次 cancel 重试。
+    await lifecycle.promise.catch(() => undefined);
   }
 
-  private async runRemoteJobNow(requestId: string, rawUrl: string, interactive: boolean): Promise<void> {
+  async cancelRemoteJob(
+    requestId: string,
+    directedRunId: string,
+    directedRunAttempt: NowcoderDirectedRunAttempt,
+  ): Promise<void> {
+    const ownership = { directedRunId, directedRunAttempt };
+    const existing = this.directedRemoteJobs.get(requestId);
+    const lifecycle = this.newDirectedLifecycle(requestId, ownership);
+    if (existing) this.assertDirectedOwnership(existing, ownership);
+
+    if (lifecycle.terminal) {
+      this.replayDirectedTerminal(lifecycle);
+      return;
+    }
+
+    const alreadyCancelled = lifecycle.cancelled;
+    lifecycle.cancelled = true;
+    if (!lifecycle.controller.signal.aborted) {
+      lifecycle.controller.abort(abortError());
+    }
+
+    const closing = this.closeDirectedTabs(lifecycle);
+    let closeFailure: unknown;
+    let workFailure: unknown;
+    if (!alreadyCancelled) {
+      await closing.catch(error => { closeFailure = error; });
+      if (lifecycle.promise) {
+        await lifecycle.promise.catch(error => { workFailure = error; });
+      }
+    } else {
+      await closing.catch(error => { closeFailure = error; });
+      if (lifecycle.promise) {
+        await lifecycle.promise.catch(error => { workFailure = error; });
+      }
+    }
+
+    if (lifecycle.activeTabIds.size > 0) {
+      throw closeFailure ?? workFailure
+        ?? new Error('定向采集页面关闭失败，请重试取消');
+    }
+    if (!lifecycle.terminal) this.finishDirectedTerminal(lifecycle, cancelledTerminal());
+  }
+
+  async acknowledgeRemoteJob(requestId: string): Promise<void> {
+    const lifecycle = this.directedRemoteJobs.get(requestId);
+    if (!lifecycle?.terminal) return;
+    if (!lifecycle.collectObserved) return;
+    this.directedRemoteJobs.delete(requestId);
+  }
+
+  private async runRemoteJobNow(
+    requestId: string,
+    rawUrl: string,
+    interactive: boolean,
+    lifecycle?: DirectedRemoteJobLifecycle,
+  ): Promise<void> {
     let tabId: number | undefined;
     let keepTab = false;
+    let terminal: RemoteJobTerminal | undefined;
+    let closeError: unknown;
+    const signal = lifecycle?.controller.signal;
+    const sendTerminal = (type: 'job.result' | 'job.error', payload: unknown): void => {
+      if (lifecycle) {
+        terminal = { type, payload };
+        lifecycle.pendingTerminal = terminal;
+      }
+      else this.options.bridge.send(type, requestId, payload);
+    };
     try {
+      throwIfAborted(signal);
       const parsedUrl = parseSupportedUrl(rawUrl);
       const url = parsedUrl.href;
-      const tab = await this.options.tabs.create({ url, active: false, purpose: 'remote-job' });
+      const tab = await this.createRemoteTab(
+        { url, active: false, purpose: 'remote-job' },
+        lifecycle,
+      );
       if (tab.id === undefined) throw new Error('浏览器未返回新标签页 ID');
       tabId = tab.id;
-      await this.options.waitForTabComplete(tabId, 30_000);
+      await this.options.waitForTabComplete(tabId, 30_000, signal);
+      throwIfAborted(signal);
       this.options.bridge.send('job.progress', requestId, { stage: 'collecting' });
       const response = await this.extractWithRetry(
         tabId,
@@ -2201,15 +2541,18 @@ export class JobRunner {
         parsedUrl.hostname === 'wx.zsxq.com' || parsedUrl.hostname === 'articles.zsxq.com'
           ? ZSXQ_MAX_STABILITY_SAMPLES
           : 5,
+        signal,
       );
+      throwIfAborted(signal);
       if (!response.ok) {
         const needsAttention = response.error.code === 'AUTH_REQUIRED';
-        if (needsAttention && interactive) {
+        if (needsAttention && interactive && !lifecycle) {
           await this.options.tabs.update(tabId, { active: true }).catch(() => undefined);
           await this.options.tabs.handoff(tabId, url);
           keepTab = true;
         }
-        this.options.bridge.send('job.error', requestId, {
+        throwIfAborted(signal);
+        sendTerminal('job.error', {
           code: response.error.code,
           message: response.error.message,
           needsAttention,
@@ -2219,21 +2562,38 @@ export class JobRunner {
       // 单条采集同样要补长文：按 URL 定向重采（收件箱那 48 条）走的就是这条路。
       this.sendDocumentResult(
         requestId,
-        await this.withLinkedArticle(payloadOf(response, 'document'), tabId),
+        await this.withLinkedArticle(payloadOf(response, 'document'), tabId, lifecycle),
+        sendTerminal,
       );
     } catch (error) {
-      const outdated = isContentScriptOutdated(error);
-      this.options.bridge.send('job.error', requestId, {
-        code: outdated
-          ? 'CONTENT_SCRIPT_OUTDATED'
-          : error instanceof Error && error.message.includes('不支持的采集地址')
-            ? 'UNSUPPORTED_URL'
-            : 'COLLECTION_FAILED',
-        message: error instanceof Error ? error.message : '浏览器采集失败',
-        needsAttention: outdated,
-      });
+      if (lifecycle && (isAbortError(error) || signal?.aborted)) {
+        terminal = cancelledTerminal();
+        lifecycle.pendingTerminal = terminal;
+      } else {
+        const outdated = isContentScriptOutdated(error);
+        sendTerminal('job.error', {
+          code: outdated
+            ? 'CONTENT_SCRIPT_OUTDATED'
+            : error instanceof Error && error.message.includes('不支持的采集地址')
+              ? 'UNSUPPORTED_URL'
+              : 'COLLECTION_FAILED',
+          message: error instanceof Error ? error.message : '浏览器采集失败',
+          needsAttention: outdated,
+        });
+      }
     } finally {
-      if (tabId !== undefined && !keepTab) await this.options.tabs.remove(tabId).catch(() => undefined);
+      if (tabId !== undefined && !keepTab) {
+        try {
+          await this.closeRemoteTab(tabId, lifecycle);
+        } catch (error) {
+          closeError = error;
+        }
+      }
+    }
+    if (closeError) throw closeError;
+    if (lifecycle) {
+      if (lifecycle.cancelled || signal?.aborted) terminal = cancelledTerminal();
+      if (terminal) this.finishDirectedTerminal(lifecycle, terminal);
     }
   }
 

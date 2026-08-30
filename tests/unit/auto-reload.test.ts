@@ -38,6 +38,10 @@ describe('什么时候可以自己重新加载', () => {
     expect(shouldAutoReload({ ...READY, busy: true })).toBe(false);
   });
 
+  it('定向运行活跃时绝不重载，即使普通采集状态为空闲', () => {
+    expect(shouldAutoReload({ ...READY, directedRunActive: true })).toBe(false);
+  });
+
   it('侧栏固定常开也会重载，任务明细从持久化状态恢复', () => {
     expect(shouldAutoReload({ ...READY, panelOpen: true })).toBe(true);
     expect(updateBanner({ ...READY, panelOpen: true }).available).toBe(true);

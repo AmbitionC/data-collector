@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { CollectedDocument } from '@data-collector/shared';
+import { enrichNowcoderEvidence } from '../../packages/bridge/src/feJourney/nowcoderEvidence.js';
 import { selectNowcoderPlanCandidates } from '../../packages/bridge/src/plans/nowcoderPlan.js';
 
 const COMPANY_LABEL = {
@@ -31,11 +32,30 @@ function interview(
     html: '<p>面经</p>',
     text: `我参加了${label} AI 应用开发一面。1.Agent Loop 怎么设计？2.Tool 如何定义？3.Memory 如何实现？`,
     images: [],
+    truncated: access === 'truncated',
     sourceMetadata: { contentAccess: access },
   };
 }
 
 describe('Nowcoder fixed collection plan selection', () => {
+  it('supports exact directed targets while preserving the scheduled default', () => {
+    const candidates = Array.from(
+      { length: 10 },
+      (_, index) => interview('alibaba', 29_000 + index),
+    );
+
+    expect(selectNowcoderPlanCandidates(candidates, '2026-08-23T01:00:00.000Z', 1).accepted)
+      .toHaveLength(1);
+    expect(selectNowcoderPlanCandidates(candidates, '2026-08-23T01:00:00.000Z', 7).accepted)
+      .toHaveLength(7);
+    expect(selectNowcoderPlanCandidates(candidates, '2026-08-23T01:00:00.000Z').accepted)
+      .toHaveLength(10);
+    expect(() => selectNowcoderPlanCandidates(candidates, '2026-08-23T01:00:00.000Z', 0))
+      .toThrow('目标数量');
+    expect(() => selectNowcoderPlanCandidates(candidates, '2026-08-23T01:00:00.000Z', 11))
+      .toThrow('目标数量');
+  });
+
   it('fills exactly ten slots without a company cap while preserving available diversity', () => {
     const candidates = [
       ...Array.from({ length: 10 }, (_, index) => interview('alibaba', 32_000 + index)),
@@ -242,5 +262,56 @@ describe('Nowcoder fixed collection plan selection', () => {
     expect(result.accepted.slice(0, 4).map(item => item.sourceMetadata?.company)).not.toContain('other');
     expect(result.accepted[4]?.sourceMetadata?.company).toBe('other');
     expect(result.coverage.other).toBe(1);
+  });
+
+  it('does not trust caller-supplied optional evidence that the current body cannot derive', () => {
+    const raw = {
+      ...interview('bytedance', 62_000),
+      title: 'AI 应用开发面经',
+      text: '我参加了 AI 应用开发岗位面试。1.Agent Loop？2.Tool Schema？3.Memory？',
+      sourceMetadata: {
+        company: 'bytedance', companyLabel: '字节', businessUnit: '火山引擎',
+        role: 'Agent 开发', interviewRound: '一面', interviewDate: '2026-08-20',
+        contentAccess: 'full', questionCount: 99, agentRelevant: true,
+        evidenceGrade: 'A', evidenceReasons: 'caller supplied',
+      },
+    };
+
+    const enriched = enrichNowcoderEvidence(raw);
+
+    expect(enriched.sourceMetadata).not.toHaveProperty('company');
+    expect(enriched.sourceMetadata).not.toHaveProperty('companyLabel');
+    expect(enriched.sourceMetadata).not.toHaveProperty('businessUnit');
+    expect(enriched.sourceMetadata).not.toHaveProperty('interviewDate');
+    expect(enriched.sourceMetadata?.questionCount).not.toBe(99);
+  });
+
+  it('rejects non-finite interview dates instead of letting them bypass the 30-day gate', () => {
+    const legalPublishedFallback = {
+      ...interview('alibaba', 62_000, '2026-08-20T00:00:00.000Z'),
+      sourceMetadata: { contentAccess: 'full', interviewDate: 'not-a-date' },
+    };
+    const poisoned = {
+      ...interview('bytedance', 62_001, '2026-06-01T00:00:00.000Z'),
+      sourceMetadata: { contentAccess: 'full', interviewDate: 'not-a-date' },
+    };
+    const invalidPublished = {
+      ...interview('tencent', 62_002),
+      publishedAt: 'not-a-date',
+      sourceMetadata: { contentAccess: 'full', interviewDate: 'not-a-date' },
+    };
+
+    const result = selectNowcoderPlanCandidates(
+      [legalPublishedFallback, poisoned, invalidPublished],
+      '2026-08-23T01:00:00.000Z',
+    );
+
+    expect(result.accepted.map(item => item.canonicalUrl)).toEqual([
+      legalPublishedFallback.canonicalUrl,
+    ]);
+    expect(result.structuredRejected).toEqual(expect.arrayContaining([
+      expect.objectContaining({ url: poisoned.canonicalUrl, code: 'OUTSIDE_30_DAYS' }),
+      expect.objectContaining({ url: invalidPublished.canonicalUrl, code: 'OUTSIDE_30_DAYS' }),
+    ]));
   });
 });

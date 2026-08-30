@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   buildStampCommit,
+  shouldDeferArtifactUpdate,
   updateWorkspace,
   type UpdateHost,
 } from '../../packages/bridge/src/autoUpdate.js';
@@ -33,6 +34,15 @@ function host(
 const AT_OLD = { 'git rev-parse HEAD': 'aaaaaaaaaaaabbbb\n', 'git status --porcelain': '' };
 
 describe('bridge auto update', () => {
+  it('defers package and restart handoff for start intent, readers, or an active directed run', () => {
+    expect(shouldDeferArtifactUpdate({ startIntents: 1, pendingReaders: 0, activeReaders: 0 }, false)).toBe(true);
+    expect(shouldDeferArtifactUpdate({ startIntents: 0, pendingReaders: 1, activeReaders: 0 }, false)).toBe(true);
+    expect(shouldDeferArtifactUpdate({ startIntents: 0, pendingReaders: 0, activeReaders: 1 }, false)).toBe(true);
+    expect(shouldDeferArtifactUpdate({ startIntents: 0, pendingReaders: 0, activeReaders: 0, physicalBusy: true }, false)).toBe(true);
+    expect(shouldDeferArtifactUpdate({ startIntents: 0, pendingReaders: 0, activeReaders: 0 }, true)).toBe(true);
+    expect(shouldDeferArtifactUpdate({ startIntents: 0, pendingReaders: 0, activeReaders: 0 }, false)).toBe(false);
+  });
+
   it('fast-forwards and rebuilds when the remote moved ahead', async () => {
     const target = host({
       ...AT_OLD,

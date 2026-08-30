@@ -519,11 +519,17 @@ Expected: PASS; stage, no commit.
 - Modify: `docs/product.md`
 - Modify: `docs/protocol.md`
 - Modify: `docs/testing.md`
+- Modify: `docs/sinks.md`
+- Modify: `.codex/skills/data-collector-delivery/SKILL.md`
 - Modify: `.codex/skills/data-collector-delivery/references/nowcoder-content-delivery.md`
 - Modify: `tests/unit/deliverySkill.test.ts`
+- Modify: `tests/unit/package.test.ts`
 - Modify: `tests/e2e/extension.test.ts`
 - Modify: `package.json`
 - Create: `scripts/smoke-nowcoder-directed.mjs`
+- Create: `scripts/lib/nowcoder-directed-smoke.mjs`
+- Create: `scripts/verify-packaged-extension.mjs`
+- Create: `tests/unit/smokeNowcoderDirected.test.ts`
 
 **Interfaces:**
 - Keyword-based delivery defaults to directed CLI with exact run marker/manifest and explicitly forbids Browser Use; scheduled fixed delivery remains fixed-plan CLI.
@@ -533,7 +539,7 @@ Expected: PASS; stage, no commit.
 
 Skill test executes/parses the CLI/manifest contract, not prose grep. E2E runs `npm run package`, loads the stable packaged extension directory, enters keywords, previews frozen latest candidates, starts target 10, drives fixture detail pages, observes marker completion, and asserts no owned `/search` URL/type/click, peak <=2, terminal tabs 0, exact current-run 10 and `codexBrowserUse=false`.
 
-Run: `npm test -- tests/unit/deliverySkill.test.ts && npm run package && npm run test:e2e -- -t "nowcoder directed"`
+Run: `npm test -- tests/unit/deliverySkill.test.ts tests/unit/package.test.ts tests/unit/smokeNowcoderDirected.test.ts && npm run package && npm run verify:package && npm run test:e2e -- -t "nowcoder directed"`
 
 Expected RED: Skill/artifact fixture absent.
 
@@ -553,8 +559,9 @@ Run in order with Node 22 PATH:
 npm run typecheck
 npm test
 npm run package
+npm run verify:package
 npm run test:e2e
-node scripts/smoke-nowcoder-directed.mjs
+npm run smoke:nowcoder-directed
 git diff --check
 ```
 

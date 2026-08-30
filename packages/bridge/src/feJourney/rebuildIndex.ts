@@ -5,6 +5,7 @@ import type { CollectedDocument } from '@data-collector/shared';
 import { assertInsideRoot, listLibrary } from '../library/index.js';
 import { atomicWriteText, SOURCE_FILE } from '../library/writer.js';
 import type { OrganizedDocument } from '../organize/index.js';
+import { projectOrganized } from '../library/storedDocument.js';
 import { FeJourneyCandidateIndex } from './candidateIndex.js';
 import { withFeJourneyCandidateLock } from './fileLock.js';
 
@@ -38,7 +39,7 @@ async function readCandidates(libraryRoot: string): Promise<RebuildCandidate[]> 
     const markdownPath = assertInsideRoot(libraryRoot, join(libraryRoot, entry.relativePath));
     const sourcePath = assertInsideRoot(libraryRoot, join(dirname(markdownPath), SOURCE_FILE));
     const sourceText = await readFile(sourcePath, 'utf8');
-    const organized = JSON.parse(sourceText) as OrganizedDocument;
+    const organized = projectOrganized(JSON.parse(sourceText) as unknown);
     if (!organized.document || !isCandidateDocument(organized.document)) {
       throw new Error(`候选原始数据格式无效：${entry.id}`);
     }

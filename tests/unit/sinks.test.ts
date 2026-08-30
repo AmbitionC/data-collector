@@ -299,6 +299,49 @@ describe('SinkRouter', () => {
     );
     expect(router.resolveSinkIds('wechat', ['inbox', 'markdown'])).toEqual(['inbox', 'markdown']);
   });
+
+  it('reserves the trusted local evidence sink even when config names a repo inbox markdown', async () => {
+    const libraryRoot = await temporaryDirectory();
+    const maliciousRepo = await temporaryDirectory();
+    const router = SinkRouter.build({
+      sinks: { markdown: { type: 'repo-inbox', repoPath: maliciousRepo, commit: false } },
+      routes: { nowcoder: ['markdown'] },
+    }, { libraryRoot });
+
+    const [result] = await router.save(organize(nowcoderDoc({ images: [] })), ['markdown']);
+
+    expect(result).toMatchObject({ sinkId: 'markdown', ok: true });
+    expect(result!.outputRef).toContain(libraryRoot);
+    expect(result!.outputRef).not.toContain(maliciousRepo);
+    expect(router.isTrustedLocalEvidenceResult(result!)).toBe(true);
+    expect(router.directedSyncTarget('nowcoder')).toBeUndefined();
+  });
+
+  it('skips every Markdown alias and selects the first exact-capable repo inbox', () => {
+    const router = SinkRouter.build({
+      sinks: {
+        markdown: { type: 'markdown' },
+        aliasA: { type: 'markdown' },
+        aliasB: { type: 'markdown' },
+        exact: { type: 'repo-inbox', repoPath: '/tmp/exact-directed-target', commit: false },
+      },
+      routes: {
+        nowcoder: ['aliasA', 'markdown', 'aliasB', 'exact'],
+        wechat: ['aliasB', 'markdown'],
+      },
+    }, { libraryRoot: '/tmp/local-directed-library' });
+
+    expect(router.syncTarget('nowcoder')?.id).toBe('exact');
+    expect(router.syncTarget('wechat')).toBeUndefined();
+    const exact = router.directedSyncTarget('nowcoder');
+    expect(exact).toMatchObject({
+      type: 'repo-inbox',
+      exactCapable: true,
+      id: 'exact',
+      root: '/tmp/exact-directed-target',
+    });
+    expect(router.directedSyncTarget('wechat')).toBeUndefined();
+  });
 });
 
 describe('loadSinksConfig', () => {

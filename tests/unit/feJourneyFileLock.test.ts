@@ -8,6 +8,12 @@ import { createTemporaryDirectoryTracker } from '../helpers/temp.js';
 const temporaryDirectories = createTemporaryDirectoryTracker();
 afterEach(() => temporaryDirectories.cleanup());
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>(resolvePromise => { resolve = resolvePromise; });
+  return { promise, resolve };
+}
+
 describe('withFeJourneyCandidateLock', () => {
   it('serializes competing critical sections with an operating-system lock', async () => {
     const root = await temporaryDirectories.create('fe-journey-file-lock-contenders-');
@@ -58,5 +64,32 @@ describe('withFeJourneyCandidateLock', () => {
     await writeFile(join(catalog, 'fe-journey.lock'), JSON.stringify({ pid: 999_999_999 }));
 
     await expect(withFeJourneyCandidateLock(root, async () => 'locked')).resolves.toBe('locked');
+  });
+
+  it('invalidates a detached async lease after its outer operation releases', async () => {
+    const root = await temporaryDirectories.create('fe-journey-file-lock-detached-');
+    const startDetached = deferred<void>();
+    let detachedEntered = false;
+    let detached!: Promise<void>;
+    await withFeJourneyCandidateLock(root, async () => {
+      detached = startDetached.promise.then(async () => {
+        await withFeJourneyCandidateLock(root, async () => { detachedEntered = true; });
+      });
+    });
+    const holderEntered = deferred<void>();
+    const releaseHolder = deferred<void>();
+    const holder = withFeJourneyCandidateLock(root, async () => {
+      holderEntered.resolve();
+      await releaseHolder.promise;
+    });
+    await holderEntered.promise;
+
+    startDetached.resolve();
+    await delay(75);
+    expect(detachedEntered).toBe(false);
+    releaseHolder.resolve();
+    await holder;
+    await detached;
+    expect(detachedEntered).toBe(true);
   });
 });

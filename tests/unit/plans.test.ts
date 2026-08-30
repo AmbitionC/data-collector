@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   collectionBatchSchema,
+  jobCancelPayloadSchema,
   jobCollectPayloadSchema,
   mergeZsxqDocumentCopies,
   planCollectEnvelopeSchema,
@@ -963,5 +964,24 @@ describe('fixed collection plan contracts', () => {
       url: 'https://www.nowcoder.com/discuss/1',
       interactive: false,
     }).interactive).toBe(false);
+    expect(jobCollectPayloadSchema.parse({
+      url: 'https://www.nowcoder.com/discuss/2',
+      interactive: false,
+      directedRunId: 'directed-1',
+      directedRunAttempt: '0123456789abcdef',
+    }).interactive).toBe(false);
+    expect(() => jobCollectPayloadSchema.parse({
+      url: 'https://www.nowcoder.com/discuss/2',
+      interactive: true,
+      directedRunId: 'directed-1',
+      directedRunAttempt: '0123456789abcdef',
+    })).toThrow('牛客定向任务必须以非交互模式采集');
+  });
+
+  it('fences directed cancellation with the current directed run attempt', () => {
+    expect(jobCancelPayloadSchema.parse({
+      directedRunId: 'directed-1',
+      directedRunAttempt: '0123456789abcdef',
+    })).toEqual({ directedRunId: 'directed-1', directedRunAttempt: '0123456789abcdef' });
   });
 });

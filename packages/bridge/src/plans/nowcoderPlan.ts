@@ -23,6 +23,18 @@ export interface NowcoderPlanSelection {
   accepted: CollectedDocument[];
   coverage: Record<CompanyId, number>;
   rejected: NowcoderPlanRejection[];
+  structuredRejected: Array<NowcoderPlanRejection & {
+    code:
+      | 'OUTSIDE_30_DAYS'
+      | 'AGENT_RELEVANCE_INSUFFICIENT'
+      | 'NON_AGENT_ROLE'
+      | 'EVIDENCE_GRADE_INSUFFICIENT'
+      | 'DUPLICATE_CLUSTER'
+      | 'DUPLICATE_QUESTION_SEQUENCE'
+      | 'TARGET_TRUNCATED';
+  }>;
+  /** Passed every per-document hard gate, before batch dedupe and target truncation. */
+  qualifiedCount: number;
 }
 
 function shanghaiDate(iso: string): string {
@@ -63,10 +75,19 @@ function agentRoleRelevant(document: CollectedDocument): boolean {
   return !NON_AGENT_ROLE.test(identity);
 }
 
-function recencyOf(document: CollectedDocument): string | undefined {
+function finiteTimestamp(value: string | undefined): number | undefined {
+  if (typeof value !== 'string' || value.length === 0) return undefined;
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) ? parsed : undefined;
+}
+
+function recencyOf(document: CollectedDocument): number | undefined {
   const interviewDate = document.sourceMetadata?.interviewDate;
-  if (typeof interviewDate === 'string') return `${interviewDate}T00:00:00.000Z`;
-  return document.publishedAt;
+  if (typeof interviewDate === 'string') {
+    const parsedInterviewDate = finiteTimestamp(`${interviewDate}T00:00:00.000Z`);
+    if (parsedInterviewDate !== undefined) return parsedInterviewDate;
+  }
+  return finiteTimestamp(document.publishedAt);
 }
 
 function commonQuestionSequenceLength(left: readonly string[], right: readonly string[]): number {
@@ -104,39 +125,50 @@ function repeatsQuestionSequence(left: CollectedDocument, right: CollectedDocume
 export function selectNowcoderPlanCandidates(
   documents: readonly CollectedDocument[],
   now: string,
+  target: number = FE_JOURNEY_PRESET.nowcoder.planTargetAccepted,
 ): NowcoderPlanSelection {
-  const cutoff = Date.parse(now) - 30 * 24 * 60 * 60 * 1_000;
+  if (!Number.isInteger(target) || target < 1 || target > 10) {
+    throw new RangeError('目标数量必须在 1–10 之间');
+  }
+  const currentTime = Date.parse(now);
+  if (!Number.isFinite(currentTime)) throw new RangeError('当前时间无效');
+  const cutoff = currentTime - 30 * 24 * 60 * 60 * 1_000;
   const rejected: NowcoderPlanRejection[] = [];
+  const structuredRejected: NowcoderPlanSelection['structuredRejected'] = [];
+  const reject = (
+    document: CollectedDocument,
+    reason: string,
+    code: NowcoderPlanSelection['structuredRejected'][number]['code'],
+  ): void => {
+    rejected.push({ url: document.canonicalUrl, reason });
+    structuredRejected.push({ url: document.canonicalUrl, reason, code });
+  };
   const eligible: CollectedDocument[] = [];
 
   for (const raw of documents) {
     const document = enrichNowcoderEvidence(raw);
-    if (document.feJourney?.duplicateOf) {
-      rejected.push({ url: document.canonicalUrl, reason: '重复问题簇' });
-      continue;
-    }
     const recentAt = recencyOf(document);
-    if (!recentAt || Date.parse(recentAt) < cutoff || Date.parse(recentAt) > Date.parse(now)) {
-      rejected.push({ url: document.canonicalUrl, reason: '超过30天' });
+    if (recentAt === undefined || recentAt < cutoff || recentAt > currentTime) {
+      reject(document, '超过30天', 'OUTSIDE_30_DAYS');
       continue;
     }
     if (!agentRelevant(document)) {
-      rejected.push({ url: document.canonicalUrl, reason: 'Agent 相关性不足' });
+      reject(document, 'Agent 相关性不足', 'AGENT_RELEVANCE_INSUFFICIENT');
       continue;
     }
     if (!agentRoleRelevant(document)) {
-      rejected.push({ url: document.canonicalUrl, reason: '非 Agent 研发岗位' });
+      reject(document, '非 Agent 研发岗位', 'NON_AGENT_ROLE');
       continue;
     }
     if (!companyOf(document) || !['A', 'B'].includes(evidenceGradeOf(document) ?? '')) {
-      rejected.push({ url: document.canonicalUrl, reason: '证据等级不足' });
+      reject(document, '证据等级不足', 'EVIDENCE_GRADE_INSUFFICIENT');
       continue;
     }
     eligible.push(document);
   }
 
   eligible.sort((left, right) =>
-    (recencyOf(right) ?? '').localeCompare(recencyOf(left) ?? '') ||
+    (recencyOf(right) ?? Number.NEGATIVE_INFINITY) - (recencyOf(left) ?? Number.NEGATIVE_INFINITY) ||
     left.canonicalUrl.localeCompare(right.canonicalUrl));
   const buckets = new Map<CompanyId, CollectedDocument[]>(
     NOWCODER_COMPANIES.map(company => [
@@ -153,18 +185,19 @@ export function selectNowcoderPlanCandidates(
   const accepted: CollectedDocument[] = [];
   const seenClusters = new Set<string>();
   let advanced = true;
-  while (accepted.length < FE_JOURNEY_PRESET.nowcoder.planTargetAccepted && advanced) {
+  while (accepted.length < target && advanced) {
     advanced = false;
     for (const company of order) {
       const bucket = buckets.get(company)!;
       while (bucket.length > 0) {
         const document = bucket.shift()!;
         const cluster = document.feJourney?.clusterId;
-        if (
-          (cluster && seenClusters.has(cluster))
-          || accepted.some(existing => repeatsQuestionSequence(existing, document))
-        ) {
-          rejected.push({ url: document.canonicalUrl, reason: '重复问题簇' });
+        if (document.feJourney?.duplicateOf || (cluster && seenClusters.has(cluster))) {
+          reject(document, '重复问题簇', 'DUPLICATE_CLUSTER');
+          continue;
+        }
+        if (accepted.some(existing => repeatsQuestionSequence(existing, document))) {
+          reject(document, '重复问题簇', 'DUPLICATE_QUESTION_SEQUENCE');
           continue;
         }
         if (cluster) seenClusters.add(cluster);
@@ -172,19 +205,19 @@ export function selectNowcoderPlanCandidates(
         advanced = true;
         break;
       }
-      if (accepted.length >= FE_JOURNEY_PRESET.nowcoder.planTargetAccepted) break;
+      if (accepted.length >= target) break;
     }
   }
 
   const acceptedUrls = new Set(accepted.map(document => document.canonicalUrl));
   for (const document of eligible) {
     if (!acceptedUrls.has(document.canonicalUrl) && !rejected.some(item => item.url === document.canonicalUrl)) {
-      rejected.push({ url: document.canonicalUrl, reason: '批次上限' });
+      reject(document, '批次上限', 'TARGET_TRUNCATED');
     }
   }
   const coverage = Object.fromEntries(NOWCODER_COMPANIES.map(company => [
     company,
     accepted.filter(document => companyOf(document) === company).length,
   ])) as Record<CompanyId, number>;
-  return { accepted, coverage, rejected };
+  return { accepted, coverage, rejected, structuredRejected, qualifiedCount: eligible.length };
 }

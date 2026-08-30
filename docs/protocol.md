@@ -1,6 +1,6 @@
 # 本机 Bridge 协议
 
-协议版本为 `1`，应用版本为 `0.4.29`。Bridge 只监听 `127.0.0.1`，默认端口 `17321`。
+协议版本为 `1`，应用版本为 `0.4.33`。Bridge 只监听 `127.0.0.1`，默认端口 `17321`。
 
 ## 固定身份自动授权
 
@@ -40,6 +40,9 @@ WebSocket Origin 校验会阻止普通网页和其他扩展。Origin 与固定 I
 - `GET /v1/plans/status`：两个每日固定计划的到期、待补跑、下次运行和最近批次状态。
 - `POST /v1/plans/run`：立即运行固定计划，只接受 `{ "planId": "zsxq-chen-teacher|nowcoder-agent-market", "force"?: boolean }`。
 - `GET /v1/plans/batches?limit=20`：最近批次历史；`limit` 必须在 1–100 之间，可选固定 `planId` 过滤。
+- `POST /v1/nowcoder/search-sessions` / `GET /v1/nowcoder/search-sessions/:sessionId`：创建或恢复最新排序的定向牛客搜索预览。
+- `POST /v1/nowcoder/runs` / `GET /v1/nowcoder/runs/:runId`：从该会话候选创建或读取独立的定向运行；它不是 `CollectionPlan`。
+- `POST /v1/nowcoder/runs/:runId/cancel` / `retry`：以 run attempt fence 取消或按 lineage 创建重试。
 
 以上 `/v1/plans/*` 接口同样只允许回环访问并要求 bearer token。对应 Codex CLI 为 `data-collector plans status`、`data-collector plans run <plan-id> --force` 和 `data-collector plans batches --limit 20`；返回只包含计划、计数、覆盖、逐条拒绝 URL/原因和错误信息，不暴露 Cookie、凭证或本机仓库路径。
 
@@ -77,6 +80,10 @@ Codex/CLI: queued → dispatched → collecting → saved
 
 - 扩展 → Bridge：`extension.hello`、`bridge.ping`、`job.progress`、`job.result`、`job.error`、`plan.result`
 - Bridge → 扩展：`bridge.authorized`、`bridge.pong`、`job.collect`、`job.saved`、`plan.collect`
+
+定向牛客详情的 `job.collect` 只在 `directedRunId` 和 `directedRunAttempt` **同时**存在时属于该运行；
+`job.cancel` 使用同一对字段作为 fence，扩展的 owned-tab telemetry 也按同一 run/attempt 独立上报。
+任何只带其中一个字段的消息都在协议边界拒绝。
 
 固定计划的 `plan.result` 除汇总 `rejections` 外，还可携带 `rejectionDetails`；每项保存
 未入选内容的规范 URL 与原因。Bridge 会把明细原样持久化到批次状态，便于定位正文不完整等问题。

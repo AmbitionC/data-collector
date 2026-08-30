@@ -32,6 +32,10 @@ interface RawTabs {
   remove(id: number): Promise<void>;
 }
 
+function isAuthoritativelyMissing(error: unknown): boolean {
+  return /No tab with id/i.test(error instanceof Error ? error.message : String(error));
+}
+
 function emptyState(): OwnedTabsState {
   return { version: 1, owned: [] };
 }
@@ -92,7 +96,11 @@ export class OwnedTabRegistry {
   }
 
   async close(tabId: number): Promise<void> {
-    await this.tabs.remove(tabId).catch(() => undefined);
+    try {
+      await this.tabs.remove(tabId);
+    } catch (error) {
+      if (!isAuthoritativelyMissing(error)) throw error;
+    }
     await this.mutate(async state => {
       state.owned = state.owned.filter(item => item.id !== tabId);
       if (state.attention?.id === tabId) delete state.attention;
@@ -103,19 +111,34 @@ export class OwnedTabRegistry {
     return this.mutate(async state => {
       const previous = state.attention;
       if (previous && previous.id !== tabId) {
-        await this.tabs.remove(previous.id).catch(() => undefined);
+        try {
+          await this.tabs.remove(previous.id);
+        } catch (error) {
+          if (!isAuthoritativelyMissing(error)) throw error;
+        }
       }
       state.owned = state.owned.filter(item => item.id !== tabId);
       state.attention = { id: tabId, url, handedOffAt: this.now() };
     });
   }
 
-  cleanupStale(): Promise<void> {
-    return this.mutate(async state => {
+  async cleanupStale(): Promise<void> {
+    let firstFailure: unknown;
+    await this.mutate(async state => {
       const stale = [...state.owned].sort((left, right) => left.id - right.id);
-      for (const tab of stale) await this.tabs.remove(tab.id).catch(() => undefined);
-      state.owned = [];
+      const cleared = new Set<number>();
+      for (const tab of stale) {
+        try {
+          await this.tabs.remove(tab.id);
+          cleared.add(tab.id);
+        } catch (error) {
+          if (isAuthoritativelyMissing(error)) cleared.add(tab.id);
+          else firstFailure ??= error;
+        }
+      }
+      state.owned = state.owned.filter(tab => !cleared.has(tab.id));
     });
+    if (firstFailure) throw firstFailure;
   }
 
   private mutate(operation: (state: OwnedTabsState) => Promise<void>): Promise<void> {

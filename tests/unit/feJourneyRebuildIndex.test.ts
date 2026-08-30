@@ -1,10 +1,11 @@
-import { readFile, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { stableContentId, type CollectedDocument } from '@data-collector/shared';
 import { rebuildFeJourneyCandidateIndex } from '../../packages/bridge/src/feJourney/index.js';
 import { MarkdownLibrary } from '../../packages/bridge/src/library/index.js';
 import { organize, type OrganizedDocument } from '../../packages/bridge/src/organize/index.js';
+import { deliveryRevision } from '../../packages/bridge/src/library/deliveryRevision.js';
 import { createTemporaryDirectoryTracker } from '../helpers/temp.js';
 
 const temporaryDirectories = createTemporaryDirectoryTracker();
@@ -50,6 +51,28 @@ async function sourcePath(root: string, id: string): Promise<string> {
 }
 
 describe('rebuildFeJourneyCandidateIndex', () => {
+  it('strips stale directed local evidence from every rewritten source envelope', async () => {
+    const root = await temporaryDirectories.create('fe-journey-index-rebuild-evidence-');
+    await mkdir(join(root, '_catalog'), { recursive: true });
+    const library = new MarkdownLibrary({ root });
+    const document = interview('7000', '腾讯', '候选人证据');
+    const organized = organize(document);
+    await library.save(organized, {
+      nowcoderDirected: {
+        runId: 'run-stale', attempt: '0123456789abcdef', currentJobId: 'nowcoder-job-stale',
+        stableContentId: stableContentId(document.canonicalUrl), canonicalUrl: document.canonicalUrl,
+        contentHash: '0123456789abcdef', clusterId: 'cluster-stale',
+        deliveryRevision: deliveryRevision(organized),
+      },
+    });
+    const path = await sourcePath(root, stableContentId(document.canonicalUrl));
+    expect(JSON.parse(await readFile(path, 'utf8'))).toHaveProperty('localEvidence');
+
+    await rebuildFeJourneyCandidateIndex(root);
+
+    expect(JSON.parse(await readFile(path, 'utf8'))).not.toHaveProperty('localEvidence');
+  });
+
   it('repairs persisted cross-company clusters and is idempotent', async () => {
     const root = await temporaryDirectories.create('fe-journey-index-rebuild-');
     const library = new MarkdownLibrary({ root });

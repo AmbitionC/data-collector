@@ -8,16 +8,34 @@ import {
   type JobStatus,
   type CollectionPlanAttempt,
   type CollectionPlanId,
+  nowcoderDirectedRunAttemptSchema,
+  type NowcoderDirectedRunAttempt,
 } from '@data-collector/shared';
 
 interface JobStoreDependencies {
   now: () => string;
   id: () => string;
+  atomicWrite: (path: string, value: StoredJobs) => Promise<void>;
+}
+
+interface JobStoreOpenOptions extends Partial<JobStoreDependencies> {
+  /**
+   * A legacy jobs file may not contain directed pins yet. Startup must load the directed
+   * run store and reconcile its exact active proof set before terminal pruning is safe.
+   */
+  deferPrune?: boolean;
 }
 
 interface StoredJobs {
   version: 1;
   jobs: JobRecord[];
+  /** False means startup has not yet reconciled this file against the directed run store. */
+  directedPinsBootstrapped?: boolean;
+  directedPins?: Array<{
+    runId: string;
+    attempt: NowcoderDirectedRunAttempt;
+    jobIds: string[];
+  }>;
 }
 
 export interface CreateJobInput {
@@ -27,10 +45,13 @@ export interface CreateJobInput {
   batchId?: string;
   planId?: CollectionPlanId;
   planAttempt?: CollectionPlanAttempt;
+  directedRunId?: string;
+  directedRunAttempt?: NowcoderDirectedRunAttempt;
 }
 
 export interface JobTransitionPatch {
   outputPath?: string;
+  markdownOutput?: { sinkId: 'markdown'; outputPath: string };
   errorCode?: string;
   errorMessage?: string;
 }
@@ -43,6 +64,38 @@ const ALLOWED_TRANSITIONS: Record<JobStatus, readonly JobStatus[]> = {
   needs_attention: [],
   failed: [],
 };
+
+function assertDirectedOwnership(
+  value: Pick<CreateJobInput, 'planId' | 'planAttempt' | 'directedRunId' | 'directedRunAttempt'>,
+): void {
+  const hasRun = value.directedRunId !== undefined;
+  const hasAttempt = value.directedRunAttempt !== undefined;
+  if (hasRun !== hasAttempt) {
+    throw new Error('directedRunId 与 directedRunAttempt 必须同时提供');
+  }
+  if (hasRun && (value.planId !== undefined || value.planAttempt !== undefined)) {
+    throw new Error('固定计划与定向运行不能同时拥有同一任务');
+  }
+  if (value.directedRunId !== undefined && value.directedRunId.trim().length === 0) {
+    throw new Error('定向运行 ID 无效');
+  }
+  if (value.directedRunAttempt !== undefined) {
+    nowcoderDirectedRunAttemptSchema.parse(value.directedRunAttempt);
+  }
+}
+
+function validateStoredJob(value: JobRecord): void {
+  try {
+    assertDirectedOwnership(value);
+    if (value.markdownOutput !== undefined && (
+      value.markdownOutput.sinkId !== 'markdown'
+      || typeof value.markdownOutput.outputPath !== 'string'
+      || value.markdownOutput.outputPath.length === 0
+    )) throw new Error('invalid markdown output');
+  } catch {
+    throw new Error('任务文件格式无效');
+  }
+}
 
 export class JobStateError extends Error {
   constructor(message: string) {
@@ -71,32 +124,77 @@ async function atomicWrite(path: string, value: StoredJobs): Promise<void> {
 
 export class JobStore {
   private readonly jobs = new Map<string, JobRecord>();
+  private readonly directedPins = new Map<string, {
+    runId: string;
+    attempt: NowcoderDirectedRunAttempt;
+    jobIds: Set<string>;
+  }>();
   private mutationQueue: Promise<void> = Promise.resolve();
 
   private constructor(
     public readonly path: string,
     private readonly dependencies: JobStoreDependencies,
+    private pruningBootstrapped: boolean,
   ) {}
 
   static async open(
     path: string,
-    overrides: Partial<JobStoreDependencies> = {},
+    options: JobStoreOpenOptions = {},
   ): Promise<JobStore> {
+    const { deferPrune = false, ...overrides } = options;
     const store = new JobStore(path, {
       now: () => new Date().toISOString(),
       id: () => randomUUID(),
+      atomicWrite,
       ...overrides,
-    });
+    }, !deferPrune);
+    let raw: string;
     try {
-      const data = JSON.parse(await readFile(path, 'utf8')) as StoredJobs;
-      if (data.version !== 1 || !Array.isArray(data.jobs)) {
+      raw = await readFile(path, 'utf8');
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return store;
+      throw error;
+    }
+    const data = JSON.parse(raw) as StoredJobs;
+    if (data.version !== 1 || !Array.isArray(data.jobs)) {
+      throw new Error('任务文件格式无效');
+    }
+    const hasDurablePinProtocol = Object.prototype.hasOwnProperty.call(data, 'directedPins');
+    if (data.directedPinsBootstrapped !== undefined
+      && typeof data.directedPinsBootstrapped !== 'boolean') throw new Error('任务文件格式无效');
+    const pins = data.directedPins ?? [];
+    if (!Array.isArray(pins)) throw new Error('任务文件格式无效');
+    for (const pin of pins) {
+      if (!pin || typeof pin !== 'object'
+        || typeof pin.runId !== 'string'
+        || pin.runId.trim().length === 0
+        || !Array.isArray(pin.jobIds)
+        || pin.jobIds.some(id => typeof id !== 'string' || id.length === 0)
+        || new Set(pin.jobIds).size !== pin.jobIds.length) {
         throw new Error('任务文件格式无效');
       }
-      for (const job of data.jobs) store.jobs.set(job.id, job);
-      if (store.prune()) await store.persist();
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+      const attempt = nowcoderDirectedRunAttemptSchema.parse(pin.attempt);
+      const key = `${pin.runId}\u0000${attempt}`;
+      if (store.directedPins.has(key)) throw new Error('任务文件格式无效');
+      store.directedPins.set(key, {
+        runId: pin.runId,
+        attempt,
+        jobIds: new Set(pin.jobIds),
+      });
     }
+    const ids = new Set<string>();
+    for (const job of data.jobs) {
+      validateStoredJob(job);
+      if (ids.has(job.id)) throw new Error('任务文件格式无效');
+      ids.add(job.id);
+      store.jobs.set(job.id, job);
+    }
+    const hasLegacyDirectedJobs = [...store.jobs.values()].some(job => job.directedRunId !== undefined);
+    store.pruningBootstrapped = deferPrune
+      ? false
+      : data.directedPinsBootstrapped
+        ?? (hasDurablePinProtocol || !hasLegacyDirectedJobs);
+    if (store.pruningBootstrapped && store.prune()) await store.persist();
     return store;
   }
 
@@ -112,13 +210,71 @@ export class JobStore {
       .map(job => structuredClone(job));
   }
 
+  /** Persist the exact active-attempt proof set before any corresponding job can be pruned. */
+  async setDirectedAttemptPins(
+    runId: string,
+    attempt: NowcoderDirectedRunAttempt,
+    jobIds: readonly string[],
+  ): Promise<void> {
+    await this.serializeMutation(async () => {
+      if (runId.trim().length === 0
+        || new Set(jobIds).size !== jobIds.length
+        || jobIds.some(id => id.length === 0)) throw new Error('定向任务保留证明无效');
+      const parsedAttempt = nowcoderDirectedRunAttemptSchema.parse(attempt);
+      const key = `${runId}\u0000${parsedAttempt}`;
+      if (jobIds.length === 0) this.directedPins.delete(key);
+      else this.directedPins.set(key, {
+        runId,
+        attempt: parsedAttempt,
+        jobIds: new Set(jobIds),
+      });
+      await this.persist();
+    });
+  }
+
+  async reconcileDirectedPins(
+    active: ReadonlyArray<{
+      runId: string;
+      attempt: NowcoderDirectedRunAttempt;
+      jobIds: readonly string[];
+    }>,
+  ): Promise<void> {
+    await this.serializeMutation(async () => {
+      const next = new Map<string, { runId: string; attempt: NowcoderDirectedRunAttempt; jobIds: Set<string> }>();
+      for (const item of active) {
+        if (item.runId.trim().length === 0
+          || new Set(item.jobIds).size !== item.jobIds.length
+          || item.jobIds.some(id => id.length === 0)) throw new Error('定向任务保留证明无效');
+        const attempt = nowcoderDirectedRunAttemptSchema.parse(item.attempt);
+        const key = `${item.runId}\u0000${attempt}`;
+        if (next.has(key)) throw new Error('定向任务保留证明重复');
+        if (item.jobIds.length > 0) next.set(key, {
+          runId: item.runId,
+          attempt,
+          jobIds: new Set(item.jobIds),
+        });
+      }
+      this.directedPins.clear();
+      for (const [key, value] of next) this.directedPins.set(key, value);
+      this.pruningBootstrapped = true;
+      await this.persist();
+    });
+  }
+
   async create(input: CreateJobInput): Promise<JobRecord> {
     return this.serializeMutation(async () => {
+      assertDirectedOwnership(input);
       const id = input.id ?? this.dependencies.id();
       const url = canonicalizeUrl(parseSupportedUrl(input.url)).href;
       const existing = this.jobs.get(id);
       if (existing) {
         if (existing.url !== url) throw new Error('任务 ID 已用于其他地址');
+        if (
+          existing.planId !== input.planId
+          || existing.planAttempt !== input.planAttempt
+          || existing.directedRunId !== input.directedRunId
+          || existing.directedRunAttempt !== input.directedRunAttempt
+        ) throw new Error('任务 ID 已用于其他任务归属');
         return structuredClone(existing);
       }
       const timestamp = this.dependencies.now();
@@ -132,6 +288,12 @@ export class JobStore {
         ...(input.batchId ? { batchId: input.batchId } : {}),
         ...(input.planId ? { planId: input.planId } : {}),
         ...(input.planAttempt ? { planAttempt: input.planAttempt } : {}),
+        ...(input.directedRunId && input.directedRunAttempt
+          ? {
+              directedRunId: input.directedRunId,
+              directedRunAttempt: input.directedRunAttempt,
+            }
+          : {}),
       };
       this.jobs.set(id, job);
       await this.persist();
@@ -155,6 +317,7 @@ export class JobStore {
         status,
         updatedAt: this.dependencies.now(),
         ...(patch.outputPath ? { outputPath: patch.outputPath } : {}),
+        ...(patch.markdownOutput ? { markdownOutput: structuredClone(patch.markdownOutput) } : {}),
         ...(patch.errorCode ? { errorCode: patch.errorCode } : {}),
         ...(patch.errorMessage ? { errorMessage: patch.errorMessage } : {}),
       };
@@ -174,6 +337,7 @@ export class JobStore {
       }
       const {
         outputPath: _outputPath,
+        markdownOutput: _markdownOutput,
         errorCode: _errorCode,
         errorMessage: _errorMessage,
         ...retained
@@ -209,11 +373,16 @@ export class JobStore {
   private serializeMutation<T>(operation: () => Promise<T>): Promise<T> {
     const transactionalOperation = async (): Promise<T> => {
       const snapshot = structuredClone(this.jobs);
+      const pinSnapshot = structuredClone(this.directedPins);
+      const pruningBootstrappedSnapshot = this.pruningBootstrapped;
       try {
         return await operation();
       } catch (error) {
         this.jobs.clear();
         for (const [id, job] of snapshot) this.jobs.set(id, job);
+        this.directedPins.clear();
+        for (const [key, pin] of pinSnapshot) this.directedPins.set(key, pin);
+        this.pruningBootstrapped = pruningBootstrappedSnapshot;
         throw error;
       }
     };
@@ -226,13 +395,28 @@ export class JobStore {
   }
 
   private async persist(): Promise<void> {
-    this.prune();
-    await atomicWrite(this.path, { version: 1, jobs: this.list() });
+    if (this.pruningBootstrapped) this.prune();
+    const directedPins = [...this.directedPins.values()]
+      .sort((left, right) => (
+        left.runId.localeCompare(right.runId) || left.attempt.localeCompare(right.attempt)
+      ))
+      .map(pin => ({
+        runId: pin.runId,
+        attempt: pin.attempt,
+        jobIds: [...pin.jobIds].sort((left, right) => left.localeCompare(right)),
+      }));
+    await this.dependencies.atomicWrite(this.path, {
+      version: 1,
+      jobs: this.list(),
+      directedPinsBootstrapped: this.pruningBootstrapped,
+      directedPins,
+    });
   }
 
   private prune(): boolean {
+    const pinned = new Set([...this.directedPins.values()].flatMap(pin => [...pin.jobIds]));
     const terminal = [...this.jobs.values()]
-      .filter(job => job.status === 'saved' || job.status === 'failed')
+      .filter(job => (job.status === 'saved' || job.status === 'failed') && !pinned.has(job.id))
       .sort((left, right) => (
         right.updatedAt.localeCompare(left.updatedAt) || right.id.localeCompare(left.id)
       ));

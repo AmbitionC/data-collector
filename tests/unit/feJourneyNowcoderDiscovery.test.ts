@@ -7,6 +7,8 @@ import {
 
 interface ApiRecordFixture {
   id: string;
+  url?: string;
+  detailUrl?: string;
   title?: string;
   content?: string;
   createTime?: number;
@@ -59,6 +61,29 @@ describe('Nowcoder plan discovery query expansion', () => {
     expect(bodies.filter(body => body.query === firstQuery).map(body => body.page)).toEqual([1, 2]);
     expect(bodies.every(body => body.type === 'post' && body.order === 'create')).toBe(true);
     expect(bodies.some(body => body.page > 2)).toBe(false);
+  });
+
+  it('keeps fixed-plan behavior while preferring a real JSON detail URL over a conflicting numeric ID', async () => {
+    const fetcher = vi.fn<typeof fetch>(async () => apiRecordResponse([{
+      id: 'not-the-real-detail',
+      url: '/feed/main/detail/real-detail-id',
+    }]));
+
+    const urls = await discoverNowcoderUrls(fetcher, new Set());
+
+    expect(urls).toEqual(['https://www.nowcoder.com/feed/main/detail/real-detail-id']);
+  });
+
+  it('skips invalid returned URL fields until it finds a later valid JSON detail URL', async () => {
+    const fetcher = vi.fn<typeof fetch>(async () => apiRecordResponse([{
+      id: 'not-the-real-detail',
+      url: 'https://example.test/not-nowcoder',
+      detailUrl: '/feed/main/detail/valid-after-invalid',
+    }]));
+
+    expect(await discoverNowcoderUrls(fetcher, new Set())).toEqual([
+      'https://www.nowcoder.com/feed/main/detail/valid-after-invalid',
+    ]);
   });
 
   it('never runs more than two public search requests concurrently', async () => {

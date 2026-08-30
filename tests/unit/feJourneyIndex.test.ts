@@ -1,10 +1,11 @@
 import { existsSync } from 'node:fs';
-import { readFile } from 'node:fs/promises';
+import { mkdir, readFile, realpath, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { stableContentId, type CollectedDocument } from '@data-collector/shared';
 import {
   FeJourneyCandidateIndex,
+  readDirectedCandidateCatalog,
   saveCollectedDocument,
 } from '../../packages/bridge/src/feJourney/index.js';
 import { listLibrary } from '../../packages/bridge/src/library/index.js';
@@ -32,6 +33,86 @@ function nowcoderDocument(id: string, text: string): CollectedDocument {
 }
 
 describe('FeJourneyCandidateIndex', () => {
+  it('keeps ordinary catalog open compatible while directed preflight owns strict identity checks', async () => {
+    const root = await temporaryDirectories.create('fe-journey-index-ordinary-compatible-');
+    await mkdir(join(root, '_catalog'));
+    await writeFile(join(root, '_catalog', 'fe-journey.json'), `${JSON.stringify({
+      version: 1,
+      entries: [{
+        id: 'legacy-noncanonical-id',
+        source: 'nowcoder',
+        url: 'https://www.nowcoder.com/discuss/legacy-ordinary',
+        contentHash: '0123456789abcdef',
+        simHash: '1111111111111111',
+        clusterId: 'legacy-cluster',
+        representativeId: 'legacy-noncanonical-id',
+        qualityScore: 1,
+        updatedAt: '2026-08-30T00:00:00.000Z',
+      }],
+    })}\n`);
+
+    await expect(FeJourneyCandidateIndex.open(root)).resolves.toBeInstanceOf(FeJourneyCandidateIndex);
+  });
+
+  it.each(['cross-cluster', 'representative-chain'] as const)(
+    'rejects a directed candidate catalog with an invalid %s representative relation',
+    async kind => {
+      const root = await temporaryDirectories.create(`fe-journey-index-${kind}-`);
+      await mkdir(join(root, '_catalog'));
+      const firstUrl = 'https://www.nowcoder.com/discuss/5101';
+      const secondUrl = 'https://www.nowcoder.com/discuss/5102';
+      const thirdUrl = 'https://www.nowcoder.com/discuss/5103';
+      const firstId = stableContentId(firstUrl);
+      const secondId = stableContentId(secondUrl);
+      const thirdId = stableContentId(thirdUrl);
+      const base = (id: string, url: string, clusterId: string, representativeId: string) => ({
+        id,
+        source: 'nowcoder',
+        url,
+        contentHash: '0123456789abcdef',
+        simHash: '1111111111111111',
+        clusterId,
+        representativeId,
+        qualityScore: 90,
+        updatedAt: '2026-08-30T00:00:00.000Z',
+      });
+      const entries = kind === 'cross-cluster'
+        ? [
+            base(firstId, firstUrl, 'cluster-a', secondId),
+            base(secondId, secondUrl, 'cluster-b', secondId),
+          ]
+        : [
+            base(firstId, firstUrl, 'cluster-a', secondId),
+            base(secondId, secondUrl, 'cluster-a', thirdId),
+            base(thirdId, thirdUrl, 'cluster-a', thirdId),
+          ];
+      const validEntries = [
+        base(firstId, firstUrl, 'cluster-a', firstId),
+        base(secondId, secondUrl, 'cluster-b', secondId),
+        ...(kind === 'representative-chain'
+          ? [base(thirdId, thirdUrl, 'cluster-c', thirdId)]
+          : []),
+      ];
+      await writeFile(join(root, '_catalog', 'fe-journey.json'), `${JSON.stringify({
+        version: 1,
+        entries: validEntries,
+      })}\n`);
+      const canonicalRoot = await realpath(root);
+      await expect(readDirectedCandidateCatalog(canonicalRoot)).resolves.toMatchObject({
+        version: 1,
+        entries: validEntries,
+      });
+      await writeFile(join(root, '_catalog', 'fe-journey.json'), `${JSON.stringify({
+        version: 1,
+        entries,
+      })}\n`);
+
+      await expect(readDirectedCandidateCatalog(canonicalRoot)).rejects.toMatchObject({
+        code: 'DIRECTED_CANDIDATE_CATALOG_CORRUPT',
+      });
+    },
+  );
+
   it('persists Nowcoder evidence and gives a real Agent interview an AI source category', async () => {
     const root = await temporaryDirectories.create('fe-journey-index-evidence-');
     const index = await FeJourneyCandidateIndex.open(root);

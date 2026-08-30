@@ -2,6 +2,7 @@ import type { OrganizedDocument } from '../organize/index.js';
 import { LIBRARY_CATEGORIES } from '../organize/classify.js';
 import { MarkdownLibrary, type MarkdownLibraryOptions } from '../library/index.js';
 import type { ContentSink, SinkResult } from './types.js';
+import type { LocalDocumentEvidence } from '../library/storedDocument.js';
 
 /**
  * 本机 Markdown 知识库 sink：包住既有 MarkdownLibrary，保持 0.2.0 行为不变，
@@ -20,7 +21,14 @@ export class MarkdownLibrarySink implements ContentSink {
   }
 
   async save(input: OrganizedDocument): Promise<SinkResult> {
-    const saved = await this.library.save(input);
+    return await this.saveLocal(input);
+  }
+
+  async saveLocal(
+    input: OrganizedDocument,
+    localEvidence?: LocalDocumentEvidence,
+  ): Promise<SinkResult> {
+    const saved = await this.library.save(input, localEvidence);
     return {
       sinkId: this.id,
       ok: true,
