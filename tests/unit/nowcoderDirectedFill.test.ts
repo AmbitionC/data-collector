@@ -130,7 +130,7 @@ function directedLocalEvidence(url: string, input: ReturnType<typeof organize>) 
 
 type DirectedTransactionTestContext = DirectedTransactionBoundaryContext;
 
-async function directedDocumentFixture() {
+async function directedDocumentFixture(options: { omitDocumentPublishedAt?: boolean } = {}) {
   const root = await temporaryDirectories.create('nowcoder-directed-document-');
   await mkdir(join(root, '_catalog'), { recursive: true });
   const url = 'https://www.nowcoder.com/discuss/8001';
@@ -138,7 +138,9 @@ async function directedDocumentFixture() {
   const jobId = nowcoderDirectedJobId(runId, ATTEMPT, url);
   const router = SinkRouter.build(undefined, { libraryRoot: root });
   const index = await FeJourneyCandidateIndex.open(root);
-  const results = await saveCollectedDocument(router, index, collected(url), undefined, {
+  const document = collected(url);
+  if (options.omitDocumentPublishedAt) delete document.publishedAt;
+  const results = await saveCollectedDocument(router, index, document, undefined, {
     runId, attempt: ATTEMPT, currentJobId: jobId,
   });
   const markdown = results.find(result => result.sinkId === 'markdown' && result.ok);
@@ -243,6 +245,16 @@ describe('directed Nowcoder exact current-run fill planning', () => {
       runId: fixture.run.id, attempt: fixture.run.attempt, currentJobId: fixture.job.id,
     });
     expect(loaded.loaded[0]?.document).not.toHaveProperty('localEvidence');
+  });
+
+  it('uses the immutable search timestamp when the detail page omits publishedAt', async () => {
+    const fixture = await directedDocumentFixture({ omitDocumentPublishedAt: true });
+    const loaded = await loadNowcoderDirectedDocuments({
+      libraryRoot: fixture.root, run: fixture.run, jobs: [fixture.job],
+    });
+
+    expect(loaded.loaded[0]?.document.publishedAt)
+      .toBe(fixture.run.frozenCandidates[0]?.publishedAt);
   });
 
   it('does not load or count a saved foreign/old-attempt job and avoids catalog access', async () => {

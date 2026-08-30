@@ -198,7 +198,12 @@ export async function loadNowcoderDirectedDocuments(input: {
         || evidence.deliveryRevision !== revision
         || local.deliveryRevision !== revision
       ) throw new Error('snapshot lineage mismatch');
-      loaded.push({ job, document });
+      loaded.push({
+        job,
+        document: document.publishedAt
+          ? document
+          : { ...document, publishedAt: candidate.publishedAt },
+      });
     } catch {
       reject('本机来源快照与当前任务证据不一致');
     }
