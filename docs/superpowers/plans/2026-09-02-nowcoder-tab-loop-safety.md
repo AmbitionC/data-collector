@@ -21,40 +21,7 @@
 
 ---
 
-### Task 1: Typed owned-tab close signal
-
-**Files:**
-- Modify: `packages/extension/src/background/index.ts`
-- Modify: `packages/extension/src/background/jobs.ts`
-- Test: `tests/unit/background.test.ts`
-
-**Interfaces:**
-- Produces: `TAB_CLOSED_BY_USER` in the existing `job.error` payload when an extension-owned remote tab is authoritatively gone.
-- Consumes: existing `waitForTabComplete()` and `JobRunner.runRemoteJobNow()` error path.
-
-- [ ] **Step 1: Write the failing test**
-
-Add a `JobRunner` test whose `waitForTabComplete` throws an error named
-`CollectorTabClosedError`. Assert exactly one `job.error`, code
-`TAB_CLOSED_BY_USER`, `needsAttention: false`, and exactly one owned-tab cleanup attempt.
-
-- [ ] **Step 2: Run test to verify it fails**
-
-Run: `npm test -- --run tests/unit/background.test.ts -t "reports an owned tab close as an explicit user stop"`
-
-Expected: FAIL because the current payload code is `COLLECTION_FAILED`.
-
-- [ ] **Step 3: Implement the minimal signal mapping**
-
-Name the `tabs.onRemoved` error `CollectorTabClosedError`. Add one helper in `jobs.ts` that recognizes that name or Chrome's exact missing-tab message and selects `TAB_CLOSED_BY_USER` before the generic `COLLECTION_FAILED` branch.
-
-- [ ] **Step 4: Run task tests**
-
-Run: `npm test -- --run tests/unit/background.test.ts`
-
-Expected: PASS.
-
-### Task 2: Durable stop fence and bounded ordinary recovery
+### Task 1: Complete Nowcoder tab-loop safety fix
 
 **Files:**
 - Modify: `packages/shared/src/model.ts`
@@ -62,92 +29,116 @@ Expected: PASS.
 - Modify: `packages/bridge/src/plans/service.ts`
 - Modify: `packages/bridge/src/server/index.ts`
 - Modify: `packages/bridge/src/nowcoderDirected/service.ts`
+- Modify: `packages/extension/src/background/connection.ts`
+- Modify: `packages/extension/src/background/index.ts`
+- Modify: `packages/extension/src/background/jobs.ts`
+- Modify: `packages/extension/src/sidepanel/index.ts`
+- Modify: `packages/extension/src/sidepanel/state.ts`
+- Modify: `packages/extension/src/sidepanel/index.html`
+- Modify: root/shared/bridge/extension package versions, shared dependency versions, `packages/extension/manifest.json`, `packages/shared/src/identity.ts`, `package-lock.json`
+- Test: `tests/unit/background.test.ts`
 - Test: `tests/unit/jobs.test.ts`
 - Test: `tests/unit/collectionPlanService.test.ts`
 - Test: `tests/unit/nowcoderDirectedOwnership.test.ts`
 - Test: `tests/integration/bridge.test.ts`
+- Test: `tests/unit/connection.test.ts`
+- Test: `tests/unit/sidepanel.test.ts`
+- Test: `tests/unit/identity.test.ts`
 
 **Interfaces:**
-- Consumes: Task 1 error code `TAB_CLOSED_BY_USER`.
-- Produces: optional persisted `JobRecord.recoveryCount`, `JobStore.recover()` terminal results, single-in-flight fixed-plan dispatch, ingress/dispatch fences, and parent-level stop behavior.
+- Produces: `TAB_CLOSED_BY_USER` in the existing `job.error` payload; optional persisted `JobRecord.recoveryCount`; `JobStore.recover()` terminal results; single-in-flight fixed-plan dispatch; fixed-plan ingress/dispatch fences; directed cancellation on close; and plans-side `directedRunActive` visibility.
+- Consumes: existing owned-tab registry, fixed-plan store, directed cancellation state machine, Bridge `/health.directedRunActive`, and plans status response.
 
-- [ ] **Step 1: Write failing store recovery tests**
+- [ ] **Step 1: Write and run the failing owned-tab test**
 
-Create one ordinary in-flight job and assert the first recovery returns it to `queued` with
-`recoveryCount: 1`; transition it in-flight again and assert the second recovery returns it as
-`needs_attention` with `RECOVERY_LIMIT_EXCEEDED`. Assert a legacy
-`nowcoder-agent-market` child without the field is terminalized on recovery. Assert directed jobs remain excluded when passed in `excludedIds`.
+Add a `JobRunner` test whose `waitForTabComplete` throws an error named
+`CollectorTabClosedError`. Assert exactly one `job.error`, code
+`TAB_CLOSED_BY_USER`, `needsAttention: false`, and exactly one owned-tab cleanup attempt.
 
-- [ ] **Step 2: Run store tests and confirm RED**
+Run: `npm test -- --run tests/unit/background.test.ts -t "reports an owned tab close as an explicit user stop"`
+
+Expected: FAIL because the current payload code is `COLLECTION_FAILED`.
+
+- [ ] **Step 2: Implement and verify the close signal**
+
+Name the `tabs.onRemoved` error `CollectorTabClosedError`. In `jobs.ts`, recognize that name or Chrome's exact missing-tab message and select `TAB_CLOSED_BY_USER` before generic `COLLECTION_FAILED`.
+
+Run: `npm test -- --run tests/unit/background.test.ts`
+
+Expected: PASS.
+
+- [ ] **Step 3: Write and run failing recovery tests**
+
+Create a fixed Nowcoder in-flight job and assert first recovery returns it to `queued` with
+`recoveryCount: 1`; a second recovery returns `needs_attention` with
+`RECOVERY_LIMIT_EXCEEDED`. Assert a legacy fixed Nowcoder child without the field is terminalized immediately, explicit retry resets the field, directed excluded jobs are unchanged, and ZSXQ recovery retains its current behavior.
 
 Run: `npm test -- --run tests/unit/jobs.test.ts`
 
-Expected: FAIL because `recoveryCount` and terminal recovery results do not exist.
+Expected: FAIL because the persisted counter and structured recovery result do not exist.
 
-- [ ] **Step 3: Implement persisted recovery budget**
+- [ ] **Step 4: Implement the bounded recovery model**
 
-Add the optional non-negative integer field, validate legacy/new values, clear it only on explicit terminal retry, and make `recover()` return newly terminal jobs. New ordinary jobs start at `recoveryCount: 0`; legacy in-flight fixed-plan Nowcoder jobs without the field are treated as having consumed one recovery.
+Add and validate the optional non-negative safe integer field. Initialize new fixed Nowcoder jobs to 0, reset it on explicit retry, and make `recover()` return `{ requeued, terminalized }`. First recovery requeues; the next terminalizes as `needs_attention/RECOVERY_LIMIT_EXCEEDED`. Treat a legacy in-flight fixed Nowcoder job without the field as already having used its recovery. Keep directed jobs excluded and ZSXQ unchanged.
 
-- [ ] **Step 4: Write and run failing parent-stop tests**
+Run: `npm test -- --run tests/unit/jobs.test.ts`
 
-Add tests asserting `TAB_CLOSED_BY_USER` moves a fixed Nowcoder batch to
-`completed_with_attention`, terminalizes its queued children, moves a directed run into its existing cancellation flow, and a terminal fixed-plan parent prevents a queued child from producing `job.collect` after reconnect. Assert a Nowcoder fixed-plan round has only one `dispatched|collecting` child at a time and dispatches the next child only after the first terminalizes. Assert a late result after parent stop is rejected before sink persistence.
+Expected: PASS.
+
+- [ ] **Step 5: Write and run failing parent-stop and fence tests**
+
+Assert `TAB_CLOSED_BY_USER` moves a fixed Nowcoder batch to `completed_with_attention`, terminalizes queued siblings, and moves a directed run into its existing cancellation flow. Assert only one fixed Nowcoder child is in-flight, the next starts only after terminal, terminal parents cannot dispatch queued children, late progress/result/error is rejected before sink persistence, and recovery-exhausted jobs notify/reconcile before any queued dispatch.
 
 Run: `npm test -- --run tests/unit/collectionPlanService.test.ts tests/unit/nowcoderDirectedOwnership.test.ts tests/integration/bridge.test.ts`
 
-Expected: FAIL before the parent stop and dispatch fence are implemented.
+Expected: FAIL before stop, sequencing, recovery notification, and fences exist.
 
-- [ ] **Step 5: Implement parent stop and dispatch fence**
+- [ ] **Step 6: Implement parent stop, sequencing, and all fences**
 
-Handle the typed terminal in each existing service. Change fixed Nowcoder collection to one in-flight child and release the next child from `onJobTerminal()`. At Bridge dispatch and incoming progress/result/error boundaries, verify every fixed-plan child still belongs to a `running` batch; otherwise terminalize it as `STALE_PLAN_RUN` without sink writes. After startup/hello recovery, call `notifyJobTerminal()` for jobs that exhausted their recovery budget before calling `dispatchQueued()`.
-
-- [ ] **Step 6: Run focused task tests**
+Use existing `completed_with_attention` for fixed-plan stop. Fixed Nowcoder plans dispatch one child at a time and release the next from terminal handling. Terminalize queued siblings with `PLAN_STOPPED_BY_USER`. At dispatch and message ingress, require the fixed-plan parent to remain `running`; otherwise terminalize the child as `STALE_PLAN_RUN` without sink writes. Feed exhausted recovery terminals through durable notices and plan reconciliation before `dispatchQueued()`. In directed terminal handling, call the existing durable cancellation path on `TAB_CLOSED_BY_USER`.
 
 Run: `npm test -- --run tests/unit/jobs.test.ts tests/unit/collectionPlanService.test.ts tests/unit/nowcoderDirectedOwnership.test.ts tests/integration/bridge.test.ts`
 
 Expected: PASS.
 
-### Task 3: Status visibility, versioning, packaging, and live recovery
-
-**Files:**
-- Modify: `packages/extension/src/background/connection.ts`
-- Modify: `packages/extension/src/background/index.ts`
-- Modify: `packages/extension/src/sidepanel/index.ts`
-- Modify: `packages/extension/src/sidepanel/state.ts`
-- Modify: `packages/extension/src/sidepanel/index.html`
-- Modify: version and identity files required by `CLAUDE.md`
-- Test: `tests/unit/connection.test.ts`
-- Test: `tests/unit/sidepanel.test.ts`
-- Test: identity tests required by the repository
-
-**Interfaces:**
-- Consumes: Bridge `/health` field `directedRunActive` and existing plans status response.
-- Produces: plans-side visibility for an active directed run; release version with no stale batch redispatch.
-
-- [ ] **Step 1: Write failing status and rendering tests**
+- [ ] **Step 7: Write and run failing status visibility tests**
 
 Assert `plans.status` carries `directedRunActive`, and the plans page shows a concise active notice only when true.
 
-- [ ] **Step 2: Run tests and confirm RED**
+Run: `npm test -- --run tests/unit/connection.test.ts tests/unit/sidepanel.test.ts`
+
+Expected: FAIL because plans state does not expose the field.
+
+- [ ] **Step 8: Implement status visibility**
+
+Thread the boolean through existing status calls and render one static notice; do not add a second run state machine or scheduler.
 
 Run: `npm test -- --run tests/unit/connection.test.ts tests/unit/sidepanel.test.ts`
 
-Expected: FAIL because the plans state does not expose the field.
+Expected: PASS.
 
-- [ ] **Step 3: Implement the visibility change**
-
-Thread the boolean through existing status calls and render one static notice; do not add a second run state machine or a new scheduler.
-
-- [ ] **Step 4: Bump patch version and refresh lockfile**
+- [ ] **Step 9: Bump patch version and refresh lockfile**
 
 Update every location required by `CLAUDE.md` from `0.4.33` to `0.4.34`, then run `npm install --package-lock-only`.
 
-- [ ] **Step 5: Run full verification and package**
+- [ ] **Step 10: Run focused and full verification**
+
+Run focused changed-area tests with one worker:
+
+`npx vitest run tests/unit/background.test.ts tests/unit/jobs.test.ts tests/unit/collectionPlanService.test.ts tests/unit/nowcoderDirectedOwnership.test.ts tests/integration/bridge.test.ts tests/unit/connection.test.ts tests/unit/sidepanel.test.ts tests/unit/identity.test.ts --maxWorkers=1`
+
+Expected: all focused tests pass.
 
 Run: `npm run typecheck && npm test && npm run package && npm run test:e2e`
 
 Expected: all commands exit 0.
 
-- [ ] **Step 6: Reinstall and validate live safety**
+- [ ] **Step 11: Commit**
+
+Commit all implementation, test, version, lockfile, and plan adjustments as:
+
+`fix: stop nowcoder tab recovery loops`
+
+- [ ] **Step 12: Reinstall and validate live safety**
 
 Reinstall/start the packaged Bridge and reload the unpacked Edge Beta extension through the repository's existing update flow. Verify the legacy batch becomes terminal/attention, Bridge is healthy, Edge contains no Data Collector-owned Nowcoder tab, and it remains absent across a reconnect observation window.
