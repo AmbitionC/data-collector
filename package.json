@@ -1,7 +1,7 @@
 {
   "name": "data-collector",
   "private": true,
-  "version": "0.4.35",
+  "version": "0.4.36",
   "type": "module",
   "workspaces": [
     "packages/*"
@@ -10,7 +10,7 @@
     "node": ">=22.12"
   },
   "scripts": {
-    "build": "npm --workspace=@data-collector/shared run build && npm --workspace=@data-collector/bridge run build && npm --workspace=@data-collector/extension run build",
+    "build": "node scripts/check-node-runtime.js && npm --prefix packages/shared run build && npm --prefix packages/bridge run build && npm --prefix packages/extension run build",
     "package": "npm run build && node scripts/package-extension.mjs",
     "setup": "npm run build && node packages/bridge/dist/cli.js bridge install && npm run install:codex-skill",
     "install:codex-skill": "node .codex/skills/data-collector-delivery/scripts/install-global-entry.mjs",

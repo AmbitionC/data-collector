@@ -2155,6 +2155,8 @@ describe('local Bridge', () => {
         libraryRoot: root,
         configDir: join(root, '.config'),
         enableFeJourneyScheduler: true,
+        // Keep this scheduler-isolation test hermetic while exercising startup and shutdown.
+        fetch: async () => new Response(null, { status: 503 }),
       });
       handles.push(bridge);
       const { socket } = await authorize(bridge);

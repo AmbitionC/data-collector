@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { spawnSync } from 'node:child_process';
 import {
   mkdir,
   readFile,
@@ -65,11 +66,34 @@ describe('extension package validation', () => {
     ) as { scripts: { build: string } };
 
     expect(rootPackage.scripts.build).toBe(
-      'npm --workspace=@data-collector/shared run build'
-      + ' && npm --workspace=@data-collector/bridge run build'
-      + ' && npm --workspace=@data-collector/extension run build',
+      'node scripts/check-node-runtime.js'
+      + ' && npm --prefix packages/shared run build'
+      + ' && npm --prefix packages/bridge run build'
+      + ' && npm --prefix packages/extension run build',
     );
-    expect(rootPackage.scripts.build).not.toContain('npm run build -w');
+    expect(rootPackage.scripts.build).not.toMatch(/--workspace|npm run build -w/);
+  });
+
+  it('fails fast on an unsupported Node runtime before workspace build dispatch', () => {
+    const guard = join(
+      import.meta.dirname,
+      '..',
+      '..',
+      'scripts',
+      'check-node-runtime.js',
+    );
+    const unsupported = spawnSync(process.execPath, [guard, '8.12.0'], {
+      encoding: 'utf8',
+    });
+    const supported = spawnSync(process.execPath, [guard, '22.12.0'], {
+      encoding: 'utf8',
+    });
+
+    expect(unsupported.status).toBe(1);
+    expect(`${unsupported.stdout}${unsupported.stderr}`).toMatch(
+      /Node\.js 8\.12\.0.*requires Node\.js >=22\.12/,
+    );
+    expect(supported.status).toBe(0);
   });
 
   it('accepts only the complete production allowlist', async () => {
