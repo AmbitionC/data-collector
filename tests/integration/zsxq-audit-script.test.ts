@@ -131,13 +131,25 @@ describe('ZSXQ owner-history acceptance audit script', () => {
       jobIds: [],
     });
     await writeFile(plans, `${JSON.stringify(storedPlans)}\n`);
+    const storedLedger = JSON.parse(await readFile(ledger, 'utf8')) as {
+      days: Record<string, Record<string, unknown>>;
+    };
+    storedLedger.days['2026-08-29'] = {
+      status: 'completed_empty', qualifyingCount: 0, crossedDayBoundary: true,
+      failedCount: 0, batchId: 'zsxq-daily-previous', attemptToken: 'b1b2c3d4e5f60718',
+    };
+    storedLedger.days['2026-08-30'] = {
+      status: 'completed_empty', qualifyingCount: 0, crossedDayBoundary: true,
+      failedCount: 0, batchId: 'zsxq-daily-accepted', attemptToken: 'c1b2c3d4e5f60718',
+    };
+    await writeFile(ledger, `${JSON.stringify(storedLedger)}\n`);
     const daily = await execFileAsync(process.execPath, [
       'scripts/audit-zsxq-owner.mjs',
       '--batch', 'zsxq-daily-accepted',
       '--plans', plans,
       '--ledger', ledger,
       '--catalog', catalog,
-      '--today', '2026-08-29',
+      '--today', '2026-08-31',
     ], { cwd: process.cwd() });
     expect(JSON.parse(daily.stdout)).toMatchObject({
       batchId: 'zsxq-daily-accepted',
@@ -149,6 +161,27 @@ describe('ZSXQ owner-history acceptance audit script', () => {
       currentDayFinalized: false,
       activeCheckpointPresent: false,
     });
+
+    storedLedger.days['2026-08-29']!.batchId = 'zsxq-daily-accepted';
+    await writeFile(ledger, `${JSON.stringify(storedLedger)}\n`);
+    try {
+      await execFileAsync(process.execPath, [
+        'scripts/audit-zsxq-owner.mjs',
+        '--batch', 'zsxq-daily-accepted',
+        '--plans', plans,
+        '--ledger', ledger,
+        '--catalog', catalog,
+        '--today', '2026-08-31',
+      ], { cwd: process.cwd() });
+      throw new Error('日批次重写昨日以前的历史日时验收脚本不应成功');
+    } catch (error) {
+      const failed = error as { code?: number; stdout?: string };
+      expect(failed.code).toBe(2);
+      expect(JSON.parse(failed.stdout ?? '{}')).toMatchObject({
+        passed: false,
+        historicalDaysRewritten: 1,
+      });
+    }
 
     const catalogEntries = JSON.parse(await readFile(catalog, 'utf8')) as Array<{ url?: string }>;
     await writeFile(catalog, `${JSON.stringify(catalogEntries.filter(entry => !entry.url?.endsWith('/102')))}\n`);

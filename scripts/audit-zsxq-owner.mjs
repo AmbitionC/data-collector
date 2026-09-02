@@ -96,9 +96,6 @@ async function main() {
     const historyBatchId = typeof ledger.lastHistoryAudit?.batchId === 'string'
       ? ledger.lastHistoryAudit.batchId
       : undefined;
-    const historyAttempt = typeof ledger.lastHistoryAudit?.attempt === 'string'
-      ? ledger.lastHistoryAudit.attempt
-      : undefined;
     const historyBatch = plans.batches.find(candidate =>
       candidate && typeof candidate === 'object' && candidate.id === historyBatchId);
     const historyDeliveryIds = new Set(Array.isArray(historyBatch?.deliveryIds)
@@ -123,10 +120,10 @@ async function main() {
           && entry.failedCount === 0;
         if (!complete) ledgerGaps += 1;
         if (
-          !entry
-          || typeof entry !== 'object'
-          || entry.batchId !== historyBatchId
-          || entry.attemptToken !== historyAttempt
+          day < yesterday
+          && entry
+          && typeof entry === 'object'
+          && entry.batchId === batch.id
         ) historicalDaysRewritten += 1;
       }
     }
