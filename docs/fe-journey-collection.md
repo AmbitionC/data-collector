@@ -12,8 +12,8 @@
 - 计划状态：`npm run collector -- plans status`。
 - 立即补跑：`npm run collector -- plans run nowcoder-agent-market --force` 或 `plans run zsxq-chen-teacher --force`。
 - 最近批次：`npm run collector -- plans batches --limit 20`。
-- 常驻服务自动检查：牛客每 24 小时、每轮最多 24 个详情任务；GitHub 每 7 日、每轮最多 12 个项目。
-- 手动补跑：`npm run collector -- fe-journey collect --force`。
+- 常驻 FeJourney 只自动检查 GitHub：每 7 日、每轮最多 12 个项目，不创建浏览器页签。牛客自动采集只由上面的每日固定计划负责。
+- 兼容的手动 FeJourney 补跑：`npm run collector -- fe-journey collect --force`。该显式命令仍可检查牛客并打开详情页；日常牛客操作优先使用固定计划或 `nowcoder run` 定向运行。
 - 查看状态：`npm run collector -- fe-journey status`。
 - 夹具冒烟：`npm run smoke:fe-journey`。
 - 固定计划与报告契约冒烟：`npm run smoke:plans`。
@@ -49,9 +49,11 @@ front-end-journey-resource/_inbox（git ignored，本机）
 
 - GitHub README 明确返回 404 时只跳过该项目；API 限流或服务故障依次尝试固定的 `raw.githubusercontent.com` 与官方 GitHub README HTML 后备地址，均失败才把整轮记为失败，不会伪装成空的成功批次。
 - GitHub 候选部分写入失败会把首个警告持久化到状态文件；全部写入失败时整轮记为失败，不更新 `lastSuccessAt`。
-- 任一来源整轮失败后按 1 小时短退避自动重试；成功后恢复牛客 24 小时、GitHub 7 日的正常周期。
-- 牛客详情任务在扩展离线时保持队列，扩展重新连接后派发。
-- 牛客详情任务进入 `failed` 或 `needs_attention` 后，会在下一次固定发现中清除旧错误并重新入队；已经成功和仍在途的任务不重复派发。
+- FeJourney 来源整轮失败后按 1 小时短退避；常驻服务只自动重试 GitHub。显式手动运行成功后仍记录各来源自己的周期状态。
+- 固定或显式牛客详情任务在扩展离线时保持队列，扩展重新连接后派发。固定计划同一时刻最多派发一个详情任务。
+- Bridge 拥有的非定向牛客任务因 Service Worker 丢失最多自动恢复一次；同一运行时的 WebSocket 短暂重连不消耗次数。第二次 worker loss 转为 `needs_attention/RECOVERY_LIMIT_EXCEEDED`，不会继续开页。
+- 升级前缺少恢复计数的 `queued`、`dispatched`、`collecting` 牛客任务按预算已用尽处理，Bridge 启动时直接终止；显式重试才会重新入队。
+- 牛客详情任务进入 `failed` 或 `needs_attention` 后，只有显式固定发现或手动运行才会清除旧错误并重新入队；后台 FeJourney 不再自动重试牛客任务。
 - 状态保存在 `~/.data-collector/fe-journey-state.json`；候选索引在本机库 `_catalog/fe-journey.json`。
 - 采集状态文件损坏时只降级关闭 fe-journey 并在状态接口暴露错误，不覆盖损坏文件，也不阻断 Bridge 启动。
 - 候选索引损坏只禁用 fe-journey 并在状态接口暴露错误，Bridge、微信和知识星球采集仍可启动和落盘。

@@ -261,6 +261,86 @@ function zsxqDocument(url: string): CollectedDocument {
 }
 
 describe('directed Nowcoder job ownership', () => {
+  it('routes a typed user tab close through one durable directed cancellation without a refill', async () => {
+    const root = await temporaryDirectories.create('nowcoder-directed-tab-close-');
+    const configDir = join(root, '.config');
+    const config = loadConfig({ libraryRoot: root, configDir, port: 0 });
+    const directedStore = await NowcoderDirectedStore.open(join(configDir, 'nowcoder-directed.json'), {
+      now: () => NOW, id: () => 'tab-close-run', attempt: () => CURRENT_ATTEMPT,
+    });
+    await directedStore.createSession({
+      id: 'tab-close-session', queries: ['Agent'], queryHash: 'c'.repeat(64),
+      requestedSort: 'latest', provider: 'nowcoder-json', sortVerified: true,
+      createdAt: NOW, expiresAt: '2026-08-30T00:30:00.000Z', candidates: [candidate()],
+    }, { target: 1 });
+    const run = await directedStore.startRun({
+      searchSessionId: 'tab-close-session', selectedCandidateIds: ['candidate-1'],
+      idempotencyKey: 'tab-close-key', deliveryAuthorized: true,
+    }, RUN_EVIDENCE);
+    const currentId = nowcoderDirectedJobId(run.id, run.attempt, URL);
+    await directedStore.checkpointCurrentRun(run.id, run.attempt, {
+      phase: 'collecting',
+      candidateCursor: 1,
+      currentJobIds: [currentId],
+      currentRoundJobIds: [currentId],
+      ...pendingSingleAudit(currentId),
+    });
+    await directedStore.recordDispatchedJobCurrent(run.id, run.attempt, currentId);
+    await directedStore.recordTabClearEvidenceCurrent(
+      run.id,
+      run.attempt,
+      currentId,
+      'remote_terminal_after_close',
+    );
+    const jobs = await JobStore.open(config.jobsFile, { now: () => NOW });
+    await jobs.create({
+      id: currentId, url: URL, requestedBy: 'codex',
+      directedRunId: run.id, directedRunAttempt: run.attempt,
+    });
+    await jobs.transition(currentId, 'dispatched');
+    await jobs.transition(currentId, 'collecting');
+    const cancel = vi.spyOn(NowcoderDirectedService.prototype, 'cancelRun');
+    try {
+      const bridge = await startBridge({
+        libraryRoot: root, configDir, port: 0, repoRoot: root, enableAutoUpdate: false,
+        readArtifactBuildId: async () => BUILD,
+      });
+      bridges.push(bridge);
+      const { socket } = await authorize(bridge);
+      const collect = nextMessage(socket);
+      socket.send(envelope('extension.hello', 'directed-tab-close-hello', DIRECTED_HELLO));
+      expect(await collect).toMatchObject({
+        type: 'job.collect', requestId: currentId,
+        payload: { directedRunId: run.id, directedRunAttempt: run.attempt, interactive: false },
+      });
+      const acknowledgement = nextMessage(socket);
+      socket.send(envelope('job.error', currentId, {
+        code: 'TAB_CLOSED_BY_USER', message: '采集标签页已关闭', needsAttention: false,
+      }));
+      expect(await acknowledgement).toMatchObject({
+        type: 'job.failed', requestId: currentId, payload: { code: 'TAB_CLOSED_BY_USER' },
+      });
+      await vi.waitFor(async () => {
+        expect((await JobStore.open(config.jobsFile)).get(currentId)).toMatchObject({
+          status: 'failed', errorCode: 'TAB_CLOSED_BY_USER',
+        });
+      });
+      expect(cancel).toHaveBeenCalledTimes(1);
+      expect(cancel).toHaveBeenCalledWith(run.id, run.attempt);
+
+      socket.send(envelope('job.error', currentId, {
+        code: 'TAB_CLOSED_BY_USER', message: '迟到重复回执', needsAttention: false,
+      }));
+      await new Promise(resolve => setTimeout(resolve, 100));
+      expect(cancel).toHaveBeenCalledTimes(1);
+      const persistedDirected = await NowcoderDirectedStore.open(join(configDir, 'nowcoder-directed.json'));
+      expect(persistedDirected.getRun(run.id)).toMatchObject({ status: 'cancelled' });
+      expect((await JobStore.open(config.jobsFile)).list()).toHaveLength(1);
+    } finally {
+      cancel.mockRestore();
+    }
+  });
+
   it('bootstraps legacy active proof pins before real server startup pruning', async () => {
     const root = await temporaryDirectories.create('nowcoder-directed-legacy-pin-startup-');
     const configDir = join(root, '.config');

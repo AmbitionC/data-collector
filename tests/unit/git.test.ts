@@ -314,27 +314,216 @@ describe('自更新要用的外部命令', () => {
     }
   });
 
-  it('进程组信号返回 EPERM 时回退终止直接子进程，不让清理异常打崩 Bridge', async () => {
-    const signals: NodeJS.Signals[] = [];
-    const permissionError = Object.assign(new Error('kill EPERM'), { code: 'EPERM' });
-    const script = "process.on('SIGTERM', () => {}); setInterval(() => {}, 1000);";
+  it('进程组已 ESRCH 时视为幂等清理成功，不回退杀直接子进程也不添加诊断', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'data-collector-esrch-cleanup-'));
+    const markerPath = join(directory, 'natural-exit.txt');
+    const goneError = Object.assign(new Error('kill ESRCH'), { code: 'ESRCH' });
+    const script = [
+      "const { writeFileSync } = require('node:fs');",
+      `setTimeout(() => writeFileSync(${JSON.stringify(markerPath)}, 'natural'), 100);`,
+    ].join('\n');
 
-    const running = runProcessForTool(
+    try {
+      const error = await runProcessForTool(
+        process.execPath,
+        ['-e', script],
+        directory,
+        process.env,
+        {
+          timeoutMs: 30,
+          killGraceMs: 500,
+          signalTree: () => {
+            throw goneError;
+          },
+        },
+      ).then(
+        () => undefined,
+        reason => reason as Error,
+      );
+
+      expect(error).toBeInstanceOf(Error);
+      expect(error?.message).toBe('命令执行超时（30ms）');
+      expect(await readFile(markerPath, 'utf8')).toBe('natural');
+    } finally {
+      terminateActiveToolProcesses('SIGKILL');
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it.each([
+    ['EINVAL', Object.assign(new Error('invalid group signal'), { code: 'EINVAL' }), 'EINVAL'],
+    ['未知异常', new Error('unexpected group kill'), 'unexpected group kill'],
+  ] as const)(
+    '进程组信号返回%s时不从 timer 抛出，并随 ToolProcessError 暴露原异常',
+    async (_label, signalError, expectedDetail) => {
+      const script = "process.on('SIGTERM', () => {}); setInterval(() => {}, 1000);";
+
+      const error = await runProcessForTool(
+        process.execPath,
+        ['-e', script],
+        tmpdir(),
+        process.env,
+        {
+          timeoutMs: 500,
+          killGraceMs: 50,
+          signalTree: () => {
+            throw signalError;
+          },
+        },
+      ).then(
+        () => undefined,
+        reason => reason as Error,
+      );
+
+      expect(error).toBeInstanceOf(Error);
+      expect(error?.message).toMatch(/^命令执行超时（500ms）/);
+      expect(error?.message).toContain(expectedDetail);
+      expect(error?.message).toMatch(/进程组信号/);
+    },
+  );
+
+  it.each([
+    [
+      '抛出异常',
+      () => {
+        throw Object.assign(new Error('direct child kill failed'), { code: 'EIO' });
+      },
+      'EIO',
+    ],
+    ['返回 false', () => false, '返回 false'],
+  ] as const)(
+    '直接子进程 fallback %s 时不从 timer 抛出，并随 ToolProcessError 暴露失败',
+    async (_label, signalChild, expectedDetail) => {
+      const directSignals: NodeJS.Signals[] = [];
+      const permissionError = Object.assign(new Error('kill EPERM'), { code: 'EPERM' });
+      const script = 'setTimeout(() => {}, 150);';
+
+      const error = await runProcessForTool(
+        process.execPath,
+        ['-e', script],
+        tmpdir(),
+        process.env,
+        {
+          timeoutMs: 30,
+          killGraceMs: 20,
+          signalTree: () => {
+            throw permissionError;
+          },
+          signalChild: signal => {
+            directSignals.push(signal);
+            return signalChild();
+          },
+        },
+      ).then(
+        () => undefined,
+        reason => reason as Error,
+      );
+
+      expect(error).toBeInstanceOf(Error);
+      expect(error?.message).toMatch(/^命令执行超时（30ms）/);
+      expect(error?.message).toContain(expectedDetail);
+      expect(error?.message).toMatch(/直接子进程/);
+      expect(directSignals).toEqual(['SIGTERM', 'SIGKILL']);
+    },
+  );
+
+  it('直接子进程 fallback 返回 ESRCH 时视为幂等成功，不追加 fallback 失败噪声', async () => {
+    const directSignals: NodeJS.Signals[] = [];
+    const permissionError = Object.assign(new Error('kill EPERM'), { code: 'EPERM' });
+    const goneError = Object.assign(new Error('direct ESRCH'), { code: 'ESRCH' });
+    const script = 'setTimeout(() => {}, 150);';
+
+    const error = await runProcessForTool(
       process.execPath,
       ['-e', script],
       tmpdir(),
       process.env,
       {
-        timeoutMs: 500,
+        timeoutMs: 30,
+        killGraceMs: 20,
+        signalTree: () => {
+          throw permissionError;
+        },
+        signalChild: signal => {
+          directSignals.push(signal);
+          throw goneError;
+        },
+      },
+    ).then(
+      () => undefined,
+      reason => reason as Error,
+    );
+
+    expect(error).toBeInstanceOf(Error);
+    expect(error?.message).toMatch(/^命令执行超时（30ms）/);
+    expect(error?.message).toContain('EPERM');
+    expect(error?.message).not.toContain('ESRCH');
+    expect(directSignals).toEqual(['SIGTERM', 'SIGKILL']);
+  });
+
+  it.each(['EPERM', 'EACCES'] as const)(
+    '进程组信号返回 %s 时回退终止直接子进程，并在超时主原因后记录降级诊断',
+    async code => {
+      const signals: NodeJS.Signals[] = [];
+      const permissionError = Object.assign(new Error(`kill ${code}`), { code });
+      const script = "process.on('SIGTERM', () => {}); setInterval(() => {}, 1000);";
+
+      const running = runProcessForTool(
+        process.execPath,
+        ['-e', script],
+        tmpdir(),
+        process.env,
+        {
+          timeoutMs: 500,
+          killGraceMs: 50,
+          signalTree: (_pid, signal) => {
+            signals.push(signal);
+            throw permissionError;
+          },
+        },
+      );
+
+      const error = await running.then(
+        () => undefined,
+        reason => reason as Error,
+      );
+      expect(error).toBeInstanceOf(Error);
+      expect(error?.message).toMatch(/^命令执行超时（500ms）/);
+      expect(error?.message).toContain(code);
+      expect(error?.message).toMatch(/降级.*直接子进程/);
+      expect(signals).toEqual(['SIGTERM', 'SIGKILL']);
+    },
+  );
+
+  it('权限降级诊断不覆盖输出上限主原因', async () => {
+    const permissionError = Object.assign(new Error('kill EACCES'), { code: 'EACCES' });
+    const script = [
+      "process.on('SIGTERM', () => {});",
+      "process.stdout.write('too much output');",
+      'setInterval(() => {}, 1000);',
+    ].join('\n');
+
+    const error = await runProcessForTool(
+      process.execPath,
+      ['-e', script],
+      tmpdir(),
+      process.env,
+      {
+        timeoutMs: 2_000,
+        maxBufferBytes: 1,
         killGraceMs: 50,
-        signalTree: (_pid, signal) => {
-          signals.push(signal);
+        signalTree: () => {
           throw permissionError;
         },
       },
+    ).then(
+      () => undefined,
+      reason => reason as Error,
     );
 
-    await expect(running).rejects.toThrow(/超时/);
-    expect(signals).toEqual(['SIGTERM', 'SIGKILL']);
+    expect(error).toBeInstanceOf(Error);
+    expect(error?.message).toMatch(/^命令输出超过 1 字节上限/);
+    expect(error?.message).toContain('EACCES');
+    expect(error?.message).toMatch(/降级.*直接子进程/);
   });
 });

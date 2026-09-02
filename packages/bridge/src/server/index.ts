@@ -270,7 +270,7 @@ export interface StartBridgeOptions extends ConfigOverrides {
   artifactReaderCoordinator?: ArtifactReaderCoordinatorLike;
   /** 更新完成后怎么退出（默认 process.exit(0)，交给登录项拉起来）。测试用。 */
   exit?: () => void;
-  /** 只有常驻 CLI 服务显式开启固定周期；嵌入式/测试启动不产生后台网络请求。 */
+  /** 只有常驻 CLI 服务显式开启 FeJourney GitHub 周期；嵌入式/测试启动不产生后台网络请求。 */
   enableFeJourneyScheduler?: boolean;
   /** 到期检查间隔，默认 15 分钟。 */
   feJourneyCheckIntervalMs?: number;
@@ -605,7 +605,9 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
           message: job.errorMessage ?? '牛客定向采集已终止',
           ...(job.planAttempt ? { attempt: job.planAttempt } : {}),
         },
-        zsxq: isZsxqJob(job),
+        // A failure carries no collected ZSXQ content and must reach even the stale runtime
+        // whose result was rejected, otherwise that runtime cannot tombstone the requestId.
+        zsxq: false,
       });
     }
   };
@@ -780,6 +782,55 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
     && job.directedRunId === undefined
   );
 
+  /** Persist a fixed child terminal under the same lease as sink+saved, then notify outside it. */
+  const terminalizeFixedNowcoderChild = async (
+    job: JobRecord,
+    status: 'failed' | 'needs_attention',
+    patch: { errorCode: string; errorMessage: string },
+  ): Promise<{ job?: JobRecord; transitioned: boolean }> => {
+    const fixed = isFixedNowcoderChild(job);
+    const outcome = fixed && collectionPlans
+      ? await collectionPlans.terminalizeFixedNowcoderChild(job, status, patch)
+      : { job: await jobs.transition(job.id, status, patch), transitioned: true };
+    if (fixed && outcome.job) publishDurableJobNotice(outcome.job);
+    if (fixed && outcome.job && outcome.transitioned) await notifyJobTerminal(outcome.job);
+    return outcome;
+  };
+
+  /**
+   * Fixed-plan parent state is the durable authority for both dispatch and result persistence.
+   * Re-read it at every async boundary; an old child must never revive a stopped batch.
+   */
+  const fenceFixedNowcoderChild = async (
+    job: JobRecord,
+    message: string,
+  ): Promise<JobRecord | undefined> => {
+    if (!isFixedNowcoderChild(job)) return jobs.get(job.id);
+    if (collectionPlans?.acceptsFixedNowcoderJob(job)) return jobs.get(job.id);
+    const current = jobs.get(job.id);
+    if (!current) return undefined;
+    if (
+      current.status === 'saved'
+      || current.status === 'failed'
+      || current.status === 'needs_attention'
+    ) return undefined;
+    try {
+      await terminalizeFixedNowcoderChild(current, 'failed', {
+        errorCode: 'STALE_PLAN_RUN',
+        errorMessage: message,
+      });
+    } catch (error) {
+      const after = jobs.get(current.id);
+      if (
+        after?.status === 'saved'
+        || after?.status === 'failed'
+        || after?.status === 'needs_attention'
+      ) return undefined;
+      throw error;
+    }
+    return undefined;
+  };
+
   const dispatch = async (job: JobRecord, targetSocket = extensionSocket): Promise<void> => {
     if (
       !targetSocket ||
@@ -793,11 +844,10 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
     if (isFixedNowcoderChild(job) && (
       !collectionPlans || !collectionPlans.acceptsFixedNowcoderJob(job)
     )) {
-      const failed = await jobs.transition(job.id, 'failed', {
+      await terminalizeFixedNowcoderChild(job, 'failed', {
         errorCode: 'STALE_PLAN_RUN',
         errorMessage: '牛客固定采集计划已结束，任务未派发',
       });
-      await notifyJobTerminal(failed);
       return;
     }
     const zsxqJob = isZsxqJob(job);
@@ -834,7 +884,14 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
       await notifyJobTerminal(failed);
       return;
     }
-    await jobs.transition(job.id, 'dispatched');
+    try {
+      await jobs.transition(job.id, 'dispatched');
+    } catch (error) {
+      // A second dispatcher may be holding an older queued snapshot. Once another dispatcher
+      // claimed it, this loser has no terminal authority over the child.
+      if (jobs.get(job.id)?.status !== 'queued') return;
+      throw error;
+    }
     // 状态落盘期间连接或磁盘 artifact 都可能已被替换；发送前再做最后一道 fence。
     if (targetSocket !== extensionSocket || targetSocket.readyState !== WebSocket.OPEN) {
       if (jobs.get(job.id)?.status === 'dispatched') await jobs.transition(job.id, 'queued');
@@ -872,6 +929,10 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
       return;
     }
     if (!sendCandidate || sendCandidate.status !== 'dispatched') return;
+    if (!await fenceFixedNowcoderChild(
+      sendCandidate,
+      '牛客固定采集计划已结束，任务未派发',
+    )) return;
     if (
       sendCandidate.directedRunId
       && (
@@ -886,16 +947,28 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
       await notifyJobTerminal(fenced);
       return;
     }
-    const collectFrame = () => targetSocket.send(JSON.stringify(envelope('job.collect', sendCandidate.id, {
-      url: sendCandidate.url,
-      interactive: sendCandidate.directedRunId ? false : !sendCandidate.batchId,
-      ...(sendCandidate.directedRunId && sendCandidate.directedRunAttempt
-        ? {
-            directedRunId: sendCandidate.directedRunId,
-            directedRunAttempt: sendCandidate.directedRunAttempt,
-          }
-        : {}),
-    })));
+    const collectFrame = () => {
+      // No await may separate this final fixed-parent check from socket.send. The losing path
+      // terminalizes asynchronously because the wire boundary itself must stay synchronous.
+      if (
+        isFixedNowcoderChild(sendCandidate)
+        && !collectionPlans?.acceptsFixedNowcoderJob(sendCandidate)
+      ) {
+        void fenceFixedNowcoderChild(sendCandidate, '牛客固定采集计划已结束，任务未派发')
+          .catch(error => console.warn('固定牛客任务发送围栏清理失败', error));
+        return;
+      }
+      targetSocket.send(JSON.stringify(envelope('job.collect', sendCandidate.id, {
+        url: sendCandidate.url,
+        interactive: sendCandidate.directedRunId ? false : !sendCandidate.batchId,
+        ...(sendCandidate.directedRunId && sendCandidate.directedRunAttempt
+          ? {
+              directedRunId: sendCandidate.directedRunId,
+              directedRunAttempt: sendCandidate.directedRunAttempt,
+            }
+          : {}),
+      })));
+    };
     if (sendCandidate.directedRunId) {
       await directedService?.dispatchCurrent(sendCandidate, () => {
         if (
@@ -1116,6 +1189,7 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
         },
         ...(zsxqLedger ? { zsxqLedger } : {}),
         onZsxqAttemptTerminal: () => resumeDeferredUpdate(),
+        replayDurableJobTerminal: job => { publishDurableJobNotice(job); },
         shouldAutoSync: async job => {
           const document = await storedDocumentFor(job);
           if (!document) return false;
@@ -1217,6 +1291,7 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
       })
     : undefined;
   for (const terminal of startupRecovery.terminalized) {
+    publishDurableJobNotice(terminal);
     await notifyJobTerminal(terminal);
   }
 
@@ -1300,11 +1375,11 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
         }
       }
       if (socket !== extensionSocket) return;
-      if (!extensionReady && !sameRuntimeReconnect) {
+      if (!extensionReady) {
         const recovered = await jobs.recover(new Set([
           ...persistingJobIds,
           ...jobs.list().filter(job => job.directedRunId !== undefined).map(job => job.id),
-        ]));
+        ]), sameRuntimeReconnect ? 'socket-reconnect' : 'worker-loss');
         for (const terminal of recovered.terminalized) {
           publishDurableJobNotice(terminal);
           await notifyJobTerminal(terminal);
@@ -1327,7 +1402,7 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
         return;
       }
       await collectionPlans?.onExtensionConnected({
-        runDue: options.enableCollectionPlanScheduler ?? options.enableFeJourneyScheduler ?? false,
+        runDue: options.enableCollectionPlanScheduler ?? false,
         ...(hello.runtimeId ? { runtimeId: hello.runtimeId } : {}),
       }).catch(error => {
         console.warn(`[plans] 扩展重连补跑失败：${error instanceof Error ? error.message : error}`);
@@ -1386,15 +1461,29 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
     }
     const job = jobs.get(parsedEnvelope.requestId);
     if (!job) throw new Error(`任务不存在：${parsedEnvelope.requestId}`);
+    if (
+      job.directedRunId === undefined
+      && (parsedEnvelope.type === 'job.result' || parsedEnvelope.type === 'job.error')
+      && (job.status === 'saved' || job.status === 'failed' || job.status === 'needs_attention')
+    ) {
+      // Terminal acknowledgement replay is capability-independent and idempotent. It must run
+      // before ZSXQ build gates and must not repeat a sink, state transition, or plan callback.
+      publishDurableJobNotice(job);
+      return;
+    }
     if (isFixedNowcoderChild(job) && (
       !collectionPlans || !collectionPlans.acceptsFixedNowcoderJob(job)
     )) {
-      if (job.status === 'saved' || job.status === 'failed' || job.status === 'needs_attention') return;
-      const failed = await jobs.transition(job.id, 'failed', {
+      if (job.status === 'saved' || job.status === 'failed' || job.status === 'needs_attention') {
+        // The extension may replay the same terminal after a socket replacement. Re-emit only
+        // its durable acknowledgement; plan callbacks remain exactly-once.
+        publishDurableJobNotice(job);
+        return;
+      }
+      await terminalizeFixedNowcoderChild(job, 'failed', {
         errorCode: 'STALE_PLAN_RUN',
         errorMessage: '牛客固定采集计划已结束，迟到结果已拒绝',
       });
-      await notifyJobTerminal(failed);
       return;
     }
     if (
@@ -1491,7 +1580,12 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
       if (result.document.canonicalUrl !== job.url) {
         throw new Error('回传内容 URL 与采集任务不一致');
       }
-      if (job.status === 'saved' || job.status === 'failed' || job.status === 'needs_attention') return;
+      if (job.status === 'saved' || job.status === 'failed' || job.status === 'needs_attention') {
+        // A terminal result may be replayed after its first acknowledgement was lost.
+        // Re-emit the notice for every remote job without repeating sinks or plan callbacks.
+        publishDurableJobNotice(job);
+        return;
+      }
       // 必须在第一个 await 前打标；否则换连 hello 可以在状态落盘间隙把它重派。
       persistingJobIds.add(job.id);
       let holdsZsxqPersistenceLease = false;
@@ -1516,6 +1610,10 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
         if (job.status === 'queued' || job.status === 'dispatched') {
           current = await jobs.transition(job.id, 'collecting');
         }
+        if (!await fenceFixedNowcoderChild(
+          current,
+          '牛客固定采集计划已结束，迟到结果未入库',
+        )) return;
         // artifact 可在任务已经下发后被原地覆盖。结果进入 sink 前再次现读磁盘；
         // 旧构建即使带着对 A 的完整性证明，也不能在当前 artifact 已是 B 时落库。
         let sinkArtifactBuildId: string | undefined;
@@ -1526,6 +1624,7 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
               errorCode: 'EXTENSION_UPDATE_REQUIRED',
               errorMessage: '扩展构建已落后于当前磁盘产物，已拒绝知识星球正文入库',
             });
+            publishDurableJobNotice(terminal);
             await notifyJobTerminal(terminal, '扩展构建已过期');
             return;
           }
@@ -1553,6 +1652,7 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
             errorCode: 'INCOMPLETE_CONTENT',
             errorMessage: '知识星球正文不完整，已拒绝归档和交付',
           });
+          publishDurableJobNotice(terminal);
           await notifyJobTerminal(terminal, '正文不完整');
           return;
         }
@@ -1573,7 +1673,7 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
               },
             }
           : result.document as CollectedDocument;
-        const sinkResults = await saveCollectedDocument(
+        const persistSink = async () => await saveCollectedDocument(
           router,
           candidateIndex,
           document,
@@ -1586,24 +1686,35 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
               }
             : undefined,
         );
-        const succeeded = sinkResults.filter(sinkResult => sinkResult.ok);
-        if (succeeded.length === 0) {
-          const detail = sinkResults
-            .map(sinkResult => `${sinkResult.sinkId}: ${sinkResult.detail?.error ?? '失败'}`)
-            .join('；');
-          throw new Error(`所有落地目标均失败：${detail || '无可用目标'}`);
+        const commitSaved = async (sinkResults: Awaited<ReturnType<typeof persistSink>>) => {
+          const succeeded = sinkResults.filter(sinkResult => sinkResult.ok);
+          if (succeeded.length === 0) {
+            const detail = sinkResults
+              .map(sinkResult => `${sinkResult.sinkId}: ${sinkResult.detail?.error ?? '失败'}`)
+              .join('；');
+            throw new Error(`所有落地目标均失败：${detail || '无可用目标'}`);
+          }
+          const markdownResults = succeeded.filter(sinkResult =>
+            router.isTrustedLocalEvidenceResult(sinkResult));
+          if (current.directedRunId && markdownResults.length !== 1) {
+            throw new Error('定向牛客结果未形成可验证的本机 Markdown 快照');
+          }
+          const markdown = markdownResults[0];
+          const primary = current.directedRunId ? markdown! : succeeded[0]!;
+          const saved = await jobs.transition(job.id, 'saved', {
+            outputPath: primary.outputRef,
+            ...(markdown ? { markdownOutput: { sinkId: 'markdown', outputPath: markdown.outputRef } } : {}),
+          });
+          return { saved, sinkResults, primary };
+        };
+        const persisted = isFixedNowcoderChild(current)
+          ? await collectionPlans?.persistFixedNowcoderChild(current, persistSink, commitSaved)
+          : await commitSaved(await persistSink());
+        if (!persisted) {
+          await fenceFixedNowcoderChild(current, '牛客固定采集计划已结束，结果未提交为已保存');
+          return;
         }
-        const markdownResults = succeeded.filter(sinkResult =>
-          router.isTrustedLocalEvidenceResult(sinkResult));
-        if (current.directedRunId && markdownResults.length !== 1) {
-          throw new Error('定向牛客结果未形成可验证的本机 Markdown 快照');
-        }
-        const markdown = markdownResults[0];
-        const primary = current.directedRunId ? markdown! : succeeded[0]!;
-        const saved = await jobs.transition(job.id, 'saved', {
-          outputPath: primary.outputRef,
-          ...(markdown ? { markdownOutput: { sinkId: 'markdown', outputPath: markdown.outputRef } } : {}),
-        });
+        const { saved, sinkResults, primary } = persisted;
         publishJobNotice(saved, {
           type: 'job.saved',
           payload: {
@@ -1632,19 +1743,18 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
             : undefined;
           const errorCode = directedSaveCode ?? 'SAVE_FAILED';
           console.warn(`[jobs] 任务 ${latest.id} 落地失败：${message}`);
+          if (isFixedNowcoderChild(latest)) {
+            await terminalizeFixedNowcoderChild(latest, 'failed', {
+              errorCode,
+              errorMessage: message,
+            });
+            return;
+          }
           const failed = await jobs.transition(latest.id, 'failed', {
             errorCode,
             errorMessage: message,
           });
-          publishJobNotice(failed, {
-            type: 'job.failed',
-            payload: {
-              code: errorCode,
-              message,
-              ...(failed.planAttempt ? { attempt: failed.planAttempt } : {}),
-            },
-            zsxq: isZsxqJob(failed),
-          });
+          publishDurableJobNotice(failed);
           await notifyJobTerminal(failed);
           return;
         }
@@ -1676,10 +1786,13 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
       if (job.directedRunId && !directedService?.acceptsResult(job)) return;
       sinkOverrides.delete(job.id);
       const status = error.needsAttention ? 'needs_attention' : 'failed';
-      const terminal = await jobs.transition(job.id, status, {
+      const outcome = await terminalizeFixedNowcoderChild(job, status, {
         errorCode: error.code,
         errorMessage: error.message,
       });
+      const terminal = outcome.job;
+      if (!terminal) return;
+      if (!outcome.transitioned) return;
       if (
         terminal.directedRunId
         && terminal.directedRunAttempt
@@ -1687,11 +1800,15 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
       ) {
         await directedService?.cancelRun(terminal.directedRunId, terminal.directedRunAttempt);
       }
-      publishDurableJobNotice(terminal);
-      await notifyJobTerminal(
-        terminal,
-        isZsxqJob(job) && error.code === 'INCOMPLETE_CONTENT' ? '正文不完整' : undefined,
-      );
+      // Fixed child terminalization already published/notified after releasing its batch lock.
+      // Keep the special ZSXQ rejection path for non-fixed jobs.
+      if (!isFixedNowcoderChild(job)) {
+        publishDurableJobNotice(terminal);
+        await notifyJobTerminal(
+          terminal,
+          isZsxqJob(job) && error.code === 'INCOMPLETE_CONTENT' ? '正文不完整' : undefined,
+        );
+      }
       resumeDeferredUpdate();
       return;
     }
@@ -1899,7 +2016,10 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
             errorCode: 'STALE_PLAN_ATTEMPT',
             errorMessage: error instanceof Error ? error.message : '固定采集计划尝试已过期',
           }).catch(() => undefined);
-          if (failed) await notifyJobTerminal(failed);
+          if (failed) {
+            publishDurableJobNotice(failed);
+            await notifyJobTerminal(failed);
+          }
         }
         throw new HttpError(
           409,
@@ -2118,7 +2238,9 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
   if (options.enableFeJourneyScheduler && feJourneyCollector.status().enabled) {
     const runScheduledCollection = (): void => {
       if (closing) return;
-      void trackOperation(runFeJourney().catch(error => {
+      // Scheduled FeJourney work must never open browser tabs without a visible user-owned run.
+      // Nowcoder remains available through the explicit fixed/directed/manual plugin flows.
+      void trackOperation(runFeJourney({ nowcoder: false, github: true }).catch(error => {
         console.warn(`[fe-journey] 定时采集失败：${error instanceof Error ? error.message : error}`);
       }));
     };
@@ -2130,7 +2252,7 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
     feJourneyTimer.unref?.();
   }
   let collectionPlanTimer: NodeJS.Timeout | undefined;
-  if ((options.enableCollectionPlanScheduler ?? options.enableFeJourneyScheduler) && collectionPlans) {
+  if (options.enableCollectionPlanScheduler && collectionPlans) {
     collectionPlanTimer = setInterval(() => {
       if (closing) return;
       void trackOperation(collectionPlans.runDuePlans().catch(error => {

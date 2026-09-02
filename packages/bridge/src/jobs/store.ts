@@ -3,6 +3,7 @@ import { mkdir, open, readFile, rename, unlink } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import {
   canonicalizeUrl,
+  descriptorForHost,
   parseSupportedUrl,
   type JobRecord,
   type JobStatus,
@@ -84,6 +85,14 @@ function assertDirectedOwnership(
   }
 }
 
+function hasNowcoderRecoveryBudget(
+  value: Pick<CreateJobInput, 'url' | 'requestedBy' | 'directedRunId'>,
+): boolean {
+  return value.directedRunId === undefined
+    && value.requestedBy !== 'extension'
+    && descriptorForHost(new URL(value.url).hostname)?.id === 'nowcoder';
+}
+
 function validateStoredJob(value: JobRecord): void {
   try {
     assertDirectedOwnership(value);
@@ -106,6 +115,8 @@ export class JobStateError extends Error {
     this.name = 'JobStateError';
   }
 }
+
+export type JobRecoveryReason = 'worker-loss' | 'socket-reconnect';
 
 async function atomicWrite(path: string, value: StoredJobs): Promise<void> {
   await mkdir(dirname(path), { recursive: true });
@@ -291,7 +302,7 @@ export class JobStore {
         ...(input.batchId ? { batchId: input.batchId } : {}),
         ...(input.planId ? { planId: input.planId } : {}),
         ...(input.planAttempt ? { planAttempt: input.planAttempt } : {}),
-        ...(input.planId === 'nowcoder-agent-market' ? { recoveryCount: 0 } : {}),
+        ...(hasNowcoderRecoveryBudget({ ...input, url }) ? { recoveryCount: 0 } : {}),
         ...(input.directedRunId && input.directedRunAttempt
           ? {
               directedRunId: input.directedRunId,
@@ -350,7 +361,7 @@ export class JobStore {
         ...retained,
         status: 'queued',
         updatedAt: this.dependencies.now(),
-        ...(current.planId === 'nowcoder-agent-market' ? { recoveryCount: 0 } : {}),
+        ...(hasNowcoderRecoveryBudget(current) ? { recoveryCount: 0 } : {}),
       };
       this.jobs.set(id, next);
       await this.persist();
@@ -358,7 +369,10 @@ export class JobStore {
     });
   }
 
-  async recover(excludedIds: ReadonlySet<string> = new Set()): Promise<{
+  async recover(
+    excludedIds: ReadonlySet<string> = new Set(),
+    reason: JobRecoveryReason = 'worker-loss',
+  ): Promise<{
     requeued: JobRecord[];
     terminalized: JobRecord[];
   }> {
@@ -368,9 +382,44 @@ export class JobStore {
       const terminalized: JobRecord[] = [];
       for (const [id, job] of this.jobs) {
         if (excludedIds.has(id)) continue;
+        const budgetedNowcoder = hasNowcoderRecoveryBudget(job);
+        if (
+          reason === 'worker-loss'
+          && budgetedNowcoder
+          && job.recoveryCount === undefined
+          && (job.status === 'queued' || job.status === 'dispatched' || job.status === 'collecting')
+        ) {
+          const terminal: JobRecord = {
+            ...job,
+            status: 'needs_attention',
+            updatedAt: this.dependencies.now(),
+            recoveryCount: 1,
+            errorCode: 'RECOVERY_LIMIT_EXCEEDED',
+            errorMessage: '旧版牛客采集任务缺少恢复证明，已停止等待处理',
+          };
+          this.jobs.set(id, terminal);
+          terminalized.push(structuredClone(terminal));
+          changed = true;
+          continue;
+        }
         if (job.status !== 'dispatched' && job.status !== 'collecting') continue;
-        if (job.planId === 'nowcoder-agent-market' && job.directedRunId === undefined) {
-          // Pre-0.4.34 fixed Nowcoder children have no durable counter. They may already have
+        // Same-runtime replay is only for Bridge-dispatched remote jobs. A side-panel capture
+        // (`requestedBy: extension`) still owns the user's current tab and is not represented by
+        // JobRunner's remote-job tombstone, so redispatching it would create an unrelated tab.
+        if (reason === 'socket-reconnect' && job.requestedBy === 'extension') continue;
+        if (budgetedNowcoder) {
+          if (reason === 'socket-reconnect') {
+            const recovered: JobRecord = {
+              ...job,
+              status: 'queued',
+              updatedAt: this.dependencies.now(),
+            };
+            this.jobs.set(id, recovered);
+            requeued.push(structuredClone(recovered));
+            changed = true;
+            continue;
+          }
+          // Older Bridge-owned Nowcoder jobs have no durable counter. They may already have
           // looped; fail closed rather than spending a fresh retry budget after upgrade.
           const recoveryCount = job.recoveryCount ?? 1;
           if (recoveryCount >= 1) {

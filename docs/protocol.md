@@ -1,6 +1,6 @@
 # 本机 Bridge 协议
 
-协议版本为 `1`，应用版本为 `0.4.33`。Bridge 只监听 `127.0.0.1`，默认端口 `17321`。
+协议版本为 `1`，应用版本为 `0.4.35`。Bridge 只监听 `127.0.0.1`，默认端口 `17321`。
 
 ## 固定身份自动授权
 
@@ -35,8 +35,8 @@ WebSocket Origin 校验会阻止普通网页和其他扩展。Origin 与固定 I
 - `POST /v1/jobs`：创建任务。正文 `{ "url": "...", "requestedBy": "codex|cli|extension" }`。Codex/CLI 任务在扩展在线时立即派发；`extension` 表示 Side Panel 当前页采集，由当前 tab runner 直接回传，不立即回派。
 - `GET /v1/jobs/:id`：查询任务状态和最终路径。
 - `POST /v1/reveal`：只允许打开知识库根目录内已存在的文件，供 Side Panel 点击“在文件夹中查看”。
-- `GET /v1/fe-journey/status`：读取固定周期状态、运行中标记和两个来源的下次到期时间。
-- `POST /v1/fe-journey/collect`：立即检查或强制运行固定预设。请求体只接受 `{ "force"?: boolean, "nowcoder"?: boolean, "github"?: boolean }`，未知字段直接 `400`；未启用固定 `fe-journey` sink 时返回 `409 FE_JOURNEY_DISABLED`。
+- `GET /v1/fe-journey/status`：读取 FeJourney 状态、运行中标记和两个来源的周期记录。常驻 FeJourney 调度只运行 GitHub，不创建牛客浏览器任务。
+- `POST /v1/fe-journey/collect`：兼容的显式手动入口，可立即检查或强制运行固定预设。请求体只接受 `{ "force"?: boolean, "nowcoder"?: boolean, "github"?: boolean }`，未知字段直接 `400`；未启用固定 `fe-journey` sink 时返回 `409 FE_JOURNEY_DISABLED`。省略来源时仍运行双源，因此可能打开牛客详情页；自动牛客采集只走每日固定计划。
 - `GET /v1/plans/status`：两个每日固定计划的到期、待补跑、下次运行和最近批次状态。
 - `POST /v1/plans/run`：立即运行固定计划，只接受 `{ "planId": "zsxq-chen-teacher|nowcoder-agent-market", "force"?: boolean }`。
 - `GET /v1/plans/batches?limit=20`：最近批次历史；`limit` 必须在 1–100 之间，可选固定 `planId` 过滤。
@@ -60,7 +60,7 @@ Codex/CLI: queued → dispatched → collecting → saved
                                   └→ failed
 ```
 
-当前页任务若在发送 progress 前断线会保持 `queued`；扩展重连后，通用 `dispatchQueued` 会把它作为恢复任务派发，避免永久丢失。Bridge 重启也会把其他未完成任务恢复到可重派发状态。相同 URL 的任务可重复执行，文件层通过稳定内容 ID 幂等更新。
+当前页任务若在发送 progress 前断线会保持 `queued`；扩展重连后，通用 `dispatchQueued` 会把它作为恢复任务派发，避免永久丢失。Bridge 拥有的非定向牛客任务因 worker loss 最多自动恢复一次；第二次进入 `needs_attention/RECOVERY_LIMIT_EXCEEDED`。升级前没有恢复计数的 `queued` / `dispatched` / `collecting` 牛客任务在启动时直接终止，不能触发 `job.collect`。同一 Service Worker 的 WebSocket 短暂重连只重放任务而不消耗该预算；定向运行由自己的 attempt fence 恢复，扩展当前页任务和知识星球保持各自原有语义。相同 URL 的任务可重复显式执行，文件层通过稳定内容 ID 幂等更新。
 
 ## WebSocket 消息
 

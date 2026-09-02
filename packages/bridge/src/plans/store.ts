@@ -23,9 +23,57 @@ interface StoredPlans {
   batches: StoredBatch[];
 }
 
+interface ParsedStoredPlans {
+  value: StoredPlans;
+  migrated: boolean;
+}
+
 const SKIPPED_ERROR_CODES = new Set(['DUPLICATE', 'QUALITY_REJECTED', 'SKIPPED']);
 
-function parseStoredPlans(value: unknown): StoredPlans {
+function repairLegacyNowcoderSelectionCounters(value: unknown): unknown {
+  if (typeof value !== 'object' || value === null) return value;
+  const batch = value as Record<string, unknown>;
+  if (
+    batch.planId !== 'nowcoder-agent-market'
+    || batch.selectionStatus !== 'completed'
+    || batch.status === 'running'
+  ) return value;
+  const counts = [batch.discovered, batch.accepted, batch.saved, batch.skipped,
+    batch.failed, batch.needsAttention];
+  if (!counts.every(count => Number.isSafeInteger(count) && (count as number) >= 0)) return value;
+  const discovered = batch.discovered as number;
+  const accepted = batch.accepted as number;
+  const saved = batch.saved as number;
+  const skipped = batch.skipped as number;
+  const failed = batch.failed as number;
+  const needsAttention = batch.needsAttention as number;
+  if (saved + skipped + failed + needsAttention <= discovered) return value;
+  // 0.4.35 briefly recounted every already-finalized Nowcoder batch from detail children on
+  // reconnect. That overwrote selection-level `saved` while retaining selection-level `skipped`,
+  // making the two overlap and the whole plans file unloadable on the next process start. Older
+  // pending-pool selections can also contain accepted historical candidates beyond this batch's
+  // detail count, so restore the same lower bound used by finalizeSelection.
+  const repairedDiscovered = Math.max(discovered, accepted + failed + needsAttention);
+  return {
+    ...batch,
+    discovered: repairedDiscovered,
+    saved: accepted,
+    skipped: repairedDiscovered - accepted - failed - needsAttention,
+  };
+}
+
+function assertPersistablePlans(value: StoredPlans): void {
+  for (const item of value.batches) {
+    const { jobIds, ...batch } = item;
+    if (
+      !Array.isArray(jobIds)
+      || !jobIds.every(id => typeof id === 'string' && id.length > 0)
+      || !collectionBatchSchema.safeParse(batch).success
+    ) throw new Error('采集批次文件格式无效');
+  }
+}
+
+function parseStoredPlans(value: unknown): ParsedStoredPlans {
   if (
     typeof value !== 'object' ||
     value === null ||
@@ -34,6 +82,7 @@ function parseStoredPlans(value: unknown): StoredPlans {
   ) {
     throw new Error('采集批次文件格式无效');
   }
+  let migrated = false;
   const batches = (value as { batches: unknown[] }).batches.map(item => {
     if (
       typeof item !== 'object' ||
@@ -44,12 +93,19 @@ function parseStoredPlans(value: unknown): StoredPlans {
       throw new Error('采集批次文件格式无效');
     }
     const { jobIds, ...batch } = item as StoredBatch;
-    const parsed = collectionBatchSchema.safeParse(batch);
+    let parsed = collectionBatchSchema.safeParse(batch);
+    if (!parsed.success) {
+      const repaired = repairLegacyNowcoderSelectionCounters(batch);
+      if (repaired !== batch) {
+        parsed = collectionBatchSchema.safeParse(repaired);
+        if (parsed.success) migrated = true;
+      }
+    }
     if (!parsed.success) throw new Error('采集批次文件格式无效');
     const normalized = parsed.data as CollectionBatch;
     return { ...normalized, jobIds: [...new Set(jobIds)] };
   });
-  return { version: 1, batches };
+  return { value: { version: 1, batches }, migrated };
 }
 
 async function atomicWrite(path: string, value: StoredPlans): Promise<void> {
@@ -88,8 +144,8 @@ export class CollectionPlanStore {
     const store = new CollectionPlanStore(path, now);
     try {
       const parsed = parseStoredPlans(JSON.parse(await readFile(path, 'utf8')) as unknown);
-      for (const batch of parsed.batches) store.batches.set(batch.id, batch);
-      if (store.prune()) await store.persist();
+      for (const batch of parsed.value.batches) store.batches.set(batch.id, batch);
+      if (store.prune() || parsed.migrated) await store.persist();
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
         if (error instanceof SyntaxError) throw new Error('采集批次文件格式无效');
@@ -183,17 +239,19 @@ export class CollectionPlanStore {
     });
   }
 
-  attachRound(batchId: string, jobIds: readonly string[]): Promise<void> {
+  attachRound(batchId: string, jobIds: readonly string[]): Promise<boolean> {
     return this.serializeMutation(async () => {
       const batch = this.require(batchId);
       if (batch.planId !== 'nowcoder-agent-market') throw new Error('仅牛客固定计划支持补齐轮次');
+      if (batch.status !== 'running' || batch.selectionStatus === 'completed') return false;
       const nextIds = [...new Set(jobIds)].filter(id => id.length > 0 && !batch.jobIds.includes(id));
-      if (nextIds.length === 0) return;
+      if (nextIds.length === 0) return true;
       batch.jobIds.push(...nextIds);
       batch.accepted = batch.jobIds.length;
       batch.discovered = Math.max(batch.discovered, batch.accepted);
       batch.rounds = (batch.rounds ?? 0) + 1;
       await this.persist();
+      return true;
     });
   }
 
@@ -201,6 +259,7 @@ export class CollectionPlanStore {
     return this.serializeMutation(async () => {
       const batch = this.require(batchId);
       if (batch.planId !== 'nowcoder-agent-market') throw new Error('仅牛客固定计划支持恢复任务归属');
+      if (batch.status !== 'running' || batch.selectionStatus === 'completed') return publicBatch(batch);
       const recoveredIds = [...new Set(jobIds)].filter(id => id.length > 0 && !batch.jobIds.includes(id));
       if (recoveredIds.length > 0) {
         batch.jobIds.push(...recoveredIds);
@@ -219,9 +278,12 @@ export class CollectionPlanStore {
     coverage?: Record<string, number>,
     rejections?: Record<string, number>,
     rejectionDetails?: readonly CollectionPlanRejection[],
-  ): Promise<void> {
+  ): Promise<boolean> {
     return this.serializeMutation(async () => {
       const batch = this.require(batchId);
+      if (batch.planId === 'nowcoder-agent-market' && (
+        batch.status !== 'running' || batch.selectionStatus === 'completed'
+      )) return false;
       batch.discovered = Math.max(discovered, batch.accepted);
       if (coverage) batch.coverage = { ...coverage };
       if (rejections) batch.rejections = { ...rejections };
@@ -229,6 +291,7 @@ export class CollectionPlanStore {
         batch.rejectionDetails = rejectionDetails.map(detail => ({ ...detail }));
       }
       await this.persist();
+      return true;
     });
   }
 
@@ -320,11 +383,15 @@ export class CollectionPlanStore {
     });
   }
 
-  markSelectionPending(batchId: string): Promise<void> {
+  markSelectionPending(batchId: string): Promise<boolean> {
     return this.serializeMutation(async () => {
       const batch = this.require(batchId);
+      if (batch.planId === 'nowcoder-agent-market' && (
+        batch.status !== 'running' || batch.selectionStatus === 'completed'
+      )) return false;
       batch.selectionStatus = 'pending';
       await this.persist();
+      return true;
     });
   }
 
@@ -387,6 +454,13 @@ export class CollectionPlanStore {
   ): Promise<CollectionBatch> {
     return this.serializeTransactionalMutation(async () => {
       const batch = this.require(batchId);
+      // A user-close/recovery-limit stop is irrevocable.  A delayed sync/finalize
+      // continuation must observe the durable terminal parent instead of rewriting it.
+      if (
+        batch.planId === 'nowcoder-agent-market'
+        && batch.status !== 'running'
+        && batch.selectionStatus === 'completed'
+      ) return publicBatch(batch);
       if (!Number.isSafeInteger(reclassifiedFailureCount) || reclassifiedFailureCount < 0) {
         throw new Error('重分类失败数无效');
       }
@@ -395,6 +469,10 @@ export class CollectionPlanStore {
         throw new Error('交付内容 ID 无效');
       }
       batch.failed = Math.max(0, batch.failed - reclassifiedFailureCount);
+      batch.discovered = Math.max(
+        batch.discovered,
+        accepted + batch.failed + batch.needsAttention,
+      );
       batch.accepted = accepted;
       batch.saved = accepted;
       batch.skipped = Math.max(
@@ -426,6 +504,7 @@ export class CollectionPlanStore {
     return this.serializeTransactionalMutation(async () => {
       const batch = this.require(batchId);
       if (batch.planId !== 'nowcoder-agent-market') throw new Error('仅牛客固定计划支持重试筛选');
+      if (batch.status !== 'running' && batch.selectionStatus === 'completed') return publicBatch(batch);
       batch.status = 'completed_with_attention';
       batch.selectionStatus = 'pending';
       batch.deliveryIds = [];
@@ -508,6 +587,44 @@ export class CollectionPlanStore {
     });
   }
 
+  /** A hard fixed-plan stop must not be reopened by reconnect selection recovery. */
+  stopNowcoder(batchId: string, message: string): Promise<CollectionBatch> {
+    return this.serializeMutation(async () => {
+      const batch = this.require(batchId);
+      if (batch.planId !== 'nowcoder-agent-market') {
+        throw new Error('仅牛客固定计划支持停止运行');
+      }
+      batch.status = 'completed_with_attention';
+      batch.selectionStatus = 'completed';
+      batch.finishedAt = this.now();
+      batch.error = message;
+      await this.persist();
+      return publicBatch(batch);
+    });
+  }
+
+  /** Recount the child partition only inside the active fixed-batch hard-stop lock. */
+  reconcileStoppedNowcoder(batchId: string, jobs: readonly JobRecord[]): Promise<CollectionBatch> {
+    return this.serializeMutation(async () => {
+      const batch = this.require(batchId);
+      if (batch.planId !== 'nowcoder-agent-market' || batch.status === 'running') return publicBatch(batch);
+      const byId = new Map(jobs.map(job => [job.id, job]));
+      const children = batch.jobIds
+        .map(id => byId.get(id))
+        .filter((job): job is JobRecord => Boolean(job));
+      batch.saved = children.filter(job => job.status === 'saved').length;
+      batch.failed = children.filter(
+        job => job.status === 'failed' && !SKIPPED_ERROR_CODES.has(job.errorCode ?? ''),
+      ).length;
+      batch.needsAttention = children.filter(job => job.status === 'needs_attention').length;
+      batch.skipped = Math.max(0, batch.discovered - batch.accepted) + children.filter(
+        job => job.status === 'failed' && SKIPPED_ERROR_CODES.has(job.errorCode ?? ''),
+      ).length;
+      await this.persist();
+      return publicBatch(batch);
+    });
+  }
+
   latest(planId?: CollectionPlanId, limit = 20): CollectionBatch[] {
     return [...this.batches.values()]
       .filter(batch => !planId || batch.planId === planId)
@@ -566,10 +683,12 @@ export class CollectionPlanStore {
 
   private persist(): Promise<void> {
     this.prune();
-    return atomicWrite(this.path, {
+    const value: StoredPlans = {
       version: 1,
       batches: [...this.batches.values()].sort((left, right) => left.id.localeCompare(right.id)),
-    });
+    };
+    assertPersistablePlans(value);
+    return atomicWrite(this.path, value);
   }
 
   private prune(): boolean {

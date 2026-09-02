@@ -802,6 +802,7 @@ export function bridgeStartOptions(
   return {
     ...configOverrides(args),
     enableFeJourneyScheduler: true,
+    enableCollectionPlanScheduler: true,
     // --no-update 只关闭 git/npm updater。artifact root 仍是 build-id 权威来源，也承载
     // package 与知识星球 sink 的跨进程租约，生产启动绝不能把它一并抹掉。
     repoRoot: artifactRepoRoot,

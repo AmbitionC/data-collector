@@ -55,6 +55,7 @@ async function fixture(options: {
     targetDays: readonly string[],
     resumeCursor?: string,
   ) => Promise<true>;
+  dispatch?: (job: JobRecord, jobs: JobStore) => Promise<void>;
 } = {}) {
   const root = await temporaryDirectories.create('collection-plan-service-');
   let connected = options.connected ?? true;
@@ -63,6 +64,7 @@ async function fixture(options: {
   const store = await CollectionPlanStore.open(join(root, 'plans.json'), now);
   const jobs = await JobStore.open(join(root, 'jobs.json'), { now, id: () => crypto.randomUUID() });
   const dispatched: string[] = [];
+  const replayedTerminals: string[] = [];
   const planMessages: Array<{
     batchId: string;
     planId: CollectionPlanId;
@@ -105,9 +107,13 @@ async function fixture(options: {
     now,
     extensionConnected: () => connected,
     discoverNowcoder: discover,
-    dispatch: async job => { dispatched.push(job.id); },
+    dispatch: async job => {
+      dispatched.push(job.id);
+      await options.dispatch?.(job, jobs);
+    },
     collectZsxq,
     zsxqLedger,
+    replayDurableJobTerminal: job => { replayedTerminals.push(job.id); },
     shouldAutoSync,
     pendingNowcoderJobs: deliveryBatchId =>
       options.pendingNowcoderJobs?.(jobs.list(), deliveryBatchId) ?? Promise.resolve([]),
@@ -134,6 +140,7 @@ async function fixture(options: {
     jobs,
     discover,
     dispatched,
+    replayedTerminals,
     planMessages,
     synced,
     zsxqLedger,
@@ -152,6 +159,7 @@ async function fixture(options: {
         dispatch: async job => { dispatched.push(job.id); },
         collectZsxq,
         zsxqLedger: reopenedLedger,
+        replayDurableJobTerminal: job => { replayedTerminals.push(job.id); },
         shouldAutoSync,
         pendingNowcoderJobs: deliveryBatchId =>
           options.pendingNowcoderJobs?.(reopenedJobs.list(), deliveryBatchId) ?? Promise.resolve([]),
@@ -417,7 +425,14 @@ describe('CollectionPlanService', () => {
     expect(context.store.get(batch.id)).toMatchObject({
       status: 'completed_with_attention',
       error: expect.stringContaining('用户关闭'),
+      saved: 0,
+      failed: siblings.length + 1,
+      needsAttention: 0,
     });
+    const stoppedBatch = context.store.get(batch.id)!;
+    expect(stoppedBatch.saved + stoppedBatch.skipped + stoppedBatch.failed + stoppedBatch.needsAttention)
+      .toBe(stoppedBatch.discovered);
+    expect((await CollectionPlanStore.open(context.store.path)).get(batch.id)).toEqual(stoppedBatch);
     expect(context.jobs.list().filter(job => job.batchId === batch.id)).toEqual(expect.arrayContaining([
       expect.objectContaining({ id: closed.id, status: 'failed', errorCode: 'TAB_CLOSED_BY_USER' }),
       ...siblings.map(job => expect.objectContaining({
@@ -427,6 +442,148 @@ describe('CollectionPlanService', () => {
       })),
     ]));
     expect(context.dispatched).toHaveLength(1);
+  });
+
+  it('keeps a stopped Nowcoder batch terminal across a racing advance and freezes late counters', async () => {
+    const context = await fixture({ candidates: nowcoderCandidates(12, 17_000) });
+    const batch = await context.service.run('nowcoder-agent-market', { force: true });
+    const [closed, late, ...queued] = context.jobs.list().filter(job => job.batchId === batch.id);
+    await context.jobs.transition(closed!.id, 'collecting');
+    await context.jobs.transition(late!.id, 'collecting');
+    const stopped = await context.jobs.transition(closed!.id, 'failed', {
+      errorCode: 'TAB_CLOSED_BY_USER', errorMessage: '用户关闭当前标签页',
+    });
+
+    await Promise.all([
+      context.service.onJobTerminal(stopped),
+      context.service.advanceNowcoderBatch(batch),
+    ]);
+    expect(context.store.get(batch.id)).toMatchObject({
+      status: 'completed_with_attention', selectionStatus: 'completed',
+      accepted: queued.length + 2, failed: queued.length + 1, saved: 0,
+    });
+
+    const lateSaved = await context.jobs.transition(late!.id, 'saved', {
+      outputPath: `/tmp/${late!.id}/index.md`,
+    });
+    await context.service.onJobTerminal(lateSaved);
+    expect(context.store.get(batch.id)).toMatchObject({
+      status: 'completed_with_attention', selectionStatus: 'completed',
+      saved: 0, failed: queued.length + 1,
+    });
+  });
+
+  it('cleans queued fixed children of a terminal parent on reconnect without reopening selection', async () => {
+    const context = await fixture({ candidates: nowcoderCandidates(8, 17_100) });
+    const batch = await context.service.run('nowcoder-agent-market', { force: true });
+    const [closed, ...siblings] = context.jobs.list().filter(job => job.batchId === batch.id);
+    await context.jobs.transition(closed!.id, 'collecting');
+    const stopped = await context.jobs.transition(closed!.id, 'failed', {
+      errorCode: 'TAB_CLOSED_BY_USER', errorMessage: '关闭',
+    });
+    await context.service.onJobTerminal(stopped);
+
+    const orphan = await context.jobs.create({
+      id: `${batch.id}-orphan`, url: 'https://www.nowcoder.com/discuss/17199', requestedBy: 'codex',
+      batchId: batch.id, planId: 'nowcoder-agent-market',
+    });
+    await context.store.attachRecoveredJobs(batch.id, [orphan.id]);
+    expect(context.store.get(batch.id)).toMatchObject({ accepted: siblings.length + 1 });
+    await context.service.onExtensionConnected();
+
+    expect(context.jobs.get(orphan.id)).toMatchObject({
+      status: 'failed', errorCode: 'PLAN_STOPPED_PARENT',
+    });
+    expect(context.store.get(batch.id)).toMatchObject({
+      status: 'completed_with_attention', selectionStatus: 'completed',
+      failed: siblings.length + 1,
+    });
+    expect(context.dispatched).toHaveLength(1);
+  });
+
+  it('repairs a crash gap where the user-close child is durable but its parent was not stopped', async () => {
+    const context = await fixture({ candidates: nowcoderCandidates(8, 17_150) });
+    const batch = await context.service.run('nowcoder-agent-market', { force: true });
+    const [closed] = context.jobs.list().filter(job => job.batchId === batch.id);
+    await context.jobs.transition(closed!.id, 'collecting');
+    await context.jobs.transition(closed!.id, 'failed', {
+      errorCode: 'TAB_CLOSED_BY_USER',
+      errorMessage: '关页终态已落盘，父批次尚未落盘',
+    });
+
+    const reopened = await context.reopen();
+    await reopened.service.onExtensionConnected();
+
+    expect(reopened.store.get(batch.id)).toMatchObject({
+      status: 'completed_with_attention',
+      selectionStatus: 'completed',
+      error: expect.stringContaining('用户关闭'),
+    });
+    expect(reopened.jobs.list().filter(job => job.batchId === batch.id && job.status === 'queued'))
+      .toHaveLength(0);
+    expect(context.replayedTerminals).toEqual([closed!.id]);
+    expect(context.dispatched).toHaveLength(1);
+  });
+
+  it('replays a durable user-close terminal after the parent was already hard-stopped', async () => {
+    const context = await fixture({ candidates: nowcoderCandidates(8, 17_175) });
+    const batch = await context.service.run('nowcoder-agent-market', { force: true });
+    const [closed] = context.jobs.list().filter(job => job.batchId === batch.id);
+    await context.jobs.transition(closed!.id, 'collecting');
+    const terminal = await context.jobs.transition(closed!.id, 'failed', {
+      errorCode: 'TAB_CLOSED_BY_USER',
+      errorMessage: '父批次已停止，ack 尚未送达',
+    });
+    await context.service.onJobTerminal(terminal);
+    expect(context.replayedTerminals).toEqual([]);
+    const frozen = context.store.get(batch.id)!;
+
+    const reopened = await context.reopen();
+    await reopened.service.onExtensionConnected();
+
+    expect(reopened.store.get(batch.id)).toEqual(frozen);
+    expect(context.replayedTerminals).toEqual([closed!.id]);
+    expect(context.dispatched).toHaveLength(1);
+  });
+
+  it('does not attach or revive staged Nowcoder children when stop wins after create', async () => {
+    const initial = nowcoderCandidates(8, 17_200);
+    const refill = nowcoderCandidates(4, 17_300);
+    const rejected = new Set(initial.slice(0, 2).map(candidate => candidate.url));
+    const context = await fixture({
+      candidates: initial.concat(refill),
+      selectNowcoderJobs: acceptAllExcept(rejected),
+    });
+    const batch = await context.service.run('nowcoder-agent-market', { force: true });
+    const firstRound = context.jobs.list().filter(job => job.batchId === batch.id);
+    await saveJobs(context, firstRound.slice(0, -1));
+    const last = firstRound.at(-1)!;
+    await context.jobs.transition(last.id, 'collecting');
+    await context.jobs.transition(last.id, 'saved', { outputPath: `/tmp/${last.id}/index.md` });
+
+    const staged = deferred<void>();
+    const releaseCreate = deferred<void>();
+    const originalCreate = context.jobs.create.bind(context.jobs);
+    vi.spyOn(context.jobs, 'create').mockImplementationOnce(async input => {
+      staged.resolve();
+      await releaseCreate.promise;
+      return originalCreate(input);
+    });
+    const advancing = context.service.advanceNowcoderBatch(batch);
+    await staged.promise;
+    await context.store.stopNowcoder(batch.id, '并发停止');
+    releaseCreate.resolve();
+    await advancing;
+
+    const terminal = context.store.get(batch.id)!;
+    const orphaned = context.jobs.list().filter(job => job.url.startsWith('https://www.nowcoder.com/discuss/173'));
+    expect(terminal).toMatchObject({
+      status: 'completed_with_attention', selectionStatus: 'completed', accepted: firstRound.length,
+    });
+    expect(orphaned).toHaveLength(4);
+    expect(orphaned).toEqual(expect.arrayContaining([
+      expect.objectContaining({ status: 'failed', errorCode: 'PLAN_STOPPED_PARENT' }),
+    ]));
   });
 
   it('releases the next fixed Nowcoder detail only after the current child is terminal', async () => {
@@ -442,6 +599,200 @@ describe('CollectionPlanService', () => {
     await context.service.onJobTerminal(saved);
 
     expect(context.dispatched).toEqual([first!.id, second!.id]);
+  });
+
+  it('does not dispatch a queued fixed sibling while another sibling is already claimed', async () => {
+    const context = await fixture({ candidates: nowcoderCandidates(8, 16_700) });
+    const batch = await context.service.run('nowcoder-agent-market', { force: true });
+    const [first] = context.jobs.list().filter(job => job.batchId === batch.id);
+
+    await context.jobs.transition(first!.id, 'dispatched');
+    expect(context.jobs.get(first!.id)).toMatchObject({ status: 'dispatched' });
+    await context.service['dispatchNextNowcoderJob'](batch.id);
+
+    expect(context.dispatched).toEqual([first!.id]);
+  });
+
+  it('claims only one fixed child when dispatchNextNowcoderJob is called concurrently', async () => {
+    const actualDispatches: string[] = [];
+    let claimEnabled = false;
+    const context = await fixture({
+      candidates: nowcoderCandidates(8, 16_750),
+      dispatch: async (job, jobs) => {
+        if (!claimEnabled) return;
+        await jobs.transition(job.id, 'dispatched');
+        actualDispatches.push(job.id);
+      },
+    });
+    const batch = await context.service.run('nowcoder-agent-market', { force: true });
+    claimEnabled = true;
+
+    await Promise.all([
+      context.service['dispatchNextNowcoderJob'](batch.id),
+      context.service['dispatchNextNowcoderJob'](batch.id),
+    ]);
+
+    expect(actualDispatches).toHaveLength(1);
+    expect(context.jobs.list().filter(job => job.batchId === batch.id && job.status === 'dispatched'))
+      .toHaveLength(1);
+  });
+
+  it('keeps the first stop reason and finishes queued cleanup when a sibling is claimed mid-snapshot', async () => {
+    const context = await fixture({ candidates: nowcoderCandidates(8, 16_775) });
+    const batch = await context.service.run('nowcoder-agent-market', { force: true });
+    const [closed, racing, other] = context.jobs.list().filter(job => job.batchId === batch.id);
+    const originalTransition = context.jobs.transition.bind(context.jobs);
+    let raced = false;
+    vi.spyOn(context.jobs, 'transition').mockImplementation(async (id, status, patch) => {
+      if (!raced && id === racing!.id && status === 'failed') {
+        raced = true;
+        await originalTransition(id, 'dispatched');
+      }
+      return originalTransition(id, status, patch);
+    });
+    const first = await originalTransition(closed!.id, 'failed', {
+      errorCode: 'TAB_CLOSED_BY_USER', errorMessage: '首次关闭原因',
+    });
+    const second = {
+      ...first,
+      errorCode: 'RECOVERY_LIMIT_EXCEEDED', errorMessage: '后到恢复上限',
+    };
+
+    await expect(Promise.all([
+      context.service.onJobTerminal(first),
+      context.service.onJobTerminal(second),
+    ])).resolves.toEqual([undefined, undefined]);
+
+    expect(context.store.get(batch.id)).toMatchObject({
+      status: 'completed_with_attention', selectionStatus: 'completed', error: '用户关闭了牛客采集页面，已停止本次牛客运行',
+    });
+    expect(context.jobs.get(other!.id)).toMatchObject({ status: 'failed', errorCode: 'PLAN_STOPPED_BY_USER' });
+  });
+
+  it('does not fail a fixed child when a concurrent dispatch loser finds it already claimed', async () => {
+    const context = await fixture({
+      candidates: nowcoderCandidates(8, 16_800),
+      dispatch: async (job, jobs) => {
+        await jobs.transition(job.id, 'dispatched');
+        throw new Error('另一个调度器已抢到该任务');
+      },
+    });
+
+    const batch = await context.service.run('nowcoder-agent-market', { force: true });
+    const [claimed] = context.jobs.list().filter(job => job.batchId === batch.id);
+
+    expect(claimed).toMatchObject({ status: 'dispatched' });
+  });
+
+  it('sets a fixed stop intent before waiting for an in-flight persistence lock', async () => {
+    const context = await fixture({ candidates: nowcoderCandidates(8, 16_900) });
+    const batch = await context.service.run('nowcoder-agent-market', { force: true });
+    const [current] = context.jobs.list().filter(job => job.batchId === batch.id);
+    await context.jobs.transition(current!.id, 'collecting');
+    const sinkEntered = deferred<void>();
+    const releaseSink = deferred<void>();
+    const commit = vi.fn(async () => undefined);
+    const persistence = context.service.persistFixedNowcoderChild(
+      current!,
+      async () => {
+        sinkEntered.resolve();
+        await releaseSink.promise;
+        return 'sink-output';
+      },
+      commit,
+    );
+    await sinkEntered.promise;
+    const closed = await context.jobs.transition(current!.id, 'failed', {
+      errorCode: 'TAB_CLOSED_BY_USER', errorMessage: '用户关闭',
+    });
+    const stopping = context.service.onJobTerminal(closed);
+
+    expect(context.service.acceptsFixedNowcoderJob(current!)).toBe(false);
+    expect(context.dispatched).toHaveLength(1);
+    releaseSink.resolve();
+    await persistence;
+    await stopping;
+
+    expect(commit).toHaveBeenCalledWith('sink-output');
+    expect(context.store.get(batch.id)).toMatchObject({
+      status: 'completed_with_attention', selectionStatus: 'completed',
+    });
+  });
+
+  it('drops a late fixed error after an in-flight sink commits saved under the batch lease', async () => {
+    const context = await fixture({ candidates: nowcoderCandidates(8, 16_950) });
+    const batch = await context.service.run('nowcoder-agent-market', { force: true });
+    const [child] = context.jobs.list().filter(job => job.batchId === batch.id);
+    await context.jobs.transition(child!.id, 'collecting');
+    const entered = deferred<void>();
+    const release = deferred<void>();
+    const persisting = context.service.persistFixedNowcoderChild(
+      child!,
+      async () => { entered.resolve(); await release.promise; return 'saved'; },
+      async () => context.jobs.transition(child!.id, 'saved', { outputPath: '/tmp/saved.md' }),
+    );
+    await entered.promise;
+    const terminalizing = context.service.terminalizeFixedNowcoderChild(child!, 'failed', {
+      errorCode: 'TAB_CLOSED_BY_USER', errorMessage: '迟到关闭',
+    });
+    release.resolve();
+    await persisting;
+    await expect(terminalizing).resolves.toMatchObject({
+      transitioned: false, job: { status: 'saved' },
+    });
+  });
+
+  it('prevents a fixed sink from starting when SAVE_FAILED wins the batch lease first', async () => {
+    const context = await fixture({ candidates: nowcoderCandidates(8, 16_975) });
+    const batch = await context.service.run('nowcoder-agent-market', { force: true });
+    const [child] = context.jobs.list().filter(job => job.batchId === batch.id);
+    await context.jobs.transition(child!.id, 'collecting');
+    await context.service.terminalizeFixedNowcoderChild(child!, 'failed', {
+      errorCode: 'SAVE_FAILED', errorMessage: '本地保存失败',
+    });
+    const sink = vi.fn(async () => 'should-not-write');
+
+    await expect(context.service.persistFixedNowcoderChild(child!, sink, async value => value))
+      .resolves.toBeUndefined();
+    expect(sink).not.toHaveBeenCalled();
+  });
+
+  it('does not let a stop during fixed sync reopen or overwrite the hard-stopped parent', async () => {
+    const syncEntered = deferred<void>();
+    const releaseSync = deferred<void>();
+    const context = await fixture({
+      syncNowcoderJobs: async () => {
+        syncEntered.resolve();
+        await releaseSync.promise;
+      },
+    });
+    const batch = await context.store.start('nowcoder-agent-market');
+    const accepted = Array.from({ length: 10 }, (_, index) => ({
+      id: `late-sync-${index}`,
+      url: `https://www.nowcoder.com/discuss/${17_000 + index}`,
+      requestedBy: 'codex' as const,
+      status: 'saved' as const,
+      createdAt: '2026-08-23T01:00:00.000Z',
+      updatedAt: '2026-08-23T01:00:00.000Z',
+    }));
+    const finalizing = context.service['finalizeExactTen'](batch, {
+      saved: accepted,
+      selection: {
+        accepted,
+        coverage: { bytedance: 3, tencent: 3, alibaba: 2, ant: 2, other: 0 },
+        rejected: [],
+      },
+      rejectionCounts: {},
+      contentRejectionFailures: [],
+    });
+    await syncEntered.promise;
+    await context.store.stopNowcoder(batch.id, '同步期间用户停止');
+    releaseSync.resolve();
+    await finalizing;
+
+    expect(context.store.get(batch.id)).toMatchObject({
+      status: 'completed_with_attention', selectionStatus: 'completed', error: '同步期间用户停止',
+    });
   });
 
   it('rotates all four primary companies before using the supplemental other bucket', async () => {
@@ -680,6 +1031,42 @@ describe('CollectionPlanService', () => {
       rounds: 2,
     });
     expect(new Set(terminal.deliveryIds)).toHaveProperty('size', 10);
+  });
+
+  it('preserves finalized Nowcoder selection counters across reconnect and reopen', async () => {
+    const candidates = nowcoderCandidates(12, 12_100);
+    const excluded = new Set(candidates.slice(0, 2).map(candidate => candidate.url));
+    const context = await fixture({
+      candidates,
+      selectNowcoderJobs: acceptAllExcept(excluded),
+    });
+    const batch = await context.service.run('nowcoder-agent-market', { force: true });
+    await saveJobs(context, context.jobs.list().filter(job => job.batchId === batch.id));
+    await saveJobs(context, context.jobs.list().filter(job => (
+      job.batchId === batch.id && job.status === 'queued'
+    )));
+    const terminal = context.store.get(batch.id)!;
+    expect(terminal).toMatchObject({
+      status: 'completed', discovered: 12, accepted: 10, saved: 10, skipped: 2,
+    });
+    const staleRecoverySignal = await context.jobs.create({
+      id: `${batch.id}-stale-recovery-signal`,
+      url: 'https://www.nowcoder.com/discuss/12199',
+      requestedBy: 'codex',
+      batchId: batch.id,
+      planId: 'nowcoder-agent-market',
+    });
+    await context.jobs.transition(staleRecoverySignal.id, 'dispatched');
+    await context.jobs.transition(staleRecoverySignal.id, 'needs_attention', {
+      errorCode: 'RECOVERY_LIMIT_EXCEEDED',
+      errorMessage: '批次完成后遗留的旧恢复信号',
+    });
+
+    await context.service.onExtensionConnected();
+
+    expect(context.store.get(batch.id)).toEqual(terminal);
+    const reopened = await context.reopen();
+    expect(reopened.store.get(batch.id)).toEqual(terminal);
   });
 
   it('stops after five rounds without attaching more than twenty-four detail jobs', async () => {

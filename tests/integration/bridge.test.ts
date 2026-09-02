@@ -20,6 +20,7 @@ import {
 import { loadConfig } from '../../packages/bridge/src/config.js';
 import { JobStore } from '../../packages/bridge/src/jobs/store.js';
 import { CollectionPlanStore } from '../../packages/bridge/src/plans/store.js';
+import { CollectionPlanService } from '../../packages/bridge/src/plans/service.js';
 import { acquireArtifactLease } from '../../scripts/artifact-lease.mjs';
 import { createTemporaryDirectoryTracker } from '../helpers/temp.js';
 
@@ -28,6 +29,12 @@ const EXTENSION_ORIGIN = `chrome-extension://${TRUSTED_EXTENSION_ID}`;
 const handles: BridgeHandle[] = [];
 const sockets: WebSocket[] = [];
 const temporaryDirectories = createTemporaryDirectoryTracker();
+
+function deferred<T>() {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  const promise = new Promise<T>(resolvePromise => { resolve = resolvePromise; });
+  return { promise, resolve };
+}
 
 async function temporaryDirectory(): Promise<string> {
   return temporaryDirectories.create('data-collector-bridge-');
@@ -1143,7 +1150,8 @@ describe('local Bridge', () => {
     });
     expect(unproven.status).toBe(202);
     current.send(envelope('job.progress', unproven.body.id, { stage: 'collecting' }));
-    current.send(envelope('job.result', unproven.body.id, {
+    const unprovenTerminal = nextMessage(current);
+    const unprovenResult = envelope('job.result', unproven.body.id, {
       document: document({
         source: 'zsxq',
         kind: 'post',
@@ -1151,7 +1159,8 @@ describe('local Bridge', () => {
         canonicalUrl: firstUrl,
         title: '未证明完整的普通采集',
       }),
-    }));
+    });
+    current.send(unprovenResult);
     await vi.waitFor(async () => {
       const job = await requestJson<{ status: string; outputPath?: string }>(
         bridge.url,
@@ -1160,6 +1169,18 @@ describe('local Bridge', () => {
       );
       expect(job.body).toMatchObject({ status: 'needs_attention' });
       expect(job.body.outputPath).toBeUndefined();
+    });
+    await expect(unprovenTerminal).resolves.toMatchObject({
+      type: 'job.failed',
+      requestId: unproven.body.id,
+      payload: { code: 'INCOMPLETE_CONTENT' },
+    });
+    const replayedUnprovenTerminal = nextMessage(current);
+    current.send(unprovenResult);
+    await expect(replayedUnprovenTerminal).resolves.toMatchObject({
+      type: 'job.failed',
+      requestId: unproven.body.id,
+      payload: { code: 'INCOMPLETE_CONTENT' },
     });
     expect((await requestJson<{ entries: unknown[] }>(
       bridge.url,
@@ -1231,6 +1252,17 @@ describe('local Bridge', () => {
       await readFile(join(root, '_catalog', 'index.json'), 'utf8'),
     ) as Array<{ contentComplete?: boolean }>;
     expect(catalog).toEqual([expect.objectContaining({ contentComplete: true })]);
+
+    const stale = await connect(bridge, legacy.token);
+    stale.send(envelope('extension.hello', 'ordinary-stale-replay', { version: '0.4.28' }));
+    await waitForExtensionReady(bridge);
+    const staleTerminal = nextMessage(stale);
+    stale.send(unprovenResult);
+    await expect(staleTerminal).resolves.toMatchObject({
+      type: 'job.failed',
+      requestId: unproven.body.id,
+      payload: { code: 'INCOMPLETE_CONTENT' },
+    });
   });
 
   it('requires a ZSXQ sink attestation to match the exact artifact build when one is known', async () => {
@@ -1583,6 +1615,7 @@ describe('local Bridge', () => {
       body: { url: topicUrl, requestedBy: 'extension' },
     });
     await writeFile(join(artifacts, 'build-id.txt'), `${buildB}\n`, 'utf8');
+    const rejectedTerminal = nextMessage(socket);
     socket.send(envelope('job.result', created.body.id, {
       document: document({
         source: 'zsxq',
@@ -1619,6 +1652,11 @@ describe('local Bridge', () => {
         errorCode: 'EXTENSION_UPDATE_REQUIRED',
       });
       expect(rejected.body.outputPath).toBeUndefined();
+    });
+    await expect(rejectedTerminal).resolves.toMatchObject({
+      type: 'job.failed',
+      requestId: created.body.id,
+      payload: { code: 'EXTENSION_UPDATE_REQUIRED' },
     });
     expect(fetcher).not.toHaveBeenCalled();
     const afterRejection = await acquireArtifactLease(root, {
@@ -1737,6 +1775,7 @@ describe('local Bridge', () => {
     });
 
     // A 已经拿到的任务即使迟到回传完整性证明，也不能写进 sink。
+    const rejectedTerminal = nextMessage(socket);
     socket.send(envelope('job.result', inFlight.body.id, {
       document: document({
         source: 'zsxq',
@@ -1762,6 +1801,11 @@ describe('local Bridge', () => {
         errorCode: 'EXTENSION_UPDATE_REQUIRED',
       });
       expect(job.body.outputPath).toBeUndefined();
+    });
+    await expect(rejectedTerminal).resolves.toMatchObject({
+      type: 'job.failed',
+      requestId: inFlight.body.id,
+      payload: { code: 'EXTENSION_UPDATE_REQUIRED' },
     });
     expect((await requestJson<{ entries: unknown[] }>(
       bridge.url,
@@ -1836,6 +1880,7 @@ describe('local Bridge', () => {
     const bridge = await startBridge({ port: 0, libraryRoot: root, configDir });
     handles.push(bridge);
     const { socket, token } = await authorize(bridge);
+    const staleAck = nextMessage(socket);
     socket.send(envelope('extension.hello', 'stopped-fixed-hello', {
       version: APP_VERSION,
       capabilities: [ZSXQ_COMPLETE_CONTENT_CAPABILITY],
@@ -1848,7 +1893,11 @@ describe('local Bridge', () => {
       );
       expect(current.body).toMatchObject({ status: 'failed', errorCode: 'STALE_PLAN_RUN' });
     });
+    expect(await staleAck).toMatchObject({
+      type: 'job.failed', requestId: child.id, payload: { code: 'STALE_PLAN_RUN' },
+    });
 
+    const replayedAck = nextMessage(socket);
     socket.send(envelope('job.error', child.id, {
       code: 'TAB_CLOSED_BY_USER', message: '迟到的关页回执', needsAttention: false,
     }));
@@ -1860,6 +1909,173 @@ describe('local Bridge', () => {
       );
       expect(current.body).toMatchObject({ status: 'failed', errorCode: 'STALE_PLAN_RUN' });
     });
+    expect(await replayedAck).toMatchObject({ type: 'job.failed', requestId: child.id });
+  });
+
+  it('checks the fixed parent synchronously inside collectFrame before sending job.collect', async () => {
+    const root = await temporaryDirectory();
+    const configDir = join(root, '.config');
+    const config = loadConfig({ libraryRoot: root, configDir, port: 0 });
+    const plans = await CollectionPlanStore.open(config.plansFile);
+    const batch = await plans.start('nowcoder-agent-market');
+    await plans.markSelectionPending(batch.id);
+    const jobs = await JobStore.open(config.jobsFile);
+    const child = await jobs.create({
+      id: 'fixed-dispatch-final-fence',
+      url: 'https://www.nowcoder.com/discuss/98768',
+      requestedBy: 'codex', batchId: batch.id, planId: 'nowcoder-agent-market',
+    });
+    await plans.attachRound(batch.id, [child.id]);
+    let acceptsCalls = 0;
+    const originalAccepts = CollectionPlanService.prototype.acceptsFixedNowcoderJob;
+    const accepts = vi.spyOn(CollectionPlanService.prototype, 'acceptsFixedNowcoderJob');
+    accepts.mockImplementation(function (job) {
+      acceptsCalls += 1;
+      // The first two checks are the ingress and awaitable final fence.  Only the synchronous
+      // collectFrame check can observe this last-microtask parent change before socket.send.
+      return acceptsCalls < 3 && originalAccepts.call(this, job);
+    });
+    const onTerminal = vi.spyOn(CollectionPlanService.prototype, 'onJobTerminal')
+      .mockResolvedValue(undefined);
+    try {
+      const bridge = await startBridge({ port: 0, libraryRoot: root, configDir });
+      handles.push(bridge);
+      const { socket, token } = await authorize(bridge);
+      const staleAck = nextMessage(socket);
+      socket.send(envelope('extension.hello', 'fixed-dispatch-final-fence', { version: APP_VERSION }));
+      expect(await staleAck).toMatchObject({ type: 'job.failed', requestId: child.id });
+      const persisted = await requestJson<{ status: string; errorCode?: string }>(
+        bridge.url, `/v1/jobs/${child.id}`, { token },
+      );
+      expect(persisted.body).toMatchObject({ status: 'failed', errorCode: 'STALE_PLAN_RUN' });
+    } finally {
+      onTerminal.mockRestore();
+      accepts.mockRestore();
+    }
+  });
+
+  it('commits a fixed result that already owns persistence despite a late non-durable acceptance flip', async () => {
+    const root = await temporaryDirectory();
+    const configDir = join(root, '.config');
+    const config = loadConfig({ libraryRoot: root, configDir, port: 0 });
+    const plans = await CollectionPlanStore.open(config.plansFile);
+    const batch = await plans.start('nowcoder-agent-market');
+    await plans.markSelectionPending(batch.id);
+    const jobs = await JobStore.open(config.jobsFile);
+    const child = await jobs.create({
+      id: 'fixed-result-parent-stop',
+      url: 'https://www.nowcoder.com/discuss/98766',
+      requestedBy: 'codex', batchId: batch.id, planId: 'nowcoder-agent-market',
+    });
+    await plans.attachRound(batch.id, [child.id]);
+    const imageStarted = deferred<void>();
+    const releaseImage = deferred<Response>();
+    let parentStopped = false;
+    const originalAccepts = CollectionPlanService.prototype.acceptsFixedNowcoderJob;
+    const accepts = vi.spyOn(CollectionPlanService.prototype, 'acceptsFixedNowcoderJob');
+    accepts.mockImplementation(function (job) {
+      return !parentStopped && originalAccepts.call(this, job);
+    });
+    const onTerminal = vi.spyOn(CollectionPlanService.prototype, 'onJobTerminal')
+      .mockResolvedValue(undefined);
+    try {
+      const bridge = await startBridge({
+        port: 0, libraryRoot: root, configDir,
+        fetch: async () => {
+          imageStarted.resolve();
+          return releaseImage.promise;
+        },
+        resolveAddresses: async () => ['93.184.216.34'],
+      });
+      handles.push(bridge);
+      const { socket, token } = await authorize(bridge);
+      const collect = nextMessage(socket);
+      socket.send(envelope('extension.hello', 'fixed-result-parent-stop', { version: APP_VERSION }));
+      expect(await collect).toMatchObject({ type: 'job.collect', requestId: child.id });
+
+      socket.send(envelope('job.result', child.id, {
+        document: document({
+          source: 'nowcoder', kind: 'post', url: child.url, canonicalUrl: child.url,
+          title: '固定计划围栏', author: '测试用户',
+          html: '<p>正文</p><img src="https://example.com/fence.png">', text: '正文',
+          images: [{ url: 'https://example.com/fence.png' }],
+        }),
+      }));
+      await imageStarted.promise;
+      parentStopped = true;
+      releaseImage.resolve(new Response(new Uint8Array([137, 80, 78, 71]), {
+        headers: { 'content-type': 'image/png' },
+      }));
+
+      await vi.waitFor(async () => {
+        const persisted = await requestJson<{ status: string; errorCode?: string }>(
+          bridge.url, `/v1/jobs/${child.id}`, { token },
+        );
+        // The test flip is not a durable stop.  Once the persistence lease was acquired, sink
+        // and saved transition are one linear operation; only a durable terminal parent fences it.
+        expect(persisted.body).toMatchObject({ status: 'saved' });
+      });
+    } finally {
+      onTerminal.mockRestore();
+      accepts.mockRestore();
+    }
+  });
+
+  it('does not enter a sink for a fixed Nowcoder result after the parent fence closes', async () => {
+    const root = await temporaryDirectory();
+    const configDir = join(root, '.config');
+    const config = loadConfig({ libraryRoot: root, configDir, port: 0 });
+    const plans = await CollectionPlanStore.open(config.plansFile);
+    const batch = await plans.start('nowcoder-agent-market');
+    await plans.markSelectionPending(batch.id);
+    const jobs = await JobStore.open(config.jobsFile);
+    const child = await jobs.create({
+      id: 'fixed-result-pre-sink-stop',
+      url: 'https://www.nowcoder.com/discuss/98767',
+      requestedBy: 'codex', batchId: batch.id, planId: 'nowcoder-agent-market',
+    });
+    await plans.attachRound(batch.id, [child.id]);
+    let parentStopped = false;
+    const originalAccepts = CollectionPlanService.prototype.acceptsFixedNowcoderJob;
+    const accepts = vi.spyOn(CollectionPlanService.prototype, 'acceptsFixedNowcoderJob');
+    accepts.mockImplementation(function (job) {
+      return !parentStopped && originalAccepts.call(this, job);
+    });
+    const onTerminal = vi.spyOn(CollectionPlanService.prototype, 'onJobTerminal')
+      .mockResolvedValue(undefined);
+    const fetch = vi.fn(async () => new Response(new Uint8Array([137, 80, 78, 71]), {
+      headers: { 'content-type': 'image/png' },
+    }));
+    try {
+      const bridge = await startBridge({
+        port: 0, libraryRoot: root, configDir, fetch,
+        resolveAddresses: async () => ['93.184.216.34'],
+      });
+      handles.push(bridge);
+      const { socket, token } = await authorize(bridge);
+      const collect = nextMessage(socket);
+      socket.send(envelope('extension.hello', 'fixed-result-pre-sink-stop', { version: APP_VERSION }));
+      expect(await collect).toMatchObject({ type: 'job.collect', requestId: child.id });
+      parentStopped = true;
+      socket.send(envelope('job.result', child.id, {
+        document: document({
+          source: 'nowcoder', kind: 'post', url: child.url, canonicalUrl: child.url,
+          title: '预落盘围栏', author: '测试用户',
+          html: '<p>正文</p><img src="https://example.com/pre-fence.png">', text: '正文',
+          images: [{ url: 'https://example.com/pre-fence.png' }],
+        }),
+      }));
+      await vi.waitFor(async () => {
+        const persisted = await requestJson<{ status: string; errorCode?: string }>(
+          bridge.url, `/v1/jobs/${child.id}`, { token },
+        );
+        expect(persisted.body).toMatchObject({ status: 'failed', errorCode: 'STALE_PLAN_RUN' });
+      });
+      expect(fetch).not.toHaveBeenCalled();
+    } finally {
+      onTerminal.mockRestore();
+      accepts.mockRestore();
+    }
   });
 
   it('keeps ordinary jobs dispatchable when the fixed-plan store is unavailable', async () => {
@@ -1871,6 +2087,7 @@ describe('local Bridge', () => {
     const bridge = await startBridge({ port: 0, libraryRoot: root, configDir });
     handles.push(bridge);
     const { socket, token } = await authorize(bridge);
+    expect((await requestJson(bridge.url, '/v1/plans/status', { token })).status).toBe(409);
     socket.send(envelope('extension.hello', 'plans-unavailable-ordinary', { version: APP_VERSION }));
     const collect = nextMessage<{ url: string }>(socket);
     const created = await requestJson<{ id: string }>(bridge.url, '/v1/jobs', {
@@ -1882,7 +2099,116 @@ describe('local Bridge', () => {
     });
   });
 
-  it('keeps one fixed Nowcoder child in flight across a same-runtime reconnect', async () => {
+  it('terminalizes every legacy ordinary Nowcoder job before extension reconnect can reopen it', async () => {
+    const root = await temporaryDirectory();
+    const configDir = join(root, '.config');
+    const config = loadConfig({ libraryRoot: root, configDir, port: 0 });
+    await mkdir(join(root, '_catalog'), { recursive: true });
+    const legacyJobs = Array.from({ length: 18 }, (_, index) => ({
+      id: `legacy-fe-journey-nowcoder-${index + 1}`,
+      url: `https://www.nowcoder.com/discuss/92456854821354${String(index).padStart(4, '0')}`,
+      requestedBy: 'codex',
+      status: (['queued', 'dispatched', 'collecting'] as const)[index % 3],
+      createdAt: '2026-09-02T18:16:20.000Z',
+      updatedAt: '2026-09-02T18:16:20.000Z',
+    }));
+    await writeFile(config.jobsFile, `${JSON.stringify({
+      version: 1,
+      jobs: legacyJobs,
+    })}\n`, 'utf8');
+
+    const bridge = await startBridge({ port: 0, libraryRoot: root, configDir });
+    handles.push(bridge);
+    const { socket } = await authorize(bridge);
+    const messages: Array<WsEnvelope<string, { code?: string }>> = [];
+    socket.on('message', data => {
+      messages.push(JSON.parse(data.toString()) as WsEnvelope<string, { code?: string }>);
+    });
+    socket.send(envelope('extension.hello', 'legacy-ordinary-nowcoder-upgrade', {
+      version: APP_VERSION,
+      runtimeId: '44444444-4444-4444-8444-444444444444',
+    }));
+    await vi.waitFor(() => expect(messages).toHaveLength(legacyJobs.length));
+    expect(messages.every(message => message.type === 'job.failed')).toBe(true);
+    expect(messages.every(message => message.payload.code === 'RECOVERY_LIMIT_EXCEEDED')).toBe(true);
+    expect(messages.map(message => message.requestId).sort()).toEqual(
+      legacyJobs.map(job => job.id).sort(),
+    );
+    expect(messages).not.toContainEqual(expect.objectContaining({ type: 'job.collect' }));
+    await new Promise(resolve => setTimeout(resolve, 250));
+    expect(messages).toHaveLength(legacyJobs.length);
+
+    const persisted = JSON.parse(await readFile(config.jobsFile, 'utf8')) as {
+      jobs: Array<{ status: string; errorCode?: string }>;
+    };
+    expect(persisted.jobs).toHaveLength(legacyJobs.length);
+    expect(persisted.jobs.every(job => job.status === 'needs_attention')).toBe(true);
+    expect(persisted.jobs.every(job => job.errorCode === 'RECOVERY_LIMIT_EXCEEDED')).toBe(true);
+  });
+
+  it('does not let the FeJourney scheduler implicitly run due collection plans', async () => {
+    const root = await temporaryDirectory();
+    const onExtensionConnected = vi.spyOn(CollectionPlanService.prototype, 'onExtensionConnected');
+    try {
+      const bridge = await startBridge({
+        port: 0,
+        libraryRoot: root,
+        configDir: join(root, '.config'),
+        enableFeJourneyScheduler: true,
+      });
+      handles.push(bridge);
+      const { socket } = await authorize(bridge);
+      socket.send(envelope('extension.hello', 'fe-journey-without-plan-scheduler', {
+        version: APP_VERSION,
+        runtimeId: '45454545-4545-4545-8545-454545454545',
+      }));
+      await waitForExtensionReady(bridge);
+      await vi.waitFor(() => {
+        expect(onExtensionConnected).toHaveBeenCalledWith(expect.objectContaining({ runDue: false }));
+      });
+    } finally {
+      onExtensionConnected.mockRestore();
+    }
+  });
+
+  it('replays an ordinary error terminal without repeating its state transition', async () => {
+    const root = await temporaryDirectory();
+    const bridge = await startBridge({
+      port: 0,
+      libraryRoot: root,
+      configDir: join(root, '.config'),
+    });
+    handles.push(bridge);
+    const { socket, token } = await authorize(bridge);
+    socket.send(envelope('extension.hello', 'ordinary-error-replay', { version: APP_VERSION }));
+    await waitForExtensionReady(bridge);
+    const created = await requestJson<{ id: string }>(bridge.url, '/v1/jobs', {
+      method: 'POST',
+      token,
+      body: { url: URL, requestedBy: 'extension' },
+    });
+    const terminalFrame = envelope('job.error', created.body.id, {
+      code: 'COLLECTION_FAILED', message: '普通任务采集失败', needsAttention: false,
+    });
+    const firstAck = nextMessage(socket);
+    socket.send(terminalFrame);
+    await expect(firstAck).resolves.toMatchObject({
+      type: 'job.failed', requestId: created.body.id, payload: { code: 'COLLECTION_FAILED' },
+    });
+
+    const replayedAck = nextMessage(socket);
+    socket.send(terminalFrame);
+    await expect(replayedAck).resolves.toMatchObject({
+      type: 'job.failed', requestId: created.body.id, payload: { code: 'COLLECTION_FAILED' },
+    });
+    expect((await requestJson<{ status: string; errorCode?: string }>(
+      bridge.url,
+      `/v1/jobs/${created.body.id}`,
+      { token },
+    )).body).toMatchObject({ status: 'failed', errorCode: 'COLLECTION_FAILED' });
+  });
+
+  it('redelivers the same fixed Nowcoder child across a same-runtime reconnect without spending recovery budget', async () => {
     const root = await temporaryDirectory();
     const configDir = join(root, '.config');
     const config = loadConfig({ libraryRoot: root, configDir, port: 0 });
@@ -1909,10 +2235,11 @@ describe('local Bridge', () => {
     expect(await firstCollect).toMatchObject({ type: 'job.collect', requestId: first.id });
 
     const replacement = await connect(bridge, token);
+    const replayedCollect = nextMessage(replacement);
     replacement.send(envelope('extension.hello', 'same-runtime-second-hello', {
       version: APP_VERSION, runtimeId: '11111111-1111-4111-8111-111111111111',
     }));
-    await expectNoMessage(replacement, 250);
+    expect(await replayedCollect).toMatchObject({ type: 'job.collect', requestId: first.id });
     const afterReconnect = await requestJson<{ status: string; recoveryCount?: number }>(
       bridge.url, `/v1/jobs/${first.id}`, { token },
     );
@@ -1927,6 +2254,113 @@ describe('local Bridge', () => {
     });
     const secondCollect = nextMessage(replacement);
     expect(await secondCollect).toMatchObject({ type: 'job.collect', requestId: second.id });
+  });
+
+  it('recovers only the interrupted fixed child in a new Bridge and releases its sibling after terminal', async () => {
+    const root = await temporaryDirectory();
+    const configDir = join(root, '.config');
+    const config = loadConfig({ libraryRoot: root, configDir, port: 0 });
+    const plans = await CollectionPlanStore.open(config.plansFile);
+    const batch = await plans.start('nowcoder-agent-market');
+    await plans.markSelectionPending(batch.id);
+    const jobs = await JobStore.open(config.jobsFile);
+    const interrupted = await jobs.create({
+      id: 'new-runtime-recovered-current', url: 'https://www.nowcoder.com/discuss/703', requestedBy: 'codex',
+      batchId: batch.id, planId: 'nowcoder-agent-market',
+    });
+    const sibling = await jobs.create({
+      id: 'new-runtime-recovered-sibling', url: 'https://www.nowcoder.com/discuss/704', requestedBy: 'codex',
+      batchId: batch.id, planId: 'nowcoder-agent-market',
+    });
+    await plans.attachRound(batch.id, [interrupted.id, sibling.id]);
+    await jobs.transition(interrupted.id, 'collecting');
+
+    const bridge = await startBridge({ port: 0, libraryRoot: root, configDir });
+    handles.push(bridge);
+    const { socket, token } = await authorize(bridge);
+    const recoveredCollect = nextMessage(socket);
+    socket.send(envelope('extension.hello', 'new-runtime-recovery', {
+      version: APP_VERSION, runtimeId: '33333333-3333-4333-8333-333333333333',
+    }));
+    expect(await recoveredCollect).toMatchObject({ type: 'job.collect', requestId: interrupted.id });
+    const recovered = await requestJson<{ status: string; recoveryCount?: number }>(
+      bridge.url, `/v1/jobs/${interrupted.id}`, { token },
+    );
+    expect(recovered.body).toMatchObject({ status: 'dispatched', recoveryCount: 1 });
+    expect((await JobStore.open(config.jobsFile)).get(sibling.id)).toMatchObject({ status: 'queued' });
+
+    const acknowledgement = nextMessage(socket);
+    socket.send(envelope('job.error', interrupted.id, {
+      code: 'COLLECTION_FAILED', message: '模拟已恢复任务终态', needsAttention: false,
+    }));
+    expect(await acknowledgement).toMatchObject({ type: 'job.failed', requestId: interrupted.id });
+    expect(await nextMessage(socket)).toMatchObject({ type: 'job.collect', requestId: sibling.id });
+  });
+
+  it('stops a fixed batch on the second lost-worker recovery before any queued sibling dispatches', async () => {
+    const root = await temporaryDirectory();
+    const configDir = join(root, '.config');
+    const config = loadConfig({ libraryRoot: root, configDir, port: 0 });
+    const plans = await CollectionPlanStore.open(config.plansFile);
+    const batch = await plans.start('nowcoder-agent-market');
+    await plans.markSelectionPending(batch.id);
+    const jobs = await JobStore.open(config.jobsFile);
+    const interrupted = await jobs.create({
+      id: 'recovery-limit-current', url: 'https://www.nowcoder.com/discuss/711', requestedBy: 'codex',
+      batchId: batch.id, planId: 'nowcoder-agent-market',
+    });
+    const sibling = await jobs.create({
+      id: 'recovery-limit-sibling', url: 'https://www.nowcoder.com/discuss/712', requestedBy: 'codex',
+      batchId: batch.id, planId: 'nowcoder-agent-market',
+    });
+    await plans.attachRound(batch.id, [interrupted.id, sibling.id]);
+    await jobs.transition(interrupted.id, 'collecting');
+
+    // First new Bridge process represents the first lost Service Worker: startup recovery
+    // preserves this child as the sole one-time retry and dispatches no queued sibling.
+    const firstBridge = await startBridge({ port: 0, libraryRoot: root, configDir });
+    handles.push(firstBridge);
+    const { socket: firstSocket, token } = await authorize(firstBridge);
+    const firstCollect = nextMessage(firstSocket);
+    firstSocket.send(envelope('extension.hello', 'first-lost-worker-recovery', {
+      version: APP_VERSION, runtimeId: '11111111-1111-4111-8111-111111111111',
+    }));
+    expect(await firstCollect).toMatchObject({ type: 'job.collect', requestId: interrupted.id });
+    const firstRecovery = await requestJson<{ status: string; recoveryCount?: number }>(
+      firstBridge.url, `/v1/jobs/${interrupted.id}`, { token },
+    );
+    expect(firstRecovery.body).toMatchObject({ status: 'dispatched', recoveryCount: 1 });
+    expect((await JobStore.open(config.jobsFile)).get(sibling.id)).toMatchObject({ status: 'queued' });
+    await firstBridge.close();
+    handles.splice(handles.indexOf(firstBridge), 1);
+
+    // A second actual Bridge process is another lost Service Worker. It must terminalize the
+    // recovered child and close the parent fence before any queued sibling can fan out.
+    const bridge = await startBridge({ port: 0, libraryRoot: root, configDir });
+    handles.push(bridge);
+    const { socket, token: replacementToken } = await authorize(bridge);
+    const recoveryLimitAck = nextMessage(socket);
+    socket.send(envelope('extension.hello', 'second-lost-worker-recovery', {
+      version: APP_VERSION, runtimeId: '22222222-2222-4222-8222-222222222222',
+    }));
+    expect(await recoveryLimitAck).toMatchObject({
+      type: 'job.failed', requestId: interrupted.id, payload: { code: 'RECOVERY_LIMIT_EXCEEDED' },
+    });
+    await expectNoMessage(socket, 250);
+    const recovered = await requestJson<{ status: string; errorCode?: string; recoveryCount?: number }>(
+      bridge.url, `/v1/jobs/${interrupted.id}`, { token: replacementToken },
+    );
+    expect(recovered.body).toMatchObject({
+      status: 'needs_attention', errorCode: 'RECOVERY_LIMIT_EXCEEDED', recoveryCount: 1,
+    });
+    const batches = await requestJson<{ batches: Array<{ status: string }> }>(
+      bridge.url, '/v1/plans/batches?limit=1&planId=nowcoder-agent-market', { token: replacementToken },
+    );
+    expect(batches.body.batches[0]).toMatchObject({ status: 'completed_with_attention' });
+    const persisted = await JobStore.open(config.jobsFile);
+    expect(persisted.get(sibling.id)).toMatchObject({
+      status: 'failed', errorCode: 'PLAN_STOPPED_AFTER_RECOVERY_LIMIT',
+    });
   });
 
   it('stops the fixed Nowcoder batch when the extension reports its typed tab-close error', async () => {
@@ -1971,7 +2405,11 @@ describe('local Bridge', () => {
     });
     await expectNoMessage(socket, 250);
     const reconnect = await connect(bridge, token);
+    const replayedStopAck = nextMessage(reconnect);
     reconnect.send(envelope('extension.hello', 'typed-tab-close-after-stop', { version: APP_VERSION }));
+    await expect(replayedStopAck).resolves.toMatchObject({
+      type: 'job.failed', requestId: active.requestId, payload: { code: 'TAB_CLOSED_BY_USER' },
+    });
     await expectNoMessage(reconnect, 250);
     const persisted = await JobStore.open(join(root, '_catalog', 'jobs.json'));
     expect(persisted.list().filter(job => job.batchId === started.body.id)).toEqual(expect.arrayContaining([
@@ -3490,6 +3928,16 @@ describe('自更新后的重启时机', () => {
     });
     handles.push(bridge);
     await vi.waitFor(() => expect(fetcher).toHaveBeenCalled());
+    try {
+      const scheduledHosts = fetcher.mock.calls
+        .map(([input]) => new globalThis.URL(String(input)).hostname);
+      expect(scheduledHosts).not.toContain('www.nowcoder.com');
+      expect(scheduledHosts).toContain('api.github.com');
+    } catch (error) {
+      releaseUpdate();
+      releaseCollection();
+      throw error;
+    }
 
     releaseUpdate();
     try {

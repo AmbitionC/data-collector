@@ -116,6 +116,7 @@ describe('Codex CLI', () => {
       repoRoot: '/repo/data-collector',
       enableAutoUpdate: false,
       enableFeJourneyScheduler: true,
+      enableCollectionPlanScheduler: true,
     });
   });
 

@@ -92,6 +92,17 @@ describe('FeJourneyCollector schedule orchestration', () => {
     expect(discoverNowcoder).toHaveBeenCalledOnce();
   });
 
+  it('can run the scheduled GitHub source without invoking Nowcoder', async () => {
+    const fixture = await collectorFixture();
+
+    const report = await fixture.collector.run({ nowcoder: false, github: true });
+
+    expect(report.sources.nowcoder).toMatchObject({ status: 'skipped', reason: 'not_requested' });
+    expect(report.sources.github).toMatchObject({ status: 'completed', saved: 1 });
+    expect(fixture.dependencies.discoverNowcoder).not.toHaveBeenCalled();
+    expect(fixture.dependencies.discoverGithub).toHaveBeenCalledOnce();
+  });
+
   it('records one source failure while allowing the other source to finish', async () => {
     const fixture = await collectorFixture({
       discoverNowcoder: vi.fn(async () => { throw new Error('牛客临时不可用'); }),

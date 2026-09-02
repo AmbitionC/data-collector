@@ -449,6 +449,13 @@ interface RemoteJobTerminal {
   payload: unknown;
 }
 
+interface OrdinaryRemoteJobLifecycle {
+  requestId: string;
+  promise?: Promise<void>;
+  terminal?: RemoteJobTerminal;
+  acknowledged: boolean;
+}
+
 interface DirectedRemoteJobLifecycle extends DirectedRemoteJobOwnership {
   requestId: string;
   controller: AbortController;
@@ -462,6 +469,7 @@ interface DirectedRemoteJobLifecycle extends DirectedRemoteJobOwnership {
 }
 
 const DIRECTED_REMOTE_LIFECYCLE_LIMIT = 100;
+const ORDINARY_REMOTE_LIFECYCLE_LIMIT = 100;
 const DIRECTED_CANCELLED_MESSAGE = '牛客定向采集已取消，扩展拥有的页面已关闭';
 
 function cancelledTerminal(): RemoteJobTerminal {
@@ -676,8 +684,11 @@ export class JobRunner {
    * Keep that request id linearized until the original terminal is emitted so the resend joins
    * the existing work instead of creating a second owned tab for the same Bridge job.
    */
-  private readonly remoteJobs = new Map<string, Promise<void>>();
+  private readonly remoteJobs = new Map<string, OrdinaryRemoteJobLifecycle>();
   private readonly directedRemoteJobs = new Map<string, DirectedRemoteJobLifecycle>();
+  /** A terminal ack can arrive while connection is still awaiting state persistence for collect. */
+  private readonly acknowledgedRemoteJobIds = new Set<string>();
+  private remoteAckOverflow = false;
   private batchStopped = false;
 
   constructor(private readonly options: JobRunnerOptions) {}
@@ -771,6 +782,17 @@ export class JobRunner {
     const terminal = lifecycle.terminal;
     if (!terminal) return;
     this.options.bridge.send(terminal.type, lifecycle.requestId, terminal.payload);
+  }
+
+  /** 普通任务的终态是本地 outbox：断线时保留，下一次同 requestId 只重放，不重开页面。 */
+  private replayOrdinaryTerminal(lifecycle: OrdinaryRemoteJobLifecycle): void {
+    const terminal = lifecycle.terminal;
+    if (!terminal) return;
+    try {
+      this.options.bridge.send(terminal.type, lifecycle.requestId, terminal.payload);
+    } catch {
+      // Bridge 断线不能抹掉终态；后续同 requestId 的 collect 会再次重放。
+    }
   }
 
   private finishDirectedTerminal(
@@ -2418,17 +2440,41 @@ export class JobRunner {
     interactive = true,
     ownership?: DirectedRemoteJobOwnership,
   ): Promise<void> {
+    // This is deliberately before the ordinary/directed ownership split. A buffered collect can
+    // be replayed with either shape after an ack raced the connection's awaited state update.
+    if (this.acknowledgedRemoteJobIds.has(requestId)) return;
+    if (this.remoteAckOverflow) {
+      throw new Error('远程采集任务确认缓冲已达安全上限，已停止接收新任务');
+    }
     if (!ownership) {
+      // Keep this tombstone for the Service Worker lifetime.  A duplicated buffered collect with
+      // the same id must not consume the acknowledgement and reopen a remote tab.
       const existing = this.remoteJobs.get(requestId);
-      if (existing) return existing;
+      if (existing) {
+        if (existing.promise) return existing.promise;
+        if (existing.terminal) {
+          this.replayOrdinaryTerminal(existing);
+          return;
+        }
+      } else if (this.remoteJobs.size >= ORDINARY_REMOTE_LIFECYCLE_LIMIT) {
+        throw new Error('普通采集任务终态等待 Bridge 回执，已达安全上限');
+      }
+      const lifecycle: OrdinaryRemoteJobLifecycle = {
+        requestId,
+        acknowledged: false,
+      };
       const work = this.remoteScheduler.run(
-        () => this.runRemoteJobNow(requestId, rawUrl, interactive),
+        () => this.runRemoteJobNow(requestId, rawUrl, interactive, undefined, lifecycle),
         interactive ? 'interactive' : 'batch',
       );
       const tracked = work.finally(() => {
-        if (this.remoteJobs.get(requestId) === tracked) this.remoteJobs.delete(requestId);
+        if (lifecycle.promise === tracked) delete lifecycle.promise;
+        if (lifecycle.acknowledged && this.remoteJobs.get(requestId) === lifecycle) {
+          this.remoteJobs.delete(requestId);
+        }
       });
-      this.remoteJobs.set(requestId, tracked);
+      lifecycle.promise = tracked;
+      this.remoteJobs.set(requestId, lifecycle);
       return tracked;
     }
 
@@ -2514,10 +2560,43 @@ export class JobRunner {
   }
 
   async acknowledgeRemoteJob(requestId: string): Promise<void> {
+    const ordinary = this.remoteJobs.get(requestId);
+    if (ordinary) {
+      // Bridge can durably acknowledge a terminal while the ordinary scheduler is still closing
+      // the tab or returning from extraction. Keep the acknowledgement until that promise drains.
+      ordinary.acknowledged = true;
+      // An ack before `sendTerminal` cannot be a normal result acknowledgement: Bridge has
+      // independently terminalized this id. Request ids are unique, so every durable ack becomes
+      // a lifetime tombstone and also covers collect handlers that were already buffered.
+      this.rememberAcknowledgedRemoteJob(requestId);
+      if (!ordinary.promise) this.remoteJobs.delete(requestId);
+      return;
+    }
     const lifecycle = this.directedRemoteJobs.get(requestId);
-    if (!lifecycle?.terminal) return;
-    if (!lifecycle.collectObserved) return;
-    this.directedRemoteJobs.delete(requestId);
+    if (lifecycle) {
+      this.rememberAcknowledgedRemoteJob(requestId);
+      if (!lifecycle.terminal) {
+        return;
+      }
+      this.directedRemoteJobs.delete(requestId);
+      return;
+    }
+    // `job.failed` is handled after an awaited side-panel transition. A following buffered
+    // `job.collect` can otherwise arrive after this ack but before JobRunner owns its lifecycle.
+    this.rememberAcknowledgedRemoteJob(requestId);
+  }
+
+  private rememberAcknowledgedRemoteJob(requestId: string): void {
+    if (this.acknowledgedRemoteJobIds.has(requestId)) return;
+    if (this.remoteAckOverflow) return;
+    if (this.acknowledgedRemoteJobIds.size >= ORDINARY_REMOTE_LIFECYCLE_LIMIT) {
+      // Preserve the exact acknowledgement that trips overflow. runRemoteJob checks this set
+      // before the global fail-closed flag, so a duplicate buffered collect remains idempotent.
+      this.acknowledgedRemoteJobIds.add(requestId);
+      this.remoteAckOverflow = true;
+      return;
+    }
+    this.acknowledgedRemoteJobIds.add(requestId);
   }
 
   private async runRemoteJobNow(
@@ -2525,6 +2604,7 @@ export class JobRunner {
     rawUrl: string,
     interactive: boolean,
     lifecycle?: DirectedRemoteJobLifecycle,
+    ordinaryLifecycle?: OrdinaryRemoteJobLifecycle,
   ): Promise<void> {
     let tabId: number | undefined;
     let keepTab = false;
@@ -2535,6 +2615,9 @@ export class JobRunner {
       if (lifecycle) {
         terminal = { type, payload };
         lifecycle.pendingTerminal = terminal;
+      } else if (ordinaryLifecycle) {
+        if (!ordinaryLifecycle.terminal) ordinaryLifecycle.terminal = { type, payload };
+        this.replayOrdinaryTerminal(ordinaryLifecycle);
       }
       else this.options.bridge.send(type, requestId, payload);
     };

@@ -194,6 +194,8 @@ export interface ToolProcessOptions {
   platform?: NodeJS.Platform;
   /** 测试注入；生产默认向独立进程组发信号。 */
   signalTree?: (pid: number, signal: NodeJS.Signals, platform: NodeJS.Platform) => void;
+  /** 测试注入；进程组信号失败时，生产默认调用 child.kill。 */
+  signalChild?: (signal: NodeJS.Signals) => boolean;
 }
 
 class ToolProcessError extends Error {
@@ -205,6 +207,13 @@ class ToolProcessError extends Error {
     super(message);
     this.name = 'ToolProcessError';
   }
+}
+
+function describeSignalError(error: unknown): string {
+  const code = (error as NodeJS.ErrnoException | undefined)?.code;
+  const message = error instanceof Error ? error.message : String(error);
+  if (code && !message.includes(code)) return `${code}: ${message}`;
+  return code ?? message;
 }
 
 function signalProcessTree(
@@ -274,24 +283,44 @@ export function runProcessForTool(
       stdio: ['ignore', 'pipe', 'pipe'],
       windowsHide: true,
     });
+    const signalChild = options.signalChild ?? (signal => child.kill(signal));
     if (child.pid !== undefined) registerToolProcess(child.pid, platform);
     const stdout: Buffer[] = [];
     const stderr: Buffer[] = [];
     let outputBytes = 0;
     let terminalError: Error | undefined;
     let forceTimer: NodeJS.Timeout | undefined;
+    const cleanupDiagnostics: string[] = [];
 
     const stopChildWithoutCrashing = (signal: NodeJS.Signals) => {
       if (child.pid === undefined) return;
       try {
         signalTree(child.pid, signal, platform);
-      } catch {
-        // macOS 偶发会对负 PID 的进程组信号返回 EPERM。清理失败不能从定时器
-        // 逸出并打崩整个 Bridge；退回只终止我们直接创建、确定归属的子进程。
+      } catch (error) {
+        const code = (error as NodeJS.ErrnoException).code;
+        if (code === 'ESRCH') return;
+        if (code === 'EPERM' || code === 'EACCES') {
+          cleanupDiagnostics.push(
+            `${signal} 进程组信号失败（${code}），已降级为直接子进程`,
+          );
+        } else {
+          cleanupDiagnostics.push(
+            `${signal} 进程组信号失败（${describeSignalError(error)}），已尝试直接子进程`,
+          );
+        }
+        // 进程组信号可能因权限或平台异常失败。清理失败不能从定时器逸出并打崩
+        // 整个 Bridge；退回只终止我们直接创建、确定归属的子进程，并保留诊断。
         try {
-          child.kill(signal);
-        } catch {
-          // 子进程可能恰好已经退出；close 事件会完成原 promise。
+          if (!signalChild(signal)) {
+            cleanupDiagnostics.push(`${signal} 直接子进程信号失败（返回 false）`);
+          }
+        } catch (fallbackError) {
+          // 子进程可能恰好已经退出；ESRCH 仍视为幂等清理成功。
+          if ((fallbackError as NodeJS.ErrnoException).code !== 'ESRCH') {
+            cleanupDiagnostics.push(
+              `${signal} 直接子进程信号失败（${describeSignalError(fallbackError)}）`,
+            );
+          }
         }
       }
     };
@@ -334,7 +363,14 @@ export function runProcessForTool(
       const stdoutText = output(stdout);
       const stderrText = output(stderr);
       if (terminalError) {
-        rejectRun(new ToolProcessError(terminalError.message, stdoutText, stderrText));
+        const cleanupDetail = cleanupDiagnostics.length > 0
+          ? `；清理诊断：${cleanupDiagnostics.join('；')}`
+          : '';
+        rejectRun(new ToolProcessError(
+          `${terminalError.message}${cleanupDetail}`,
+          stdoutText,
+          stderrText,
+        ));
         return;
       }
       if (code !== 0) {

@@ -96,7 +96,7 @@ interface JobRecordBase {
   planId?: import('./plans.js').CollectionPlanId;
   /** 计划子任务所属的 staging 尝试；换代后旧任务结果不得落地。 */
   planAttempt?: import('./plans.js').CollectionPlanAttempt;
-  /** Fixed Nowcoder jobs may recover from one interrupted browser collection only. */
+  /** Bridge-owned non-directed Nowcoder jobs may recover from one worker loss only. */
   recoveryCount?: number;
 }
 

@@ -357,6 +357,14 @@ describe('durable jobs', () => {
       directedRunId: 'run-recovery',
       directedRunAttempt: '1111111111111111',
     });
+    const extensionOwnedNowcoder = await jobs.create({
+      id: 'extension-owned-nowcoder-recovery',
+      url: 'https://www.nowcoder.com/discuss/8102-extension',
+      requestedBy: 'extension',
+    });
+    expect(zsxq).not.toHaveProperty('recoveryCount');
+    expect(directed).not.toHaveProperty('recoveryCount');
+    expect(extensionOwnedNowcoder).not.toHaveProperty('recoveryCount');
     await jobs.transition(nowcoder.id, 'dispatched');
     await jobs.transition(zsxq.id, 'dispatched');
     await jobs.transition(directed.id, 'dispatched');
@@ -400,6 +408,155 @@ describe('durable jobs', () => {
       status: 'needs_attention',
       errorCode: 'RECOVERY_LIMIT_EXCEEDED',
     });
+  });
+
+  it('bounds every Bridge-owned ordinary Nowcoder recovery and stops legacy work on upgrade', async () => {
+    const root = await temporaryDirectory();
+    const path = join(root, '_catalog', 'jobs.json');
+    const jobs = await JobStore.open(path, { now: () => NOW });
+    const ordinary = await jobs.create({
+      id: 'ordinary-nowcoder-recovery',
+      url: 'https://nowcoder.com/discuss/8104',
+      requestedBy: 'codex',
+    });
+    expect(ordinary).toMatchObject({ recoveryCount: 0 });
+
+    await jobs.transition(ordinary.id, 'dispatched');
+    await jobs.recover();
+    expect(jobs.get(ordinary.id)).toMatchObject({ status: 'queued', recoveryCount: 1 });
+    await jobs.transition(ordinary.id, 'dispatched');
+    const exhausted = await jobs.recover();
+    expect(exhausted.terminalized.map(job => job.id)).toContain(ordinary.id);
+    expect(jobs.get(ordinary.id)).toMatchObject({
+      status: 'needs_attention',
+      errorCode: 'RECOVERY_LIMIT_EXCEEDED',
+      recoveryCount: 1,
+    });
+    await expect(jobs.retry(ordinary.id)).resolves.toMatchObject({
+      status: 'queued',
+      recoveryCount: 0,
+    });
+
+    const legacyPath = join(root, '_catalog', 'legacy-ordinary-jobs.json');
+    const legacyJobs = (['queued', 'dispatched', 'collecting'] as const).map(status => ({
+      id: `legacy-ordinary-nowcoder-${status}`,
+      url: `https://www.nowcoder.com/discuss/8105-${status}`,
+      requestedBy: 'codex',
+      status,
+      createdAt: NOW,
+      updatedAt: NOW,
+    }));
+    await writeFile(legacyPath, `${JSON.stringify({ version: 1, jobs: legacyJobs })}\n`);
+    const legacy = await JobStore.open(legacyPath, { now: () => NOW });
+    const legacyRecovery = await legacy.recover();
+    expect(legacyRecovery.terminalized.map(job => job.id)).toEqual(
+      legacyJobs.map(job => job.id),
+    );
+    for (const legacyJob of legacyJobs) {
+      expect(legacy.get(legacyJob.id)).toMatchObject({
+        status: 'needs_attention',
+        errorCode: 'RECOVERY_LIMIT_EXCEEDED',
+      });
+    }
+  });
+
+  it('requeues ordinary and fixed jobs on socket reconnect without consuming recovery budget', async () => {
+    const root = await temporaryDirectory();
+    const path = join(root, 'socket-reconnect-jobs.json');
+    const ordinaryDispatched = {
+      id: 'socket-ordinary-dispatched',
+      url: 'https://mp.weixin.qq.com/s/socket-ordinary-dispatched',
+      requestedBy: 'cli',
+      status: 'dispatched',
+      createdAt: NOW,
+      updatedAt: NOW,
+    };
+    const ordinaryCollecting = {
+      id: 'socket-ordinary-collecting',
+      url: 'https://mp.weixin.qq.com/s/socket-ordinary-collecting',
+      requestedBy: 'cli',
+      status: 'collecting',
+      createdAt: NOW,
+      updatedAt: NOW,
+    };
+    const fixedWithoutCounter = {
+      id: 'socket-fixed-without-counter',
+      url: 'https://www.nowcoder.com/discuss/socket-fixed-without-counter',
+      requestedBy: 'codex',
+      status: 'collecting',
+      createdAt: NOW,
+      updatedAt: NOW,
+      batchId: 'socket-fixed-batch',
+      planId: 'nowcoder-agent-market',
+    };
+    const fixedWithCounter = {
+      id: 'socket-fixed-with-counter',
+      url: 'https://www.nowcoder.com/discuss/socket-fixed-with-counter',
+      requestedBy: 'codex',
+      status: 'dispatched',
+      createdAt: NOW,
+      updatedAt: NOW,
+      batchId: 'socket-fixed-batch',
+      planId: 'nowcoder-agent-market',
+      recoveryCount: 1,
+    };
+    const ordinaryNowcoder = {
+      id: 'socket-ordinary-nowcoder',
+      url: 'https://nowcoder.com/discuss/socket-ordinary-nowcoder',
+      requestedBy: 'cli',
+      status: 'dispatched',
+      createdAt: NOW,
+      updatedAt: NOW,
+      recoveryCount: 0,
+    };
+    const excluded = {
+      id: 'socket-excluded',
+      url: 'https://mp.weixin.qq.com/s/socket-excluded',
+      requestedBy: 'cli',
+      status: 'collecting',
+      createdAt: NOW,
+      updatedAt: NOW,
+    };
+    const extensionOwned = {
+      id: 'socket-extension-owned',
+      url: 'https://mp.weixin.qq.com/s/socket-extension-owned',
+      requestedBy: 'extension',
+      status: 'collecting',
+      createdAt: NOW,
+      updatedAt: NOW,
+    };
+    await writeFile(path, `${JSON.stringify({
+      version: 1,
+      jobs: [
+        ordinaryDispatched,
+        ordinaryCollecting,
+        fixedWithoutCounter,
+        fixedWithCounter,
+        ordinaryNowcoder,
+        excluded,
+        extensionOwned,
+      ],
+    })}\n`);
+
+    const jobs = await JobStore.open(path, { now: () => NOW });
+    const recovery = await jobs.recover(new Set([excluded.id]), 'socket-reconnect');
+
+    expect(recovery.terminalized).toEqual([]);
+    expect(recovery.requeued.map(job => job.id)).toEqual([
+      ordinaryDispatched.id,
+      ordinaryCollecting.id,
+      fixedWithoutCounter.id,
+      fixedWithCounter.id,
+      ordinaryNowcoder.id,
+    ]);
+    expect(jobs.get(ordinaryDispatched.id)?.status).toBe('queued');
+    expect(jobs.get(ordinaryCollecting.id)?.status).toBe('queued');
+    expect(jobs.get(fixedWithoutCounter.id)).toMatchObject({ status: 'queued' });
+    expect(jobs.get(fixedWithoutCounter.id)).not.toHaveProperty('recoveryCount');
+    expect(jobs.get(fixedWithCounter.id)).toMatchObject({ status: 'queued', recoveryCount: 1 });
+    expect(jobs.get(ordinaryNowcoder.id)).toMatchObject({ status: 'queued', recoveryCount: 0 });
+    expect(jobs.get(excluded.id)?.status).toBe('collecting');
+    expect(jobs.get(extensionOwned.id)?.status).toBe('collecting');
   });
 
   it('does not requeue a job whose result is still being persisted in this Bridge process', async () => {

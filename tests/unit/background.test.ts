@@ -2092,6 +2092,157 @@ describe('extension job runner', () => {
     expect(bridge.sent.filter(message => message.type === 'job.result')).toHaveLength(1);
   });
 
+  it('retains an ordinary result terminal when bridge.send fails and replays it without opening a tab', async () => {
+    const tabs = new InMemoryTabs();
+    const bridge = new InMemoryBridge();
+    const send = bridge.send.bind(bridge);
+    let failTerminalSend = true;
+    bridge.send = (type, requestId, payload) => {
+      if (failTerminalSend && (type === 'job.result' || type === 'job.error')) {
+        throw new Error('Bridge 连接已断开');
+      }
+      send(type, requestId, payload);
+    };
+    const runner = new JobRunner({ tabs, bridge, waitForTabComplete: async () => undefined });
+
+    await runner.runRemoteJob('ordinary-result-send-failure', URL, false);
+    failTerminalSend = false;
+    await runner.runRemoteJob('ordinary-result-send-failure', URL, false);
+
+    expect(tabs.created).toHaveLength(1);
+    expect(bridge.sent.filter(message => message.type === 'job.result')).toHaveLength(1);
+    expect(bridge.sent.filter(message => message.type === 'job.error')).toHaveLength(0);
+  });
+
+  it('retains an ordinary error terminal when catch-path bridge.send fails and replays it without opening a tab', async () => {
+    const tabs = new InMemoryTabs();
+    const bridge = new InMemoryBridge();
+    const send = bridge.send.bind(bridge);
+    let failTerminalSend = true;
+    bridge.send = (type, requestId, payload) => {
+      if (failTerminalSend && (type === 'job.result' || type === 'job.error')) {
+        throw new Error('Bridge 连接已断开');
+      }
+      send(type, requestId, payload);
+    };
+    tabs.sendMessage = async () => {
+      throw new Error('页面提取失败');
+    };
+    const runner = new JobRunner({ tabs, bridge, waitForTabComplete: async () => undefined });
+
+    await runner.runRemoteJob('ordinary-error-send-failure', URL, false);
+    failTerminalSend = false;
+    await runner.runRemoteJob('ordinary-error-send-failure', URL, false);
+
+    expect(tabs.created).toHaveLength(1);
+    expect(bridge.sent.filter(message => message.type === 'job.error')).toHaveLength(1);
+    expect(bridge.sent.filter(message => message.type === 'job.result')).toHaveLength(0);
+  });
+
+  it('never reopens an ordinary request id after the Bridge confirms its terminal', async () => {
+    const tabs = new InMemoryTabs();
+    const bridge = new InMemoryBridge();
+    const runner = new JobRunner({ tabs, bridge, waitForTabComplete: async () => undefined });
+
+    await runner.runRemoteJob('ordinary-terminal-tombstone', URL, false);
+    await runner.runRemoteJob('ordinary-terminal-tombstone', URL, false);
+    expect(tabs.created).toHaveLength(1);
+    expect(bridge.sent.filter(message => message.type === 'job.result')).toHaveLength(2);
+
+    await runner.acknowledgeRemoteJob('ordinary-terminal-tombstone');
+    await runner.runRemoteJob('ordinary-terminal-tombstone', URL, false);
+
+    expect(tabs.created).toHaveLength(1);
+    expect(bridge.sent.filter(message => message.type === 'job.result')).toHaveLength(2);
+  });
+
+  it('keeps an ordinary acknowledgement that arrives before its terminal as a permanent tombstone', async () => {
+    const tabs = new InMemoryTabs();
+    const bridge = new InMemoryBridge();
+    let entered!: () => void;
+    let release!: () => void;
+    const started = new Promise<void>(resolve => { entered = resolve; });
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const runner = new JobRunner({
+      tabs,
+      bridge,
+      waitForTabComplete: async () => {
+        entered();
+        await gate;
+      },
+    });
+
+    const running = runner.runRemoteJob('ordinary-early-ack', URL, false);
+    await started;
+    await runner.acknowledgeRemoteJob('ordinary-early-ack');
+    release();
+    await running;
+    await runner.runRemoteJob('ordinary-early-ack', URL, false);
+
+    expect(tabs.created).toHaveLength(1);
+  });
+
+  it('drops every buffered ordinary collect for an acknowledgement that arrived before its lifecycle', async () => {
+    const tabs = new InMemoryTabs();
+    const bridge = new InMemoryBridge();
+    const runner = new JobRunner({ tabs, bridge, waitForTabComplete: async () => undefined });
+
+    await runner.acknowledgeRemoteJob('ordinary-pre-ack');
+    await runner.runRemoteJob('ordinary-pre-ack', URL, false);
+    await runner.runRemoteJob('ordinary-pre-ack', URL, false);
+
+    expect(tabs.created).toHaveLength(0);
+  });
+
+  it('fails closed when ordinary terminal tombstones reach their safety limit', async () => {
+    const tabs = new InMemoryTabs();
+    const bridge = new InMemoryBridge();
+    const runner = new JobRunner({ tabs, bridge, waitForTabComplete: async () => undefined });
+
+    for (let index = 0; index < 100; index += 1) {
+      await runner.runRemoteJob(`ordinary-terminal-cap-${index}`, `${URL}-${index}`, false);
+    }
+
+    await expect(runner.runRemoteJob('ordinary-terminal-over-cap', `${URL}-over-cap`, false))
+      .rejects.toThrow('已达安全上限');
+    expect(tabs.created).toHaveLength(100);
+  });
+
+  it('tombstones the ordinary acknowledgement that trips the safety overflow', async () => {
+    const tabs = new InMemoryTabs();
+    const bridge = new InMemoryBridge();
+    const runner = new JobRunner({ tabs, bridge, waitForTabComplete: async () => undefined });
+
+    for (let index = 0; index <= 100; index += 1) {
+      await runner.acknowledgeRemoteJob(`ordinary-ack-cap-${index}`);
+    }
+
+    await expect(runner.runRemoteJob('ordinary-ack-cap-100', URL, false)).resolves.toBeUndefined();
+    await expect(runner.runRemoteJob('ordinary-after-ack-overflow', URL, false))
+      .rejects.toThrow('已停止接收新任务');
+    expect(tabs.created).toHaveLength(0);
+  });
+
+  it('tombstones the directed acknowledgement that trips the safety overflow', async () => {
+    const tabs = new InMemoryTabs();
+    const bridge = new InMemoryBridge();
+    const runner = new JobRunner({ tabs, bridge, waitForTabComplete: async () => undefined });
+    const ownership = {
+      directedRunId: 'directed-ack-overflow',
+      directedRunAttempt: PLAN_ATTEMPT,
+    };
+
+    for (let index = 0; index <= 100; index += 1) {
+      await runner.acknowledgeRemoteJob(`directed-ack-cap-${index}`);
+    }
+
+    await expect(runner.runRemoteJob('directed-ack-cap-100', URL, false, ownership))
+      .resolves.toBeUndefined();
+    await expect(runner.runRemoteJob('directed-after-ack-overflow', URL, false, ownership))
+      .rejects.toThrow('已停止接收新任务');
+    expect(tabs.created).toHaveLength(0);
+  });
+
   it('caches cancel-before-collect and replays the exact terminal without opening a tab', async () => {
     const tabs = new InMemoryTabs();
     const bridge = new InMemoryBridge();
@@ -2109,8 +2260,8 @@ describe('extension job runner', () => {
     await runner.runRemoteJob('directed-job-1', URL, true, ownership);
 
     expect(tabs.created).toEqual([]);
-    expect(bridge.sent).toHaveLength(2);
-    expect(bridge.sent[1]).toEqual(first);
+    expect(bridge.sent).toHaveLength(1);
+    expect(bridge.sent[0]).toEqual(first);
     expect(bridge.sent[0]).toMatchObject({
       type: 'job.error',
       requestId: 'directed-job-1',
@@ -2122,7 +2273,7 @@ describe('extension job runner', () => {
     });
   });
 
-  it('shares one directed lifecycle and replays a cached normal terminal until durable ack', async () => {
+  it('never reopens a directed request id after its durable ack', async () => {
     const tabs = new InMemoryTabs();
     const bridge = new InMemoryBridge();
     const runner = new JobRunner({ tabs, bridge, waitForTabComplete: async () => undefined });
@@ -2143,7 +2294,8 @@ describe('extension job runner', () => {
 
     await runner.acknowledgeRemoteJob('directed-job-2');
     await runner.runRemoteJob('directed-job-2', URL, false, ownership);
-    expect(tabs.created).toHaveLength(2);
+    expect(tabs.created).toHaveLength(1);
+    expect(bridge.sent.filter(message => message.type === 'job.result')).toHaveLength(2);
   });
 
   it('retries a transient normal-terminal close on duplicate collect without opening a new tab', async () => {

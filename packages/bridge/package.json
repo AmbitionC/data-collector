@@ -1,7 +1,7 @@
 {
   "name": "@data-collector/bridge",
   "private": true,
-  "version": "0.4.34",
+  "version": "0.4.35",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -12,7 +12,7 @@
     "build": "tsc -p tsconfig.json"
   },
   "dependencies": {
-    "@data-collector/shared": "0.4.34",
+    "@data-collector/shared": "0.4.35",
     "sanitize-html": "2.17.6",
     "turndown": "7.2.4",
     "ws": "8.21.1"

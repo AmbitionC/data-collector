@@ -4,7 +4,7 @@
 
 **Goal:** Stop a user-closed Nowcoder collection tab from reopening indefinitely while preserving one bounded crash recovery.
 
-**Architecture:** The extension emits a typed user-close error. The Bridge terminalizes the owning Nowcoder run before any new dispatch, fences children whose fixed-plan parent is terminal, and persists a one-recovery budget for ordinary jobs. The plans view exposes the already-existing directed-active fact without duplicating the directed state machine.
+**Architecture:** The extension emits a typed user-close error. The Bridge terminalizes the owning Nowcoder run before any new dispatch, fences children whose fixed-plan parent is terminal, and persists a one-recovery budget for Bridge-owned non-directed Nowcoder jobs. Scheduled FeJourney work is GitHub-only and its switch is independent from daily collection plans. The plans view exposes the already-existing directed-active fact without duplicating the directed state machine.
 
 **Tech Stack:** TypeScript, Chrome Extension MV3, Node.js Bridge, Vitest, WebSocket integration tests.
 
@@ -16,7 +16,7 @@
 - Do not refresh user pages or close tabs not owned by Data Collector.
 - Preserve ZSXQ attempt, completeness, ledger, and update-reload safety behavior.
 - Directed jobs remain excluded from generic `JobStore.recover()`.
-- This release is `0.4.34`: update root/shared/bridge/extension package versions, shared dependency versions, extension manifest, shared `APP_VERSION`, and identity tests; then run `npm install --package-lock-only`.
+- This release is `0.4.35`: update root/shared/bridge/extension package versions, shared dependency versions, extension manifest, shared `APP_VERSION`, and identity tests; then run `npm install --package-lock-only`.
 - Required final verification: `npm run typecheck && npm test && npm run package && npm run test:e2e`.
 
 ---
@@ -49,7 +49,7 @@
 - Produces: `TAB_CLOSED_BY_USER` in the existing `job.error` payload; optional persisted `JobRecord.recoveryCount`; `JobStore.recover()` terminal results; single-in-flight fixed-plan dispatch; fixed-plan ingress/dispatch fences; directed cancellation on close; and plans-side `directedRunActive` visibility.
 - Consumes: existing owned-tab registry, fixed-plan store, directed cancellation state machine, Bridge `/health.directedRunActive`, and plans status response.
 
-- [ ] **Step 1: Write and run the failing owned-tab test**
+- [x] **Step 1: Write and run the failing owned-tab test**
 
 Add a `JobRunner` test whose `waitForTabComplete` throws an error named
 `CollectorTabClosedError`. Assert exactly one `job.error`, code
@@ -59,7 +59,7 @@ Run: `npm test -- --run tests/unit/background.test.ts -t "reports an owned tab c
 
 Expected: FAIL because the current payload code is `COLLECTION_FAILED`.
 
-- [ ] **Step 2: Implement and verify the close signal**
+- [x] **Step 2: Implement and verify the close signal**
 
 Name the `tabs.onRemoved` error `CollectorTabClosedError`. In `jobs.ts`, recognize that name or Chrome's exact missing-tab message and select `TAB_CLOSED_BY_USER` before generic `COLLECTION_FAILED`.
 
@@ -67,25 +67,25 @@ Run: `npm test -- --run tests/unit/background.test.ts`
 
 Expected: PASS.
 
-- [ ] **Step 3: Write and run failing recovery tests**
+- [x] **Step 3: Write and run failing recovery tests**
 
-Create a fixed Nowcoder in-flight job and assert first recovery returns it to `queued` with
+Create a Bridge-owned non-directed Nowcoder in-flight job and assert first recovery returns it to `queued` with
 `recoveryCount: 1`; a second recovery returns `needs_attention` with
-`RECOVERY_LIMIT_EXCEEDED`. Assert a legacy fixed Nowcoder child without the field is terminalized immediately, explicit retry resets the field, directed excluded jobs are unchanged, and ZSXQ recovery retains its current behavior.
+`RECOVERY_LIMIT_EXCEEDED`. Assert legacy queued/dispatched/collecting Nowcoder work without the field is terminalized immediately, explicit retry resets the field, directed and extension-owned jobs are excluded, and ZSXQ recovery retains its current behavior.
 
 Run: `npm test -- --run tests/unit/jobs.test.ts`
 
 Expected: FAIL because the persisted counter and structured recovery result do not exist.
 
-- [ ] **Step 4: Implement the bounded recovery model**
+- [x] **Step 4: Implement the bounded recovery model**
 
-Add and validate the optional non-negative safe integer field. Initialize new fixed Nowcoder jobs to 0, reset it on explicit retry, and make `recover()` return `{ requeued, terminalized }`. First recovery requeues; the next terminalizes as `needs_attention/RECOVERY_LIMIT_EXCEEDED`. Treat a legacy in-flight fixed Nowcoder job without the field as already having used its recovery. Keep directed jobs excluded and ZSXQ unchanged.
+Add and validate the optional non-negative safe integer field. Initialize new Bridge-owned non-directed Nowcoder jobs to 0, reset it on explicit retry, and make `recover()` return `{ requeued, terminalized }`. First worker-loss recovery requeues; the next terminalizes as `needs_attention/RECOVERY_LIMIT_EXCEEDED`; same-runtime socket reconnect does not consume the counter. Treat legacy queued/dispatched/collecting Nowcoder work without the field as already having used its recovery. Keep directed and extension-owned jobs excluded and ZSXQ unchanged.
 
 Run: `npm test -- --run tests/unit/jobs.test.ts`
 
 Expected: PASS.
 
-- [ ] **Step 5: Write and run failing parent-stop and fence tests**
+- [x] **Step 5: Write and run failing parent-stop and fence tests**
 
 Assert `TAB_CLOSED_BY_USER` moves a fixed Nowcoder batch to `completed_with_attention`, terminalizes queued siblings, and moves a directed run into its existing cancellation flow. Assert only one fixed Nowcoder child is in-flight, the next starts only after terminal, terminal parents cannot dispatch queued children, late progress/result/error is rejected before sink persistence, and recovery-exhausted jobs notify/reconcile before any queued dispatch.
 
@@ -93,7 +93,7 @@ Run: `npm test -- --run tests/unit/collectionPlanService.test.ts tests/unit/nowc
 
 Expected: FAIL before stop, sequencing, recovery notification, and fences exist.
 
-- [ ] **Step 6: Implement parent stop, sequencing, and all fences**
+- [x] **Step 6: Implement parent stop, sequencing, and all fences**
 
 Use existing `completed_with_attention` for fixed-plan stop. Fixed Nowcoder plans dispatch one child at a time and release the next from terminal handling. Terminalize queued siblings with `PLAN_STOPPED_BY_USER`. At dispatch and message ingress, require the fixed-plan parent to remain `running`; otherwise terminalize the child as `STALE_PLAN_RUN` without sink writes. Feed exhausted recovery terminals through durable notices and plan reconciliation before `dispatchQueued()`. In directed terminal handling, call the existing durable cancellation path on `TAB_CLOSED_BY_USER`.
 
@@ -101,7 +101,7 @@ Run: `npm test -- --run tests/unit/jobs.test.ts tests/unit/collectionPlanService
 
 Expected: PASS.
 
-- [ ] **Step 7: Write and run failing status visibility tests**
+- [x] **Step 7: Write and run failing status visibility tests**
 
 Assert `plans.status` carries `directedRunActive`, and the plans page shows a concise active notice only when true.
 
@@ -109,7 +109,7 @@ Run: `npm test -- --run tests/unit/connection.test.ts tests/unit/sidepanel.test.
 
 Expected: FAIL because plans state does not expose the field.
 
-- [ ] **Step 8: Implement status visibility**
+- [x] **Step 8: Implement status visibility**
 
 Thread the boolean through existing status calls and render one static notice; do not add a second run state machine or scheduler.
 
@@ -117,9 +117,9 @@ Run: `npm test -- --run tests/unit/connection.test.ts tests/unit/sidepanel.test.
 
 Expected: PASS.
 
-- [ ] **Step 9: Bump patch version and refresh lockfile**
+- [x] **Step 9: Bump patch version and refresh lockfile**
 
-Update every location required by `CLAUDE.md` from `0.4.33` to `0.4.34`, then run `npm install --package-lock-only`.
+Update every location required by `CLAUDE.md` from `0.4.33` to `0.4.35`, then run `npm install --package-lock-only`.
 
 - [ ] **Step 10: Run focused and full verification**
 
@@ -142,3 +142,71 @@ Commit all implementation, test, version, lockfile, and plan adjustments as:
 - [ ] **Step 12: Reinstall and validate live safety**
 
 Reinstall/start the packaged Bridge and reload the unpacked Edge Beta extension through the repository's existing update flow. Verify the legacy batch becomes terminal/attention, Bridge is healthy, Edge contains no Data Collector-owned Nowcoder tab, and it remains absent across a reconnect observation window.
+
+---
+
+### Task 2: Remove the hidden FeJourney Nowcoder producer
+
+**Files:**
+- Modify: `packages/bridge/src/server/index.ts`
+- Modify: `packages/bridge/src/cli.ts`
+- Modify: `packages/bridge/src/jobs/store.ts`
+- Modify: `packages/shared/src/model.ts`
+- Test: `tests/unit/jobs.test.ts`
+- Test: `tests/unit/feJourneyCollector.test.ts`
+- Test: `tests/integration/bridge.test.ts`
+- Test: `tests/integration/cli.test.ts`
+- Document: `docs/fe-journey-collection.md`
+- Document: `docs/protocol.md`
+
+- [x] **Step 13: Reproduce the second root cause from the live ledger**
+
+Confirm the controlled restore generated 18 `fe-journey-nowcoder-*` jobs with no plan/run ownership or
+recovery counter, and that extension concurrency made closed pages appear to be replenished.
+
+- [x] **Step 14: Add failing producer, migration, and switch-isolation tests**
+
+Assert scheduled FeJourney can run GitHub without invoking Nowcoder; preload 18 legacy ordinary Nowcoder
+jobs across queued/dispatched/collecting and assert reconnect sends no `job.collect`; assert the FeJourney
+scheduler switch does not imply `runDue` for collection plans.
+
+- [x] **Step 15: Implement the second-root fix**
+
+Run scheduled FeJourney as GitHub-only, decouple the two scheduler switches, explicitly enable both in the
+production CLI, extend the one-worker-loss budget to all Bridge-owned non-directed Nowcoder jobs, and
+fail closed legacy records without a counter.
+
+- [ ] **Step 16: Re-run full verification, package, E2E, and controlled restore**
+
+Verify the exact live 18-job shape becomes terminal before extension dispatch, no background producer
+creates replacement Nowcoder jobs, and no Data Collector-owned Nowcoder tab appears during the observation
+window.
+
+---
+
+### Task 3: Keep historical collection plans loadable after reconnect
+
+**Files:**
+- Modify: `packages/bridge/src/plans/store.ts`
+- Modify: `packages/bridge/src/plans/service.ts`
+- Test: `tests/unit/collectionPlanStore.test.ts`
+- Test: `tests/unit/collectionPlanService.test.ts`
+
+- [x] **Step 17: Reproduce the production plan-store failure**
+
+Use the production counter shape to prove a finalized selection is recounted on reconnect and then rejected
+on reopen. Cover both detail-counter overlap and a historical pending-pool selection whose accepted plus
+failed total exceeds the original discovered count.
+
+- [x] **Step 18: Freeze terminal selection counters and migrate only the known legacy shape**
+
+Let only the active hard-stop path recount under its batch lock. Terminal reconnects clean queued children
+without changing parent counters. On load, repair only terminal completed-selection Nowcoder overflow,
+persist it atomically, raise the same discovered lower bound during new finalization, and validate every
+future write strictly.
+
+- [ ] **Step 19: Re-run complete verification and live plan migration**
+
+Confirm non-Nowcoder invalid data remains rejected, hard-stop batches reopen with valid counters, all nine
+production legacy batches migrate, the plan API becomes healthy, and the controlled Edge observation does
+not reopen any legacy ordinary Nowcoder task.

@@ -105,6 +105,8 @@ export interface CollectionPlanServiceDependencies {
   zsxqLedger?: ZsxqDayLedgerStore;
   /** 当前知识星球 attempt 已可靠写入终态，可释放外部互斥门禁。 */
   onZsxqAttemptTerminal?: (batch: CollectionBatch) => void;
+  /** 重启恢复时重放已持久化的子任务终态，供扩展建立耐久 ack。 */
+  replayDurableJobTerminal?: (job: JobRecord) => void | Promise<void>;
   shouldAutoSync: (job: JobRecord) => Promise<boolean>;
   pendingNowcoderJobs?: (deliveryBatchId: string) => Promise<readonly JobRecord[]>;
   selectNowcoderJobs: (
@@ -170,6 +172,17 @@ function selectDiscoveryRound(
   return selected;
 }
 
+function findDurableNowcoderStopSignal(
+  jobs: readonly JobRecord[],
+  batchId: string,
+): JobRecord | undefined {
+  return jobs.find(job => (
+    job.batchId === batchId
+    && (job.status === 'failed' || job.status === 'needs_attention')
+    && (job.errorCode === 'TAB_CLOSED_BY_USER' || job.errorCode === 'RECOVERY_LIMIT_EXCEEDED')
+  ));
+}
+
 export class CollectionPlanService {
   private readonly now: () => string;
   private readonly executing = new Set<string>();
@@ -187,6 +200,10 @@ export class CollectionPlanService {
   private readonly coveredJobs = new Set<string>();
   private readonly advancingBatches = new Set<string>();
   private readonly batchSyncErrors = new Map<string, string[]>();
+  /** Fixed detail persistence and parent stop share one short per-batch linearization point. */
+  private readonly fixedNowcoderBatchTails = new Map<string, Promise<void>>();
+  /** Set synchronously, before a stop waits behind a save, so every other path fails closed. */
+  private readonly stoppingNowcoderBatches = new Set<string>();
 
   constructor(private readonly dependencies: CollectionPlanServiceDependencies) {
     this.now = dependencies.now ?? (() => new Date().toISOString());
@@ -286,6 +303,24 @@ export class CollectionPlanService {
       this.dependencies.store.active().filter(batch => !recent.some(item => item.id === batch.id)),
     );
     for (const persisted of persistedBatches) {
+      if (
+        persisted.planId === 'nowcoder-agent-market'
+        && persisted.status !== 'running'
+        && persisted.selectionStatus === 'completed'
+      ) {
+        const durableStopSignal = findDurableNowcoderStopSignal(
+          this.dependencies.jobs.list(),
+          persisted.id,
+        );
+        try {
+          if (durableStopSignal) {
+            await this.dependencies.replayDurableJobTerminal?.(durableStopSignal);
+          }
+        } finally {
+          await this.cleanStoppedNowcoderChildren(persisted);
+        }
+        continue;
+      }
       const batch = persisted.planId === 'nowcoder-agent-market' && persisted.selectionStatus !== 'completed'
         ? await this.dependencies.store.attachRecoveredJobs(
             persisted.id,
@@ -294,6 +329,21 @@ export class CollectionPlanService {
               .map(job => job.id),
           )
         : persisted;
+      const jobs = this.dependencies.jobs.list();
+      const attached = jobs.filter(job => job.batchId === batch.id);
+      if (batch.planId === 'nowcoder-agent-market' && batch.status === 'running') {
+        // A process can exit after the child terminal is durable but before onJobTerminal persists
+        // the parent stop. Repair that crash gap before reconnect dispatch sees any queued sibling.
+        const durableStopSignal = findDurableNowcoderStopSignal(attached, batch.id);
+        if (durableStopSignal) {
+          try {
+            await this.dependencies.replayDurableJobTerminal?.(durableStopSignal);
+          } finally {
+            await this.onJobTerminal(durableStopSignal);
+          }
+          continue;
+        }
+      }
       if (
         batch.planId === 'nowcoder-agent-market' &&
         batch.status !== 'running' &&
@@ -303,8 +353,6 @@ export class CollectionPlanService {
         continue;
       }
       if (batch.status !== 'running') continue;
-      const jobs = this.dependencies.jobs.list();
-      const attached = jobs.filter(job => job.batchId === batch.id);
       if (batch.planId === 'zsxq-chen-teacher') {
         // 旧运行中批次没有 preparationStatus，也按未完成处理。即使已经创建了
         // 部分子任务，也必须重跑发现/staging；任务 ID 稳定，重放是幂等的。
@@ -354,7 +402,64 @@ export class CollectionPlanService {
   /** Fixed Nowcoder children are valid only while their owning batch is still running. */
   acceptsFixedNowcoderJob(job: Pick<JobRecord, 'batchId' | 'planId'>): boolean {
     if (job.planId !== 'nowcoder-agent-market' || !job.batchId) return true;
-    return this.dependencies.store.get(job.batchId)?.status === 'running';
+    return !this.stoppingNowcoderBatches.has(job.batchId)
+      && this.hasDurableFixedNowcoderParent(job.batchId);
+  }
+
+  /**
+   * Runs a fixed child sink and its durable saved transition under the same batch lock as stop.
+   * The caller publishes terminal notices only after this returns, avoiding plan recursion in lock.
+   */
+  async persistFixedNowcoderChild<T, R>(
+    job: JobRecord,
+    persist: () => Promise<T>,
+    commit: (value: T) => Promise<R>,
+  ): Promise<R | undefined> {
+    if (!job.batchId || job.planId !== 'nowcoder-agent-market' || job.directedRunId) {
+      return await commit(await persist());
+    }
+    return await this.withFixedNowcoderBatchLock(job.batchId, async () => {
+      const current = this.dependencies.jobs.get(job.id);
+      if (
+        !current
+        || current.status === 'saved'
+        || current.status === 'failed'
+        || current.status === 'needs_attention'
+      ) return undefined;
+      if (!this.acceptsFixedNowcoderJob(job)) return undefined;
+      const value = await persist();
+      // A stop that arrives after this lock was acquired linearizes after this commit. It blocks
+      // new work immediately via stoppingNowcoderBatches, but cannot split sink from saved.
+      if (!this.hasDurableFixedNowcoderParent(job.batchId!)) return undefined;
+      return await commit(value);
+    });
+  }
+
+  /**
+   * Serializes a fixed child terminal against its sink+saved commit.  Plan advancement stays
+   * outside this lock: callers publish/notify only after receiving this durable outcome.
+   */
+  async terminalizeFixedNowcoderChild(
+    job: JobRecord,
+    status: 'failed' | 'needs_attention',
+    patch: { errorCode: string; errorMessage: string },
+  ): Promise<{ job?: JobRecord; transitioned: boolean }> {
+    if (!job.batchId || job.planId !== 'nowcoder-agent-market' || job.directedRunId) {
+      return { job: await this.dependencies.jobs.transition(job.id, status, patch), transitioned: true };
+    }
+    return await this.withFixedNowcoderBatchLock(job.batchId, async () => {
+      const current = this.dependencies.jobs.get(job.id);
+      if (!current) return { transitioned: false };
+      if (
+        current.status === 'saved'
+        || current.status === 'failed'
+        || current.status === 'needs_attention'
+      ) return { job: current, transitioned: false };
+      return {
+        job: await this.dependencies.jobs.transition(current.id, status, patch),
+        transitioned: true,
+      };
+    });
   }
 
   async onJobCreated(job: JobRecord): Promise<void> {
@@ -512,6 +617,24 @@ export class CollectionPlanService {
     const currentBatch = this.dependencies.store.get(job.batchId);
     if (currentBatch?.status !== 'running') return;
     if (job.planId === 'zsxq-chen-teacher' && !this.isCurrentJobAttempt(job)) return;
+    // A user-close/recovery-limit is a fail-closed control signal. Handle it before any
+    // unrelated await (coverage/sync) so stopping intent is visible in this same turn.
+    if (job.planId === 'nowcoder-agent-market' && job.errorCode === 'TAB_CLOSED_BY_USER') {
+      await this.stopNowcoderBatch(currentBatch, job, {
+        parentMessage: '用户关闭了牛客采集页面，已停止本次牛客运行',
+        siblingCode: 'PLAN_STOPPED_BY_USER',
+        siblingMessage: '用户关闭了牛客采集页面，所属计划已停止',
+      });
+      return;
+    }
+    if (job.planId === 'nowcoder-agent-market' && job.errorCode === 'RECOVERY_LIMIT_EXCEEDED') {
+      await this.stopNowcoderBatch(currentBatch, job, {
+        parentMessage: '牛客采集任务已用尽自动恢复次数，已停止本次牛客运行',
+        siblingCode: 'PLAN_STOPPED_AFTER_RECOVERY_LIMIT',
+        siblingMessage: '同批任务已用尽自动恢复次数，所属计划已停止',
+      });
+      return;
+    }
     if (job.planId !== 'nowcoder-agent-market' && job.status === 'saved' && !this.coveredJobs.has(job.id)) {
       this.coveredJobs.add(job.id);
       const key = await this.dependencies.coverageKey?.(job);
@@ -527,10 +650,6 @@ export class CollectionPlanService {
     if (job.status !== 'saved' && job.status !== 'failed' && job.status !== 'needs_attention') return;
     if (job.planId === 'zsxq-chen-teacher') {
       await this.reconcileZsxqBatch(job.batchId);
-      return;
-    }
-    if (job.planId === 'nowcoder-agent-market' && job.errorCode === 'TAB_CLOSED_BY_USER') {
-      await this.stopNowcoderBatchForUserClose(currentBatch, job);
       return;
     }
     const reconciled = await this.dependencies.store.reconcile(
@@ -551,35 +670,140 @@ export class CollectionPlanService {
     await this.advanceNowcoderBatch(reconciled);
   }
 
-  private async stopNowcoderBatchForUserClose(batch: CollectionBatch, job: JobRecord): Promise<void> {
-    // Persist the parent stop first. This is the durable dispatch/ingress fence: if the process
-    // exits while terminalizing siblings below, a restart still cannot reopen any queued child.
-    // Reversing this order would leave a crash window where an untouched sibling has a running
-    // parent and can be dispatched by a reconnect.
-    const terminal = await this.dependencies.store.attention(
-      batch.id,
-      '用户关闭了牛客采集页面，已停止本次牛客运行',
-    );
-    for (const sibling of this.dependencies.jobs.list('queued')) {
-      if (sibling.batchId !== batch.id || sibling.id === job.id) continue;
-      await this.dependencies.jobs.transition(sibling.id, 'failed', {
-        errorCode: 'PLAN_STOPPED_BY_USER',
-        errorMessage: '用户关闭了牛客采集页面，所属计划已停止',
+  private async stopNowcoderBatch(
+    batch: CollectionBatch,
+    job: JobRecord,
+    stop: { parentMessage: string; siblingCode: string; siblingMessage: string },
+  ): Promise<void> {
+    // This assignment deliberately precedes the first await. It fail-closes new dispatch and
+    // advance work while an already-acquired persistence lease linearizes before this stop.
+    this.stoppingNowcoderBatches.add(batch.id);
+    try {
+      await this.withFixedNowcoderBatchLock(batch.id, async () => {
+        // Persist the parent stop first. This is the durable dispatch/ingress fence: if the process
+        // exits while terminalizing siblings below, a restart still cannot reopen any queued child.
+        // A concurrent terminal can have won before this invocation got the batch lease. Preserve
+        // that first durable reason; this late invocation still performs idempotent cleanup/recount.
+        const durable = this.dependencies.store.get(batch.id);
+        let terminal = durable?.planId === 'nowcoder-agent-market'
+          && durable.status !== 'running'
+          && durable.selectionStatus === 'completed'
+          ? durable
+          : await this.dependencies.store.stopNowcoder(batch.id, stop.parentMessage);
+        await this.terminalizeQueuedNowcoderSiblings(batch.id, job.id, stop.siblingCode, stop.siblingMessage);
+        terminal = await this.dependencies.store.reconcileStoppedNowcoder(
+          batch.id,
+          this.dependencies.jobs.list(),
+        );
+        await this.persistTerminalBenchmark(terminal);
+        this.clearBatchRuntime(batch.id);
       });
+      this.stoppingNowcoderBatches.delete(batch.id);
+    } catch (error) {
+      // Keep the intent on failure: reopening a partially stopped fixed batch is unsafe.
+      throw error;
     }
-    await this.persistTerminalBenchmark(terminal);
+  }
+
+  private hasDurableFixedNowcoderParent(batchId: string): boolean {
+    const batch = this.dependencies.store.get(batchId);
+    return batch?.planId === 'nowcoder-agent-market'
+      && batch.status === 'running'
+      && batch.selectionStatus !== 'completed';
+  }
+
+  private async withFixedNowcoderBatchLock<T>(
+    batchId: string,
+    operation: () => Promise<T>,
+  ): Promise<T> {
+    const previous = this.fixedNowcoderBatchTails.get(batchId) ?? Promise.resolve();
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const tail = previous.catch(() => undefined).then(async () => await gate);
+    this.fixedNowcoderBatchTails.set(batchId, tail);
+    await previous.catch(() => undefined);
+    try {
+      return await operation();
+    } finally {
+      release();
+      if (this.fixedNowcoderBatchTails.get(batchId) === tail) {
+        this.fixedNowcoderBatchTails.delete(batchId);
+      }
+    }
+  }
+
+  private async cleanStoppedNowcoderChildren(batch: CollectionBatch): Promise<void> {
+    await this.terminalizeQueuedNowcoderSiblings(
+      batch.id,
+      undefined,
+      'PLAN_STOPPED_PARENT',
+      '所属牛客固定计划已结束，任务已清理',
+    );
+    // Parent counters are a frozen selection snapshot after terminalization. Only the active
+    // stop path may recount under its batch lock; reconnect cleanup must not mix detail-job
+    // counters back into an already-finalized selection.
     this.clearBatchRuntime(batch.id);
+  }
+
+  /** A queued snapshot can race a dispatcher; never let one loser abort sibling cleanup. */
+  private async terminalizeQueuedNowcoderSiblings(
+    batchId: string,
+    excludedJobId: string | undefined,
+    errorCode: string,
+    errorMessage: string,
+  ): Promise<void> {
+    const queuedIds = this.dependencies.jobs.list('queued')
+      .filter(job => (
+        job.batchId === batchId
+        && job.planId === 'nowcoder-agent-market'
+        && job.id !== excludedJobId
+      ))
+      .map(job => job.id);
+    for (const id of queuedIds) {
+      try {
+        await this.dependencies.jobs.transition(id, 'failed', { errorCode, errorMessage });
+      } catch (error) {
+        const current = this.dependencies.jobs.get(id);
+        // Another path has already terminalized or claimed it. The durable parent fence makes a
+        // claimed child harmless; continue cleaning the remaining snapshot instead of aborting.
+        if (!current || current.status !== 'queued') continue;
+        throw error;
+      }
+    }
+  }
+
+  private fixedNowcoderHardStopped(batchId: string): boolean {
+    const current = this.dependencies.store.get(batchId);
+    return current?.planId === 'nowcoder-agent-market'
+      && current.status !== 'running'
+      && current.selectionStatus === 'completed';
   }
 
   private async dispatchNextNowcoderJob(batchId: string): Promise<void> {
     const batch = this.dependencies.store.get(batchId);
-    if (!batch || batch.planId !== 'nowcoder-agent-market' || batch.status !== 'running') return;
+    if (
+      !batch
+      || batch.planId !== 'nowcoder-agent-market'
+      || batch.status !== 'running'
+      || batch.selectionStatus === 'completed'
+      || this.stoppingNowcoderBatches.has(batchId)
+    ) return;
+    // This is intentionally before selecting a queued child: a concurrent caller may already
+    // have claimed the first sibling and not yet reached the extension send boundary.
+    if (this.dependencies.jobs.list().some(job => (
+      job.batchId === batchId
+      && job.planId === 'nowcoder-agent-market'
+      && (job.status === 'dispatched' || job.status === 'collecting')
+    ))) return;
     const next = this.dependencies.jobs.list('queued')
       .find(job => job.batchId === batchId && job.planId === 'nowcoder-agent-market');
     if (!next) return;
     try {
       await this.dependencies.dispatch(next);
     } catch (error) {
+      // Another dispatch path may have claimed this queued snapshot while this call awaited.
+      // It is not a dispatch failure and must not overwrite the winner with failed.
+      if (this.dependencies.jobs.get(next.id)?.status !== 'queued') return;
       const failed = await this.dependencies.jobs.transition(next.id, 'failed', {
         errorCode: 'DISPATCH_FAILED',
         errorMessage: error instanceof Error ? error.message : '任务分发失败',
@@ -598,25 +822,32 @@ export class CollectionPlanService {
   }
 
   async advanceNowcoderBatch(batch: CollectionBatch): Promise<void> {
-    if (batch.selectionStatus === 'completed' || this.advancingBatches.has(batch.id)) return;
+    if (
+      batch.selectionStatus === 'completed'
+      || this.stoppingNowcoderBatches.has(batch.id)
+      || this.advancingBatches.has(batch.id)
+    ) return;
     this.advancingBatches.add(batch.id);
     try {
       let current = await this.dependencies.store.attachRecoveredJobs(
         batch.id,
         this.dependencies.jobs.list().filter(job => job.batchId === batch.id).map(job => job.id),
       );
+      if (this.fixedNowcoderHardStopped(current.id) || this.stoppingNowcoderBatches.has(current.id)) return;
       if (current.status !== 'running') {
-        current = current.selectionStatus === 'pending'
-          ? await this.dependencies.store.resumeSelection(batch.id)
-          : await this.dependencies.store.resumeCollection(batch.id);
+        const resumed = await this.resumeNowcoderSelection(current);
+        if (!resumed || resumed.status !== 'running') return;
+        current = resumed;
       }
       while (current.selectionStatus !== 'completed') {
+        if (this.fixedNowcoderHardStopped(current.id) || this.stoppingNowcoderBatches.has(current.id)) return;
         const jobs = this.dependencies.jobs.list();
         const attached = jobs.filter(job => job.batchId === current.id);
         let prepared: Awaited<ReturnType<CollectionPlanService['selectSaved']>>;
         try {
           prepared = await this.selectSaved(current, attached);
         } catch (error) {
+          if (this.fixedNowcoderHardStopped(current.id) || this.stoppingNowcoderBatches.has(current.id)) return;
           const terminal = await this.dependencies.store.attention(
             current.id,
             `牛客真实性筛选失败：${error instanceof Error ? error.message : String(error)}`,
@@ -625,6 +856,7 @@ export class CollectionPlanService {
           this.clearBatchRuntime(current.id);
           return;
         }
+        if (this.fixedNowcoderHardStopped(current.id) || this.stoppingNowcoderBatches.has(current.id)) return;
 
         const target = FE_JOURNEY_PRESET.nowcoder.planTargetAccepted;
         if (prepared.selection.accepted.length >= target) {
@@ -664,6 +896,7 @@ export class CollectionPlanService {
         try {
           next = await this.discoverRound(current, Math.min(roundSize, budget - attached.length));
         } catch (error) {
+          if (this.fixedNowcoderHardStopped(current.id) || this.stoppingNowcoderBatches.has(current.id)) return;
           const terminal = await this.dependencies.store.fail(
             current.id,
             error instanceof Error ? error.message : '固定采集计划执行失败',
@@ -672,12 +905,15 @@ export class CollectionPlanService {
           this.clearBatchRuntime(current.id);
           return;
         }
+        if (this.fixedNowcoderHardStopped(current.id) || this.stoppingNowcoderBatches.has(current.id)) return;
         if (next.length === 0) {
           await this.attentionWithoutDelivery(current, prepared, '公开候选已耗尽');
           return;
         }
 
-        await this.dependencies.store.resumeCollection(current.id);
+        const resumed = await this.resumeNowcoderCollection(current);
+        if (!resumed || resumed.status !== 'running' || resumed.selectionStatus === 'completed') return;
+        current = resumed;
         current = await this.createAttachAndDispatch(current, attached.length, next);
         if (!this.nowcoderRoundTerminal(current.id)) return;
       }
@@ -738,6 +974,8 @@ export class CollectionPlanService {
     attachedCount: number,
     candidates: readonly NowcoderDiscoveryCandidate[],
   ): Promise<CollectionBatch> {
+    const active = this.dependencies.store.get(batch.id);
+    if (!active || active.status !== 'running' || active.selectionStatus === 'completed') return active ?? batch;
     const staged: JobRecord[] = [];
     for (const candidate of candidates) {
       staged.push(await this.dependencies.jobs.create({
@@ -748,16 +986,65 @@ export class CollectionPlanService {
         planId: batch.planId,
       }));
     }
-    await this.dependencies.store.markDiscovery(
+    const discovered = await this.dependencies.store.markDiscovery(
       batch.id,
       Math.max(batch.discovered, attachedCount + staged.length),
       batch.coverage ?? { bytedance: 0, tencent: 0, alibaba: 0, ant: 0, other: 0 },
       batch.rejections ?? {},
     );
-    await this.dependencies.store.attachRound(batch.id, staged.map(job => job.id));
-    await this.dependencies.store.markSelectionPending(batch.id);
+    if (!discovered) {
+      await this.failNowcoderOrphans(staged);
+      return this.dependencies.store.get(batch.id) ?? batch;
+    }
+    const attached = await this.dependencies.store.attachRound(batch.id, staged.map(job => job.id));
+    if (!attached) {
+      await this.failNowcoderOrphans(staged);
+      return this.dependencies.store.get(batch.id) ?? batch;
+    }
+    if (!await this.dependencies.store.markSelectionPending(batch.id)) {
+      await this.cleanStoppedNowcoderChildren(this.dependencies.store.get(batch.id) ?? batch);
+      return this.dependencies.store.get(batch.id) ?? batch;
+    }
     await this.dispatchNextNowcoderJob(batch.id);
     return this.dependencies.store.reconcile(batch.id, this.dependencies.jobs.list());
+  }
+
+  private async failNowcoderOrphans(jobs: readonly JobRecord[]): Promise<void> {
+    for (const orphan of jobs) {
+      if (this.dependencies.jobs.get(orphan.id)?.status !== 'queued') continue;
+      await this.dependencies.jobs.transition(orphan.id, 'failed', {
+        errorCode: 'PLAN_STOPPED_PARENT',
+        errorMessage: '所属牛客固定计划已结束，未归属任务已清理',
+      });
+    }
+  }
+
+  /** Keep store's explicit invalid-state throws, but treat a concurrent hard-stop as a fence. */
+  private async resumeNowcoderSelection(batch: CollectionBatch): Promise<CollectionBatch | undefined> {
+    const current = this.dependencies.store.get(batch.id);
+    if (!current || current.selectionStatus === 'completed') return current;
+    if (current.status === 'running') return current;
+    try {
+      return current.selectionStatus === 'pending'
+        ? await this.dependencies.store.resumeSelection(current.id)
+        : await this.dependencies.store.resumeCollection(current.id);
+    } catch (error) {
+      const after = this.dependencies.store.get(batch.id);
+      if (!after || after.selectionStatus === 'completed') return after;
+      throw error;
+    }
+  }
+
+  private async resumeNowcoderCollection(batch: CollectionBatch): Promise<CollectionBatch | undefined> {
+    const current = this.dependencies.store.get(batch.id);
+    if (!current || current.selectionStatus === 'completed') return current;
+    try {
+      return await this.dependencies.store.resumeCollection(current.id);
+    } catch (error) {
+      const after = this.dependencies.store.get(batch.id);
+      if (!after || after.selectionStatus === 'completed') return after;
+      throw error;
+    }
   }
 
   private async finalizeExactTen(
@@ -784,6 +1071,7 @@ export class CollectionPlanService {
         }
       }
     }
+    if (this.fixedNowcoderHardStopped(batch.id) || this.stoppingNowcoderBatches.has(batch.id)) return;
     const syncErrors = this.batchSyncErrors.get(batch.id);
     if (syncErrors?.length || delivered.size !== accepted.length) {
       const message = syncErrors?.length
@@ -800,6 +1088,7 @@ export class CollectionPlanService {
       prepared.selection.coverage,
       prepared.rejectionCounts,
     );
+    if (this.fixedNowcoderHardStopped(batch.id) || this.stoppingNowcoderBatches.has(batch.id)) return;
     const terminal = await this.dependencies.store.finalizeSelection(
       batch.id,
       accepted.length,
@@ -824,6 +1113,7 @@ export class CollectionPlanService {
       prepared.selection.coverage,
       prepared.rejectionCounts,
     );
+    if (this.fixedNowcoderHardStopped(batch.id) || this.stoppingNowcoderBatches.has(batch.id)) return;
     const terminal = await this.dependencies.store.finalizeSelection(
       batch.id,
       prepared.selection.accepted.length,

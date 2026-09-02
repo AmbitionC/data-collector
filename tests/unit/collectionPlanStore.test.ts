@@ -225,6 +225,143 @@ describe('CollectionPlanStore', () => {
     await expect(store.resumeCollection(batch.id)).rejects.toThrow('已完成筛选');
   });
 
+  it('keeps finalized Nowcoder counters valid when accepted pending candidates exceed this batch', async () => {
+    const root = await temporaryDirectories.create('plan-store-pending-pool-finalize-');
+    const path = join(root, 'plans.json');
+    const store = await CollectionPlanStore.open(path, () => '2026-09-02T01:00:00.000Z');
+    const batch = await store.start('nowcoder-agent-market');
+    const failedIds = Array.from({ length: 24 }, (_, index) => `failed-detail-${index + 1}`);
+    await store.markDiscovery(batch.id, failedIds.length);
+    await store.attachRound(batch.id, failedIds);
+    await store.markSelectionPending(batch.id);
+    await store.reconcile(batch.id, failedIds.map(id => job(id, 'failed', 'COLLECTION_FAILED')));
+
+    const finalized = await store.finalizeSelection(
+      batch.id,
+      2,
+      { bytedance: 2 },
+      {},
+    );
+
+    expect(finalized).toMatchObject({
+      discovered: 26,
+      accepted: 2,
+      saved: 2,
+      skipped: 0,
+      failed: 24,
+      needsAttention: 0,
+    });
+    expect((await CollectionPlanStore.open(path)).get(batch.id)).toEqual(finalized);
+  });
+
+  it('repairs terminal Nowcoder counters corrupted by a legacy reconnect recount', async () => {
+    const root = await temporaryDirectories.create('plan-store-legacy-nowcoder-counters-');
+    const path = join(root, 'plans.json');
+    const reconnectRecount = {
+      id: 'nowcoder-agent-market-legacy-recount',
+      planId: 'nowcoder-agent-market',
+      status: 'completed_with_attention',
+      startedAt: '2026-09-02T01:00:00.000Z',
+      finishedAt: '2026-09-02T02:00:00.000Z',
+      discovered: 24,
+      accepted: 1,
+      saved: 24,
+      skipped: 23,
+      failed: 0,
+      needsAttention: 0,
+      deliveryIds: ['0123456789ab'],
+      trigger: 'scheduled',
+      selectionStatus: 'completed',
+      rounds: 5,
+      error: '牛客合格候选不足 10 条（1/10）',
+      jobIds: Array.from({ length: 24 }, (_, index) => `legacy-job-${index + 1}`),
+    };
+    const pendingPool = {
+      ...reconnectRecount,
+      id: 'nowcoder-agent-market-legacy-pending-pool',
+      discovered: 24,
+      accepted: 2,
+      saved: 2,
+      skipped: 0,
+      failed: 24,
+      jobIds: Array.from({ length: 24 }, (_, index) => `pending-job-${index + 1}`),
+    };
+    await writeFile(path, `${JSON.stringify({
+      version: 1,
+      batches: [reconnectRecount, pendingPool],
+    })}\n`, 'utf8');
+
+    const reopened = await CollectionPlanStore.open(path);
+
+    expect(reopened.get(reconnectRecount.id)).toMatchObject({
+      discovered: 24,
+      accepted: 1,
+      saved: 1,
+      skipped: 23,
+      failed: 0,
+      needsAttention: 0,
+    });
+    expect(reopened.get(pendingPool.id)).toMatchObject({
+      discovered: 26,
+      accepted: 2,
+      saved: 2,
+      skipped: 0,
+      failed: 24,
+      needsAttention: 0,
+    });
+    const persisted = JSON.parse(await readFile(path, 'utf8')) as {
+      batches: Array<typeof reconnectRecount>;
+    };
+    expect(persisted.batches.every(item => {
+      const { jobIds: _jobIds, ...batch } = item;
+      return collectionBatchSchema.safeParse(batch).success;
+    })).toBe(true);
+  });
+
+  it('does not apply the legacy counter migration to another collection source', async () => {
+    const root = await temporaryDirectories.create('plan-store-invalid-other-source-');
+    const path = join(root, 'plans.json');
+    await writeFile(path, `${JSON.stringify({
+      version: 1,
+      batches: [{
+        id: 'zsxq-overflow',
+        planId: 'zsxq-chen-teacher',
+        status: 'completed_with_attention',
+        startedAt: '2026-09-02T00:00:00.000Z',
+        finishedAt: '2026-09-02T01:00:00.000Z',
+        discovered: 1,
+        accepted: 1,
+        saved: 1,
+        skipped: 1,
+        failed: 0,
+        needsAttention: 0,
+        deliveryIds: [],
+        preparationStatus: 'completed',
+        jobIds: ['zsxq-job'],
+      }],
+    })}\n`, 'utf8');
+
+    await expect(CollectionPlanStore.open(path)).rejects.toThrow('采集批次文件格式无效');
+  });
+
+  it('does not reopen a hard-stopped Nowcoder batch when late sync finalization arrives', async () => {
+    const root = await temporaryDirectories.create('plan-store-hard-stop-finalize-');
+    const store = await CollectionPlanStore.open(
+      join(root, 'plans.json'),
+      () => '2026-09-03T01:00:00.000Z',
+    );
+    const batch = await store.start('nowcoder-agent-market');
+    await store.stopNowcoder(batch.id, '用户关闭采集页面');
+
+    const retried = await store.retrySelection(batch.id, '迟到的同步失败');
+    const finalized = await store.finalizeSelection(batch.id, 10, { bytedance: 10 }, {});
+
+    expect(retried).toMatchObject({
+      status: 'completed_with_attention', selectionStatus: 'completed', error: '用户关闭采集页面',
+    });
+    expect(finalized).toEqual(retried);
+  });
+
   it('rolls back the live finalized batch when its atomic persistence fails', async () => {
     const root = await temporaryDirectories.create('plan-store-finalize-rollback-');
     const path = join(root, 'plans.json');
