@@ -2065,6 +2065,33 @@ describe('extension job runner', () => {
     expect(tabs.removed).toEqual([42, 42, 42, 42]);
   });
 
+  it('deduplicates an in-flight ordinary collect request across a reconnect resend', async () => {
+    const tabs = new InMemoryTabs();
+    const bridge = new InMemoryBridge();
+    let release!: () => void;
+    let started!: () => void;
+    const loading = new Promise<void>(resolve => { release = resolve; });
+    const opened = new Promise<void>(resolve => { started = resolve; });
+    const runner = new JobRunner({
+      tabs,
+      bridge,
+      waitForTabComplete: async () => {
+        started();
+        await loading;
+      },
+    });
+
+    const first = runner.runRemoteJob('fixed-nowcoder-request', URL, false);
+    await opened;
+    const duplicate = runner.runRemoteJob('fixed-nowcoder-request', URL, false);
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect(tabs.created).toHaveLength(1);
+
+    release();
+    await Promise.all([first, duplicate]);
+    expect(bridge.sent.filter(message => message.type === 'job.result')).toHaveLength(1);
+  });
+
   it('caches cancel-before-collect and replays the exact terminal without opening a tab', async () => {
     const tabs = new InMemoryTabs();
     const bridge = new InMemoryBridge();
@@ -2345,6 +2372,33 @@ describe('extension job runner', () => {
     const error = bridge.sent.find(message => message.type === 'job.error');
     expect((error?.payload as { code: string }).code).toBe('COLLECTION_FAILED');
     expect(tabs.removed).toContain(42);
+  });
+
+  it('reports an owned tab close as an explicit user stop', async () => {
+    const tabs = new InMemoryTabs();
+    const bridge = new InMemoryBridge();
+    const runner = new JobRunner({
+      tabs,
+      bridge,
+      waitForTabComplete: async () => {
+        const error = new Error('采集标签页已关闭');
+        error.name = 'CollectorTabClosedError';
+        throw error;
+      },
+    });
+
+    await runner.runRemoteJob('user-closed-tab', URL, false);
+
+    const errors = bridge.sent.filter(message => message.type === 'job.error');
+    expect(errors).toHaveLength(1);
+    expect(errors[0]).toMatchObject({
+      requestId: 'user-closed-tab',
+      payload: {
+        code: 'TAB_CLOSED_BY_USER',
+        needsAttention: false,
+      },
+    });
+    expect(tabs.removed).toEqual([42]);
   });
 
   it('opens a background tab, returns content, and closes the created tab', async () => {

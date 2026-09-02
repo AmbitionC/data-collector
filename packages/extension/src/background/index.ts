@@ -100,7 +100,9 @@ function waitForTabComplete(
       const onRemoved = (removedId: number) => {
         if (removedId === tabId) {
           cleanup();
-          reject(new Error('采集标签页已关闭'));
+          const error = new Error('采集标签页已关闭');
+          error.name = 'CollectorTabClosedError';
+          reject(error);
         }
       };
       const onAbort = () => {

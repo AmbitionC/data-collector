@@ -161,6 +161,27 @@ describe('side panel state mapping', () => {
     expect(document.querySelector('#plans-panel')?.textContent).not.toContain('8入选');
   });
 
+  it('shows the directed Nowcoder notice only while the server reports an active run', () => {
+    const planActions = actions as SidePanelActions & {
+      runPlan: ReturnType<typeof vi.fn>;
+      openPlanSource: ReturnType<typeof vi.fn>;
+    };
+    planActions.runPlan = vi.fn(async () => undefined);
+    planActions.openPlanSource = vi.fn();
+
+    renderSidePanel(document, {
+      phase: 'plans', loading: false, plans: [], directedRunActive: true,
+    }, planActions);
+    const notice = document.querySelector<HTMLElement>('#plans-directed-status')!;
+    expect(notice.hidden).toBe(false);
+    expect(notice.textContent).toContain('定向任务正在运行');
+
+    renderSidePanel(document, {
+      phase: 'plans', loading: false, plans: [], directedRunActive: false,
+    }, planActions);
+    expect(notice.hidden).toBe(true);
+  });
+
   it('adds a top-level 任务 tab', () => {
     const planActions = actions as SidePanelActions & { openPage: ReturnType<typeof vi.fn> };
     renderTopNav(document, 'plans' as never, planActions);

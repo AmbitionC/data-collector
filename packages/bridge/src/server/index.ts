@@ -462,7 +462,7 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
   );
   // Ordinary/fixed-plan jobs keep the existing recovery behavior. Directed jobs are recovered
   // later from the durable current-run/current-round fence so an old attempt never becomes queued.
-  await jobs.recover(new Set(
+  const startupRecovery = await jobs.recover(new Set(
     jobs.list().filter(job => job.directedRunId !== undefined).map(job => job.id),
   ));
   let planStore: CollectionPlanStore | undefined;
@@ -534,6 +534,8 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
   let extensionReady = false;
   let extensionVersion: string | undefined;
   let extensionBuildId: string | undefined;
+  /** Retained across a socket replacement so a living Service Worker is not recovered as a crash. */
+  let lastExtensionRuntimeId: string | undefined;
   const extensionRuntime = new WeakMap<WebSocket, {
     version: string;
     buildId?: string;
@@ -772,6 +774,12 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
   };
   let updateTimer: NodeJS.Timeout | undefined;
 
+  const isFixedNowcoderChild = (job: Pick<JobRecord, 'batchId' | 'planId' | 'directedRunId'>): boolean => (
+    job.planId === 'nowcoder-agent-market'
+    && job.batchId !== undefined
+    && job.directedRunId === undefined
+  );
+
   const dispatch = async (job: JobRecord, targetSocket = extensionSocket): Promise<void> => {
     if (
       !targetSocket ||
@@ -782,6 +790,16 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
     ) return;
     if (job.directedRunId && !directedService?.canDispatch(job)) return;
     if (job.directedRunId && !await directedService?.guardJobBoundary(job, 'before-dispatch')) return;
+    if (isFixedNowcoderChild(job) && (
+      !collectionPlans || !collectionPlans.acceptsFixedNowcoderJob(job)
+    )) {
+      const failed = await jobs.transition(job.id, 'failed', {
+        errorCode: 'STALE_PLAN_RUN',
+        errorMessage: '牛客固定采集计划已结束，任务未派发',
+      });
+      await notifyJobTerminal(failed);
+      return;
+    }
     const zsxqJob = isZsxqJob(job);
     // 恢复中的子任务也必须服从完整正文能力门禁。artifact 可能在 Bridge 运行中
     // 被打包流程原地替换，所以每次 dispatch 都重新读磁盘，不能信启动时快照。
@@ -893,7 +911,22 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
   };
 
   const dispatchQueued = async (targetSocket = extensionSocket): Promise<void> => {
-    for (const job of jobs.list('queued')) await dispatch(job, targetSocket);
+    const fixedBatchesDispatched = new Set<string>();
+    for (const job of jobs.list('queued')) {
+      if (isFixedNowcoderChild(job)) {
+        const batchId = job.batchId!;
+        if (fixedBatchesDispatched.has(batchId)) continue;
+        const hasInFlightSibling = jobs.list().some(sibling => (
+          sibling.id !== job.id
+          && sibling.batchId === batchId
+          && sibling.planId === 'nowcoder-agent-market'
+          && (sibling.status === 'dispatched' || sibling.status === 'collecting')
+        ));
+        if (hasInFlightSibling) continue;
+        fixedBatchesDispatched.add(batchId);
+      }
+      await dispatch(job, targetSocket);
+    }
   };
   const collectorFetcher = options.fetch ?? fetch;
 
@@ -1183,6 +1216,9 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
         },
       })
     : undefined;
+  for (const terminal of startupRecovery.terminalized) {
+    await notifyJobTerminal(terminal);
+  }
 
   const feJourneyConfigured = sinksConfig.sinks['fe-journey']?.type === 'repo-inbox';
   const feJourneyEnabled = feJourneyConfigured && Boolean(candidateIndex);
@@ -1235,6 +1271,8 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
     const parsedEnvelope = wsEnvelopeSchema.parse(JSON.parse(messageText(data)));
     if (parsedEnvelope.type === 'extension.hello') {
       const hello = extensionHelloPayloadSchema.parse(parsedEnvelope.payload);
+      const sameRuntimeReconnect = hello.runtimeId !== undefined
+        && hello.runtimeId === lastExtensionRuntimeId;
       // Record authenticated socket evidence while this socket is deliberately not ready. Active
       // directed recovery validates/appends it before any reconnect path can dispatch work.
       const helloArtifactBuildId = await refreshArtifactBuildId();
@@ -1245,6 +1283,7 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
         ...(hello.runtimeId ? { runtimeId: hello.runtimeId } : {}),
         capabilities: [...(hello.capabilities ?? [])],
       });
+      lastExtensionRuntimeId = hello.runtimeId;
       if (
         hello.buildId !== undefined
         && hello.buildId === helloArtifactBuildId
@@ -1261,11 +1300,15 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
         }
       }
       if (socket !== extensionSocket) return;
-      if (!extensionReady) {
-        await jobs.recover(new Set([
+      if (!extensionReady && !sameRuntimeReconnect) {
+        const recovered = await jobs.recover(new Set([
           ...persistingJobIds,
           ...jobs.list().filter(job => job.directedRunId !== undefined).map(job => job.id),
         ]));
+        for (const terminal of recovered.terminalized) {
+          publishDurableJobNotice(terminal);
+          await notifyJobTerminal(terminal);
+        }
       }
       // recover 会触发文件 I/O；等待期间这个 socket 可能已被新版连接替换。
       if (socket !== extensionSocket) return;
@@ -1343,6 +1386,17 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
     }
     const job = jobs.get(parsedEnvelope.requestId);
     if (!job) throw new Error(`任务不存在：${parsedEnvelope.requestId}`);
+    if (isFixedNowcoderChild(job) && (
+      !collectionPlans || !collectionPlans.acceptsFixedNowcoderJob(job)
+    )) {
+      if (job.status === 'saved' || job.status === 'failed' || job.status === 'needs_attention') return;
+      const failed = await jobs.transition(job.id, 'failed', {
+        errorCode: 'STALE_PLAN_RUN',
+        errorMessage: '牛客固定采集计划已结束，迟到结果已拒绝',
+      });
+      await notifyJobTerminal(failed);
+      return;
+    }
     if (
       job.directedRunId
       && directedService?.acceptsCancellationTerminal(job)
@@ -1626,6 +1680,13 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
         errorCode: error.code,
         errorMessage: error.message,
       });
+      if (
+        terminal.directedRunId
+        && terminal.directedRunAttempt
+        && error.code === 'TAB_CLOSED_BY_USER'
+      ) {
+        await directedService?.cancelRun(terminal.directedRunId, terminal.directedRunAttempt);
+      }
       publishDurableJobNotice(terminal);
       await notifyJobTerminal(
         terminal,
@@ -1855,7 +1916,10 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
       if (!collectionPlans) {
         throw new HttpError(409, 'COLLECTION_PLANS_UNAVAILABLE', planStoreError ?? '固定采集计划不可用');
       }
-      return sendJson(response, 200, collectionPlans.status());
+      return sendJson(response, 200, {
+        ...collectionPlans.status(),
+        directedRunActive: directedService?.hasActiveRun() ?? false,
+      });
     }
     if (request.method === 'GET' && requestUrl.pathname === '/v1/plans/batches') {
       if (!collectionPlans) {

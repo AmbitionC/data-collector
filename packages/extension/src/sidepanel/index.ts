@@ -9,6 +9,7 @@ import {
   type ItemFilter,
   type LibraryEntry,
   type CollectionPlanStatus,
+  type PlansStatusResponse,
   type TopPage,
   type SyncFilter,
   type SidePanelActions,
@@ -80,6 +81,7 @@ let plans: CollectionPlanStatus[] = [];
 let plansLoading = false;
 let plansError: string | undefined;
 let runningPlanId: CollectionPlanStatus['id'] | undefined;
+let directedRunActive = false;
 
 function plansState(): SidePanelState {
   return {
@@ -87,6 +89,7 @@ function plansState(): SidePanelState {
     plans,
     loading: plansLoading,
     ...(runningPlanId ? { runningPlanId } : {}),
+    ...(directedRunActive ? { directedRunActive } : {}),
     ...(plansError ? { error: plansError } : {}),
   };
 }
@@ -96,8 +99,9 @@ async function loadPlans(): Promise<void> {
   plansError = undefined;
   renderSidePanel(document, plansState(), actions);
   try {
-    const status = await message<{ plans: CollectionPlanStatus[] }>({ type: 'plans.status' });
+    const status = await message<PlansStatusResponse>({ type: 'plans.status' });
     plans = status.plans;
+    directedRunActive = status.directedRunActive === true;
   } catch (error) {
     plansError = errorMessage(error, '读取采集任务失败。');
   } finally {

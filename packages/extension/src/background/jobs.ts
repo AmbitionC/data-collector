@@ -501,6 +501,11 @@ function isContentScriptOutdated(error: unknown): boolean {
   return /CONTENT_SCRIPT_OUTDATED/u.test(message);
 }
 
+function isCollectorTabClosedByUser(error: unknown): boolean {
+  if (!(error instanceof Error)) return false;
+  return error.name === 'CollectorTabClosedError' || /No tab with id/i.test(error.message);
+}
+
 function isContentScriptRequestTimeout(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error);
   return /页面交互「[^」]+」超时（60 秒）/u.test(message);
@@ -666,6 +671,12 @@ interface ZsxqPlanPhaseResult {
 
 export class JobRunner {
   private readonly remoteScheduler = new RemoteJobScheduler(2);
+  /**
+   * A reconnect may resend a fixed-plan request while this Service Worker still owns its tab.
+   * Keep that request id linearized until the original terminal is emitted so the resend joins
+   * the existing work instead of creating a second owned tab for the same Bridge job.
+   */
+  private readonly remoteJobs = new Map<string, Promise<void>>();
   private readonly directedRemoteJobs = new Map<string, DirectedRemoteJobLifecycle>();
   private batchStopped = false;
 
@@ -2408,10 +2419,17 @@ export class JobRunner {
     ownership?: DirectedRemoteJobOwnership,
   ): Promise<void> {
     if (!ownership) {
-      return this.remoteScheduler.run(
+      const existing = this.remoteJobs.get(requestId);
+      if (existing) return existing;
+      const work = this.remoteScheduler.run(
         () => this.runRemoteJobNow(requestId, rawUrl, interactive),
         interactive ? 'interactive' : 'batch',
       );
+      const tracked = work.finally(() => {
+        if (this.remoteJobs.get(requestId) === tracked) this.remoteJobs.delete(requestId);
+      });
+      this.remoteJobs.set(requestId, tracked);
+      return tracked;
     }
 
     const existing = this.directedRemoteJobs.get(requestId);
@@ -2571,14 +2589,17 @@ export class JobRunner {
         lifecycle.pendingTerminal = terminal;
       } else {
         const outdated = isContentScriptOutdated(error);
+        const tabClosedByUser = isCollectorTabClosedByUser(error);
         sendTerminal('job.error', {
-          code: outdated
+          code: tabClosedByUser
+            ? 'TAB_CLOSED_BY_USER'
+            : outdated
             ? 'CONTENT_SCRIPT_OUTDATED'
             : error instanceof Error && error.message.includes('不支持的采集地址')
               ? 'UNSUPPORTED_URL'
               : 'COLLECTION_FAILED',
           message: error instanceof Error ? error.message : '浏览器采集失败',
-          needsAttention: outdated,
+          needsAttention: outdated && !tabClosedByUser,
         });
       }
     } finally {

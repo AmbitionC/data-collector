@@ -15,6 +15,12 @@ export interface CollectionPlanStatus {
   latest?: CollectionBatch;
 }
 
+/** 固定计划页的服务端状态；定向牛客运行会阻止固定任务被错误地判成空闲。 */
+export interface PlansStatusResponse {
+  plans: CollectionPlanStatus[];
+  directedRunActive?: boolean;
+}
+
 /** 已入库的一条内容。 */
 export interface LibraryEntry {
   id: string;
@@ -178,6 +184,7 @@ export type SidePanelState =
       plans: CollectionPlanStatus[];
       loading: boolean;
       runningPlanId?: CollectionPlanId;
+      directedRunActive?: boolean;
       error?: string;
     }
   | {
@@ -957,11 +964,16 @@ function renderPlans(
   const list = required<HTMLElement>(document, '#plans-list');
   const empty = required<HTMLElement>(document, '#plans-empty');
   const error = required<HTMLElement>(document, '#plans-error');
+  const directed = required<HTMLElement>(document, '#plans-directed-status');
   list.replaceChildren();
   empty.hidden = state.loading || state.plans.length > 0;
   empty.textContent = state.loading ? '正在读取任务…' : '还没有可用的采集计划。';
   error.hidden = !state.error;
   error.textContent = state.error ?? '';
+  directed.hidden = !state.directedRunActive;
+  directed.textContent = state.directedRunActive
+    ? '牛客定向任务正在运行；固定牛客采集会在它结束后再开始。'
+    : '';
 
   for (const plan of state.plans) {
     const copy = PLAN_PRESENTATION[plan.id];

@@ -351,6 +351,12 @@ export class CollectionPlanService {
     return batch?.status === 'running' && batch.preparationAttempt === job.planAttempt;
   }
 
+  /** Fixed Nowcoder children are valid only while their owning batch is still running. */
+  acceptsFixedNowcoderJob(job: Pick<JobRecord, 'batchId' | 'planId'>): boolean {
+    if (job.planId !== 'nowcoder-agent-market' || !job.batchId) return true;
+    return this.dependencies.store.get(job.batchId)?.status === 'running';
+  }
+
   async onJobCreated(job: JobRecord): Promise<void> {
     if (!job.batchId || !job.planId) return;
     await this.dependencies.store.attachJob(job.batchId, job.id, job.planAttempt);
@@ -523,6 +529,10 @@ export class CollectionPlanService {
       await this.reconcileZsxqBatch(job.batchId);
       return;
     }
+    if (job.planId === 'nowcoder-agent-market' && job.errorCode === 'TAB_CLOSED_BY_USER') {
+      await this.stopNowcoderBatchForUserClose(currentBatch, job);
+      return;
+    }
     const reconciled = await this.dependencies.store.reconcile(
       job.batchId,
       this.dependencies.jobs.list(),
@@ -534,8 +544,48 @@ export class CollectionPlanService {
       }
       return;
     }
-    if (!this.nowcoderRoundTerminal(reconciled.id)) return;
+    if (!this.nowcoderRoundTerminal(reconciled.id)) {
+      await this.dispatchNextNowcoderJob(reconciled.id);
+      return;
+    }
     await this.advanceNowcoderBatch(reconciled);
+  }
+
+  private async stopNowcoderBatchForUserClose(batch: CollectionBatch, job: JobRecord): Promise<void> {
+    // Persist the parent stop first. This is the durable dispatch/ingress fence: if the process
+    // exits while terminalizing siblings below, a restart still cannot reopen any queued child.
+    // Reversing this order would leave a crash window where an untouched sibling has a running
+    // parent and can be dispatched by a reconnect.
+    const terminal = await this.dependencies.store.attention(
+      batch.id,
+      '用户关闭了牛客采集页面，已停止本次牛客运行',
+    );
+    for (const sibling of this.dependencies.jobs.list('queued')) {
+      if (sibling.batchId !== batch.id || sibling.id === job.id) continue;
+      await this.dependencies.jobs.transition(sibling.id, 'failed', {
+        errorCode: 'PLAN_STOPPED_BY_USER',
+        errorMessage: '用户关闭了牛客采集页面，所属计划已停止',
+      });
+    }
+    await this.persistTerminalBenchmark(terminal);
+    this.clearBatchRuntime(batch.id);
+  }
+
+  private async dispatchNextNowcoderJob(batchId: string): Promise<void> {
+    const batch = this.dependencies.store.get(batchId);
+    if (!batch || batch.planId !== 'nowcoder-agent-market' || batch.status !== 'running') return;
+    const next = this.dependencies.jobs.list('queued')
+      .find(job => job.batchId === batchId && job.planId === 'nowcoder-agent-market');
+    if (!next) return;
+    try {
+      await this.dependencies.dispatch(next);
+    } catch (error) {
+      const failed = await this.dependencies.jobs.transition(next.id, 'failed', {
+        errorCode: 'DISPATCH_FAILED',
+        errorMessage: error instanceof Error ? error.message : '任务分发失败',
+      });
+      await this.onJobTerminal(failed);
+    }
   }
 
   /** 记录 Bridge 运行期防线拒绝的计划子任务，再按终态推进批次。 */
@@ -706,16 +756,7 @@ export class CollectionPlanService {
     );
     await this.dependencies.store.attachRound(batch.id, staged.map(job => job.id));
     await this.dependencies.store.markSelectionPending(batch.id);
-    for (const job of staged) {
-      try {
-        await this.dependencies.dispatch(job);
-      } catch (error) {
-        await this.dependencies.jobs.transition(job.id, 'failed', {
-          errorCode: 'DISPATCH_FAILED',
-          errorMessage: error instanceof Error ? error.message : '任务分发失败',
-        });
-      }
-    }
+    await this.dispatchNextNowcoderJob(batch.id);
     return this.dependencies.store.reconcile(batch.id, this.dependencies.jobs.list());
   }
 

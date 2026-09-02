@@ -1378,7 +1378,7 @@ describe('extension Bridge connection', () => {
     const fetcher = vi.fn<typeof fetch>(async (input, init) => {
       const url = String(input);
       if (url.endsWith('/v1/plans/status')) {
-        return new Response(JSON.stringify({ plans: [] }), {
+        return new Response(JSON.stringify({ plans: [], directedRunActive: true }), {
           status: 200,
           headers: { 'content-type': 'application/json' },
         });
@@ -1395,7 +1395,7 @@ describe('extension Bridge connection', () => {
     });
     const connection = new BridgeConnection(dependencies(storage, () => new MemorySocket(), fetcher));
 
-    await expect(connection.planStatus()).resolves.toEqual({ plans: [] });
+    await expect(connection.planStatus()).resolves.toEqual({ plans: [], directedRunActive: true });
     await expect(connection.runPlan('nowcoder-agent-market', true)).resolves.toEqual({
       batch: { id: 'batch-1' },
     });

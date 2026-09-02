@@ -386,19 +386,62 @@ describe('CollectionPlanService', () => {
     expect(context.planMessages).toHaveLength(2);
   });
 
-  it('dispatches eight detail jobs in the initial Nowcoder target-fill round', async () => {
+  it('keeps only one detail job in flight in the initial Nowcoder target-fill round', async () => {
     const context = await fixture({ candidates: nowcoderCandidates(12) });
 
     const batch = await context.service.run('nowcoder-agent-market', { force: true });
     const attached = context.jobs.list().filter(job => job.batchId === batch.id);
 
     expect(attached).toHaveLength(8);
-    expect(context.dispatched).toHaveLength(8);
+    expect(context.dispatched).toHaveLength(1);
     expect(context.store.latest('nowcoder-agent-market', 1)[0]).toMatchObject({
       status: 'running',
       rounds: 1,
       accepted: 8,
     });
+  });
+
+  it('stops a fixed Nowcoder batch when the user closes its owned detail tab', async () => {
+    const context = await fixture({ candidates: nowcoderCandidates(12) });
+    const batch = await context.service.run('nowcoder-agent-market', { force: true });
+    const [current, ...siblings] = context.jobs.list().filter(job => job.batchId === batch.id);
+
+    expect(context.dispatched).toEqual([current!.id]);
+    await context.jobs.transition(current!.id, 'collecting');
+    const closed = await context.jobs.transition(current!.id, 'failed', {
+      errorCode: 'TAB_CLOSED_BY_USER',
+      errorMessage: '采集标签页已关闭',
+    });
+    await context.service.onJobTerminal(closed);
+
+    expect(context.store.get(batch.id)).toMatchObject({
+      status: 'completed_with_attention',
+      error: expect.stringContaining('用户关闭'),
+    });
+    expect(context.jobs.list().filter(job => job.batchId === batch.id)).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: closed.id, status: 'failed', errorCode: 'TAB_CLOSED_BY_USER' }),
+      ...siblings.map(job => expect.objectContaining({
+        id: job.id,
+        status: 'failed',
+        errorCode: 'PLAN_STOPPED_BY_USER',
+      })),
+    ]));
+    expect(context.dispatched).toHaveLength(1);
+  });
+
+  it('releases the next fixed Nowcoder detail only after the current child is terminal', async () => {
+    const context = await fixture({ candidates: nowcoderCandidates(12) });
+    const batch = await context.service.run('nowcoder-agent-market', { force: true });
+    const [first, second] = context.jobs.list().filter(job => job.batchId === batch.id);
+
+    expect(context.dispatched).toEqual([first!.id]);
+    await context.jobs.transition(first!.id, 'collecting');
+    const saved = await context.jobs.transition(first!.id, 'saved', {
+      outputPath: `/tmp/${first!.id}/index.md`,
+    });
+    await context.service.onJobTerminal(saved);
+
+    expect(context.dispatched).toEqual([first!.id, second!.id]);
   });
 
   it('rotates all four primary companies before using the supplemental other bucket', async () => {
@@ -439,7 +482,7 @@ describe('CollectionPlanService', () => {
     await saveJobs(context, firstRound);
 
     expect(context.jobs.list().filter(job => job.batchId === batch.id)).toHaveLength(12);
-    expect(context.dispatched).toHaveLength(12);
+    expect(context.dispatched).toHaveLength(9);
     expect(context.store.latest('nowcoder-agent-market', 1)[0]).toMatchObject({
       status: 'running',
       rounds: 2,
@@ -664,7 +707,7 @@ describe('CollectionPlanService', () => {
       rounds: 5,
       deliveryIds: [],
     });
-  });
+  }, 30_000);
 
   it('ends candidate exhaustion with attention and no partial delivery', async () => {
     const candidates = nowcoderCandidates(8, 14_000);
@@ -978,7 +1021,7 @@ describe('CollectionPlanService', () => {
 
     await context.service.onExtensionConnected();
 
-    expect(context.dispatched).toHaveLength(4);
+    expect(context.dispatched).toHaveLength(1);
     expect(context.dispatched.every(id => !firstRound.some(job => job.id === id))).toBe(true);
     expect(context.store.latest('nowcoder-agent-market', 1)[0]).toMatchObject({
       status: 'running',
@@ -1055,7 +1098,7 @@ describe('CollectionPlanService', () => {
     await context.service.onExtensionConnected();
 
     expect(context.discover).toHaveBeenCalledOnce();
-    expect(context.dispatched).toHaveLength(2);
+    expect(context.dispatched).toHaveLength(1);
     expect(context.store.latest('nowcoder-agent-market', 1)[0]).toMatchObject({
       status: 'running',
       discovered: 2,
@@ -1793,7 +1836,7 @@ describe('CollectionPlanService', () => {
     await context.service.onExtensionConnected();
 
     expect(context.discover).toHaveBeenCalledOnce();
-    expect(context.dispatched).toHaveLength(2);
+    expect(context.dispatched).toHaveLength(1);
     expect(context.store.latest('nowcoder-agent-market', 1)[0]).toMatchObject({
       status: 'running',
       selectionStatus: 'pending',

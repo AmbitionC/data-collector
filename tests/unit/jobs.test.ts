@@ -330,6 +330,78 @@ describe('durable jobs', () => {
     expect(JSON.parse(await readFile(path, 'utf8'))).toMatchObject({ version: 1 });
   });
 
+  it('bounds fixed Nowcoder recovery, safely terminalizes legacy work, and preserves other recovery paths', async () => {
+    const root = await temporaryDirectory();
+    const path = join(root, '_catalog', 'jobs.json');
+    const jobs = await JobStore.open(path, { now: () => NOW });
+    const nowcoder = await jobs.create({
+      id: 'nowcoder-recovery',
+      url: 'https://www.nowcoder.com/discuss/8101',
+      requestedBy: 'codex',
+      batchId: 'nowcoder-batch',
+      planId: 'nowcoder-agent-market',
+      planAttempt: '0123456789abcdef',
+    });
+    const zsxq = await jobs.create({
+      id: 'zsxq-recovery',
+      url: 'https://wx.zsxq.com/group/48844584441158/topic/811111111111111',
+      requestedBy: 'codex',
+      batchId: 'zsxq-batch',
+      planId: 'zsxq-chen-teacher',
+      planAttempt: 'fedcba9876543210',
+    });
+    const directed = await jobs.create({
+      id: 'directed-recovery',
+      url: 'https://www.nowcoder.com/discuss/8102',
+      requestedBy: 'codex',
+      directedRunId: 'run-recovery',
+      directedRunAttempt: '1111111111111111',
+    });
+    await jobs.transition(nowcoder.id, 'dispatched');
+    await jobs.transition(zsxq.id, 'dispatched');
+    await jobs.transition(directed.id, 'dispatched');
+
+    const first = await jobs.recover(new Set([directed.id]));
+    expect(first.requeued.map(job => job.id)).toContain(nowcoder.id);
+    expect(jobs.get(nowcoder.id)).toMatchObject({ status: 'queued', recoveryCount: 1 });
+    expect(jobs.get(zsxq.id)).toMatchObject({ status: 'queued' });
+    expect(jobs.get(directed.id)).toMatchObject({ status: 'dispatched' });
+
+    await jobs.transition(nowcoder.id, 'dispatched');
+    const second = await jobs.recover(new Set([directed.id]));
+    expect(second.terminalized.map(job => job.id)).toContain(nowcoder.id);
+    expect(jobs.get(nowcoder.id)).toMatchObject({
+      status: 'needs_attention',
+      errorCode: 'RECOVERY_LIMIT_EXCEEDED',
+      recoveryCount: 1,
+    });
+
+    await expect(jobs.retry(nowcoder.id)).resolves.toMatchObject({
+      status: 'queued',
+      recoveryCount: 0,
+    });
+
+    const legacyPath = join(root, '_catalog', 'legacy-jobs.json');
+    await writeFile(legacyPath, `${JSON.stringify({ version: 1, jobs: [{
+      id: 'legacy-nowcoder',
+      url: 'https://www.nowcoder.com/discuss/8103',
+      requestedBy: 'codex',
+      status: 'collecting',
+      createdAt: NOW,
+      updatedAt: NOW,
+      batchId: 'legacy-batch',
+      planId: 'nowcoder-agent-market',
+      planAttempt: '2222222222222222',
+    }] })}\n`);
+    const legacy = await JobStore.open(legacyPath, { now: () => NOW });
+    const legacyRecovery = await legacy.recover();
+    expect(legacyRecovery.terminalized.map(job => job.id)).toEqual(['legacy-nowcoder']);
+    expect(legacy.get('legacy-nowcoder')).toMatchObject({
+      status: 'needs_attention',
+      errorCode: 'RECOVERY_LIMIT_EXCEEDED',
+    });
+  });
+
   it('does not requeue a job whose result is still being persisted in this Bridge process', async () => {
     const root = await temporaryDirectory();
     const jobs = await JobStore.open(join(root, '_catalog', 'jobs.json'), {

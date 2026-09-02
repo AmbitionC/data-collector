@@ -17,7 +17,9 @@ import {
   startBridge,
   type BridgeHandle,
 } from '../../packages/bridge/src/index.js';
+import { loadConfig } from '../../packages/bridge/src/config.js';
 import { JobStore } from '../../packages/bridge/src/jobs/store.js';
+import { CollectionPlanStore } from '../../packages/bridge/src/plans/store.js';
 import { acquireArtifactLease } from '../../scripts/artifact-lease.mjs';
 import { createTemporaryDirectoryTracker } from '../helpers/temp.js';
 
@@ -1813,6 +1815,169 @@ describe('local Bridge', () => {
       status: 200,
       body: { batches: [{ id: run.body.id, planId: 'nowcoder-agent-market' }] },
     });
+  });
+
+  it('fences a stopped fixed Nowcoder child and drops its late terminal frame idempotently', async () => {
+    const root = await temporaryDirectory();
+    const configDir = join(root, '.config');
+    const config = loadConfig({ libraryRoot: root, configDir, port: 0 });
+    const plans = await CollectionPlanStore.open(config.plansFile);
+    const batch = await plans.start('nowcoder-agent-market');
+    await plans.attention(batch.id, '用户关闭了牛客采集页面，已停止本次牛客运行');
+    const jobs = await JobStore.open(config.jobsFile);
+    const child = await jobs.create({
+      id: 'stopped-fixed-nowcoder-child',
+      url: 'https://www.nowcoder.com/discuss/98765',
+      requestedBy: 'codex',
+      batchId: batch.id,
+      planId: 'nowcoder-agent-market',
+    });
+
+    const bridge = await startBridge({ port: 0, libraryRoot: root, configDir });
+    handles.push(bridge);
+    const { socket, token } = await authorize(bridge);
+    socket.send(envelope('extension.hello', 'stopped-fixed-hello', {
+      version: APP_VERSION,
+      capabilities: [ZSXQ_COMPLETE_CONTENT_CAPABILITY],
+    }));
+    await vi.waitFor(async () => {
+      const current = await requestJson<{ status: string; errorCode?: string }>(
+        bridge.url,
+        `/v1/jobs/${child.id}`,
+        { token },
+      );
+      expect(current.body).toMatchObject({ status: 'failed', errorCode: 'STALE_PLAN_RUN' });
+    });
+
+    socket.send(envelope('job.error', child.id, {
+      code: 'TAB_CLOSED_BY_USER', message: '迟到的关页回执', needsAttention: false,
+    }));
+    await vi.waitFor(async () => {
+      const current = await requestJson<{ status: string; errorCode?: string }>(
+        bridge.url,
+        `/v1/jobs/${child.id}`,
+        { token },
+      );
+      expect(current.body).toMatchObject({ status: 'failed', errorCode: 'STALE_PLAN_RUN' });
+    });
+  });
+
+  it('keeps ordinary jobs dispatchable when the fixed-plan store is unavailable', async () => {
+    const root = await temporaryDirectory();
+    const configDir = join(root, '.config');
+    const config = loadConfig({ libraryRoot: root, configDir, port: 0 });
+    await mkdir(configDir, { recursive: true });
+    await writeFile(config.plansFile, '{not valid json', 'utf8');
+    const bridge = await startBridge({ port: 0, libraryRoot: root, configDir });
+    handles.push(bridge);
+    const { socket, token } = await authorize(bridge);
+    socket.send(envelope('extension.hello', 'plans-unavailable-ordinary', { version: APP_VERSION }));
+    const collect = nextMessage<{ url: string }>(socket);
+    const created = await requestJson<{ id: string }>(bridge.url, '/v1/jobs', {
+      method: 'POST', token, body: { url: URL, requestedBy: 'codex' },
+    });
+
+    expect(await collect).toMatchObject({
+      type: 'job.collect', requestId: created.body.id, payload: { url: URL },
+    });
+  });
+
+  it('keeps one fixed Nowcoder child in flight across a same-runtime reconnect', async () => {
+    const root = await temporaryDirectory();
+    const configDir = join(root, '.config');
+    const config = loadConfig({ libraryRoot: root, configDir, port: 0 });
+    const plans = await CollectionPlanStore.open(config.plansFile);
+    const batch = await plans.start('nowcoder-agent-market');
+    await plans.markSelectionPending(batch.id);
+    const jobs = await JobStore.open(config.jobsFile);
+    const first = await jobs.create({
+      id: 'same-runtime-first', url: 'https://www.nowcoder.com/discuss/701', requestedBy: 'codex',
+      batchId: batch.id, planId: 'nowcoder-agent-market',
+    });
+    const second = await jobs.create({
+      id: 'same-runtime-second', url: 'https://www.nowcoder.com/discuss/702', requestedBy: 'codex',
+      batchId: batch.id, planId: 'nowcoder-agent-market',
+    });
+    await plans.attachRound(batch.id, [first.id, second.id]);
+    const bridge = await startBridge({ port: 0, libraryRoot: root, configDir });
+    handles.push(bridge);
+    const { socket: original, token } = await authorize(bridge);
+    const firstCollect = nextMessage(original);
+    original.send(envelope('extension.hello', 'same-runtime-first-hello', {
+      version: APP_VERSION, runtimeId: '11111111-1111-4111-8111-111111111111',
+    }));
+    expect(await firstCollect).toMatchObject({ type: 'job.collect', requestId: first.id });
+
+    const replacement = await connect(bridge, token);
+    replacement.send(envelope('extension.hello', 'same-runtime-second-hello', {
+      version: APP_VERSION, runtimeId: '11111111-1111-4111-8111-111111111111',
+    }));
+    await expectNoMessage(replacement, 250);
+    const afterReconnect = await requestJson<{ status: string; recoveryCount?: number }>(
+      bridge.url, `/v1/jobs/${first.id}`, { token },
+    );
+    expect(afterReconnect.body).toMatchObject({ status: 'dispatched', recoveryCount: 0 });
+
+    const firstAcknowledgement = nextMessage(replacement);
+    replacement.send(envelope('job.error', first.id, {
+      code: 'COLLECTION_FAILED', message: '测试终态', needsAttention: false,
+    }));
+    expect(await firstAcknowledgement).toMatchObject({
+      type: 'job.failed', requestId: first.id, payload: { code: 'COLLECTION_FAILED' },
+    });
+    const secondCollect = nextMessage(replacement);
+    expect(await secondCollect).toMatchObject({ type: 'job.collect', requestId: second.id });
+  });
+
+  it('stops the fixed Nowcoder batch when the extension reports its typed tab-close error', async () => {
+    const root = await temporaryDirectory();
+    const configDir = join(root, '.config');
+    const bridge = await startBridge({
+      port: 0,
+      libraryRoot: root,
+      configDir,
+      fetch: async input => new Response([
+        '<a href="/discuss/801">一</a>', '<a href="/discuss/802">二</a>',
+        '<a href="/discuss/803">三</a>', '<a href="/discuss/804">四</a>',
+        '<a href="/discuss/805">五</a>', '<a href="/discuss/806">六</a>',
+        '<a href="/discuss/807">七</a>', '<a href="/discuss/808">八</a>',
+      ].join('')),
+    });
+    handles.push(bridge);
+    const { socket, token } = await authorize(bridge);
+    socket.send(envelope('extension.hello', 'typed-tab-close-fixed-plan', { version: APP_VERSION }));
+    const collect = nextMessage(socket);
+    const started = await requestJson<{ id: string }>(bridge.url, '/v1/plans/run', {
+      method: 'POST', token, body: { planId: 'nowcoder-agent-market', force: true },
+    });
+    const active = await collect;
+    expect(active).toMatchObject({ type: 'job.collect' });
+    const acknowledgement = nextMessage(socket);
+    socket.send(envelope('job.error', active.requestId, {
+      code: 'TAB_CLOSED_BY_USER', message: '采集标签页已关闭', needsAttention: false,
+    }));
+    expect(await acknowledgement).toMatchObject({
+      type: 'job.failed', requestId: active.requestId, payload: { code: 'TAB_CLOSED_BY_USER' },
+    });
+    await vi.waitFor(async () => {
+      const batches = await requestJson<{ batches: Array<{ status: string; error?: string }> }>(
+        bridge.url,
+        '/v1/plans/batches?limit=1&planId=nowcoder-agent-market',
+        { token },
+      );
+      expect(batches.body.batches[0]).toMatchObject({
+        status: 'completed_with_attention', error: expect.stringContaining('用户关闭'),
+      });
+    });
+    await expectNoMessage(socket, 250);
+    const reconnect = await connect(bridge, token);
+    reconnect.send(envelope('extension.hello', 'typed-tab-close-after-stop', { version: APP_VERSION }));
+    await expectNoMessage(reconnect, 250);
+    const persisted = await JobStore.open(join(root, '_catalog', 'jobs.json'));
+    expect(persisted.list().filter(job => job.batchId === started.body.id)).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: active.requestId, errorCode: 'TAB_CLOSED_BY_USER' }),
+      expect.objectContaining({ errorCode: 'PLAN_STOPPED_BY_USER' }),
+    ]));
   });
 
   it('stamps plan identity into every plan document before saving it', async () => {

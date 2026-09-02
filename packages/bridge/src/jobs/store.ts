@@ -87,6 +87,9 @@ function assertDirectedOwnership(
 function validateStoredJob(value: JobRecord): void {
   try {
     assertDirectedOwnership(value);
+    if (value.recoveryCount !== undefined && (
+      !Number.isSafeInteger(value.recoveryCount) || value.recoveryCount < 0
+    )) throw new Error('invalid recovery count');
     if (value.markdownOutput !== undefined && (
       value.markdownOutput.sinkId !== 'markdown'
       || typeof value.markdownOutput.outputPath !== 'string'
@@ -288,6 +291,7 @@ export class JobStore {
         ...(input.batchId ? { batchId: input.batchId } : {}),
         ...(input.planId ? { planId: input.planId } : {}),
         ...(input.planAttempt ? { planAttempt: input.planAttempt } : {}),
+        ...(input.planId === 'nowcoder-agent-market' ? { recoveryCount: 0 } : {}),
         ...(input.directedRunId && input.directedRunAttempt
           ? {
               directedRunId: input.directedRunId,
@@ -346,6 +350,7 @@ export class JobStore {
         ...retained,
         status: 'queued',
         updatedAt: this.dependencies.now(),
+        ...(current.planId === 'nowcoder-agent-market' ? { recoveryCount: 0 } : {}),
       };
       this.jobs.set(id, next);
       await this.persist();
@@ -353,20 +358,57 @@ export class JobStore {
     });
   }
 
-  async recover(excludedIds: ReadonlySet<string> = new Set()): Promise<void> {
-    await this.serializeMutation(async () => {
+  async recover(excludedIds: ReadonlySet<string> = new Set()): Promise<{
+    requeued: JobRecord[];
+    terminalized: JobRecord[];
+  }> {
+    return await this.serializeMutation(async () => {
       let changed = false;
+      const requeued: JobRecord[] = [];
+      const terminalized: JobRecord[] = [];
       for (const [id, job] of this.jobs) {
         if (excludedIds.has(id)) continue;
         if (job.status !== 'dispatched' && job.status !== 'collecting') continue;
-        this.jobs.set(id, {
+        if (job.planId === 'nowcoder-agent-market' && job.directedRunId === undefined) {
+          // Pre-0.4.34 fixed Nowcoder children have no durable counter. They may already have
+          // looped; fail closed rather than spending a fresh retry budget after upgrade.
+          const recoveryCount = job.recoveryCount ?? 1;
+          if (recoveryCount >= 1) {
+            const terminal: JobRecord = {
+              ...job,
+              status: 'needs_attention',
+              updatedAt: this.dependencies.now(),
+              recoveryCount,
+              errorCode: 'RECOVERY_LIMIT_EXCEEDED',
+              errorMessage: '牛客采集任务已用尽自动恢复次数，已停止等待处理',
+            };
+            this.jobs.set(id, terminal);
+            terminalized.push(structuredClone(terminal));
+            changed = true;
+            continue;
+          }
+          const recovered: JobRecord = {
+            ...job,
+            status: 'queued',
+            updatedAt: this.dependencies.now(),
+            recoveryCount: recoveryCount + 1,
+          };
+          this.jobs.set(id, recovered);
+          requeued.push(structuredClone(recovered));
+          changed = true;
+          continue;
+        }
+        const recovered: JobRecord = {
           ...job,
           status: 'queued',
           updatedAt: this.dependencies.now(),
-        });
+        };
+        this.jobs.set(id, recovered);
+        requeued.push(structuredClone(recovered));
         changed = true;
       }
       if (changed) await this.persist();
+      return { requeued, terminalized };
     });
   }
 
