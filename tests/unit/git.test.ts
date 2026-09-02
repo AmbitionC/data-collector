@@ -313,4 +313,28 @@ describe('自更新要用的外部命令', () => {
       await rm(directory, { recursive: true, force: true });
     }
   });
+
+  it('进程组信号返回 EPERM 时回退终止直接子进程，不让清理异常打崩 Bridge', async () => {
+    const signals: NodeJS.Signals[] = [];
+    const permissionError = Object.assign(new Error('kill EPERM'), { code: 'EPERM' });
+    const script = "process.on('SIGTERM', () => {}); setInterval(() => {}, 1000);";
+
+    const running = runProcessForTool(
+      process.execPath,
+      ['-e', script],
+      tmpdir(),
+      process.env,
+      {
+        timeoutMs: 500,
+        killGraceMs: 50,
+        signalTree: (_pid, signal) => {
+          signals.push(signal);
+          throw permissionError;
+        },
+      },
+    );
+
+    await expect(running).rejects.toThrow(/超时/);
+    expect(signals).toEqual(['SIGTERM', 'SIGKILL']);
+  });
 });

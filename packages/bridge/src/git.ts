@@ -192,6 +192,8 @@ export interface ToolProcessOptions {
   maxBufferBytes?: number;
   killGraceMs?: number;
   platform?: NodeJS.Platform;
+  /** 测试注入；生产默认向独立进程组发信号。 */
+  signalTree?: (pid: number, signal: NodeJS.Signals, platform: NodeJS.Platform) => void;
 }
 
 class ToolProcessError extends Error {
@@ -262,6 +264,7 @@ export function runProcessForTool(
   const maxBufferBytes = options.maxBufferBytes ?? 8 * 1024 * 1024;
   const killGraceMs = options.killGraceMs ?? 2_000;
   const platform = options.platform ?? process.platform;
+  const signalTree = options.signalTree ?? signalProcessTree;
 
   return new Promise((resolveRun, rejectRun) => {
     const child = spawn(command, [...args], {
@@ -278,14 +281,29 @@ export function runProcessForTool(
     let terminalError: Error | undefined;
     let forceTimer: NodeJS.Timeout | undefined;
 
+    const stopChildWithoutCrashing = (signal: NodeJS.Signals) => {
+      if (child.pid === undefined) return;
+      try {
+        signalTree(child.pid, signal, platform);
+      } catch {
+        // macOS 偶发会对负 PID 的进程组信号返回 EPERM。清理失败不能从定时器
+        // 逸出并打崩整个 Bridge；退回只终止我们直接创建、确定归属的子进程。
+        try {
+          child.kill(signal);
+        } catch {
+          // 子进程可能恰好已经退出；close 事件会完成原 promise。
+        }
+      }
+    };
+
     const output = (chunks: Buffer[]) => Buffer.concat(chunks).toString('utf8');
     const stopTree = (error: Error) => {
       if (terminalError) return;
       terminalError = error;
       if (child.pid === undefined) return;
-      signalProcessTree(child.pid, 'SIGTERM', platform);
+      stopChildWithoutCrashing('SIGTERM');
       forceTimer = setTimeout(() => {
-        if (child.pid !== undefined) signalProcessTree(child.pid, 'SIGKILL', platform);
+        stopChildWithoutCrashing('SIGKILL');
       }, killGraceMs);
       forceTimer.unref();
     };
