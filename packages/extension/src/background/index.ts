@@ -209,6 +209,7 @@ connection.onPlanCollect(async (requestId, payload) => {
       {
         force: payload.force === true,
         ...(payload.zsxqMode ? { zsxqMode: payload.zsxqMode } : {}),
+        ...(payload.zsxqDateRange ? { zsxqDateRange: payload.zsxqDateRange } : {}),
         ...(payload.targetDays ? { targetDays: payload.targetDays } : {}),
         ...(payload.resumeCursor ? { resumeCursor: payload.resumeCursor } : {}),
       },

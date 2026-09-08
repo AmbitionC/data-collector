@@ -50,6 +50,54 @@ function menuResponse(): Response {
 }
 
 describe('ZSXQ API fallback', () => {
+  it('overlaps an inclusive midnight boundary instead of skipping tied posts', async () => {
+    const boundary = '2026-08-31T16:00:00.000Z';
+    const first = Array.from({ length: 20 }, (_, index) => topic(String(93000 + index), boundary));
+    const fetcher = vi.fn(async (input: RequestInfo | URL) => {
+      const url = new URL(String(input));
+      if (url.pathname.endsWith('/menus')) return menuResponse();
+      if (url.pathname.endsWith(`/groups/${GROUP_ID}`)) return groupResponse();
+      if (url.pathname.endsWith('/sticky')) return topicResponse([]);
+      if (!url.searchParams.has('end_time')) return topicResponse(first);
+      expect(url.searchParams.get('end_time')).toBe('2026-08-31T16:00:00.001Z');
+      return topicResponse([first[19]!, topic('94000', boundary), topic('94001', '2026-08-31T15:59:59.000Z')]);
+    });
+    const result = await collectZsxqApiViews(GROUP_ID, {
+      fetcher, aduid: 'test-device', dateRange: { since: '2026-09-01', until: '2026-09-09' },
+    });
+    expect(result.documents).toHaveLength(21);
+    expect(result.coverage['分页:最新']).toBe(2);
+  });
+
+  it('exhausts an explicit Shanghai date range beyond 20 documents per view', async () => {
+    const pageRequests: URL[] = [];
+    const firstPage = Array.from({ length: 20 }, (_, index) =>
+      topic(String(91000 + index), new Date(Date.UTC(2026, 8, 8, 12, 0, -index)).toISOString()));
+    const fetcher = vi.fn(async (input: RequestInfo | URL) => {
+      const url = new URL(String(input));
+      if (url.pathname.endsWith('/menus')) return menuResponse();
+      if (url.pathname.endsWith(`/groups/${GROUP_ID}`)) return groupResponse();
+      if (url.pathname.endsWith('/sticky')) return topicResponse([]);
+      pageRequests.push(url);
+      return topicResponse(url.searchParams.has('end_time') ? [
+        topic('92001', '2026-08-31T16:00:00.000Z'), // September 1, Shanghai
+        topic('92002', '2026-08-31T15:59:59.000Z'),
+      ] : firstPage);
+    });
+    const result = await collectZsxqApiViews(GROUP_ID, {
+      fetcher, aduid: 'test-device', now: () => new Date('2026-09-08T16:40:00.000Z'),
+      dateRange: { since: '2026-09-01', until: '2026-09-09' },
+    });
+    expect(result.documents).toHaveLength(21);
+    expect(result.documents.some(document => document.sourceMetadata?.topicId === '92001')).toBe(true);
+    expect(result.documents.some(document => document.sourceMetadata?.topicId === '92002')).toBe(false);
+    expect(pageRequests).toHaveLength(6);
+    for (const label of ['最新', '精华', '只看星主']) {
+      expect(result.coverage[`分页:${label}`]).toBe(2);
+      expect(result.coverage[`日期范围已核验:${label}`]).toBe(1);
+    }
+  });
+
   it('retries a transient signed API transport failure before failing the owner page', async () => {
     const fetcher = vi.fn(async () => {
       if (fetcher.mock.calls.length < 3) throw new TypeError('network stalled');

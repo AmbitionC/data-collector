@@ -173,7 +173,7 @@ describe('Codex CLI', () => {
     expect(stderr).toContain('固定计划');
   });
 
-  it('waits for the exact plan batch and prints its terminal delivery manifest', async () => {
+  it.each([false, true])('waits for an exact batch with persisted date range=%s', async rangeMode => {
     const root = await temporaryDirectories.create('data-collector-cli-plan-wait-');
     const configDir = join(root, '.config');
     const bridge = await startBridge({ port: 0, libraryRoot: root, configDir });
@@ -202,12 +202,16 @@ describe('Codex CLI', () => {
 
     const running = runCli([
       'plans', 'run', 'zsxq-chen-teacher', '--force', '--wait', '5000',
+      ...(rangeMode ? ['--since', '2025-09-01', '--until', '2025-09-09'] : []),
       '--port', port, '--library', root, '--config', configDir,
     ], {
       stdout: value => { stdout += value; },
       stderr: value => { stderr += value; },
     });
     const collect = await command;
+    if (rangeMode) expect(collect.payload).toMatchObject({
+      zsxqDateRange: { since: '2025-09-01', until: '2025-09-09' },
+    });
     acknowledgePlanStart(socket, collect);
     socket.send(envelope('plan.result', collect.requestId, {
       batchId: collect.payload.batchId,
@@ -225,6 +229,7 @@ describe('Codex CLI', () => {
       id: collect.payload.batchId,
       status: 'completed',
       deliveryIds: [],
+      ...(rangeMode ? { zsxqDateRange: { since: '2025-09-01', until: '2025-09-09' } } : {}),
     });
   });
 

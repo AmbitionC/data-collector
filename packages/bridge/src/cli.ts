@@ -18,6 +18,7 @@ import {
 } from './server/index.js';
 import {
   COLLECTION_PLAN_IDS,
+  zsxqDateRangeSchema,
   nowcoderDirectedCancelResponseSchema,
   nowcoderDirectedRetryResponseSchema,
   nowcoderDirectedStartResponseSchema,
@@ -577,6 +578,15 @@ async function plans(args: string[], io: CliIo): Promise<number> {
     if (args.includes('--owner-history') && planId !== 'zsxq-chen-teacher') {
       throw new Error('--owner-history 只适用于 zsxq-chen-teacher');
     }
+    const since = option(args, '--since');
+    const until = option(args, '--until');
+    if ((args.includes('--since') || args.includes('--until')) && (!since || !until)) {
+      throw new Error('日期补采必须同时指定 --since YYYY-MM-DD 和 --until YYYY-MM-DD');
+    }
+    const zsxqDateRange = since && until ? zsxqDateRangeSchema.parse({ since, until }) : undefined;
+    if (zsxqDateRange && (planId !== 'zsxq-chen-teacher' || args.includes('--owner-history'))) {
+      throw new Error('日期补采只适用于知识星球逐日模式');
+    }
     const rawWait = option(args, '--wait');
     if (rawWait !== undefined) {
       waitMs = Number(rawWait);
@@ -592,6 +602,7 @@ async function plans(args: string[], io: CliIo): Promise<number> {
         planId,
         force: args.includes('--force'),
         ...(args.includes('--owner-history') ? { zsxqMode: 'owner-history' } : {}),
+        ...(zsxqDateRange ? { zsxqDateRange } : {}),
       }),
     };
   } else if (action === 'batches') {

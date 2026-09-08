@@ -13,6 +13,7 @@ import {
   type CollectionPlanId,
   type NowcoderDirectedRunAttempt,
   type ZsxqCollectionMode,
+  type ZsxqDateRange,
   type ZsxqDayDraft,
   type ZsxqLibraryIndexEntry,
   type ZsxqOwnerAudit,
@@ -1181,6 +1182,7 @@ export class JobRunner {
     batchId: string,
     attempt: CollectionPlanAttempt,
     targetDays: readonly string[],
+    dateRange?: ZsxqDateRange,
   ): Promise<Omit<ZsxqPlanPhaseResult, 'prepared'>> {
     if (!this.options.knownZsxqIndex) {
       throw new Error('BRIDGE_UPDATE_REQUIRED：Bridge 未提供知识星球紧凑去重索引');
@@ -1207,17 +1209,22 @@ export class JobRunner {
     const collectApiViews = async (): Promise<CollectedDocument[]> => {
       const fallback = await this.ask(tabId, {
         type: this.contentMessageType('list.apiCollect'),
+        ...(dateRange ? { dateRange } : {}),
       });
       if (!fallback.ok) throw new Error(fallback.error.message);
       const collection = payloadOf(fallback, 'apiCollection');
       Object.assign(audit.coverage, collection.coverage);
+      for (const item of collection.businessSkips) audit.businessSkips.set(item.url, item);
       return collection.documents.filter(document => {
+        if (dateRange) return true;
         const labels = String(document.sourceMetadata?.viewLabels ?? '');
         return labels.includes('最新') || labels.includes('精华');
       });
     };
     let documents: CollectedDocument[];
-    try {
+    if (dateRange) {
+      documents = await collectApiViews();
+    } else try {
       documents = await collectViews();
     } catch (error) {
       if (isZsxqPlanDomCoverageIncomplete(error)) {
@@ -1270,7 +1277,7 @@ export class JobRunner {
           `PUBLISHED_AT_UNPROVEN：无法证明知识星球帖子发布时间：${document.canonicalUrl}`,
         );
       }
-      if (!targetSet.has(publishedDay)) {
+      if (dateRange ? publishedDay < dateRange.since || publishedDay > dateRange.until : !targetSet.has(publishedDay)) {
         reject(document, '非目标日期');
         continue;
       }
@@ -1742,6 +1749,7 @@ export class JobRunner {
     options: {
       force?: boolean;
       zsxqMode?: ZsxqCollectionMode;
+      zsxqDateRange?: ZsxqDateRange;
       targetDays?: readonly string[];
       resumeCursor?: string;
     } = {},
@@ -1765,6 +1773,7 @@ export class JobRunner {
             batchId,
             attempt,
             options.targetDays ?? [],
+            options.zsxqDateRange,
           );
         }
         return await this.runZsxqOwnerPages(

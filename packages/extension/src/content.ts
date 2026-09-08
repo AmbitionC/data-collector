@@ -178,6 +178,7 @@ interface ExtractMessage {
   key?: string;
   label?: ZsxqPlanView;
   cursor?: string;
+  dateRange?: { since: string; until: string };
   context?: ZsxqOwnerApiContext;
   articleUrl?: string;
   overrides?: {
@@ -1724,7 +1725,10 @@ if (!alreadyRegistered) chrome.runtime.onMessage.addListener((message: unknown, 
       });
       return false;
     }
-    void collectZsxqApiViews(groupId, { aduid: zsxqAduid() }).then(
+    void collectZsxqApiViews(groupId, {
+      aduid: zsxqAduid(),
+      ...(request.dateRange ? { dateRange: request.dateRange } : {}),
+    }).then(
       apiCollection => respond({ ok: true, apiCollection }),
       error => {
         const message = error instanceof Error ? error.message : '知识星球接口兜底采集失败';

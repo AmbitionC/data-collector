@@ -11,6 +11,7 @@ import {
   type CollectionPlanTrigger,
   type JobRecord,
   type ZsxqCollectionMode,
+  type ZsxqDateRange,
   type ZsxqOwnerAudit,
 } from '@data-collector/shared';
 
@@ -161,6 +162,7 @@ export class CollectionPlanStore {
       force?: boolean;
       trigger?: CollectionPlanTrigger;
       zsxqMode?: ZsxqCollectionMode;
+      zsxqDateRange?: ZsxqDateRange;
     } = {},
   ): Promise<CollectionBatch> {
     return this.serializeMutation(async () => {
@@ -183,6 +185,7 @@ export class CollectionPlanStore {
         ...(planId === 'zsxq-chen-teacher' && options.zsxqMode
           ? { zsxqMode: options.zsxqMode }
           : {}),
+        ...(options.zsxqDateRange ? { zsxqDateRange: options.zsxqDateRange } : {}),
         ...(planId === 'nowcoder-agent-market'
           ? { selectionStatus: 'collecting' as const, rounds: 0 }
           : { preparationStatus: 'collecting' as const }),

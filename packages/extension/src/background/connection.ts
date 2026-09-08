@@ -16,6 +16,7 @@ import {
   type CollectionPlanId,
   type NowcoderDirectedRunAttempt,
   type ZsxqCollectionMode,
+  type ZsxqDateRange,
   type ZsxqLibraryIndexEntry,
 } from '@data-collector/shared';
 
@@ -72,6 +73,7 @@ type PlanCollectHandler = (
     attempt: CollectionPlanAttempt;
     force?: boolean;
     zsxqMode?: ZsxqCollectionMode;
+    zsxqDateRange?: ZsxqDateRange;
     targetDays?: string[];
     resumeCursor?: string;
   },
@@ -909,6 +911,7 @@ export class BridgeConnection {
           attempt: payload.attempt,
           ...(payload.force === undefined ? {} : { force: payload.force }),
           ...(payload.zsxqMode ? { zsxqMode: payload.zsxqMode } : {}),
+          ...(payload.zsxqDateRange ? { zsxqDateRange: payload.zsxqDateRange } : {}),
           ...(payload.targetDays ? { targetDays: payload.targetDays } : {}),
           ...(payload.resumeCursor ? { resumeCursor: payload.resumeCursor } : {}),
         });

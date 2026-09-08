@@ -8,7 +8,22 @@ import {
   planStartedEnvelopeSchema,
   planResultEnvelopeSchema,
   unionZsxqViewDocuments,
+  zsxqDateRangeSchema,
 } from '@data-collector/shared';
+
+describe('explicit ZSXQ Shanghai date ranges', () => {
+  it('accepts inclusive ranges up to 31 actual calendar days', () => {
+    expect(zsxqDateRangeSchema.parse({ since: '2026-08-01', until: '2026-08-31' }))
+      .toEqual({ since: '2026-08-01', until: '2026-08-31' });
+  });
+  it.each([
+    { since: '2026-02-30', until: '2026-03-01' },
+    { since: '2026-09-09', until: '2026-09-01' },
+    { since: '2026-08-01', until: '2026-09-01' },
+  ])('rejects invalid or unbounded dates: %j', range => {
+    expect(zsxqDateRangeSchema.safeParse(range).success).toBe(false);
+  });
+});
 
 const BATCH = {
   id: 'batch-20260823-nowcoder-agent-market',

@@ -1,6 +1,7 @@
 import {
   COLLECTION_PLAN_IDS,
   stableContentId,
+  zsxqDateRangeSchema,
   type CollectionBatch,
   type CollectionPlanAttempt,
   type CollectionPlanRejection,
@@ -8,6 +9,7 @@ import {
   type CollectionPlanTrigger,
   type JobRecord,
   type ZsxqCollectionMode,
+  type ZsxqDateRange,
   type ZsxqDayDraft,
   type ZsxqOwnerAudit,
   type ZsxqOwnerCheckpoint,
@@ -101,6 +103,7 @@ export interface CollectionPlanServiceDependencies {
     mode: ZsxqCollectionMode,
     targetDays: readonly string[],
     resumeCursor?: string,
+    dateRange?: ZsxqDateRange,
   ) => Promise<true>;
   zsxqLedger?: ZsxqDayLedgerStore;
   /** 当前知识星球 attempt 已可靠写入终态，可释放外部互斥门禁。 */
@@ -249,10 +252,21 @@ export class CollectionPlanService {
       force?: boolean;
       trigger?: CollectionPlanTrigger;
       zsxqMode?: ZsxqCollectionMode;
+      zsxqDateRange?: ZsxqDateRange;
     } = {},
   ): Promise<CollectionBatch> {
+    if (options.zsxqDateRange) {
+      const range = zsxqDateRangeSchema.parse(options.zsxqDateRange);
+      if (planId !== 'zsxq-chen-teacher' || options.zsxqMode === 'owner-history') {
+        throw new Error('日期补采只适用于知识星球逐日模式');
+      }
+      if (range.until > shanghaiDay(this.now())) throw new Error('日期补采不能包含未来日期');
+    }
     const running = this.dependencies.store.active(planId)[0];
     if (running && !options.force) {
+      if (JSON.stringify(running.zsxqDateRange) !== JSON.stringify(options.zsxqDateRange)) {
+        throw new Error('知识星球已有不同日期范围的任务运行中，请等待该批次结束');
+      }
       if (this.dependencies.extensionConnected()) {
         if (
           running.planId === 'zsxq-chen-teacher'
@@ -268,6 +282,7 @@ export class CollectionPlanService {
       {
         trigger: options.trigger ?? 'manual',
         ...(options.force === undefined ? {} : { force: options.force }),
+        ...(options.zsxqDateRange ? { zsxqDateRange: options.zsxqDateRange } : {}),
         ...(planId === 'zsxq-chen-teacher'
           ? { zsxqMode: options.zsxqMode ?? 'daily-ledger' }
           : {}),
@@ -1230,6 +1245,7 @@ export class CollectionPlanService {
           mode,
           ledgerRequest.targetDays,
           ledgerRequest.resumeCursor,
+          preparing.zsxqDateRange,
         );
         if (dispatched !== true) throw new Error('知识星球采集命令未派发');
         return;

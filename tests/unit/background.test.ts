@@ -738,7 +738,7 @@ describe('extension job runner', () => {
     });
   });
 
-  it('collects the bounded latest and digest views before daily owner-ledger pages', async () => {
+  it.each([false, true])('collects daily views with explicit range=%s and deduplicates before jobs', async rangeMode => {
     const tabs = new InMemoryTabs();
     const bridge = new InMemoryBridge();
     const known = {
@@ -747,11 +747,17 @@ describe('extension job runner', () => {
       text: '投资经营复盘正文'.repeat(20),
       html: `<p>${'投资经营复盘正文'.repeat(20)}</p>`,
       publishedAt: '2026-08-24T10:00:00.000Z',
-      sourceMetadata: { authorRole: 'owner', topicId: '80011' },
+      sourceMetadata: { authorRole: 'owner', topicId: '80011', viewLabels: rangeMode ? '只看星主' : '最新' },
     } satisfies CollectedDocument;
     tabs.sendMessage = async (_tabId, message) => {
       const request = message as { type: string };
       tabs.asked.push(request.type);
+      if (request.type === 'list.apiCollect') {
+        expect(message).toMatchObject({ dateRange: { since: '2026-08-24', until: '2026-08-24' } });
+        return { ok: true, apiCollection: {
+          documents: [known], businessSkips: [], coverage: { '视图:最新': 1 },
+        } } as never;
+      }
       if (request.type === 'list.apiCollectOwnerPage') {
         return {
           ok: true,
@@ -794,11 +800,15 @@ describe('extension job runner', () => {
       'daily-views-and-ledger',
       PLAN_ATTEMPT,
       phase => { phases.push(phase as unknown as Record<string, unknown>); },
-      { zsxqMode: 'daily-ledger', targetDays: ['2026-08-24'] },
+      {
+        zsxqMode: 'daily-ledger', targetDays: rangeMode ? [] : ['2026-08-24'],
+        ...(rangeMode ? { zsxqDateRange: { since: '2026-08-24', until: '2026-08-24' } } : {}),
+      },
     );
 
-    expect(collectViews).toHaveBeenCalledWith(42, ['最新', '精华'], expect.any(Object));
-    expect(tabs.asked).toEqual(['list.apiCollectOwnerPage']);
+    if (rangeMode) expect(collectViews).not.toHaveBeenCalled();
+    else expect(collectViews).toHaveBeenCalledWith(42, ['最新', '精华'], expect.any(Object));
+    expect(tabs.asked).toEqual(rangeMode ? ['list.apiCollect', 'list.apiCollectOwnerPage'] : ['list.apiCollectOwnerPage']);
     expect(bridge.createdFor).toEqual([]);
     expect(phases.at(-1)).toMatchObject({
       discovered: 2,

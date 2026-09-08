@@ -25,6 +25,16 @@ export type ZsxqPlanView = (typeof ZSXQ_PLAN_VIEWS)[number];
 export const ZSXQ_COLLECTION_MODES = ['daily-ledger', 'owner-history'] as const;
 export type ZsxqCollectionMode = (typeof ZSXQ_COLLECTION_MODES)[number];
 
+/** Explicit manual backfills use inclusive Shanghai calendar days, never ledger rewrites. */
+export const zsxqDateRangeSchema = z.object({
+  since: z.iso.date(),
+  until: z.iso.date(),
+}).strict().refine(range => {
+  const days = (Date.parse(range.until) - Date.parse(range.since)) / 86_400_000;
+  return days >= 0 && days < 31;
+}, '知识星球补采范围必须为正序且最多 31 个自然日');
+export type ZsxqDateRange = z.infer<typeof zsxqDateRangeSchema>;
+
 export const ZSXQ_OWNER_ITEM_OUTCOMES = ['exact', 'semantic', 'saved', 'repaired'] as const;
 export type ZsxqOwnerItemOutcome = (typeof ZSXQ_OWNER_ITEM_OUTCOMES)[number];
 
@@ -517,6 +527,7 @@ export interface CollectionBatch {
   rounds?: number;
   /** 知识星球逐日增量或显式历史审计模式。 */
   zsxqMode?: ZsxqCollectionMode;
+  zsxqDateRange?: ZsxqDateRange;
   /** 只看星主分页、去重、过滤和逐日覆盖的结构化审计事实。 */
   ownerAudit?: ZsxqOwnerAudit;
   coverage?: Record<string, number>;
@@ -599,12 +610,16 @@ export const collectionBatchSchema = z.object({
   force: z.boolean().optional(),
   rounds: countSchema.optional(),
   zsxqMode: zsxqCollectionModeSchema.optional(),
+  zsxqDateRange: zsxqDateRangeSchema.optional(),
   ownerAudit: zsxqOwnerAuditSchema.optional(),
   coverage: z.record(z.string().trim().min(1).max(100), countSchema).optional(),
   rejections: z.record(z.string().trim().min(1).max(100), countSchema).optional(),
   rejectionDetails: z.array(collectionPlanRejectionSchema).max(500).optional(),
   error: z.string().trim().min(1).max(2_000).optional(),
 }).superRefine((batch, context) => {
+  if (batch.zsxqDateRange && (batch.planId !== 'zsxq-chen-teacher' || batch.zsxqMode !== 'daily-ledger')) {
+    context.addIssue({ code: 'custom', path: ['zsxqDateRange'], message: '日期补采只适用于知识星球逐日模式' });
+  }
   const terminal = batch.status !== 'running';
   if (terminal !== Boolean(batch.finishedAt)) {
     context.addIssue({

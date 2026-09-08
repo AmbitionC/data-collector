@@ -8,6 +8,7 @@ import {
   collectionPlanIdSchema,
   collectionPlanRejectionSchema,
   zsxqCollectionModeSchema,
+  zsxqDateRangeSchema,
   zsxqDayDraftSchema,
   zsxqOwnerAuditSchema,
   zsxqOwnerCheckpointSchema,
@@ -225,9 +226,13 @@ export const planCollectPayloadSchema = z.object({
   attempt: collectionPlanAttemptSchema,
   force: z.boolean().optional(),
   zsxqMode: zsxqCollectionModeSchema.optional(),
+  zsxqDateRange: zsxqDateRangeSchema.optional(),
   targetDays: z.array(z.string().regex(/^\d{4}-\d{2}-\d{2}$/u)).max(3660).optional(),
   resumeCursor: z.iso.datetime().optional(),
 }).strict().superRefine((payload, context) => {
+  if (payload.zsxqDateRange && (payload.planId !== 'zsxq-chen-teacher' || payload.zsxqMode !== 'daily-ledger')) {
+    context.addIssue({ code: 'custom', path: ['zsxqDateRange'], message: '日期补采只适用于知识星球逐日模式' });
+  }
   if (payload.zsxqMode && payload.planId !== 'zsxq-chen-teacher') {
     context.addIssue({
       code: 'custom',

@@ -1,7 +1,9 @@
 import {
   mergeZsxqDocumentCopies,
   unionZsxqViewDocuments,
+  zsxqDateRangeSchema,
   type CollectedDocument,
+  type ZsxqDateRange,
   type ZsxqPlanView,
 } from '@data-collector/shared';
 import {
@@ -46,6 +48,7 @@ export interface ZsxqApiFallbackDependencies {
   requestId?: () => string;
   /** Detached HTML parsing root. Browser callers use the current content document. */
   domDocument?: Document;
+  dateRange?: ZsxqDateRange;
 }
 
 export interface ZsxqApiCollection {
@@ -856,6 +859,7 @@ export async function collectZsxqApiViews(
   groupId: string,
   dependencies: ZsxqApiFallbackDependencies,
 ): Promise<ZsxqApiCollection> {
+  const dateRange = dependencies.dateRange ? zsxqDateRangeSchema.parse(dependencies.dateRange) : undefined;
   const fetcher = dependencies.fetcher ?? fetch.bind(globalThis);
   const requestId = dependencies.requestId ?? (() => crypto.randomUUID());
   const common = { fetcher, requestId, aduid: dependencies.aduid };
@@ -871,7 +875,10 @@ export async function collectZsxqApiViews(
   const scopes = viewScopes(menuPayload);
   const referenceNow = (dependencies.now ?? (() => new Date()))();
   const collectedAt = referenceNow.toISOString();
-  const cutoff = referenceNow.getTime() - PLAN_LOOKBACK_MS;
+  const cutoff = dateRange
+    ? Date.parse(`${dateRange.since}T00:00:00+08:00`)
+    : referenceNow.getTime() - PLAN_LOOKBACK_MS;
+  const endExclusive = dateRange ? Date.parse(`${dateRange.until}T00:00:00+08:00`) + 86_400_000 : Infinity;
   const businessSkips = new Map<string, { url: string; reason: string }>();
   const observations = new Map<string, CollectedDocument>();
   let observationCharacters = 0;
@@ -968,6 +975,8 @@ export async function collectZsxqApiViews(
       return { topicId, createTime, document };
     });
     const documents = verified.flatMap(({ document }) => {
+      const time = Date.parse(document.publishedAt!);
+      if (dateRange && (time < cutoff || time >= endExclusive)) return [];
       const excluded = excludedBy(document.text);
       if (excluded) {
         businessSkips.set(document.canonicalUrl, {
@@ -1044,14 +1053,14 @@ export async function collectZsxqApiViews(
   while (true) {
     pruneBusinessSkips();
     const activeStates = states.filter(state =>
-      !state.exhausted && state.documents.size < PLAN_ITEMS_PER_VIEW);
+      !state.exhausted && (dateRange !== undefined || state.documents.size < PLAN_ITEMS_PER_VIEW));
     if (activeStates.length === 0) break;
     const pageLimited = activeStates.find(state => state.pagesFetched >= MAX_VIEW_PAGES);
     if (pageLimited) {
       throw coverageError(
         'ZSXQ_API_PAGE_LIMIT',
-        `「${pageLimited.label}」已翻满 ${MAX_VIEW_PAGES} 页仍未取得 ${PLAN_ITEMS_PER_VIEW} 条可核验文档，`
-        + '且尚未证明最近 15 天内容已经耗尽',
+        `「${pageLimited.label}」已翻满 ${MAX_VIEW_PAGES} 页，尚未证明`
+        + (dateRange ? `${dateRange.since} 至 ${dateRange.until} 范围已经耗尽` : '最近 15 天内容已经耗尽'),
       );
     }
     const pages = await Promise.all(activeStates.map(async state => {
@@ -1106,11 +1115,13 @@ export async function collectZsxqApiViews(
         continue;
       }
       const oldestTime = times.at(-1)!;
-      if (oldestTime <= cutoff) {
+      if (dateRange ? oldestTime < cutoff : oldestTime <= cutoff) {
         state.exhausted = true;
         continue;
       }
-      const nextEndTime = new Date(oldestTime - 1).toISOString();
+      // Overlap the last millisecond even if the server treats end_time as exclusive.
+      // Deduplicate overlap; unchanged cursor/no new IDs must fail closed.
+      const nextEndTime = new Date(oldestTime + (dateRange ? 1 : -1)).toISOString();
       if (nextEndTime === state.endTime) {
         throw coverageError(
           'ZSXQ_API_CURSOR_UNPROVEN',
@@ -1127,7 +1138,7 @@ export async function collectZsxqApiViews(
   const byView = states.map(state => ({
     label: state.label,
     documents: [...state.documents.values()]
-      .slice(0, PLAN_ITEMS_PER_VIEW)
+      .slice(0, dateRange ? undefined : PLAN_ITEMS_PER_VIEW)
       .map(richestObservation),
   }));
   const latest = byView.find(view => view.label === '最新');
@@ -1144,7 +1155,7 @@ export async function collectZsxqApiViews(
     ],
   }])
     .sort((left, right) => (right.publishedAt ?? '').localeCompare(left.publishedAt ?? ''))
-    .slice(0, PLAN_ITEMS_PER_VIEW);
+    .slice(0, dateRange ? undefined : PLAN_ITEMS_PER_VIEW);
   const documents = unionZsxqViewDocuments(byView)
     .filter(document => !businessSkips.has(document.canonicalUrl));
   const coverage: Record<string, number> = Object.fromEntries(states.map(state => {
@@ -1154,6 +1165,12 @@ export async function collectZsxqApiViews(
     return [`视图:${state.label}`, ids.size];
   }));
   addPublicationCoverage(coverage, documents);
+  if (dateRange) {
+    for (const state of states) {
+      coverage[`分页:${state.label}`] = state.pagesFetched;
+      coverage[`日期范围已核验:${state.label}`] = state.exhausted ? 1 : 0;
+    }
+  }
   return {
     documents,
     businessSkips: [...businessSkips.values()],

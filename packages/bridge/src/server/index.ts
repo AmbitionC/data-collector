@@ -19,6 +19,7 @@ import {
   extensionHelloPayloadSchema,
   extensionPlanResultPayloadSchema,
   planStartedPayloadSchema,
+  zsxqDateRangeSchema,
   jobResultPayloadSchema,
   nowcoderDirectedCancelRequestSchema,
   nowcoderDirectedCancelResponseSchema,
@@ -1156,6 +1157,7 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
           mode,
           targetDays,
           resumeCursor,
+          dateRange,
         ) => {
           const targetSocket = extensionSocket;
           const artifactBuildId = await refreshArtifactBuildId();
@@ -1176,6 +1178,7 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
             zsxqMode: mode,
             targetDays: [...targetDays],
             ...(resumeCursor ? { resumeCursor } : {}),
+            ...(dateRange ? { zsxqDateRange: dateRange } : {}),
           }));
           await planStartAcks.dispatch(planStartAckKey(batchId, attempt), () => {
             if (
@@ -2062,6 +2065,7 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
         planId: z.enum(COLLECTION_PLAN_IDS),
         force: z.boolean().optional(),
         zsxqMode: z.enum(['daily-ledger', 'owner-history']).optional(),
+        zsxqDateRange: zsxqDateRangeSchema.optional(),
       }).strict().superRefine((value, context) => {
         if (value.zsxqMode && value.planId !== 'zsxq-chen-teacher') {
           context.addIssue({
@@ -2077,6 +2081,7 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
         {
           ...(input.force === undefined ? {} : { force: input.force }),
           ...(input.zsxqMode ? { zsxqMode: input.zsxqMode } : {}),
+          ...(input.zsxqDateRange ? { zsxqDateRange: input.zsxqDateRange } : {}),
         },
       ));
     }

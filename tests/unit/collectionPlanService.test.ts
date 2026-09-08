@@ -307,6 +307,32 @@ async function saveJobs(
 }
 
 describe('CollectionPlanService', () => {
+  it('rejects future, foreign-plan and history-mode ranges without creating a batch', async () => {
+    const { service, store } = await fixture({ now: '2026-09-08T16:05:00.000Z' });
+    const zsxqDateRange = { since: '2026-09-01', until: '2026-09-09' };
+    await expect(service.run('zsxq-chen-teacher', {
+      zsxqDateRange: { ...zsxqDateRange, until: '2026-09-10' },
+    })).rejects.toThrow('未来');
+    await expect(service.run('nowcoder-agent-market', { zsxqDateRange })).rejects.toThrow('只适用');
+    await expect(service.run('zsxq-chen-teacher', {
+      zsxqMode: 'owner-history', zsxqDateRange,
+    })).rejects.toThrow('只适用');
+    expect(store.latest()).toEqual([]);
+  });
+
+  it('persists a manual range without adding already complete days to ledger targets', async () => {
+    const context = await fixture({ now: '2026-09-08T16:05:00.000Z' });
+    const zsxqDateRange = { since: '2026-09-01', until: '2026-09-09' };
+    const batch = await context.service.run('zsxq-chen-teacher', { zsxqDateRange });
+    expect(batch.zsxqDateRange).toEqual(zsxqDateRange);
+    expect(context.planMessages[0]?.targetDays).toEqual(['2026-09-08']);
+    const reopened = await CollectionPlanStore.open(context.store.path);
+    expect(reopened.get(batch.id)?.zsxqDateRange).toEqual(zsxqDateRange);
+    await expect(context.service.run('zsxq-chen-teacher', {
+      zsxqDateRange: { since: '2026-09-02', until: '2026-09-09' },
+    })).rejects.toThrow('不同日期范围');
+  });
+
   it('dispatches owner history from the ledger and finalizes a continuous exhausted day', async () => {
     const context = await fixture({ now: '2026-08-25T01:05:00.000Z' });
     const batch = await context.service.run('zsxq-chen-teacher', {
