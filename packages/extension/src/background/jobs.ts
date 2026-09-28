@@ -2686,7 +2686,7 @@ export class JobRunner {
       await this.options.waitForTabComplete(tabId, 30_000, signal);
       throwIfAborted(signal);
       this.options.bridge.send('job.progress', requestId, { stage: 'collecting' });
-      const response = await this.extractWithRetry(
+      let response = await this.extractWithRetry(
         tabId,
         undefined,
         parsedUrl.hostname === 'www.nowcoder.com',
@@ -2696,6 +2696,24 @@ export class JobRunner {
           : 5,
         signal,
       );
+      throwIfAborted(signal);
+      const topicIdentity = parsedUrl.hostname === 'wx.zsxq.com'
+        ? /^\/group\/(\d+)\/topic\/(\d+)\/?$/u.exec(parsedUrl.pathname) : undefined;
+      if (!response.ok && topicIdentity
+        && (response.error.code === 'UNSUPPORTED_LAYOUT' || response.error.code === 'CONTENT_EMPTY')) {
+        response = await this.ask(tabId, {
+          type: this.contentMessageType('document.apiCollectTopic'),
+          groupId: topicIdentity[1], topicId: topicIdentity[2],
+        }, signal);
+        if (response.ok) {
+          const candidate = payloadOf(response, 'document');
+          if (candidate.source !== 'zsxq' || candidate.kind !== 'post'
+            || !sameCanonicalUrl(candidate.canonicalUrl, url)
+            || candidate.sourceMetadata?.apiTopicDetail !== true) {
+            throw new Error('单条详情接口未返回可核验的目标帖子');
+          }
+        }
+      }
       throwIfAborted(signal);
       if (!response.ok) {
         const needsAttention = response.error.code === 'AUTH_REQUIRED';

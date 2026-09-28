@@ -80,6 +80,53 @@ export interface ZsxqOwnerPage {
   context: ZsxqOwnerApiContext;
 }
 
+/** Read one authenticated detail without relying on the SPA's DOM layout or scanning feeds. */
+export async function collectZsxqApiTopic(
+  groupId: string,
+  topicId: string,
+  dependencies: ZsxqApiFallbackDependencies,
+): Promise<CollectedDocument> {
+  if (!/^\d{6,25}$/u.test(groupId) || !/^\d{15,25}$/u.test(topicId)) {
+    throw coverageError('ZSXQ_API_TOPIC_UNPROVEN', '单条详情缺少有效的星球或帖子编号');
+  }
+  const common = {
+    fetcher: dependencies.fetcher ?? fetch.bind(globalThis),
+    requestId: dependencies.requestId ?? (() => crypto.randomUUID()),
+    aduid: dependencies.aduid,
+  };
+  const groupPayload = await apiGet(`${API_ROOT}/groups/${groupId}`, common);
+  const group = responseData(groupPayload)?.group;
+  if (!isRecord(group) || identifier(group.group_id ?? group.groupId) !== groupId) {
+    throw coverageError('ZSXQ_API_GROUP_UNPROVEN', '单条详情接口未证明目标星球身份');
+  }
+  const owner = isRecord(group.owner) ? group.owner : undefined;
+  const ownerId = owner ? identifier(owner.user_id ?? owner.userId) : undefined;
+  if (!owner || !ownerId) throw new Error('AUTHOR_IDENTITY_UNPROVEN：缺少可核验星主身份');
+  const payload = await apiGet(`${API_ROOT}/topics/${topicId}`, common);
+  const data = responseData(payload);
+  const topic = isRecord(data?.topic)
+    ? data.topic : data && identifier(data.topic_id ?? data.topicId) ? data : undefined;
+  const topicGroup = topic && isRecord(topic.group) ? topic.group : undefined;
+  if (!topic || identifier(topic.topic_id ?? topic.topicId) !== topicId
+    || !topicGroup || identifier(topicGroup.group_id ?? topicGroup.groupId) !== groupId) {
+    throw coverageError('ZSXQ_API_TOPIC_UNPROVEN', '单条详情接口返回了不同帖子或星球');
+  }
+  const author = topicOwner(topic);
+  if (!author || identifier(author.user_id ?? author.userId) !== ownerId) {
+    throw new Error('AUTHOR_IDENTITY_UNPROVEN：单条详情未证明为星主发布');
+  }
+  const createTime = createTimeOf(topic);
+  if (!createTime) throw coverageError('ZSXQ_API_PUBLISHED_AT_UNPROVEN', '单条详情缺少可核验发布时间');
+  const hydrated = await hydrateTopicFileUrls(payload, topicId, common);
+  const document = ownerDetailDocument(groupId, topicId, hydrated, owner,
+    (dependencies.now ?? (() => new Date()))().toISOString(), createTime);
+  const sourceMetadata: NonNullable<CollectedDocument['sourceMetadata']> = {
+    ...document.sourceMetadata, apiTopicDetail: true,
+  };
+  delete sourceMetadata.viewLabels;
+  return { ...document, sourceMetadata };
+}
+
 function shanghaiPublicationDay(publishedAt: string | undefined): string | undefined {
   if (!publishedAt || !Number.isFinite(Date.parse(publishedAt))) return undefined;
   return new Intl.DateTimeFormat('en-CA', {

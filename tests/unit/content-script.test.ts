@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 // @vitest-environment-options { "url": "https://wx.zsxq.com/group/48844584441158" }
 import { readFile } from 'node:fs/promises';
+import { webcrypto } from 'node:crypto';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
@@ -12,6 +13,7 @@ import {
   CONTENT_BUILD_ID,
   CONTENT_DIAGNOSE_REQUEST,
   CONTENT_DOCUMENT_REQUEST,
+  CONTENT_API_COLLECT_TOPIC_REQUEST,
   CONTENT_EXTRACTION_PROTOCOL,
   CONTENT_FOCUS_LAST_REQUEST,
   CONTENT_HIGHLIGHT_REQUEST,
@@ -328,6 +330,41 @@ async function confirmPersistentExpansionFixture(topicId: string): Promise<{
 }
 
 describe('content script list collection', () => {
+  it('returns a signed exact-topic document and current build proof even without DOM body containers', async () => {
+    document.body.innerHTML = '<app-root></app-root>';
+    vi.stubGlobal('crypto', webcrypto);
+    const groupId = '48844584441158';
+    const topicId = '82258285555521452';
+    const fetcher = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      const group = { group_id: groupId, owner: { user_id: '1001', name: '陈老师' } };
+      const data = url.endsWith(`/groups/${groupId}`) ? { group } : { topic: {
+        topic_id: topicId, type: 'talk', group: { group_id: groupId },
+        create_time: '2026-09-28T09:20:00+0800', talk: {
+          text: '这是陈老师副业主题的完整正文，接口精确返回目标帖子。', owner: group.owner,
+        },
+      } };
+      return new Response(JSON.stringify({ succeeded: true, resp_data: data }));
+    });
+    vi.stubGlobal('fetch', fetcher);
+    const result = await ask<Record<string, unknown>>({ type: CONTENT_API_COLLECT_TOPIC_REQUEST, groupId, topicId });
+    expect(result).toMatchObject({
+      ok: true, contentProtocol: CONTENT_EXTRACTION_PROTOCOL, contentBuildId: CONTENT_BUILD_ID,
+      document: { canonicalUrl: `https://wx.zsxq.com/group/${groupId}/topic/${topicId}`, truncated: false },
+    });
+    expect(fetcher).toHaveBeenCalledTimes(2);
+  });
+
+  it('rejects malformed exact-topic identifiers before any authenticated fetch', async () => {
+    const fetcher = vi.fn();
+    vi.stubGlobal('fetch', fetcher);
+    const result = await ask<ExtractionErrorResponse>({
+      type: CONTENT_API_COLLECT_TOPIC_REQUEST, groupId: '../other', topicId: '82258285555521452',
+    });
+    expect(result).toMatchObject({ ok: false, error: { code: 'UNSUPPORTED_LAYOUT' } });
+    expect(fetcher).not.toHaveBeenCalled();
+  });
+
   it('ignores another exact build request instead of letting an old listener answer first', () => {
     const sendResponse = vi.fn();
     const foreignRequest = contentRequestType(

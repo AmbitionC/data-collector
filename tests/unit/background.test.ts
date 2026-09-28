@@ -2701,9 +2701,34 @@ describe('extension job runner', () => {
 
     await runner.runRemoteJob('missing-zsxq-detail', topic('82258285555521452').canonicalUrl, false);
 
-    expect(tabs.asked).toHaveLength(11);
+    expect(tabs.asked.filter(type => type === 'extract.document')).toHaveLength(11);
     expect(bridge.sent.at(-1)).toMatchObject({ type: 'job.error', payload: { code: 'UNSUPPORTED_LAYOUT' } });
     expect(bridge.sent.some(message => message.type === 'job.result')).toBe(false);
+    expect(tabs.removed).toEqual([42]);
+  });
+
+  it.each([false, true])('uses a signed exact topic when ZSXQ DOM has no layout and rejects a mismatched result (mismatch=%s)', async mismatch => {
+    const tabs = new InMemoryTabs();
+    const bridge = new InMemoryBridge();
+    const candidate = {
+      ...topic(mismatch ? '82258285555521453' : '82258285555521452'),
+      sourceMetadata: { apiTopicDetail: true, sourceBodyProven: true, sourceMediaProven: true },
+    };
+    const requested: unknown[] = [];
+    tabs.sendMessage = async (_id, message) => {
+      const request = message as { type: string };
+      if (request.type === 'document.apiCollectTopic') {
+        requested.push(message);
+        return { ok: true, document: candidate };
+      }
+      return { ok: false, error: { code: 'UNSUPPORTED_LAYOUT', message: '页面没有正文容器' } };
+    };
+    const runner = new JobRunner({ tabs, bridge, waitForTabComplete: async () => undefined, delay: async () => undefined });
+    await runner.runRemoteJob('exact-api-fallback', topic('82258285555521452').canonicalUrl, false);
+
+    expect(requested).toEqual([{ type: 'document.apiCollectTopic', groupId: '48844584441158', topicId: '82258285555521452' }]);
+    expect(bridge.sent.some(frame => frame.type === 'job.result')).toBe(!mismatch);
+    expect(bridge.sent.some(frame => frame.type === 'job.error')).toBe(mismatch);
     expect(tabs.removed).toEqual([42]);
   });
 
