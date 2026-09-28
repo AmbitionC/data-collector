@@ -2253,6 +2253,179 @@ describe('extension job runner', () => {
     expect(tabs.created).toHaveLength(0);
   });
 
+  it('continues collecting fresh jobs after the acknowledgement cache fills using durable Bridge state', async () => {
+    const tabs = new InMemoryTabs();
+    const bridge = Object.assign(new InMemoryBridge(), {
+      getJob: async (id: string) => ({ id, url: URL, status: 'dispatched' as const }),
+    });
+    const runner = new JobRunner({ tabs, bridge, waitForTabComplete: async () => undefined });
+    for (let index = 0; index <= 100; index += 1) {
+      await runner.acknowledgeRemoteJob(`past-ack-${index}`);
+    }
+
+    await runner.runRemoteJob('fresh-after-cache-full', URL, false);
+    await runner.acknowledgeRemoteJob('fresh-after-cache-full');
+    await runner.runRemoteJob('another-fresh-after-cache-full', URL, false);
+
+    expect(tabs.created).toHaveLength(2);
+    expect(bridge.sent.filter(frame => frame.type === 'job.result').map(frame => frame.requestId))
+      .toEqual(['fresh-after-cache-full', 'another-fresh-after-cache-full']);
+  });
+
+  it.each(['saved', 'failed', 'needs_attention'] as const)(
+    'does not reopen a durably %s job outside the acknowledgement cache',
+    async status => {
+      const tabs = new InMemoryTabs();
+      const bridge = Object.assign(new InMemoryBridge(), {
+        getJob: async (id: string) => ({ id, url: URL, status }),
+      });
+      const runner = new JobRunner({ tabs, bridge, waitForTabComplete: async () => undefined });
+      for (let index = 0; index <= 100; index += 1) {
+        await runner.acknowledgeRemoteJob(`past-ack-${index}`);
+      }
+
+      await runner.runRemoteJob('durable-terminal-after-cache-full', URL, false);
+      await runner.runRemoteJob('durable-terminal-after-cache-full', URL, false);
+
+      expect(tabs.created).toHaveLength(0);
+      expect(bridge.sent).toHaveLength(0);
+    },
+  );
+
+  it('reports a failed durable lookup without opening a tab after the acknowledgement cache fills', async () => {
+    const tabs = new InMemoryTabs();
+    const bridge = Object.assign(new InMemoryBridge(), {
+      getJob: async () => { throw new Error('读取采集任务失败：HTTP 404'); },
+    });
+    const runner = new JobRunner({ tabs, bridge, waitForTabComplete: async () => undefined });
+    for (let index = 0; index <= 100; index += 1) {
+      await runner.acknowledgeRemoteJob(`past-ack-${index}`);
+    }
+
+    await runner.runRemoteJob('missing-after-cache-full', URL, false);
+
+    expect(tabs.created).toHaveLength(0);
+    expect(bridge.sent).toEqual([{
+      type: 'job.error',
+      requestId: 'missing-after-cache-full',
+      payload: { code: 'COLLECTION_FAILED', message: '读取采集任务失败：HTTP 404', needsAttention: false },
+    }]);
+  });
+
+  it('preserves an ordinary acknowledgement racing the durable lookup after the cache fills', async () => {
+    const tabs = new InMemoryTabs();
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    let lookupStarted = false;
+    const bridge = Object.assign(new InMemoryBridge(), {
+      getJob: async (id: string) => {
+        lookupStarted = true;
+        await gate;
+        return { id, url: URL, status: 'dispatched' as const };
+      },
+    });
+    const runner = new JobRunner({ tabs, bridge, waitForTabComplete: async () => undefined });
+    for (let index = 0; index <= 100; index += 1) {
+      await runner.acknowledgeRemoteJob(`past-ack-${index}`);
+    }
+
+    const work = runner.runRemoteJob('ack-during-durable-lookup', URL, false);
+    await vi.waitFor(() => expect(lookupStarted).toBe(true));
+    await runner.acknowledgeRemoteJob('ack-during-durable-lookup');
+    release();
+    await work;
+
+    expect(tabs.created).toHaveLength(0);
+    expect(bridge.sent).toHaveLength(0);
+  });
+
+  it.each([
+    { id: 'different-id', url: URL, status: 'dispatched' },
+    { id: 'identity-check', url: `${URL}-different`, status: 'dispatched' },
+    { id: 'identity-check', url: URL, status: 'queued' },
+    { id: 'identity-check', url: URL, status: 'dispatched', directedRunId: 'different-owner' },
+  ] as const)('refuses an unproven durable task after the cache fills: %j', async job => {
+    const tabs = new InMemoryTabs();
+    const bridge = Object.assign(new InMemoryBridge(), { getJob: async () => job });
+    const runner = new JobRunner({ tabs, bridge, waitForTabComplete: async () => undefined });
+    for (let index = 0; index <= 100; index += 1) {
+      await runner.acknowledgeRemoteJob(`past-ack-${index}`);
+    }
+
+    await runner.runRemoteJob('identity-check', URL, false);
+
+    expect(tabs.created).toHaveLength(0);
+    expect(bridge.sent).toHaveLength(0);
+  });
+
+  it.each([false, true])('does not terminalize an active job for the opposite ownership shape (directed=%s)', async directed => {
+    const tabs = new InMemoryTabs();
+    const ownership = { directedRunId: 'active-owner', directedRunAttempt: PLAN_ATTEMPT };
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const bridge = Object.assign(new InMemoryBridge(), {
+      getJob: async (id: string) => ({
+        id, url: URL, status: 'collecting' as const, ...(directed ? ownership : {}),
+      }),
+    });
+    const runner = new JobRunner({ tabs, bridge, waitForTabComplete: async () => gate });
+    for (let index = 0; index <= 100; index += 1) {
+      await runner.acknowledgeRemoteJob(`past-ack-${index}`);
+    }
+    const active = runner.runRemoteJob('active-ownership', URL, false, directed ? ownership : undefined);
+    await vi.waitFor(() => expect(tabs.created).toHaveLength(1));
+    await runner.runRemoteJob('active-ownership', URL, false, directed ? undefined : ownership);
+
+    expect(tabs.removed).toHaveLength(0);
+    expect(bridge.sent).toHaveLength(0);
+    release();
+    await active;
+    expect(bridge.sent.filter(frame => frame.type === 'job.result')).toHaveLength(1);
+  });
+
+  it.each([false, true])('honors a durable acknowledgement when its pending lookup rejects (directed=%s)', async directed => {
+    const tabs = new InMemoryTabs();
+    let reject!: (error: Error) => void;
+    let lookupStarted = false;
+    const lookup = new Promise<never>((_resolve, rejectLookup) => { reject = rejectLookup; });
+    const bridge = Object.assign(new InMemoryBridge(), {
+      getJob: async () => { lookupStarted = true; return lookup; },
+    });
+    const runner = new JobRunner({ tabs, bridge, waitForTabComplete: async () => undefined });
+    for (let index = 0; index <= 100; index += 1) {
+      await runner.acknowledgeRemoteJob(`past-ack-${index}`);
+    }
+    const ownership = { directedRunId: 'ack-owner', directedRunAttempt: PLAN_ATTEMPT };
+    const work = runner.runRemoteJob('ack-before-read-error', URL, false, directed ? ownership : undefined);
+    await vi.waitFor(() => expect(lookupStarted).toBe(true));
+    await runner.acknowledgeRemoteJob('ack-before-read-error');
+    reject(new Error('Bridge lookup disconnected'));
+    await work;
+
+    expect(tabs.created).toHaveLength(0);
+    expect(bridge.sent).toHaveLength(0);
+  });
+
+  it('continues a durably owned directed job after the acknowledgement cache fills', async () => {
+    const tabs = new InMemoryTabs();
+    const ownership = { directedRunId: 'fresh-directed-run', directedRunAttempt: PLAN_ATTEMPT };
+    const bridge = Object.assign(new InMemoryBridge(), {
+      getJob: async (id: string) => ({ id, url: URL, status: 'dispatched' as const, ...ownership }),
+    });
+    const runner = new JobRunner({ tabs, bridge, waitForTabComplete: async () => undefined });
+    for (let index = 0; index <= 100; index += 1) {
+      await runner.acknowledgeRemoteJob(`past-ack-${index}`);
+    }
+
+    await runner.runRemoteJob('fresh-directed-after-cache-full', URL, false, ownership);
+
+    expect(tabs.created).toHaveLength(1);
+    expect(tabs.removed).toHaveLength(1);
+    expect(bridge.sent).toContainEqual(expect.objectContaining({
+      type: 'job.result', requestId: 'fresh-directed-after-cache-full',
+    }));
+  });
+
   it('caches cancel-before-collect and replays the exact terminal without opening a tab', async () => {
     const tabs = new InMemoryTabs();
     const bridge = new InMemoryBridge();

@@ -1,5 +1,6 @@
 import {
   APP_VERSION,
+  JOB_STATUSES,
   EXTENSION_REPLACED_CLOSE_CODE,
   EXTENSION_REPLACED_CLOSE_REASON,
   NOWCODER_DETAIL_CAPABILITY,
@@ -14,6 +15,7 @@ import {
   wsEnvelopeSchema,
   type CollectionPlanAttempt,
   type CollectionPlanId,
+  type JobRecord,
   type NowcoderDirectedRunAttempt,
   type ZsxqCollectionMode,
   type ZsxqDateRange,
@@ -143,6 +145,7 @@ export class BridgeConnection {
   /** WebSocket 终态可能比调用方注册 waiter 更快，保留一个有界抢先回执缓存。 */
   private readonly recentJobTerminals = new Map<string, JobTerminalNotice>();
   private readonly jobTerminalWaiters = new Map<string, Set<JobTerminalWaiter>>();
+  private readonly activeCollects = new Map<string, { handlers: number; terminalSent: boolean }>();
 
   constructor(private readonly dependencies: ConnectionDependencies) {}
 
@@ -426,6 +429,10 @@ export class BridgeConnection {
         payload: compatiblePayload,
       }),
     );
+    if (type === 'job.result' || type === 'job.error') {
+      const active = this.activeCollects.get(requestId);
+      if (active) active.terminalSent = true;
+    }
     const localStatus =
       type === 'job.progress'
         ? 'collecting'
@@ -596,6 +603,27 @@ export class BridgeConnection {
       if (oldest === undefined) break;
       this.recentJobTerminals.delete(oldest);
     }
+  }
+
+  /** Read durable state before accepting work beyond the bounded worker acknowledgement cache. */
+  async getJob(jobId: string): Promise<Pick<JobRecord,
+    'id' | 'url' | 'status' | 'directedRunId' | 'directedRunAttempt'>> {
+    const { baseUrl, token } = await this.authorized();
+    const fetcher = this.dependencies.fetch;
+    const response = await fetcher(`${baseUrl}/v1/jobs/${encodeURIComponent(jobId)}`, {
+      headers: { authorization: `Bearer ${token}` },
+      signal: AbortSignal.timeout(10_000),
+    });
+    if (!response.ok) throw new Error(`读取采集任务失败：HTTP ${response.status}`);
+    const raw = await response.json() as Record<string, unknown>;
+    if (
+      !raw || raw.id !== jobId || typeof raw.url !== 'string'
+      || !JOB_STATUSES.includes(raw.status as JobRecord['status'])
+      || (raw.directedRunId !== undefined && typeof raw.directedRunId !== 'string')
+      || (raw.directedRunAttempt !== undefined && typeof raw.directedRunAttempt !== 'string')
+    ) throw new Error('Bridge 返回了无效任务');
+    return raw as unknown as Pick<JobRecord,
+      'id' | 'url' | 'status' | 'directedRunId' | 'directedRunAttempt'>;
   }
 
   private async recoverPersistedJobTerminal(jobId: string): Promise<JobTerminalNotice | undefined> {
@@ -840,6 +868,10 @@ export class BridgeConnection {
         await this.transition(generation, { bridgeStatus: 'protocol_error' });
         return;
       }
+      const active = this.activeCollects.get(message.requestId)
+        ?? { handlers: 0, terminalSent: false };
+      active.handlers += 1;
+      this.activeCollects.set(message.requestId, active);
       try {
         if (isCurrent()) {
           await this.transitionJob(generation, isCurrent, {
@@ -868,8 +900,21 @@ export class BridgeConnection {
             }
           }
         }
-      } catch {
-        // 采集器运行时失败由任务终态表达，不能污染连接协议状态。
+      } catch (error) {
+        // Admission can fail before JobRunner installs a terminal outbox. Report that
+        // rejection as a job failure; swallowing it leaves Bridge stuck at dispatched.
+        if (isCurrent() && !active.terminalSent && payload.directedRunId === undefined) {
+          this.send('job.error', message.requestId, {
+            code: 'COLLECTION_FAILED',
+            message: error instanceof Error ? error.message : '浏览器采集失败',
+            needsAttention: false,
+          });
+        }
+      } finally {
+        active.handlers -= 1;
+        if (active.handlers === 0 && this.activeCollects.get(message.requestId) === active) {
+          this.activeCollects.delete(message.requestId);
+        }
       }
       return;
     }
