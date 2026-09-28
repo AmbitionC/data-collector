@@ -2665,6 +2665,48 @@ describe('extension job runner', () => {
     expect(bridge.sent.some(message => message.type === 'job.error')).toBe(false);
   });
 
+  it('waits for a ZSXQ detail to mount after the browser reports page loading complete', async () => {
+    const tabs = new InMemoryTabs();
+    const bridge = new InMemoryBridge();
+    const candidate = topic('82258285555521452');
+    let samples = 0;
+    tabs.sendMessage = async () => {
+      samples += 1;
+      if (samples <= 2) return {
+        ok: false,
+        error: { code: 'UNSUPPORTED_LAYOUT', message: '正文尚未挂载' },
+      };
+      return { ok: true, document: candidate };
+    };
+    const runner = new JobRunner({
+      tabs, bridge, waitForTabComplete: async () => undefined, delay: async () => undefined,
+    });
+
+    await runner.runRemoteJob('late-zsxq-detail', candidate.canonicalUrl, false);
+
+    expect(bridge.sent).toContainEqual(expect.objectContaining({
+      type: 'job.result', payload: { document: expect.objectContaining({ truncated: false }) },
+    }));
+    expect(bridge.sent.some(message => message.type === 'job.error')).toBe(false);
+    expect(tabs.removed).toEqual([42]);
+  });
+
+  it('bounds ZSXQ layout retries and fails without saving when the detail never mounts', async () => {
+    const tabs = new InMemoryTabs();
+    const bridge = new InMemoryBridge();
+    tabs.response = { ok: false, error: { code: 'UNSUPPORTED_LAYOUT', message: '没有帖子正文' } };
+    const runner = new JobRunner({
+      tabs, bridge, waitForTabComplete: async () => undefined, delay: async () => undefined,
+    });
+
+    await runner.runRemoteJob('missing-zsxq-detail', topic('82258285555521452').canonicalUrl, false);
+
+    expect(tabs.asked).toHaveLength(11);
+    expect(bridge.sent.at(-1)).toMatchObject({ type: 'job.error', payload: { code: 'UNSUPPORTED_LAYOUT' } });
+    expect(bridge.sent.some(message => message.type === 'job.result')).toBe(false);
+    expect(tabs.removed).toEqual([42]);
+  });
+
   it('reports an actionable error when the current page has no content script（不再卡在「清理正文」）', async () => {
     const tabs = new InMemoryTabs();
     const bridge = new InMemoryBridge();

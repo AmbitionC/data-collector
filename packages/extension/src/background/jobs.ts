@@ -2166,8 +2166,10 @@ export class JobRunner {
         last = response;
         continue;
       }
+      // Browser load completion precedes SPA mounting; a missing ZSXQ layout is retryable
+      // within the same bounded observation window, before full-body stability can begin.
       const retryable = response.error.code === 'CONTENT_EMPTY'
-        || (retryUnsupportedLayout && response.error.code === 'UNSUPPORTED_LAYOUT');
+        || ((retryUnsupportedLayout || stabilizeZsxq) && response.error.code === 'UNSUPPORTED_LAYOUT');
       if (!retryable) return response;
       stableSignature = undefined;
       stableForMs = 0;
