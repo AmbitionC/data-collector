@@ -339,6 +339,7 @@ describe('built Chrome extension', () => {
     await sourcePage.goto(url, { waitUntil: 'domcontentloaded' });
     const { page: sidePanel } = await sidePanelFor(sourcePage);
     await sidePanel.setViewport({ width: 390, height: 1100 });
+    await sidePanel.emulateMediaFeatures([{ name: 'prefers-reduced-motion', value: 'reduce' }]);
     await waitForVisiblePanel(sidePanel, '#ready-panel', 15_000);
     await clickSidePanel(sidePanel, '#nav-hot');
     await waitForVisiblePanel(sidePanel, '#hot-panel', 10_000);
