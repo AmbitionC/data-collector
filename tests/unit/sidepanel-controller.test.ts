@@ -99,6 +99,19 @@ afterEach(() => {
 });
 
 describe('side panel build stamp', () => {
+  it('keeps the hot view when an older library read completes', async () => {
+    let finish!: (value: unknown) => void;
+    handler = async message => message.type === 'library.list'
+      ? new Promise(resolve => { finish = resolve; }) : { ok: true, value: readyStatus() };
+    document.querySelector<HTMLElement>('#nav-library')!.click();
+    await vi.waitFor(() => expect(finish).toBeTypeOf('function'));
+    document.querySelector<HTMLElement>('#nav-hot')!.click();
+    expect(visible('#hot-panel')).toBe(true);
+    finish({ ok: true, value: { entries: [] } });
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect(visible('#hot-panel')).toBe(true);
+    expect(visible('#library-panel')).toBe(false);
+  });
   it('右下角常驻显示构建版本', () => {
     // 用户无法从浏览器里判断自己加载的是不是最新构建，只能靠「某个功能怎么没出现」
     // 反推——实际就这么踩过一次：功能全做完了，用户看到的还是旧版。

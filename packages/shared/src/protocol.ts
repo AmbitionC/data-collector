@@ -2,6 +2,7 @@ import { z } from 'zod';
 import { CONTENT_KINDS, FE_JOURNEY_CANDIDATE_KINDS, SOURCES } from './model.js';
 import { descriptorForHost } from './sources.js';
 import { canonicalizeUrl, parseSupportedUrl } from './url.js';
+import { nowcoderHotMaterialSchema, renderHotMaterial } from './nowcoderHot.js';
 import {
   collectionBatchSchema,
   collectionPlanAttemptSchema,
@@ -65,7 +66,17 @@ export const collectedDocumentSchema = z.object({
     .record(z.string(), z.union([z.string(), z.number(), z.boolean(), z.null()]))
     .optional(),
   feJourney: feJourneyCandidateMetadataSchema.optional(),
+  operationMaterial: nowcoderHotMaterialSchema.optional(),
 }).superRefine((document, context) => {
+  if (document.operationMaterial && (document.source !== 'nowcoder' || document.kind !== 'post'
+    || document.images.length > 0 || document.author || document.questioner || document.feJourney)) {
+    context.addIssue({ code: 'custom', path: ['operationMaterial'], message: '热帖素材只接受无个人信息、无图片的牛客来源短摘' });
+  }
+  if (document.operationMaterial && (document.text !== document.operationMaterial.evidence.excerpt
+    || document.html !== renderHotMaterial(document.operationMaterial)
+    || (document.sourceMetadata && Object.keys(document.sourceMetadata).length > 0))) {
+    context.addIssue({ code: 'custom', path: ['operationMaterial'], message: '热帖素材只能保留规范化短摘与编辑笔记，不能夹带全文或其他来源数据' });
+  }
   try {
     const rawUrl = parseSupportedUrl(document.url);
     const canonicalUrl = canonicalizeUrl(rawUrl).href;

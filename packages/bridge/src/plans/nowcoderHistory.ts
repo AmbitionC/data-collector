@@ -28,6 +28,7 @@ export function knownNowcoderPlanUrls(
 ): Set<string> {
   const grouped = new Map<string, JobRecord[]>();
   for (const job of jobs) {
+    if (job.materialKind === 'nowcoder-hot') continue;
     const url = canonicalJobUrl(job.url);
     if (!url) continue;
     const matches = grouped.get(url) ?? [];
@@ -66,6 +67,7 @@ export function pendingNowcoderPlanJobs(
 ): JobRecord[] {
   const latestByContentId = new Map<string, JobRecord>();
   for (const job of jobs) {
+    if (job.materialKind === 'nowcoder-hot') continue;
     if (
       job.status !== 'saved'
       || !job.outputPath

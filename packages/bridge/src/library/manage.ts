@@ -3,6 +3,8 @@ import { dirname, join, relative } from 'node:path';
 import { atomicWriteText } from './writer.js';
 import { assertInsideRoot } from './paths.js';
 import { withCatalogTransaction } from './catalogTransaction.js';
+import { collectedDocumentSchema, hotMaterialId, type CollectedDocument } from '@data-collector/shared';
+import { projectOrganized } from './storedDocument.js';
 
 /**
  * 已入库内容的查看与管理。
@@ -15,6 +17,7 @@ import { withCatalogTransaction } from './catalogTransaction.js';
  */
 
 export interface LibraryEntry {
+  materialKind?: 'nowcoder-hot';
   id: string;
   source: string;
   title: string;
@@ -59,6 +62,7 @@ export async function listLibrary(root: string): Promise<LibraryEntry[]> {
 
 /** 一条已入库内容的正文（供侧栏「查看内容」）。 */
 export interface LibraryEntryContent extends LibraryEntry {
+  document?: CollectedDocument;
   /** Markdown 全文；超长会截断，并置 truncated。 */
   markdown: string;
   truncated: boolean;
@@ -95,7 +99,14 @@ export async function readEntry(
     return undefined;
   }
   const truncated = markdown.length > MAX_CONTENT_BYTES;
+  let document: CollectedDocument | undefined;
+  if (entry.materialKind === 'nowcoder-hot' || entry.id.startsWith('hot-')) {
+    const stored = projectOrganized(JSON.parse(await readFile(join(dirname(absolutePath), 'source.json'), 'utf8')));
+    document = collectedDocumentSchema.parse(stored.document) as CollectedDocument;
+    if (!document.operationMaterial || hotMaterialId(document.canonicalUrl) !== entry.id) throw new Error('热帖素材元信息与目录不一致');
+  }
   return {
+    ...(document ? { document } : {}),
     ...entry,
     absolutePath,
     truncated,
