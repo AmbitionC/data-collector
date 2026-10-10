@@ -20,6 +20,7 @@ import {
   parseSupportedUrl,
   SOURCES,
   stableContentId,
+  hotMaterialId,
   ZSXQ_COMPLETE_CONTENT_CAPABILITY,
   type Source,
 } from '@data-collector/shared';
@@ -80,6 +81,7 @@ export interface SyncInfo {
 }
 
 interface CatalogEntry {
+  materialKind?: 'nowcoder-hot';
   id: string;
   source: Source;
   title: string;
@@ -1777,7 +1779,7 @@ export class MarkdownLibrary {
     const catalog = directedPreflight
       ? structuredClone(directedPreflight.catalog)
       : await this.readCatalog(catalogPath);
-    const id = stableContentId(input.document.canonicalUrl);
+    const id = input.document.operationMaterial ? hotMaterialId(input.document.canonicalUrl) : stableContentId(input.document.canonicalUrl);
     const existing = catalog.find(entry => entry.id === id);
     const directedEvidence = localEvidence?.nowcoderDirected;
     const directed = directedEvidence !== undefined;
@@ -1935,6 +1937,7 @@ export class MarkdownLibrary {
     }
 
     const nextEntry: CatalogEntry = {
+      ...(input.document.operationMaterial ? { materialKind: 'nowcoder-hot' as const } : {}),
       id,
       source: input.document.source,
       title: input.document.title,

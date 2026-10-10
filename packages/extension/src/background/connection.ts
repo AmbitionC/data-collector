@@ -455,6 +455,7 @@ export class BridgeConnection {
       userCategory?: string;
       userTags?: string[];
       sinks?: string[];
+      materialKind?: 'nowcoder-hot';
       batchId?: string;
       planId?: CollectionPlanId;
       attempt?: CollectionPlanAttempt;
@@ -476,6 +477,7 @@ export class BridgeConnection {
         body: JSON.stringify({
           url,
           requestedBy: 'extension',
+          ...(overrides?.materialKind ? { materialKind: overrides.materialKind } : {}),
           ...(overrides?.sinks?.length ? { sinks: overrides.sinks } : {}),
           ...(overrides?.batchId ? { batchId: overrides.batchId } : {}),
           ...(overrides?.planId ? { planId: overrides.planId } : {}),

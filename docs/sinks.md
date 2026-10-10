@@ -109,3 +109,7 @@ staging 内容或不完整收件箱内容永远不可被 manifest 或 Agent 消�
    - `front-end-journey-resource`：按 `.codex/skills/curate-fe-journey-inbox/` 聚合候选，产出 `interview/`、`knowledge/` 更新，以及本地运营选题/项目候选/跳过项报告。
 
 完整设计见 [`docs/superpowers/specs/2026-07-24-collection-platform-design.md`](superpowers/specs/2026-07-24-collection-platform-design.md)。
+
+## 牛客热帖素材隔离（v0.4.42）
+
+带 `operationMaterial` 的文档强制走内部 `markdown` 本机 sink；`hot-<stableContentId>` 与同一来源 URL 的普通面经身份独立。索引 `materialKind: nowcoder-hot` 不参与面经候选索引/通用 pending 同步。`syncEntries` 与 `RepoInboxSink.save` 均拒绝素材，不受来源路由配置覆盖。仅可从热帖页导出私有 JSON，后续后台接入见 [导入约定](nowcoder-hot-materials.md)。

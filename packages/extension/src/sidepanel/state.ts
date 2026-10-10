@@ -5,7 +5,7 @@ import type { BatchItem, BatchPhase } from '../background/jobs.js';
 
 export type { BatchItem, BatchPhase };
 
-export type TopPage = 'collect' | 'plans' | 'library';
+export type TopPage = 'collect' | 'plans' | 'library' | 'hot';
 
 export interface CollectionPlanStatus {
   id: CollectionPlanId;
@@ -23,6 +23,7 @@ export interface PlansStatusResponse {
 
 /** 已入库的一条内容。 */
 export interface LibraryEntry {
+  materialKind?: 'nowcoder-hot';
   id: string;
   source: string;
   title: string;
@@ -674,10 +675,11 @@ function renderEntryOverlay(
   const busy = (state.syncing ?? []).includes(view.id);
   const syncButton = required<HTMLButtonElement>(document, '#entry-sync');
   // 逐条核对完就地同步：这正是「逐个验证后同步远程」那一步。
-  syncButton.disabled = busy || !entry;
+  const privateMaterial = entry?.materialKind === 'nowcoder-hot' || entry?.id.startsWith('hot-') === true;
+  syncButton.disabled = busy || !entry || privateMaterial;
   syncButton.textContent = busy
     ? '正在同步…'
-    : syncState === 'synced' ? '重新同步这一条' : '同步这一条';
+    : privateMaterial ? '私有素材 · 请从热帖页导出' : syncState === 'synced' ? '重新同步这一条' : '同步这一条';
   syncButton.onclick = () => { void actions.syncLibrary([view.id]); };
 
   required(document, '#entry-title').textContent = view.title || '（无标题）';
@@ -725,7 +727,7 @@ function renderLibrary(
   const visible = state.entries
     .filter(entry => !state.source || entry.source === state.source)
     .filter(entry => state.syncFilter === 'all' || syncStateOf(entry) === state.syncFilter);
-  const pendingCount = state.entries.filter(entry => syncStateOf(entry) !== 'synced').length;
+  const pendingCount = state.entries.filter(entry => entry.materialKind !== 'nowcoder-hot' && !entry.id.startsWith('hot-') && syncStateOf(entry) !== 'synced').length;
 
   required(document, '#library-heading').textContent = state.loading
     ? '正在读取…'
@@ -783,10 +785,11 @@ function renderLibrary(
     syncOne.type = 'button';
     syncOne.className = 'row-button';
     const busy = (state.syncing ?? []).includes(entry.id);
-    syncOne.disabled = busy;
+    const privateMaterial = entry.materialKind === 'nowcoder-hot' || entry.id.startsWith('hot-');
+    syncOne.disabled = busy || privateMaterial;
     syncOne.textContent = busy
       ? '同步中…'
-      : isUnpushed(entry.sync) ? '推送' : syncState === 'synced' ? '重新同步' : '同步';
+      : privateMaterial ? '私有素材' : isUnpushed(entry.sync) ? '推送' : syncState === 'synced' ? '重新同步' : '同步';
     syncOne.onclick = () => { void actions.syncLibrary([entry.id]); };
 
     const remove = document.createElement('button');
@@ -902,6 +905,11 @@ export function renderTopNav(document: Document, page: TopPage, actions: SidePan
   collect.onclick = () => actions.openPage('collect');
   plans.onclick = () => actions.openPage('plans');
   library.onclick = () => actions.openPage('library');
+  const hot = document.querySelector<HTMLButtonElement>('#nav-hot');
+  if (hot) {
+    hot.setAttribute('aria-pressed', String(page === 'hot'));
+    hot.onclick = () => actions.openPage('hot');
+  }
 }
 
 const PLAN_PRESENTATION: Record<CollectionPlanId, {

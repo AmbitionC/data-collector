@@ -330,6 +330,48 @@ async function waitForText(
 }
 
 describe('built Chrome extension', () => {
+  it('previews and saves checked private hot materials through the existing Chrome pipeline', async () => {
+    const { libraryRoot } = await startStack();
+    const url = 'https://www.nowcoder.com/';
+    const fixture = await readFile(join(WORKSPACE, 'tests', 'fixtures', 'nowcoder-hot-list.html'), 'utf8');
+    const sourcePage = await browser!.newPage();
+    await serveArticleFixture(sourcePage, fixture, url);
+    await sourcePage.goto(url, { waitUntil: 'domcontentloaded' });
+    const { page: sidePanel } = await sidePanelFor(sourcePage);
+    await sidePanel.setViewport({ width: 390, height: 1100 });
+    await waitForVisiblePanel(sidePanel, '#ready-panel', 15_000);
+    await clickSidePanel(sidePanel, '#nav-hot');
+    await waitForVisiblePanel(sidePanel, '#hot-panel', 10_000);
+    await clickSidePanel(sidePanel, '#hot-read');
+    await waitForValue(sidePanel, 'document.querySelectorAll(".hot-card").length', value => value === '2', 15_000, '热帖预览');
+    expect(await sidePanel.evaluate(() => [...document.querySelectorAll<HTMLInputElement>('.hot-select')].every(input => !input.checked))).toBe(true);
+    await sidePanel.evaluate(() => {
+      const selected = document.querySelector<HTMLInputElement>('.hot-select')!;
+      selected.checked = true; selected.dispatchEvent(new Event('change'));
+      const note = document.querySelector<HTMLTextAreaElement>('.hot-note')!;
+      note.value = '围绕等待回复时的节奏管理找选题'; note.dispatchEvent(new Event('input'));
+      const tag = document.querySelector<HTMLInputElement>('fieldset input')!;
+      tag.checked = true; tag.dispatchEvent(new Event('change'));
+    });
+    const screenshots = join(WORKSPACE, 'artifacts', 'screenshots');
+    await mkdir(screenshots, { recursive: true });
+    await sidePanel.screenshot({ path: join(screenshots, 'nowcoder-hot-preview.png'), fullPage: true });
+    await clickSidePanel(sidePanel, '#hot-save');
+    await waitForText(sidePanel, '#hot-status', '已保存 1 条，已跳过 0 条，失败 0 条。', 15_000);
+    const catalog = JSON.parse(await readFile(join(libraryRoot, '_catalog', 'index.json'), 'utf8')) as { id: string; materialKind: string; relativePath: string }[];
+    expect(catalog).toHaveLength(1);
+    expect(catalog[0]?.id).toMatch(/^hot-/u);
+    expect(catalog[0]?.materialKind).toBe('nowcoder-hot');
+    const result = await sidePanel.evaluate(async () => await chrome.runtime.sendMessage({ type: 'hot.export' }));
+    expect(result.ok).toBe(true);
+    expect(result.value.materials[0].document.operationMaterial.editorial.inspirationNote).toBe('围绕等待回复时的节奏管理找选题');
+    expect(result.value.materials[0].document.operationMaterial.editorial.emotionTags).toEqual(['焦虑']);
+    expect(result.value.materials[0].document.author).toBeUndefined();
+    const checkboxes = await sidePanel.evaluate(() => [...document.querySelectorAll<HTMLInputElement>('.hot-select')].map(input => input.getBoundingClientRect().width));
+    expect(checkboxes.every(width => width <= 24)).toBe(true);
+    await sidePanel.screenshot({ path: join(screenshots, 'nowcoder-hot-saved.png'), fullPage: true });
+  });
+
   it('automatically authorizes the side panel and captures the current page into the local library', async () => {
     const { libraryRoot } = await startStack();
 

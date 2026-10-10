@@ -68,6 +68,7 @@ export interface CollectedDocument {
   userTags?: string[];
   sourceMetadata?: Record<string, string | number | boolean | null>;
   feJourney?: FeJourneyCandidateMetadata;
+  operationMaterial?: import('./nowcoderHot.js').NowcoderHotMaterial;
 }
 
 export const JOB_STATUSES = [
@@ -84,6 +85,8 @@ interface JobRecordBase {
   id: string;
   url: string;
   requestedBy: 'codex' | 'cli' | 'extension';
+  /** Private list snapshots must never become full-detail interview jobs. */
+  materialKind?: 'nowcoder-hot';
   status: JobStatus;
   createdAt: string;
   updatedAt: string;

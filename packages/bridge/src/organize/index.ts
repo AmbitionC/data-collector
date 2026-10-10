@@ -1,5 +1,6 @@
 import {
   collectedDocumentSchema,
+  HOT_MATERIAL_CATEGORY,
   type CollectedDocument,
 } from '@data-collector/shared';
 import { classify } from './classify.js';
@@ -32,8 +33,8 @@ export function organize(input: CollectedDocument): OrganizedDocument {
   return {
     document,
     sanitizedHtml,
-    summary: summarize(document.text, document.title),
-    category: classification.category,
-    tags: classification.tags,
+    summary: document.operationMaterial ? '未核实来源短摘；私有运营素材' : summarize(document.text, document.title),
+    category: document.operationMaterial ? HOT_MATERIAL_CATEGORY : classification.category,
+    tags: document.operationMaterial ? [...document.operationMaterial.editorial.emotionTags] : classification.tags,
   };
 }

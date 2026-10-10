@@ -26,6 +26,7 @@ import {
  */
 
 export interface LibraryCatalogEntry {
+  materialKind?: 'nowcoder-hot';
   id: string;
   source: string;
   title: string;
@@ -198,6 +199,13 @@ export async function syncEntries(
 
   for (const entry of catalog) {
     if (!wanted.has(entry.id)) continue;
+    if (entry.materialKind === 'nowcoder-hot' || entry.id.startsWith('hot-')) {
+      const sync: SyncInfo = { state: 'failed', at: now(), error: '热帖素材仅供私有运营使用，请导出私有素材 JSON；不能同步到题库收件箱' };
+      entry.sync = sync;
+      changedIds.add(entry.id);
+      results.push({ id: entry.id, title: entry.title, sync });
+      continue;
+    }
     // 知识星球历史数据里有「明确截断」与「旧版未记录完整性」两种情形。
     // 两者都不能进交付 sink；留在 pending 队列，供新版重采后收敛为 true。
     if (
@@ -231,6 +239,7 @@ export async function syncEntries(
     }
     try {
       const organized = await readOrganized(root, entry);
+      if (organized.document.operationMaterial) throw new Error('热帖素材不能同步到通用收件箱');
       assertZsxqSourceMatchesCatalog(entry, organized);
       if (
         options.skipDelivered
@@ -368,6 +377,7 @@ export function isDelivered(sync: SyncInfo | undefined): boolean {
 /** 尚未送达（未同步、失败、以及已提交但没推上去）的条目 id，供「同步全部未同步」展开使用。 */
 export async function pendingIds(root: string, deliveryBatchId?: string): Promise<string[]> {
   return (await readCatalog(root))
+    .filter(entry => entry.materialKind !== 'nowcoder-hot' && !entry.id.startsWith('hot-'))
     .filter(entry =>
       !isDelivered(entry.sync)
       || (deliveryBatchId !== undefined && entry.deliveryBatchId === deliveryBatchId))

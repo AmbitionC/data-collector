@@ -129,6 +129,7 @@ export class RepoInboxSink implements ContentSink {
   }
 
   async save(input: OrganizedDocument): Promise<SinkResult> {
+    if (input.document.operationMaterial) throw new Error('热帖素材仅可保存在私有运营素材中，禁止投递通用收件箱');
     const result = this.saveQueue.then(() => this.saveNow(input));
     this.saveQueue = result.then(
       () => undefined,

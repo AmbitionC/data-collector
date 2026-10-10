@@ -21,6 +21,7 @@ export function contentRequestType(request: string, buildId = CONTENT_BUILD_ID):
 /** 精确构建消息名让同页仍存活的旧 listener 根本不会抢先响应。 */
 export const CONTENT_DOCUMENT_REQUEST = contentRequestType('extract.document');
 export const CONTENT_LIST_REQUEST = contentRequestType('extract.list');
+export const CONTENT_HOT_LIST_REQUEST = contentRequestType('hot.list');
 export const CONTENT_SELECT_VIEW_REQUEST = contentRequestType('list.selectView');
 export const CONTENT_API_COLLECT_REQUEST = contentRequestType('list.apiCollect');
 export const CONTENT_API_COLLECT_OWNER_PAGE_REQUEST = contentRequestType(
@@ -41,6 +42,7 @@ export const CONTENT_FOCUS_LAST_REQUEST = contentRequestType('list.focusLast');
 const CURRENT_CONTENT_REQUESTS: ReadonlySet<string> = new Set([
   CONTENT_DOCUMENT_REQUEST,
   CONTENT_LIST_REQUEST,
+  CONTENT_HOT_LIST_REQUEST,
   CONTENT_SELECT_VIEW_REQUEST,
   CONTENT_API_COLLECT_REQUEST,
   CONTENT_API_COLLECT_OWNER_PAGE_REQUEST,

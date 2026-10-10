@@ -35,6 +35,7 @@ function documentOrder(left: RebuildCandidate, right: RebuildCandidate): number 
 async function readCandidates(libraryRoot: string): Promise<RebuildCandidate[]> {
   const candidates: RebuildCandidate[] = [];
   for (const entry of await listLibrary(libraryRoot)) {
+    if (entry.materialKind === 'nowcoder-hot' || entry.id.startsWith('hot-')) continue;
     if (entry.source !== 'nowcoder' && entry.source !== 'github') continue;
     const markdownPath = assertInsideRoot(libraryRoot, join(libraryRoot, entry.relativePath));
     const sourcePath = assertInsideRoot(libraryRoot, join(dirname(markdownPath), SOURCE_FILE));

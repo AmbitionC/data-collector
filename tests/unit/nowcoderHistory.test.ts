@@ -25,6 +25,15 @@ function job(
 }
 
 describe('knownNowcoderPlanUrls', () => {
+  it('ignores private hot-material jobs in interview dedupe and pending selection', () => {
+    const interview = job('interview', 'saved', '2026-08-23T08:00:00.000Z', {
+      url: 'https://www.nowcoder.com/discuss/9001', outputPath: '/tmp/interview/index.md',
+    });
+    const hot = { ...interview, id: 'hot-save', materialKind: 'nowcoder-hot',
+      updatedAt: NOW, outputPath: '/tmp/hot/index.md' } as JobRecord;
+    expect(knownNowcoderPlanUrls([hot], 'new-batch', NOW)).not.toContain(hot.url);
+    expect(pendingNowcoderPlanJobs([interview, hot], new Set([stableContentId(hot.url)]))).toEqual([interview]);
+  });
   it('keeps saved and nonterminal jobs known', () => {
     const savedJob = job('1001', 'saved', '2026-08-23T08:00:00.000Z');
     const queuedJob = job('1002', 'queued', '2026-08-23T08:00:00.000Z');
