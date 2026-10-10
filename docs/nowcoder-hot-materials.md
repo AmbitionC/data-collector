@@ -32,6 +32,7 @@ Bridge 和扩展需一起更新至本次构建。旧 Bridge 的 schema 会丢弃
 - 新增可选 `operationMaterial`；普通面经文档不带该字段。
 - 素材 ID：`hot-` + 现有 `stableContentId(canonicalUrl)`。同一链接的面经仍用原 ID，不会互相覆盖；热帖重采保留一条。
 - 固定分类 `热帖素材`，目录索引标 `materialKind: nowcoder-hot`。素材不参与面经去重、fe-journey 候选索引/重建、通用 pending 同步列表。
+- 保存任务持久化 `materialKind: nowcoder-hot`，并验证回传文档与任务类型一致。扩展重启/服务重启中断保存时进入 `needs_attention`，只能回到素材预览手动重试；不会自动打开详情页采全文。
 - Bridge 强制素材只写内部 `markdown` sink，拒绝定向面经交付。普通同步和所有 RepoInboxSink 均拒绝素材，即使用户配置了其他去向。
 - `library.entry` 对素材追加经过 schema/身份校验的 `document`，用于读取精确私有导出；普通条目的现有形状不变。
 
