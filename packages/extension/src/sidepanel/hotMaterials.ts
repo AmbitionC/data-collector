@@ -84,12 +84,12 @@ export function bindHotMaterials(document: Document, message: Message): { show()
       ? `${fallback}；连接暂时中断，请重试。` : text || fallback;
   }
   read.onclick = async () => {
-    busy = true; status.textContent = '正在读取当前牛客页面的可见条目…'; controls();
+    busy = true; status.textContent = '正在读取当前牛客页面已加载的可识别条目…'; controls();
     try {
       preview = await message<HotPreview>({ type: 'hot.preview' });
       selected.clear(); drafts.clear(); drawRows();
       status.textContent = preview.rows.length === 0 ? '本页没有识别到帖子。可能尚未加载或页面结构变化，请检查列表后重试。'
-        : `预览 ${preview.rows.length} 条，本页可见热度不代表全站排名。请勾选需要的素材。${preview.capped ? '本次最多显示 60 条；滚动后可重新读取。' : ''}`;
+        : `预览 ${preview.rows.length} 条，本页可见热度不代表全站排名。请勾选需要的素材。${preview.capped ? '已达当前 DOM 前 60 条的预览上限；滚动后重读不保证覆盖后续条目。' : ''}`;
     } catch (error) { failure(error, '读取热帖预览失败'); }
     finally { busy = false; controls(); }
   };
