@@ -62,7 +62,7 @@ export async function saveCollectedDocument(
         },
       };
     }
-    const results = await router.save(organized, override, localEvidence);
+    const results = await router.save(organized, document.sourceMetadata?.nowcoderReviewOnly === true ? ['markdown'] : override, localEvidence);
     if (directedEvidence) {
       const localFailure = results.find(result =>
         router.isTrustedLocalEvidenceResult(result)

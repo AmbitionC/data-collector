@@ -1,3 +1,4 @@
+import { nowcoderScheduleConfigSchema, type NowcoderScheduleConfig } from '@data-collector/shared';
 import {
   sidePanelStateFromStatus,
   renderSidePanel,
@@ -82,6 +83,12 @@ let plansLoading = false;
 let plansError: string | undefined;
 let runningPlanId: CollectionPlanStatus['id'] | undefined;
 let directedRunActive = false;
+let nowcoderSchedule: NowcoderScheduleConfig | undefined;
+let nowcoderScheduleDraft: NowcoderScheduleConfig | undefined;
+let nowcoderScheduleSaving = false;
+let nowcoderScheduleNote: string | undefined;
+let nowcoderScheduleError: string | undefined;
+let nowcoderScheduleRevision = 0;
 
 function plansState(): SidePanelState {
   return {
@@ -90,11 +97,17 @@ function plansState(): SidePanelState {
     loading: plansLoading,
     ...(runningPlanId ? { runningPlanId } : {}),
     ...(directedRunActive ? { directedRunActive } : {}),
+    ...(nowcoderSchedule ? { nowcoderSchedule } : {}),
+    ...(nowcoderScheduleDraft ? { nowcoderScheduleDraft } : {}),
+    ...(nowcoderScheduleSaving ? { nowcoderScheduleSaving } : {}),
+    ...(nowcoderScheduleNote ? { nowcoderScheduleNote } : {}),
+    ...(nowcoderScheduleError ? { nowcoderScheduleError } : {}),
     ...(plansError ? { error: plansError } : {}),
   };
 }
 
 async function loadPlans(): Promise<void> {
+  const observedScheduleRevision = nowcoderScheduleRevision;
   plansLoading = plans.length === 0;
   plansError = undefined;
   renderSidePanel(document, plansState(), actions);
@@ -102,6 +115,17 @@ async function loadPlans(): Promise<void> {
     const status = await message<PlansStatusResponse>({ type: 'plans.status' });
     plans = status.plans;
     directedRunActive = status.directedRunActive === true;
+    if (observedScheduleRevision === nowcoderScheduleRevision) {
+      const previousSchedule = nowcoderSchedule;
+      const untouched = nowcoderScheduleDraft === undefined
+        || JSON.stringify(nowcoderScheduleDraft) === JSON.stringify(previousSchedule);
+      const parsedSchedule = nowcoderScheduleConfigSchema.safeParse(status.nowcoderSchedule);
+      nowcoderSchedule = parsedSchedule.success ? parsedSchedule.data : undefined;
+      if (nowcoderSchedule && untouched) {
+        nowcoderScheduleDraft = structuredClone(nowcoderSchedule);
+        if (JSON.stringify(previousSchedule) !== JSON.stringify(nowcoderSchedule)) nowcoderScheduleNote = undefined;
+      }
+    }
   } catch (error) {
     plansError = errorMessage(error, '读取采集任务失败。');
   } finally {
@@ -445,12 +469,39 @@ const actions: SidePanelActions = {
     else if (next === 'plans') void loadPlans();
     else void refresh();
   },
-  async runPlan(planId, force) {
+  editNowcoderSchedule(config) {
+    nowcoderScheduleDraft = structuredClone(config);
+    nowcoderScheduleNote = undefined;
+    nowcoderScheduleError = undefined;
+    renderSidePanel(document, plansState(), actions);
+  },
+  async saveNowcoderSchedule(input) {
+    if (nowcoderScheduleSaving) return;
+    nowcoderScheduleSaving = true;
+    nowcoderScheduleRevision += 1;
+    nowcoderScheduleError = undefined;
+    nowcoderScheduleNote = undefined;
+    renderSidePanel(document, plansState(), actions);
+    try {
+      const config = nowcoderScheduleConfigSchema.parse(input);
+      const saved = await message<unknown>({ type: 'plans.nowcoderSchedule.configure', config });
+      nowcoderSchedule = nowcoderScheduleConfigSchema.parse(saved);
+      nowcoderScheduleDraft = structuredClone(nowcoderSchedule);
+      nowcoderScheduleNote = '已保存；下次符合条件时按计划收集。本次不会立即采集。';
+    } catch (error) {
+      nowcoderScheduleError = errorMessage(error, '保存周期收集设置失败。');
+    } finally {
+      nowcoderScheduleRevision += 1;
+      nowcoderScheduleSaving = false;
+      if (page === 'plans') renderSidePanel(document, plansState(), actions);
+    }
+  },
+  async runPlan(planId, force, review) {
     runningPlanId = planId;
     plansError = undefined;
     renderSidePanel(document, plansState(), actions);
     try {
-      await message({ type: 'plans.run', planId, force });
+      await message({ type: 'plans.run', planId, force, ...(review ?? {}) });
     } catch (error) {
       plansError = errorMessage(error, '启动采集任务失败。');
     } finally {

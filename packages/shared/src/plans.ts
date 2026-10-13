@@ -7,6 +7,15 @@ export type CollectionPlanId = (typeof COLLECTION_PLAN_IDS)[number];
 export const COLLECTION_PLAN_TRIGGERS = ['manual', 'scheduled'] as const;
 export type CollectionPlanTrigger = (typeof COLLECTION_PLAN_TRIGGERS)[number];
 
+export const NOWCODER_SCHEDULE_COMPANIES = ['bytedance', 'tencent', 'alibaba', 'ant', 'other'] as const;
+export const nowcoderScheduleConfigSchema = z.object({
+  enabled: z.boolean(),
+  companies: z.array(z.enum(NOWCODER_SCHEDULE_COMPANIES)).min(1).max(5)
+    .refine(companies => new Set(companies).size === companies.length, '公司不能重复'),
+  reviewOnly: z.literal(true),
+}).strict();
+export type NowcoderScheduleConfig = z.infer<typeof nowcoderScheduleConfigSchema>;
+
 /** Bridge 每次下发固定计划时生成的不可猜测尝试令牌。 */
 export const collectionPlanAttemptSchema = z.string().regex(/^[a-f0-9]{16}$/);
 export type CollectionPlanAttempt = z.infer<typeof collectionPlanAttemptSchema>;
@@ -513,6 +522,10 @@ export interface CollectionBatch {
   needsAttention: number;
   /** 已成功同步到目标仓库收件箱的稳定内容 ID；下游只加工这里列出的本批内容。 */
   deliveryIds: string[];
+  nowcoderReviewOnly?: true;
+  nowcoderCompanies?: Array<'bytedance' | 'tencent' | 'alibaba' | 'ant' | 'other'>;
+  /** Qualified local IDs for this review batch, never a delivery acknowledgement. */
+  reviewIds?: string[];
   /** 手动补采不得占用当天的自动日任务；旧批次缺失时由服务按兼容规则推断。 */
   trigger?: CollectionPlanTrigger;
   /** 需要二次筛选的计划用持久状态保证 Bridge 重启后可续跑。 */
@@ -603,6 +616,9 @@ export const collectionBatchSchema = z.object({
   failed: countSchema,
   needsAttention: countSchema,
   deliveryIds: z.array(z.string().regex(/^[a-f0-9]{12}$/)).max(100).default([]),
+  nowcoderReviewOnly: z.literal(true).optional(),
+  nowcoderCompanies: z.array(z.enum(['bytedance', 'tencent', 'alibaba', 'ant', 'other'])).min(1).max(5).optional(),
+  reviewIds: z.array(z.string().regex(/^[a-f0-9]{12}$/)).max(100).optional(),
   trigger: z.enum(COLLECTION_PLAN_TRIGGERS).optional(),
   selectionStatus: z.enum(['collecting', 'pending', 'completed']).optional(),
   preparationStatus: z.enum(['collecting', 'completed']).optional(),
@@ -617,6 +633,18 @@ export const collectionBatchSchema = z.object({
   rejectionDetails: z.array(collectionPlanRejectionSchema).max(500).optional(),
   error: z.string().trim().min(1).max(2_000).optional(),
 }).superRefine((batch, context) => {
+  if ((batch.nowcoderReviewOnly || batch.nowcoderCompanies || batch.reviewIds) && batch.planId !== 'nowcoder-agent-market') {
+    context.addIssue({ code: 'custom', path: ['nowcoderReviewOnly'], message: '待审核模式只适用于牛客面经计划' });
+  }
+  if (batch.nowcoderReviewOnly && batch.deliveryIds.length > 0) {
+    context.addIssue({ code: 'custom', path: ['deliveryIds'], message: '待审核批次不能声明交付成功' });
+  }
+  if (batch.nowcoderCompanies && (!batch.nowcoderReviewOnly || new Set(batch.nowcoderCompanies).size !== batch.nowcoderCompanies.length)) {
+    context.addIssue({ code: 'custom', path: ['nowcoderCompanies'], message: '公司筛选需要待审核模式且不能重复' });
+  }
+  if (batch.reviewIds && (!batch.nowcoderReviewOnly || batch.reviewIds.length > batch.accepted)) {
+    context.addIssue({ code: 'custom', path: ['reviewIds'], message: '待审核来源 ID 与批次模式或计数不一致' });
+  }
   if (batch.zsxqDateRange && (batch.planId !== 'zsxq-chen-teacher' || batch.zsxqMode !== 'daily-ledger')) {
     context.addIssue({ code: 'custom', path: ['zsxqDateRange'], message: '日期补采只适用于知识星球逐日模式' });
   }

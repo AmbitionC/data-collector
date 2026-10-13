@@ -80,6 +80,7 @@ export interface SyncInfo {
 }
 
 interface CatalogEntry {
+  nowcoderReviewOnly?: true;
   id: string;
   source: Source;
   title: string;
@@ -1586,7 +1587,7 @@ function isCatalogEntry(value: unknown): value is CatalogEntry {
   const allowed = new Set([
     'id', 'source', 'title', 'url', 'category', 'relativePath', 'updatedAt', 'publishedAt',
     'contentComplete', 'contentCompletenessVersion', 'contentCompletenessBuildId',
-    'deliveryRevision', 'deliveryBatchId', 'sync',
+    'deliveryRevision', 'deliveryBatchId', 'sync', 'nowcoderReviewOnly',
   ]);
   if (Object.keys(value).some(key => !allowed.has(key))) return false;
   if (typeof value.id !== 'string' || value.id.length === 0
@@ -1594,6 +1595,7 @@ function isCatalogEntry(value: unknown): value is CatalogEntry {
     || typeof value.title !== 'string' || typeof value.url !== 'string'
     || typeof value.category !== 'string' || typeof value.relativePath !== 'string' || value.relativePath.length === 0
     || typeof value.updatedAt !== 'string') return false;
+  if (value.nowcoderReviewOnly !== undefined && value.nowcoderReviewOnly !== true) return false;
   if (value.publishedAt !== undefined && typeof value.publishedAt !== 'string') return false;
   if (value.contentComplete !== undefined && typeof value.contentComplete !== 'boolean') return false;
   if (value.contentCompletenessVersion !== undefined && typeof value.contentCompletenessVersion !== 'string') return false;
@@ -1791,6 +1793,22 @@ export class MarkdownLibrary {
     const existingSourcePath = existingMarkdownPath
       ? assertInsideRoot(root, join(dirname(existingMarkdownPath), SOURCE_FILE))
       : undefined;
+    if (input.document.source === 'nowcoder') {
+      let held = input.document.sourceMetadata?.nowcoderReviewOnly === true || existing?.nowcoderReviewOnly === true;
+      if (!held && existingSourcePath) {
+        await assertSafeWritePath(root, existingSourcePath);
+        try {
+          const previous = projectOrganized(JSON.parse(await readFile(existingSourcePath, 'utf8')) as unknown).document;
+          held = previous.source === 'nowcoder' && previous.canonicalUrl === input.document.canonicalUrl
+            && previous.sourceMetadata?.nowcoderReviewOnly === true;
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== 'ENOENT' && !(error instanceof SyntaxError)) throw error;
+        }
+      }
+      if (held) input = { ...input, document: { ...input.document, sourceMetadata: {
+        ...input.document.sourceMetadata, nowcoderReviewOnly: true,
+      } } };
+    }
     const transactionId = directed ? newDirectedTransactionId() : undefined;
     let directedEntryPlan = directedNewEntry ? directedPreflight?.newEntryPlan : undefined;
     if (directed && existing && existingMarkdownPath && transactionId) {
@@ -1935,6 +1953,8 @@ export class MarkdownLibrary {
     }
 
     const nextEntry: CatalogEntry = {
+      ...(input.document.sourceMetadata?.nowcoderReviewOnly === true || existing?.nowcoderReviewOnly === true
+        ? { nowcoderReviewOnly: true as const } : {}),
       id,
       source: input.document.source,
       title: input.document.title,

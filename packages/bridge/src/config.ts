@@ -11,6 +11,8 @@ export interface BridgeConfig {
   sinksFile: string;
   plansFile: string;
   zsxqLedgerFile: string;
+  nowcoderScheduleFile: string;
+  interviewHistoryPath?: string;
 }
 
 export interface ConfigOverrides {
@@ -18,6 +20,7 @@ export interface ConfigOverrides {
   port?: number;
   libraryRoot?: string;
   configDir?: string;
+  interviewHistoryPath?: string;
 }
 
 function expandPath(value: string): string {
@@ -48,15 +51,19 @@ export function loadConfig(overrides: ConfigOverrides = {}): BridgeConfig {
   const configDir = expandPath(
     overrides.configDir ?? process.env.DATA_COLLECTOR_CONFIG ?? '~/.data-collector',
   );
+  const interviewHistoryPath = overrides.interviewHistoryPath ?? process.env.DATA_COLLECTOR_INTERVIEW_HISTORY;
+  if (interviewHistoryPath !== undefined && !isAbsolute(interviewHistoryPath)) throw new Error('面经私有来源历史必须显式使用仓外绝对路径');
   return {
     host,
     port,
     libraryRoot,
     configDir,
+    ...(interviewHistoryPath ? { interviewHistoryPath } : {}),
     authFile: join(configDir, 'auth.json'),
     jobsFile: join(libraryRoot, '_catalog', 'jobs.json'),
     sinksFile: join(configDir, 'sinks.json'),
     plansFile: join(configDir, 'collection-plans.json'),
     zsxqLedgerFile: join(configDir, 'zsxq-day-ledger.json'),
+    nowcoderScheduleFile: join(configDir, 'nowcoder-schedule.json'),
   };
 }

@@ -56,6 +56,35 @@ beforeEach(async () => {
 });
 
 describe('side panel state mapping', () => {
+  it('does not run from a stale draft while private schedule settings are unavailable', () => {
+    actions.runPlan = vi.fn(async () => undefined);
+    renderSidePanel(document, { phase: 'plans', loading: false,
+      nowcoderScheduleDraft: { enabled: false, companies: ['ant'], reviewOnly: true },
+      plans: [{ id: 'nowcoder-agent-market', due: false, pending: false, nextRunAt: '2026-10-14T01:00:00.000Z' }],
+    } as never, actions);
+    const run = document.querySelector<HTMLButtonElement>('[data-plan-run="nowcoder-agent-market"]')!;
+    run.click();
+    expect(actions.runPlan).not.toHaveBeenCalled();
+    expect(run.disabled).toBe(true);
+  });
+  it.each([false, true])('keeps the latest batch company scope separate from unsaved targets; reviewOnly=%s', reviewOnly => {
+    renderSidePanel(document, {
+      phase: 'plans', loading: false,
+      nowcoderSchedule: { enabled: false, companies: ['ant'], reviewOnly: true },
+      nowcoderScheduleDraft: { enabled: true, companies: ['other'], reviewOnly: true },
+      plans: [{ id: 'nowcoder-agent-market', due: false, pending: false, nextRunAt: '2026-10-14T01:00:00.000Z', latest: {
+        id: 'latest-nowcoder', planId: 'nowcoder-agent-market', status: 'completed',
+        startedAt: '2026-10-13T01:00:00.000Z', finishedAt: '2026-10-13T01:05:00.000Z',
+        discovered: 0, accepted: 0, saved: 0, skipped: 0, failed: 0, needsAttention: 0, deliveryIds: [],
+        ...(reviewOnly ? { nowcoderReviewOnly: true, nowcoderCompanies: ['tencent'], reviewIds: [] } : {}),
+      } }],
+    } as never, actions);
+    const ticket = document.querySelector('[data-plan-id="nowcoder-agent-market"]')!;
+    expect(ticket.querySelector('.plan-scope')!.textContent).toBe(reviewOnly
+      ? '腾讯 · 仅本机待审核' : '腾讯 · 字节 · 阿里 · 蚂蚁');
+    expect(ticket.querySelector('.plan-spine')!.textContent).toContain('周期收集已关闭');
+  });
+
   it('renders the two fixed plans as compact run tickets with coverage and recovery actions', () => {
     const planActions = actions as SidePanelActions & {
       runPlan: ReturnType<typeof vi.fn>;
@@ -112,7 +141,7 @@ describe('side panel state mapping', () => {
     } as never, planActions);
 
     expect(document.querySelector<HTMLElement>('#plans-panel')?.hidden).toBe(false);
-    expect(document.querySelectorAll('.plan-ticket')).toHaveLength(2);
+    expect(document.querySelectorAll('#plans-list .plan-ticket')).toHaveLength(2);
     expect(document.querySelector('#plans-panel')?.textContent).toContain('陈老师的知识星球');
     expect(document.querySelector('#plans-panel')?.textContent).toContain('字节 3');
     expect(document.querySelector('#plans-panel')?.textContent).toContain('腾讯 3');
