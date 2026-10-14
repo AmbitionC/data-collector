@@ -47,7 +47,7 @@ npm run collector -- plans run nowcoder-agent-market --review-only --companies a
 - `DATA_COLLECTOR_INTERVIEW_INVENTORY_ROOT` 可显式指定只读的已发布面经快照，独立于保存/交付 inbox 的目标目录。必须是绝对路径；不设置时保留原有目标目录行为。
 - `DATA_COLLECTOR_INTERVIEW_HISTORY` 指向资源仓库外的私有来源台账。库存、搜索预览、定向派发和选择现在使用同一显式输入。配置文件缺失、符号链接、超大文件或不兼容记录会阻止该路径，不会悄悄变成空历史。
 - 仓外 schemaVersion1 的采集身份读取支持 ISO updatedAt，并原样保留 prepared/B-partial。它们只能提供“曾处理来源”的排重身份，不代表合格库存或发布许可；库存仍要求完整可核验的发布绑定。
-- `bodySha256` 和 `processUnitId` 不能代替采集时的16位 contentHash/clusterId。仅有现代编辑字段的记录仍需先完成带真实原件与来源绑定证据的独立转换；本版本不会猜测、截断或自动升级它们。
+- `bodySha256` 和 `processUnitId` 不能代替采集时的16位 contentHash/clusterId。现代记录可通过schemaVersion2私有身份投影恢复真实原件中的采集身份；详见[身份投影契约](nowcoder-identity-projection.md)。缺当前来源绑定时继续阻止运行，不猜测、截断或升级等级。
 - 待审核详情在串行派发边界再次读取本地、待审和历史来源；预览后已保存的重复项记录 SOURCE_ALREADY_COLLECTED，不再打开详情页。终态推进在释放限速队列后执行，避免下一任务等待自己。
 
 升级不自动迁移或重写原台账，不新建定时器。已有脏工作区仍应通过独立整合、完整验证和保留回滚副本后再切换。打包成功不等于运行中的 Bridge/Chrome 已更新。

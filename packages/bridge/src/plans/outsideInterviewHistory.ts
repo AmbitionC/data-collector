@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { constants } from 'node:fs';
 import { lstat, open, realpath } from 'node:fs/promises';
 import { isAbsolute, join, parse, relative, resolve, sep } from 'node:path';
@@ -16,13 +17,13 @@ function inside(root: string, path: string): boolean {
 }
 
 /** The resource ledger is private input, explicitly selected outside the public repository. */
-export async function readOutsideInterviewHistory(resourceRoot: string, historyPath: string): Promise<unknown> {
+export async function readSafeInterviewFile(resourceRoot: string, historyPath: string, location: 'outside' | 'inside' = 'outside'): Promise<{ bytes: Buffer; sha256: string }> {
   if (!isAbsolute(historyPath) || historyPath.includes('\0')
     || historyPath.split(sep).some(part => part === '.' || part === '..')) {
     invalid('private interview historyPath must be an explicit absolute path');
   }
   const path = resolve(historyPath);
-  if (inside(resourceRoot, path)) invalid('private interview historyPath must be outside the resource repository');
+  if (inside(resourceRoot, path) !== (location === 'inside')) invalid('interview file is outside its required boundary');
   try {
     const root = parse(path).root;
     const parts = path.slice(root.length).split(sep);
@@ -35,27 +36,31 @@ export async function readOutsideInterviewHistory(resourceRoot: string, historyP
       }
     }
     const physical = await realpath(path);
-    if (inside(resourceRoot, physical)) invalid('private interview historyPath resolves inside the resource repository');
+    if (inside(resourceRoot, physical) !== (location === 'inside')) invalid('interview file resolves outside its required boundary');
     const expected = await lstat(physical);
     if (!expected.isFile() || expected.isSymbolicLink() || expected.size > MAX_FILE_BYTES) {
       invalid('private interview source history exceeds the inventory read limit or is not a regular file');
     }
     const handle = await open(physical, constants.O_RDONLY | constants.O_NOFOLLOW);
-    let contents: string;
+    let bytes: Buffer;
     try {
       const observed = await handle.stat();
       if (!observed.isFile() || observed.dev !== expected.dev || observed.ino !== expected.ino
         || observed.size > MAX_FILE_BYTES || await realpath(path) !== physical) {
         invalid('private interview source history changed while opening');
       }
-      const bytes = await handle.readFile();
+      bytes = await handle.readFile();
       if (bytes.byteLength > MAX_FILE_BYTES) invalid('private interview source history exceeds the inventory read limit');
-      contents = bytes.toString('utf8');
     } finally { await handle.close(); }
-    try { return JSON.parse(contents) as unknown; }
-    catch (error) { throw new OutsideInterviewHistoryError('inventory-invalid', 'private interview source history is invalid JSON', { cause: error }); }
+    return { bytes, sha256: createHash('sha256').update(bytes).digest('hex') };
   } catch (error) {
     if (error instanceof OutsideInterviewHistoryError) throw error;
     throw new OutsideInterviewHistoryError('inventory-unavailable', 'explicit outside interview source history cannot be read', { cause: error });
   }
+}
+
+export async function readOutsideInterviewHistory(resourceRoot: string, historyPath: string): Promise<unknown> {
+  const file = await readSafeInterviewFile(resourceRoot, historyPath);
+  try { return JSON.parse(file.bytes.toString('utf8')) as unknown; }
+  catch (error) { throw new OutsideInterviewHistoryError('inventory-invalid', 'private interview source history is invalid JSON', { cause: error }); }
 }

@@ -14,6 +14,7 @@ export interface BridgeConfig {
   nowcoderScheduleFile: string;
   interviewHistoryPath?: string;
   interviewInventoryRoot?: string;
+  interviewInventoryCommit?: string;
 }
 
 export interface ConfigOverrides {
@@ -23,6 +24,7 @@ export interface ConfigOverrides {
   configDir?: string;
   interviewHistoryPath?: string;
   interviewInventoryRoot?: string;
+  interviewInventoryCommit?: string;
 }
 
 function expandPath(value: string): string {
@@ -57,6 +59,8 @@ export function loadConfig(overrides: ConfigOverrides = {}): BridgeConfig {
   if (interviewHistoryPath !== undefined && !isAbsolute(interviewHistoryPath)) throw new Error('面经私有来源历史必须显式使用仓外绝对路径');
   const interviewInventoryRoot = overrides.interviewInventoryRoot ?? process.env.DATA_COLLECTOR_INTERVIEW_INVENTORY_ROOT;
   if (interviewInventoryRoot !== undefined && !isAbsolute(interviewInventoryRoot)) throw new Error('已发布面经库存必须显式使用绝对路径');
+  const interviewInventoryCommit = overrides.interviewInventoryCommit ?? process.env.DATA_COLLECTOR_INTERVIEW_INVENTORY_COMMIT;
+  if (interviewInventoryCommit !== undefined && !/^[a-f0-9]{40}$/u.test(interviewInventoryCommit)) throw new Error('已发布面经库存提交必须是40位完整SHA');
   return {
     host,
     port,
@@ -64,6 +68,7 @@ export function loadConfig(overrides: ConfigOverrides = {}): BridgeConfig {
     configDir,
     ...(interviewHistoryPath ? { interviewHistoryPath } : {}),
     ...(interviewInventoryRoot ? { interviewInventoryRoot } : {}),
+    ...(interviewInventoryCommit ? { interviewInventoryCommit } : {}),
     authFile: join(configDir, 'auth.json'),
     jobsFile: join(libraryRoot, '_catalog', 'jobs.json'),
     sinksFile: join(configDir, 'sinks.json'),

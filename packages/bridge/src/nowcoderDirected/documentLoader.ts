@@ -25,6 +25,7 @@ const localCatalogEntrySchema = z.object({
   relativePath: z.string().min(1),
   updatedAt: z.string(),
   publishedAt: z.string().optional(),
+  nowcoderReviewOnly: z.literal(true).optional(),
   contentComplete: z.boolean().optional(),
   contentCompletenessVersion: z.string().optional(),
   contentCompletenessBuildId: z.string().optional(),

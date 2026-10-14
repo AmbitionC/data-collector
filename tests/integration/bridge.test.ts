@@ -1,3 +1,4 @@
+import { identityProjectionFixture, PUBLISHED_COMMIT } from '../helpers/identityProjection.js';
 import * as sourceIndex from '../../packages/bridge/src/nowcoderDirected/knownSources.js';
 import { spawn } from 'node:child_process';
 import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
@@ -4029,4 +4030,23 @@ it('preserves two-second actual dispatch spacing after a slow source-index read'
   socket.send(envelope('extension.hello', 'review-slow-lookup-hello', { version: APP_VERSION }));
   await vi.waitFor(() => expect(sends).toHaveLength(2), { timeout: 10000 });
   expect(sends[1]! - sends[0]!).toBeGreaterThanOrEqual(1950);
+});
+
+
+it('records a blocked modern identity inventory without search requests, child jobs or delivery', async () => {
+  const root = await temporaryDirectory(), f = await identityProjectionFixture(root);
+  f.projection.bindings[0]!.review = { status: 'pending', reason: 'current binding missing' }; await f.save();
+  const fetcher = vi.fn<typeof fetch>(async () => { throw new Error('Real outbound requests are forbidden in this fixture'); });
+  const bridge = await startBridge({ port: 0, libraryRoot: f.library, configDir: join(root, '.config'), fetch: fetcher,
+    interviewInventoryRoot: f.resource, interviewHistoryPath: f.projectionPath, interviewInventoryCommit: PUBLISHED_COMMIT });
+  handles.push(bridge); const { socket, token } = await authorize(bridge);
+  socket.send(envelope('extension.hello', 'modern-projection-hello', { version: APP_VERSION }));
+  await waitForExtensionReady(bridge);
+  const started = await requestJson(bridge.url, '/v1/plans/run', { method: 'POST', token,
+    body: { planId: 'nowcoder-agent-market', nowcoderReviewOnly: true, nowcoderCompanies: ['tencent'] } });
+  expect(started).toMatchObject({ status: 202, body: { status: 'failed', deliveryIds: [], saved: 0 } });
+  expect((started.body as CollectionBatch).error).toMatch(/inventory-unverifiable|identit.*incomplete/u);
+  expect(fetcher).not.toHaveBeenCalled();
+  expect((await JobStore.open(join(f.library, '_catalog/jobs.json'))).list()).toEqual([]);
+  expect((await requestJson<{ batches: CollectionBatch[] }>(bridge.url, '/v1/plans/batches', { token })).body.batches).toHaveLength(1);
 });

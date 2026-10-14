@@ -1094,10 +1094,12 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
   const nowcoderHistoryInput = {
     historyRoot: config.interviewInventoryRoot,
     historyPath: config.interviewHistoryPath,
+    historyCommit: config.interviewInventoryCommit,
   };
   const explicitHistoryOptions = {
     ...(config.interviewInventoryRoot ? { historyRoot: config.interviewInventoryRoot } : {}),
     ...(config.interviewHistoryPath ? { historyPath: config.interviewHistoryPath } : {}),
+    ...(config.interviewInventoryCommit ? { historyCommit: config.interviewInventoryCommit } : {}),
   };
   const directedSessionController = directedStore
     ? new NowcoderDirectedSessionController({
@@ -1212,7 +1214,7 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
         companyInventory: async () => {
           const resourceRoot = config.interviewInventoryRoot ?? router.syncTarget('nowcoder')?.root;
           if (!resourceRoot) throw new Error('请先配置面经资源仓库；库存不可核验，待审核收集未开始');
-          return await readCompanyInventory(resourceRoot, config.libraryRoot, new Date().toISOString(), config.interviewHistoryPath);
+          return await readCompanyInventory(resourceRoot, config.libraryRoot, new Date().toISOString(), config.interviewHistoryPath, config.interviewInventoryCommit);
         },
         extensionConnected: () => extensionReady && extensionSocket?.readyState === WebSocket.OPEN,
         canCollectZsxq: extensionCanCollectZsxq,

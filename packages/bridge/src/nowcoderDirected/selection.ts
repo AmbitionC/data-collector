@@ -102,6 +102,7 @@ export interface NowcoderDirectedSelectionCoordinatorOptions {
   targetRoot?: string;
   historyRoot?: string;
   historyPath?: string;
+  historyCommit?: string;
   now?: () => string;
 }
 
@@ -170,7 +171,7 @@ export class NowcoderDirectedSelectionCoordinator {
         if (!this.options.targetRoot) {
           return await this.finishSystemic(context, 'DIRECTED_SELECTION_INVARIANT_FAILED');
         }
-        const loaded = await loadStrictProcessedNowcoderHistory(this.options.historyRoot ?? this.options.targetRoot, this.options.historyPath);
+        const loaded = await loadStrictProcessedNowcoderHistory(this.options.historyRoot ?? this.options.targetRoot, this.options.historyPath, this.options.historyCommit);
         const persisted = await this.options.store.persistHistorySnapshotCurrent(
           run.id, run.attempt, loaded.snapshot, loaded.digest,
         );

@@ -8,7 +8,7 @@ import { readKnownNowcoderLocalSources } from './documentLoader.js';
 /** One URL identity set for local/pending/history search gates; explicit retry runs remain separate. */
 export async function knownNowcoderSources(input: {
   libraryRoot: string; targetRoot?: string | undefined; jobs: readonly JobRecord[]; excludeRunId?: string;
-  historyPath?: string | undefined; historyRoot?: string | undefined;
+  historyPath?: string | undefined; historyRoot?: string | undefined; historyCommit?: string | undefined;
 }): Promise<{ urls: Set<string>; reasons: Map<string, string>; warnings: Record<string, number> }> {
   const reasons = new Map<string, string>();
   const warnings: Record<string, number> = {};
@@ -25,7 +25,7 @@ export async function knownNowcoderSources(input: {
   const historyRoot = input.historyRoot ?? input.targetRoot;
   if (input.historyPath && !historyRoot) throw new Error('Configured source history requires a published inventory root');
   if (historyRoot) {
-    const {snapshot} = await loadStrictProcessedNowcoderHistory(historyRoot, input.historyPath);
+    const {snapshot} = await loadStrictProcessedNowcoderHistory(historyRoot, input.historyPath, input.historyCommit);
     for (const entry of snapshot.hashesByUrl) add(entry.url, 'processed_history');
   }
   if (input.targetRoot) {

@@ -1,3 +1,4 @@
+import { loadNowcoderIdentityProjection } from './nowcoderIdentityProjection.js';
 import { readOutsideInterviewHistory } from './outsideInterviewHistory.js';
 import { createHash } from 'node:crypto';
 import { lstat, readFile, realpath } from 'node:fs/promises';
@@ -139,7 +140,7 @@ export function validateProcessedNowcoderHistorySnapshot(
   return structuredClone(snapshot);
 }
 
-export async function loadStrictProcessedNowcoderHistory(repoRoot: string, outsidePath?: string): Promise<{
+export async function loadStrictProcessedNowcoderHistory(repoRoot: string, outsidePath?: string, expectedPublishedCommit?: string): Promise<{
   snapshot: ProcessedNowcoderHistorySnapshot;
   digest: string;
   history: ProcessedNowcoderHistory;
@@ -197,6 +198,19 @@ export async function loadStrictProcessedNowcoderHistory(repoRoot: string, outsi
   }
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return corruptHistory();
   const envelope = parsed as Record<string, unknown>;
+  if (envelope.schemaVersion === 2 && outsidePath) {
+    try {
+      const projection = await loadNowcoderIdentityProjection(canonicalRoot, outsidePath, expectedPublishedCommit);
+      const byUrl = new Map<string, Set<string>>(), clusters = new Set<string>();
+      for (const item of projection.identities) {
+        const hashes = byUrl.get(item.url) ?? new Set<string>(); hashes.add(item.contentHash); byUrl.set(item.url, hashes); clusters.add(item.clusterId);
+      }
+      const snapshot: ProcessedNowcoderHistorySnapshot = { version: 1,
+        hashesByUrl: [...byUrl].sort(([left], [right]) => compareUtf8(left, right)).map(([url, hashes]) => ({ url, hashes: [...hashes].sort(compareUtf8) })),
+        clusterIds: [...clusters].sort(compareUtf8) };
+      return { snapshot, digest: processedNowcoderHistoryDigest(snapshot), history: historyFromSnapshot(snapshot) };
+    } catch { return corruptHistory(); }
+  }
   if (envelope.schemaVersion !== 1 || typeof envelope.updatedAt !== 'string'
     || !(/^\d{4}-\d{2}-\d{2}$/u.test(envelope.updatedAt) || (outsidePath !== undefined && Number.isFinite(Date.parse(envelope.updatedAt))))
     || !envelope.records || typeof envelope.records !== 'object' || Array.isArray(envelope.records)) {

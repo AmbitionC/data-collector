@@ -1,3 +1,4 @@
+import { loadNowcoderIdentityProjection, NowcoderIdentityProjectionError } from './nowcoderIdentityProjection.js';
 import { readOutsideInterviewHistory, OutsideInterviewHistoryError } from './outsideInterviewHistory.js';
 import { lstat, readFile, realpath } from 'node:fs/promises';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
@@ -259,6 +260,7 @@ export async function readCompanyInventory(
   libraryRoot: string,
   now: string,
   historyPath?: string,
+  expectedPublishedCommit?: string,
 ): Promise<CompanyInventory> {
   if (!Number.isFinite(Date.parse(now))) invalid('current inventory time is invalid');
   const resource = await canonicalRoot(resourceRoot, 'resource'), library = await canonicalRoot(libraryRoot, 'local library');
@@ -270,10 +272,22 @@ export async function readCompanyInventory(
     inventory[leaf.company].published += 1;
   }
   const pending = await qualifiedSnapshots(library, now);
-  const published = publishedIdentities(historyPath === undefined ? undefined : await readOutsideInterviewHistory(resource, historyPath).catch(error => {
+  const history = historyPath === undefined ? undefined : await readOutsideInterviewHistory(resource, historyPath).catch(error => {
     if (error instanceof OutsideInterviewHistoryError) throw new NowcoderInventoryError(error.code, error.message, { cause: error });
     throw error;
-  }), leaves);
+  });
+  let published: PublishedIdentities;
+  if (record(history) && history.schemaVersion === 2 && historyPath) {
+    try {
+      const projection = await loadNowcoderIdentityProjection(resource, historyPath, expectedPublishedCommit);
+      published = { complete: true, urls: new Set(projection.identities.map(item => item.url)),
+        hashes: new Set(projection.identities.map(item => item.contentHash)), clusters: new Set(projection.identities.map(item => item.clusterId)) };
+    } catch (error) {
+      if (error instanceof NowcoderIdentityProjectionError) throw new NowcoderInventoryError(
+        error.code === 'PROJECTION_INVALID' ? 'inventory-invalid' : 'inventory-unverifiable', error.message, { cause: error });
+      throw error;
+    }
+  } else published = publishedIdentities(history, leaves);
   if (pending.length > 0 && !published.complete) {
     throw new NowcoderInventoryError('inventory-unverifiable',
       'qualified pending stock cannot be checked against all published interviews; an explicit complete outside interview historyPath is required');
