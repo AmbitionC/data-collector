@@ -1,3 +1,4 @@
+import { knownNowcoderSources } from '../nowcoderDirected/knownSources.js';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
@@ -1064,6 +1065,10 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
         store: directedStore,
         jobs,
         dispatch,
+        knownSourceUrls: async excludeRunId => (await knownNowcoderSources({
+          libraryRoot: config.libraryRoot, targetRoot: nowcoderTargetRoot,
+          jobs: jobs.list(), excludeRunId,
+        })).urls,
         sendCancel: async job => {
           const socket = extensionSocket;
           if (!socket || !extensionReady || socket.readyState !== WebSocket.OPEN) return;
@@ -1147,7 +1152,11 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
         canStartZsxqAttempt: () => persistingJobIds.size === 0
           && !updateCheckInFlight
           && artifactReaders.snapshot().updateState === 'idle',
-        discoverNowcoder: knownUrls => discoverNowcoderPlanCandidates(collectorFetcher, knownUrls),
+        discoverNowcoder: async knownUrls => {
+          const known = await knownNowcoderSources({ libraryRoot: config.libraryRoot,
+            targetRoot: nowcoderTargetRoot, jobs: jobs.list() });
+          return await discoverNowcoderPlanCandidates(collectorFetcher, new Set([...knownUrls, ...known.urls]));
+        },
         dispatch,
         collectZsxq: async (
           batchId,
@@ -1311,7 +1320,11 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
         .map(job => job.url)
         .filter(url => url.startsWith('https://www.nowcoder.com/')),
     ),
-    discoverNowcoder: knownUrls => discoverNowcoderUrls(collectorFetcher, knownUrls),
+    discoverNowcoder: async knownUrls => {
+      const known = await knownNowcoderSources({ libraryRoot: config.libraryRoot,
+        targetRoot: nowcoderTargetRoot, jobs: jobs.list() });
+      return await discoverNowcoderUrls(collectorFetcher, new Set([...knownUrls, ...known.urls]));
+    },
     enqueueNowcoder: async url => {
       const id = `fe-journey-nowcoder-${stableContentId(url)}`;
       const existing = jobs.get(id);

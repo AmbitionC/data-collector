@@ -97,6 +97,7 @@ export type NowcoderDirectedAttentionReason = z.infer<typeof nowcoderDirectedAtt
 export const NOWCODER_DIRECTED_REJECTION_MESSAGES = {
   LOCAL_SNAPSHOT_INVALID: '本批详情快照校验失败',
   SOURCE_HISTORY_DUPLICATE: '该内容已在历史批次处理',
+  SOURCE_ALREADY_COLLECTED: '该来源已在本地或待审链中，无需重采',
   OUTSIDE_30_DAYS: '内容不在最近 30 天范围内',
   AGENT_RELEVANCE_INSUFFICIENT: '内容与 Agent 研发岗位关联不足',
   NON_AGENT_ROLE: '内容不是 Agent 研发岗位面经',
@@ -137,7 +138,7 @@ export const nowcoderDirectedProgressSchema = z.object({
   qualified: z.number().int().nonnegative().max(NOWCODER_DIRECTED_MAX_DETAILS),
   accepted: z.number().int().nonnegative().max(10),
   delivered: z.number().int().nonnegative().max(10),
-  rejectionCounts: z.array(nowcoderDirectedRejectionCountSchema).max(12),
+  rejectionCounts: z.array(nowcoderDirectedRejectionCountSchema).max(13),
   companies: z.array(nowcoderDirectedCompanyCountSchema).length(NOWCODER_DIRECTED_COMPANIES.length),
 }).strict().superRefine((progress, context) => {
   if (!(progress.delivered <= progress.accepted
@@ -217,7 +218,13 @@ export const nowcoderSearchRequestSchema = z.object({
   queries: nowcoderQueriesSchema,
   target: z.number().int().min(1).max(10),
   sort: z.literal('latest'),
-}).strict();
+  maxPagesPerQuery: z.number().int().min(1).max(4).optional(),
+  maxRequests: z.number().int().min(1).max(24).optional(),
+}).strict().superRefine((request, context) => {
+  if ((request.maxRequests ?? 24) < request.queries.length) {
+    context.addIssue({ code: 'custom', path: ['maxRequests'], message: '搜索请求预算须至少覆盖每个关键词一页' });
+  }
+});
 export type NowcoderSearchRequest = z.infer<typeof nowcoderSearchRequestSchema>;
 
 export const nowcoderSearchCandidateSchema = z.object({
@@ -228,8 +235,40 @@ export const nowcoderSearchCandidateSchema = z.object({
   page: z.number().int().min(1).max(100),
   rank: z.number().int().min(1).max(100),
   publishedAt: z.iso.datetime(),
+  title: z.string().max(640).optional(),
+  snippet: z.string().max(1_600).optional(),
+  sourceRecordType: z.enum(['content', 'moment']).optional(),
 }).strict();
 export type NowcoderSearchCandidate = z.infer<typeof nowcoderSearchCandidateSchema>;
+
+export const nowcoderSearchDiagnosticsSchema = z.object({
+  maxPagesPerQuery: z.number().int().min(1).max(4),
+  maxRequests: z.number().int().min(1).max(24),
+  requests: z.number().int().min(0).max(24),
+  rawRecords: z.number().int().nonnegative(),
+  parsedRecords: z.number().int().nonnegative(),
+  duplicateRecords: z.number().int().nonnegative(),
+  knownSourcesRemoved: z.number().int().nonnegative(),
+  retainedCandidates: z.number().int().nonnegative(),
+  reviewOnlyCandidates: z.number().int().nonnegative(),
+  skippedCounts: z.record(z.string(), z.number().int().nonnegative()),
+  knownSourceCounts: z.record(z.string(), z.number().int().nonnegative()),
+  sourceIndexWarnings: z.record(z.string(), z.number().int().nonnegative()).optional(),
+  pages: z.array(z.object({
+    query: z.string(), page: z.number().int().min(1).max(4),
+    total: z.number().int().nonnegative().optional(), totalPage: z.number().int().nonnegative().optional(),
+    rawRecords: z.number().int().nonnegative(), parsedRecords: z.number().int().nonnegative(),
+  }).strict()).max(24),
+  stops: z.array(z.object({ query: z.string(), reason: z.enum([
+    'end_of_results', 'empty_page', 'repeated_page', 'page_limit', 'request_budget', 'unknown_pagination',
+  ]) }).strict()).max(12),
+}).strict();
+export type NowcoderSearchDiagnostics = z.infer<typeof nowcoderSearchDiagnosticsSchema>;
+export const nowcoderReviewOnlyCandidateSchema = z.object({
+  canonicalUrl: canonicalNowcoderUrlSchema, query: z.string(), page: z.number().int().min(1).max(4),
+  rank: z.number().int().min(1).max(100), title: z.string().max(640).optional(),
+  reason: z.enum(['missing_published_at', 'invalid_published_at']),
+}).strict();
 
 export const nowcoderSearchSessionSchema = z.object({
   id: opaqueIdSchema,
@@ -241,6 +280,8 @@ export const nowcoderSearchSessionSchema = z.object({
   createdAt: z.iso.datetime(),
   expiresAt: z.iso.datetime(),
   candidates: z.array(nowcoderSearchCandidateSchema).max(500),
+  discovery: nowcoderSearchDiagnosticsSchema.optional(),
+  reviewOnlyCandidates: z.array(nowcoderReviewOnlyCandidateSchema).max(500).optional(),
 }).strict().superRefine((session, context) => {
   const ids = new Set<string>();
   const urls = new Set<string>();

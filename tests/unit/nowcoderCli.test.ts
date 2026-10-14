@@ -109,6 +109,13 @@ function json(value: unknown, status = 200): Response {
 }
 
 describe('minimal Nowcoder CLI', () => {
+  it('accepts bounded query paging and rejects oversized budgets or changes to a frozen session', () => {
+    expect(parseNowcoderCliArgs(['preview','--query','字节 Agent','--target','1','--latest','--max-pages','4','--max-requests','8']))
+      .toMatchObject({maxPagesPerQuery:4,maxRequests:8});
+    expect(()=>parseNowcoderCliArgs(['preview','--query','字节','--target','1','--latest','--max-pages','5'])).toThrow();
+    expect(()=>parseNowcoderCliArgs(['preview','--query','字节','--query','Agent','--target','1','--latest','--max-requests','1'])).toThrow();
+    expect(()=>parseNowcoderCliArgs(['run','--session','frozen','--latest','--deliver','--idempotency-key','key','--max-pages','4'])).toThrow();
+  });
   it('parses only the bounded five-action grammar', () => {
     expect(parseNowcoderCliArgs([
       'preview', '--query', '字节 Agent 面经', '--query', '阿里 Agent 面经',

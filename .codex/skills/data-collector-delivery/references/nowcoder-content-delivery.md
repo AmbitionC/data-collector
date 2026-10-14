@@ -21,6 +21,20 @@ Repeat `--query` for additional keywords. The command uses the Nowcoder JSON pro
 `type:post, order:create`, then the logged-in Data Collector extension collects detail pages.
 It does not open or type into a Nowcoder search page and uses no model call for discovery.
 
+Directed search accepts `--max-pages <1..4>` and `--max-requests <1..24>` in query mode.
+Defaults are four pages per query and 24 total requests, with two queries in flight and an
+eight-second timeout per request. Pages are visited breadth-first; an empty/repeated page,
+unknown pagination, the page limit, or the total request budget stops further paging without
+retrying. A frozen `--session` retains its preview policy and cannot override these flags.
+
+`nowcoder preview` returns titles/snippets plus `session.discovery` counts and stop reasons.
+Search records include both long posts (`contentData`) and dynamics (`momentData`). Missing or
+invalid publication dates remain in `reviewOnlyCandidates` for explicit date verification;
+they are not automatic delivery candidates. Preview excludes local library/pending entries,
+active or saved jobs, pending repository inbox sources, and processed history. The dispatch
+boundary rechecks source identity; content-hash and question-cluster checks still apply after
+detail extraction. Candidate counts are not counts of verified, complete interviews.
+
 Use fixed plan `nowcoder-agent-market` only when the user explicitly requests the existing preset
 market sweep. Do not translate arbitrary keywords into that fixed plan.
 

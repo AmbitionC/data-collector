@@ -148,10 +148,11 @@ async function preferredChrome(): Promise<string | undefined> {
     process.env.CHROME_PATH,
     process.env.PUPPETEER_EXECUTABLE_PATH,
     ...playwrightChromiumCandidates(),
-    // 产品浏览器优先；当前官方 Chrome 已忽略 --load-extension，而 Edge 仍支持 E2E 所需的解压扩展。
+    // Chrome 通过受支持的 Extensions CDP 域加载临时扩展；本机 Edge Beta 的
+    // 截图通路可能挂起，不能仅因它仍接受 --load-extension 就优先选择它。
+    '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
     '/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge',
     '/Applications/Microsoft Edge Beta.app/Contents/MacOS/Microsoft Edge Beta',
-    '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
     '/usr/bin/google-chrome',
     '/usr/bin/chromium',
     'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
@@ -292,24 +293,36 @@ async function startStack(): Promise<{ libraryRoot: string }> {
   if (!executablePath) {
     throw new Error('未找到 Chrome；请设置 PUPPETEER_EXECUTABLE_PATH 后重试');
   }
+  const usesExtensionCli = /Microsoft Edge|msedge(?:\.exe)?$/i.test(executablePath);
   browser = await puppeteer.launch({
     headless: true,
     executablePath,
-    // 用浏览器自带的 --load-extension 加载扩展（不依赖 puppeteer 的
-    // Extensions CDP 域——部分 Chromium 构建未编译该域）。
+    userDataDir: await temporaryDirectories.create('data-collector-e2e-profile-'),
+    // 官方 Chrome 不再接受 --load-extension。显式等待 CDP 加载完成，
+    // 避免在扩展注册前开始查找 service worker；Edge 仍使用兼容的 CLI 路径。
+    enableExtensions: !usesExtensionCli,
+    pipe: !usesExtensionCli,
+    waitForInitialPage: usesExtensionCli,
     // 容器/CI 无用户命名空间沙箱，需显式关闭沙箱；本地测试仅加载受信任 fixture。
     args: [
       '--no-sandbox',
       '--disable-setuid-sandbox',
       '--disable-dev-shm-usage',
-      `--disable-extensions-except=${isolatedExtensionPath}`,
-      `--load-extension=${isolatedExtensionPath}`,
+      ...(usesExtensionCli
+        ? [
+          `--disable-extensions-except=${isolatedExtensionPath}`,
+          `--load-extension=${isolatedExtensionPath}`,
+        ]
+        : ['--enable-unsafe-extension-debugging']),
     ],
     // timeout 已经守住「启动卡死」；不要再挂 AbortSignal —— 它会在超时点直接杀掉
     // 浏览器进程，跑得久一点的用例会莫名其妙断在半路（Connection closed）。
     timeout: 20_000,
     protocolTimeout: 20_000,
   });
+  if (!usesExtensionCli) {
+    expect(await browser.installExtension(isolatedExtensionPath)).toBe(TRUSTED_EXTENSION_ID);
+  }
   return { libraryRoot };
 }
 
