@@ -6,6 +6,7 @@ import { canonicalNowcoderDetailUrl, normalizeNowcoderSearchRecord, objectRecord
   type NormalizedNowcoderSearchRecord } from '../feJourney/nowcoderSearchRecord.js';
 const JSON_SEARCH_URL = 'https://gw-c.nowcoder.com/api/sparta/pc/search';
 const QUERY_CONCURRENCY = 2;
+const SESSION_CANDIDATE_LIMIT = 500;
 const SEARCH_TIMEOUT_MS = 8_000;
 export interface NowcoderDirectedSearchAudit {
   provider: 'nowcoder-json'; requestedSort: 'latest'; order: 'create'; sortVerified: true; codexBrowserUse: false;
@@ -153,13 +154,19 @@ export async function discoverNowcoderDirectedCandidates(
   }
   const candidates = [...deliverable.values()]
     .sort((left, right) => (right.publishedAt ?? '').localeCompare(left.publishedAt ?? '') || originOrder(left, right))
+    .slice(0, SESSION_CANDIDATE_LIMIT)
     .map(hit => ({ id: stableContentId(hit.canonicalUrl), canonicalUrl: hit.canonicalUrl, contentType: 'post' as const,
       matchedQueries: [...new Set(hits.filter(other => other.canonicalUrl === hit.canonicalUrl).map(other => other.query))],
       page: hit.page, rank: hit.rank, publishedAt: hit.publishedAt!, title: hit.title,
       snippet: hit.snippet, sourceRecordType: hit.sourceRecordType }));
   const previewOnly = [...previews.values()].filter(hit => !deliverable.has(hit.canonicalUrl)).sort(originOrder)
+    .slice(0, SESSION_CANDIDATE_LIMIT)
     .map(hit => ({ canonicalUrl: hit.canonicalUrl, query: hit.query, page: hit.page, rank: hit.rank,
       title: hit.title, reason: hit.dateReason! }));
+  const datedOverflow = deliverable.size - candidates.length;
+  const previewOverflow = [...previews.keys()].filter(url => !deliverable.has(url)).length - previewOnly.length;
+  if (datedOverflow > 0) diagnostics.skippedCounts.candidate_limit = datedOverflow;
+  if (previewOverflow > 0) diagnostics.skippedCounts.review_only_limit = previewOverflow;
   diagnostics.retainedCandidates = candidates.length;
   diagnostics.reviewOnlyCandidates = previewOnly.length;
   return { candidates, previewOnly, diagnostics,

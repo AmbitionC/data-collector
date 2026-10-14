@@ -150,6 +150,26 @@
             </div>
             <span class="plans-timezone">北京时间</span>
           </div>
+          <article id="nowcoder-schedule" class="plan-ticket nowcoder-schedule" aria-labelledby="nowcoder-schedule-heading">
+            <header>
+              <h3 id="nowcoder-schedule-heading">跨公司面经周期收集</h3>
+              <span id="nowcoder-schedule-status" class="plan-status">未启用</span>
+            </header>
+            <label class="schedule-toggle"><input id="nowcoder-schedule-enabled" type="checkbox" disabled>启用周期收集</label>
+            <fieldset id="nowcoder-schedule-companies" class="schedule-companies">
+              <legend>收集公司</legend>
+              <label><input type="checkbox" data-nowcoder-company="bytedance" disabled>字节</label>
+              <label><input type="checkbox" data-nowcoder-company="tencent" disabled>腾讯</label>
+              <label><input type="checkbox" data-nowcoder-company="alibaba" disabled>阿里</label>
+              <label><input type="checkbox" data-nowcoder-company="ant" disabled>蚂蚁</label>
+              <label><input type="checkbox" data-nowcoder-company="other" disabled>其他公司</label>
+            </fieldset>
+            <p class="support compact">每天 09:00（上海时间），Bridge 醒着且扩展在线时收集。休眠时不收集；优先补库存较少的公司。</p>
+            <p class="support compact">结果仅本机待审核，可在「已入库」核对后再手动同步。</p>
+            <button id="nowcoder-schedule-save" type="button" class="secondary-button" disabled>保存设置</button>
+            <p id="nowcoder-schedule-note" class="support compact" aria-live="polite">保存只更新配置，不会立即采集。</p>
+            <p id="nowcoder-schedule-error" class="support compact plans-error" role="alert" hidden></p>
+          </article>
           <div id="plans-list" class="plans-list" aria-live="polite"></div>
           <p id="plans-empty" class="support compact" hidden>还没有可用的采集计划。</p>
           <p id="plans-directed-status" class="support compact" hidden></p>

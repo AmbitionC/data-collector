@@ -26,6 +26,7 @@ import {
  */
 
 export interface LibraryCatalogEntry {
+  nowcoderReviewOnly?: true;
   id: string;
   source: string;
   title: string;
@@ -231,6 +232,10 @@ export async function syncEntries(
     }
     try {
       const organized = await readOrganized(root, entry);
+      if ((options.deliveryBatchId || options.skipDelivered)
+        && (entry.nowcoderReviewOnly || organized.document.sourceMetadata?.nowcoderReviewOnly === true)) {
+        throw new Error('该面经属于待审核批次，已阻止自动交付；请先加工、核验后显式同步');
+      }
       assertZsxqSourceMatchesCatalog(entry, organized);
       if (
         options.skipDelivered
@@ -368,6 +373,7 @@ export function isDelivered(sync: SyncInfo | undefined): boolean {
 /** 尚未送达（未同步、失败、以及已提交但没推上去）的条目 id，供「同步全部未同步」展开使用。 */
 export async function pendingIds(root: string, deliveryBatchId?: string): Promise<string[]> {
   return (await readCatalog(root))
+    .filter(entry => !entry.nowcoderReviewOnly)
     .filter(entry =>
       !isDelivered(entry.sync)
       || (deliveryBatchId !== undefined && entry.deliveryBatchId === deliveryBatchId))

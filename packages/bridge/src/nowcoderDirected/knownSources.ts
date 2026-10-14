@@ -8,6 +8,7 @@ import { readKnownNowcoderLocalSources } from './documentLoader.js';
 /** One URL identity set for local/pending/history search gates; explicit retry runs remain separate. */
 export async function knownNowcoderSources(input: {
   libraryRoot: string; targetRoot?: string | undefined; jobs: readonly JobRecord[]; excludeRunId?: string;
+  historyPath?: string | undefined; historyRoot?: string | undefined;
 }): Promise<{ urls: Set<string>; reasons: Map<string, string>; warnings: Record<string, number> }> {
   const reasons = new Map<string, string>();
   const warnings: Record<string, number> = {};
@@ -20,9 +21,14 @@ export async function knownNowcoderSources(input: {
     if (job.directedRunId === input.excludeRunId && input.excludeRunId) continue;
     if (['queued', 'dispatched', 'collecting', 'saved'].includes(job.status)) add(job.url, 'active_or_saved_job');
   }
-  if (input.targetRoot) {
-    const {snapshot} = await loadStrictProcessedNowcoderHistory(input.targetRoot);
+  if (input.historyRoot && !input.historyPath) throw new Error('Explicit published inventory root requires an outside source history');
+  const historyRoot = input.historyRoot ?? input.targetRoot;
+  if (input.historyPath && !historyRoot) throw new Error('Configured source history requires a published inventory root');
+  if (historyRoot) {
+    const {snapshot} = await loadStrictProcessedNowcoderHistory(historyRoot, input.historyPath);
     for (const entry of snapshot.hashesByUrl) add(entry.url, 'processed_history');
+  }
+  if (input.targetRoot) {
     const root = await realpath(input.targetRoot);
     const directory = join(root, '_inbox', 'nowcoder');
     let entries: string[] = [];

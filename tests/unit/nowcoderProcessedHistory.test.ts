@@ -198,3 +198,38 @@ describe('processed Nowcoder history', () => {
     }
   });
 });
+
+
+describe('explicit outside identity history', () => {
+  it('uses the selected outside ledger for search identities without promoting prepared or partial evidence', async () => {
+    const root = await temporaryDirectories.create('outside-identity-');
+    const repo = join(root, 'resource'); await mkdir(repo);
+    const path = join(await import('node:fs/promises').then(fs => fs.realpath(root)), 'history.private.json');
+    const raw = JSON.stringify({ schemaVersion: 1, updatedAt: '2026-10-14T10:00:00.000Z', records: {
+      '0123456789ab': { source: 'nowcoder', url: 'https://nowcoder.com/discuss/1001?from=share',
+        contentHash: '0123456789abcdef', clusterId: 'captured-cluster', status: 'prepared', evidenceGrade: 'B-partial',
+        publicFiles: [], knowledgeKeys: [], processedAt: '2026-10-14T10:00:00.000Z' },
+    } });
+    await writeFile(path, raw);
+    const loaded = await loadStrictProcessedNowcoderHistory(repo, path);
+    expect(loaded.snapshot.hashesByUrl).toEqual([{ url: 'https://www.nowcoder.com/discuss/1001', hashes: ['0123456789abcdef'] }]);
+    expect(loaded.snapshot.clusterIds).toEqual(['captured-cluster']);
+    expect(await import('node:fs/promises').then(fs => fs.readFile(path, 'utf8'))).toBe(raw);
+  });
+
+  it('fails closed for a missing explicitly configured ledger instead of an empty history', async () => {
+    const repo = await temporaryDirectories.create('outside-missing-identity-');
+    await expect(loadStrictProcessedNowcoderHistory(repo, join(repo, '..', 'absent-history.private.json'))).rejects.toMatchObject({ code: 'DIRECTED_HISTORY_CORRUPT' });
+  });
+
+  it('does not reinterpret modern body SHA or editorial process IDs as captured runtime identity', async () => {
+    const root = await temporaryDirectories.create('outside-modern-identity-'), repo = join(root, 'resource'); await mkdir(repo);
+    const path = join(await import('node:fs/promises').then(fs => fs.realpath(root)), 'modern.private.json');
+    await writeFile(path, JSON.stringify({ schemaVersion: 1, updatedAt: '2026-10-14T10:00:00.000Z', records: {
+      '0123456789ab': { source: 'nowcoder', url: 'https://www.nowcoder.com/discuss/1001',
+        bodySha256: 'a'.repeat(64), processUnitId: 'editorial-unit', status: 'published', evidenceGrade: 'B',
+        publication: { status: 'published' }, verifiedDelivery: { articleKey: 'tencent-base-1' } },
+    } }));
+    await expect(loadStrictProcessedNowcoderHistory(repo, path)).rejects.toMatchObject({ code: 'DIRECTED_HISTORY_CORRUPT' });
+  });
+});

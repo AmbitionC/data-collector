@@ -7,6 +7,7 @@ import {
   ZSXQ_COMPLETE_CONTENT_CAPABILITY,
   bridgeAuthorizedPayloadSchema,
   collectionPlanAttemptSchema,
+  nowcoderScheduleConfigSchema,
   jobCancelPayloadSchema,
   jobCollectPayloadSchema,
   jobFailedPayloadSchema,
@@ -17,6 +18,7 @@ import {
   type CollectionPlanId,
   type JobRecord,
   type NowcoderDirectedRunAttempt,
+  type NowcoderScheduleConfig,
   type ZsxqCollectionMode,
   type ZsxqDateRange,
   type ZsxqLibraryIndexEntry,
@@ -53,6 +55,17 @@ interface ConnectionDependencies {
 export interface DirectedRemoteJobOwnership {
   directedRunId: string;
   directedRunAttempt: NowcoderDirectedRunAttempt;
+}
+
+export interface NowcoderReviewPlanOptions {
+  nowcoderReviewOnly: true;
+  nowcoderCompanies?: NowcoderScheduleConfig['companies'];
+}
+
+function scheduleConfiguration(input: unknown): NowcoderScheduleConfig {
+  const parsed = nowcoderScheduleConfigSchema.safeParse(input);
+  if (!parsed.success) throw new Error('牛客调度配置响应无效；需要已知公司和仅待审核模式');
+  return parsed.data;
 }
 
 type CollectHandler = (
@@ -696,17 +709,47 @@ export class BridgeConnection {
       headers: { authorization: `Bearer ${token}` },
     });
     if (!response.ok) throw new Error(`读取采集任务失败：HTTP ${response.status}`);
-    return response.json();
+    const body = await response.json() as { nowcoderSchedule?: unknown };
+    if (body.nowcoderSchedule !== undefined) scheduleConfiguration(body.nowcoderSchedule);
+    return body;
+  }
+
+  async nowcoderSchedule(): Promise<NowcoderScheduleConfig> {
+    const { baseUrl, token } = await this.authorized();
+    const response = await this.fetchWithDeadline(`${baseUrl}/v1/plans/nowcoder-schedule`, {
+      headers: { authorization: `Bearer ${token}` },
+    }, '读取牛客调度配置超时');
+    if (!response.ok) throw new Error(`读取牛客调度配置失败：HTTP ${response.status}`);
+    return scheduleConfiguration(await response.json());
+  }
+
+  async configureNowcoderSchedule(input: unknown): Promise<NowcoderScheduleConfig> {
+    const config = scheduleConfiguration(input);
+    const { baseUrl, token } = await this.authorized();
+    const response = await this.fetchWithDeadline(`${baseUrl}/v1/plans/nowcoder-schedule`, {
+      method: 'PUT',
+      headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+      body: JSON.stringify(config),
+    }, '保存牛客调度配置超时');
+    if (!response.ok) throw new Error(`保存牛客调度配置失败：HTTP ${response.status}`);
+    return scheduleConfiguration(await response.json());
   }
 
   /** 立即运行一条固定计划；force 用于用户明确点击的重试/补跑。 */
-  async runPlan(planId: CollectionPlanId, force = false): Promise<unknown> {
+  async runPlan(planId: CollectionPlanId, force = false, review?: NowcoderReviewPlanOptions): Promise<unknown> {
+    if (review && (planId !== 'nowcoder-agent-market' || review.nowcoderReviewOnly !== true)) {
+      throw new Error('只有牛客面经计划支持仅待审核模式');
+    }
+    if (review?.nowcoderCompanies) scheduleConfiguration({ enabled: false, companies: review.nowcoderCompanies, reviewOnly: true });
     const { baseUrl, token } = await this.authorized();
     const fetcher = this.dependencies.fetch;
     const response = await fetcher(`${baseUrl}/v1/plans/run`, {
       method: 'POST',
       headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
-      body: JSON.stringify({ planId, ...(force ? { force: true } : {}) }),
+      body: JSON.stringify({ planId, ...(force ? { force: true } : {}), ...(review ? {
+        nowcoderReviewOnly: true,
+        ...(review.nowcoderCompanies ? { nowcoderCompanies: review.nowcoderCompanies } : {}),
+      } : {}) }),
     });
     if (!response.ok) throw new Error(`启动采集任务失败：HTTP ${response.status}`);
     return response.json();

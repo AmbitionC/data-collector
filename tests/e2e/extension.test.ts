@@ -343,6 +343,36 @@ async function waitForText(
 }
 
 describe('built Chrome extension', () => {
+  it('keeps company scheduling disabled and saves selected companies through the real private Bridge', async () => {
+    const { libraryRoot } = await startStack();
+    const fixture = await readFile(join(WORKSPACE, 'tests', 'fixtures', 'wechat-article.html'), 'utf8');
+    const articlePage = await browser!.newPage();
+    await serveArticleFixture(articlePage, fixture);
+    await articlePage.goto(TARGET_URL, { waitUntil: 'domcontentloaded' });
+    const { page: sidePanel } = await sidePanelFor(articlePage);
+    await sidePanel.setViewport({ width: 420, height: 1100 });
+    await waitForVisiblePanel(sidePanel, '#ready-panel', 15_000);
+    await clickSidePanel(sidePanel, '#nav-plans');
+    await waitForVisiblePanel(sidePanel, '#plans-panel', 15_000);
+    await waitForText(sidePanel, '#nowcoder-schedule-status', '未启用', 10_000);
+    const screenshotDirectory = join(WORKSPACE, 'artifacts', 'screenshots');
+    await mkdir(screenshotDirectory, { recursive: true });
+    await sidePanel.screenshot({ path: join(screenshotDirectory, 'company-review-schedule-disabled.png'), fullPage: true });
+    await sidePanel.evaluate(() => {
+      const enabled = document.querySelector<HTMLInputElement>('#nowcoder-schedule-enabled');
+      if (!enabled || enabled.checked) throw new Error('Schedule must start disabled');
+      for (const input of document.querySelectorAll<HTMLInputElement>('#nowcoder-schedule-companies input')) {
+        if (input.dataset.nowcoderCompany !== 'ant' && input.checked) input.click();
+      }
+    });
+    await clickSidePanel(sidePanel, '#nowcoder-schedule-save');
+    await waitForText(sidePanel, '#nowcoder-schedule-note', '已保存；下次符合条件时按计划收集。本次不会立即采集。', 10_000);
+    const configuration = JSON.parse(await readFile(join(libraryRoot, '.config', 'nowcoder-schedule.json'), 'utf8'));
+    expect(configuration.config).toEqual({ enabled: false, companies: ['ant'], reviewOnly: true });
+    const plans = JSON.parse(await readFile(join(libraryRoot, '.config', 'collection-plans.json'), 'utf8').catch(() => '{}'));
+    expect(plans.batches ?? []).toEqual([]);
+    await sidePanel.screenshot({ path: join(screenshotDirectory, 'company-review-schedule-saved.png'), fullPage: true });
+  });
   it('automatically authorizes the side panel and captures the current page into the local library', async () => {
     const { libraryRoot } = await startStack();
 

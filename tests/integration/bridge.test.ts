@@ -1,3 +1,4 @@
+import * as sourceIndex from '../../packages/bridge/src/nowcoderDirected/knownSources.js';
 import { spawn } from 'node:child_process';
 import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -3954,4 +3955,78 @@ describe('自更新后的重启时机', () => {
 
     await vi.waitFor(() => expect(exit).toHaveBeenCalledOnce());
   });
+});
+
+
+describe('preserved-work review dispatch integration', () => {
+  it('rechecks a source saved after preview without dispatching a duplicate detail and retains serial spacing', async () => {
+    const root = await temporaryDirectory(), configDir = join(root, '.config');
+    const config = loadConfig({ libraryRoot: root, configDir, port: 0 });
+    const plans = await CollectionPlanStore.open(config.plansFile);
+    const batch = await plans.start('nowcoder-agent-market', { nowcoderReviewOnly: true });
+    await plans.markSelectionPending(batch.id);
+    const jobs = await JobStore.open(config.jobsFile);
+    const children = [];
+    for (const id of [84001, 84002, 84003]) children.push(await jobs.create({
+      id: `review-preserved-${id}`, url: `https://www.nowcoder.com/discuss/${id}`, requestedBy: 'codex',
+      batchId: batch.id, planId: 'nowcoder-agent-market', nowcoderReviewOnly: true,
+    }));
+    await plans.attachRound(batch.id, children.map(job => job.id));
+    // The preview predates this durable local source index entry.
+    await writeFile(join(root, '_catalog', 'index.json'), JSON.stringify([{
+      id: 'local-source', source: 'nowcoder', title: '已收藏来源', url: children[0]!.url,
+      category: 'interview', relativePath: 'nowcoder/local-source/index.md', updatedAt: new Date().toISOString(),
+    }]));
+    const bridge = await startBridge({ port: 0, libraryRoot: root, configDir }); handles.push(bridge);
+    const { socket, token } = await authorize(bridge);
+    const frames: Array<{ type: string; requestId: string; time: number }> = [];
+    socket.on('message', frame => {
+      const message = JSON.parse(frame.toString());
+      frames.push({ ...message, time: Date.now() });
+      if (message.type === 'job.collect') socket.send(envelope('job.error', message.requestId,
+        { code: 'UNSUPPORTED_LAYOUT', message: '受控测试终态', needsAttention: false }));
+    });
+    socket.send(envelope('extension.hello', 'preserved-review-hello', { version: APP_VERSION }));
+    await vi.waitFor(() => expect(frames.filter(frame => frame.type === 'job.collect')).toHaveLength(2), { timeout: 9000 });
+    const duplicate = await requestJson<{ status: string; errorCode?: string }>(bridge.url, `/v1/jobs/${children[0]!.id}`, { token });
+    expect(duplicate.body).toMatchObject({ status: 'failed', errorCode: 'SOURCE_ALREADY_COLLECTED' });
+    const collects = frames.filter(frame => frame.type === 'job.collect');
+    expect(collects.map(frame => frame.requestId)).toEqual([children[1]!.id, children[2]!.id]);
+    expect(collects[1]!.time - collects[0]!.time).toBeGreaterThanOrEqual(1950);
+    expect((await requestJson<{ batches: CollectionBatch[] }>(bridge.url, '/v1/plans/batches', { token })).body.batches.find(value => value.id === batch.id)?.deliveryIds).toEqual([]);
+  }, 15000);
+});
+
+it('preserves two-second actual dispatch spacing after a slow source-index read', async () => {
+  const lookup = sourceIndex.knownNowcoderSources;
+  vi.spyOn(sourceIndex, 'knownNowcoderSources').mockImplementationOnce(async input => {
+    await new Promise(resolve => setTimeout(resolve, 2500));
+    return lookup(input);
+  });
+  const root = await temporaryDirectory(), configDir = join(root, '.config');
+  const config = loadConfig({ libraryRoot: root, configDir, port: 0 });
+  const plans = await CollectionPlanStore.open(config.plansFile);
+  const batch = await plans.start('nowcoder-agent-market', { nowcoderReviewOnly: true });
+  await plans.markSelectionPending(batch.id);
+  const jobs = await JobStore.open(config.jobsFile);
+  const children = [];
+  for (const id of [94001, 94002]) children.push(await jobs.create({
+    id: `review-slow-lookup-${id}`, url: `https://www.nowcoder.com/discuss/${id}`, requestedBy: 'codex',
+    batchId: batch.id, planId: 'nowcoder-agent-market', nowcoderReviewOnly: true,
+  }));
+  await plans.attachRound(batch.id, children.map(job => job.id));
+  const bridge = await startBridge({ port: 0, libraryRoot: root, configDir }); handles.push(bridge);
+  const { socket } = await authorize(bridge);
+  const sends: number[] = [];
+  socket.on('message', frame => {
+    const message = JSON.parse(frame.toString());
+    if (message.type === 'job.collect') {
+      sends.push(Date.now());
+      socket.send(envelope('job.error', message.requestId,
+        { code: 'UNSUPPORTED_LAYOUT', message: 'controlled test terminal', needsAttention: false }));
+    }
+  });
+  socket.send(envelope('extension.hello', 'review-slow-lookup-hello', { version: APP_VERSION }));
+  await vi.waitFor(() => expect(sends).toHaveLength(2), { timeout: 10000 });
+  expect(sends[1]! - sends[0]!).toBeGreaterThanOrEqual(1950);
 });

@@ -2,6 +2,7 @@ import { normalizeNowcoderSearchRecord } from './nowcoderSearchRecord.js';
 import { canonicalizeUrl } from '@data-collector/shared';
 import { FE_JOURNEY_PRESET } from './preset.js';
 import type { NowcoderCompany } from './nowcoderEvidence.js';
+import { detectNowcoderResponseStop, NowcoderCollectionStopError } from '../plans/nowcoderPacing.js';
 
 const DETAIL_PATH = /^\/(?:discuss\/\d+|feed\/main\/detail\/[A-Za-z0-9_-]+)\/?$/;
 const JSON_SEARCH_URL = 'https://gw-c.nowcoder.com/api/sparta/pc/search';
@@ -170,9 +171,11 @@ async function searchDetailHits(fetcher: typeof fetch, query: string): Promise<S
     }
     return apiHits;
   } catch (apiError) {
+    if (apiError instanceof NowcoderCollectionStopError) throw apiError;
     try {
       return [...apiHits, ...await searchSsrPage(fetcher, query)];
     } catch (ssrError) {
+      if (ssrError instanceof NowcoderCollectionStopError) throw ssrError;
       throw new Error(
         `牛客搜索请求失败（${query}）：API ${errorMessage(apiError)}；SSR ${errorMessage(ssrError)}`,
       );
@@ -185,9 +188,24 @@ async function searchPair<T extends { query: string }>(
   items: readonly T[],
 ): Promise<Array<{ item: T; hits: SearchHit[] }>> {
   if (items.length > SEARCH_CONCURRENCY) throw new Error('牛客搜索并发批次超过上限');
+  let stopped: NowcoderCollectionStopError | undefined;
+  const guardedFetcher: typeof fetch = async (input, init) => {
+    if (stopped) throw stopped;
+    try {
+      const response = await fetcher(input, init);
+      if (stopped) throw stopped;
+      const challenge = await detectNowcoderResponseStop(response);
+      if (challenge) stopped ??= challenge;
+      if (stopped) throw stopped;
+      return response;
+    } catch (error) {
+      if (error instanceof NowcoderCollectionStopError) stopped ??= error;
+      throw error;
+    }
+  };
   return await Promise.all(items.map(async item => ({
     item,
-    hits: await searchDetailHits(fetcher, item.query),
+    hits: await searchDetailHits(guardedFetcher, item.query),
   })));
 }
 
@@ -240,17 +258,26 @@ export interface NowcoderDiscoveryCandidate {
   queryCompany: NowcoderCompany;
 }
 
-/** 为每日计划发现带查询公司证据的候选；汇总全部固定查询后再按相关性与时间取每公司前 15。 */
+export interface NowcoderPlanDiscoveryOptions {
+  companies?: readonly NowcoderCompany[];
+  reviewOnly?: boolean;
+}
+
+/** 为每日计划发现带查询公司证据的候选；只搜索选定公司，再按相关性与时间取每公司前 15。 */
 export async function discoverNowcoderPlanCandidates(
   fetcher: typeof fetch,
   knownUrls: ReadonlySet<string>,
+  options: NowcoderPlanDiscoveryOptions = {},
 ): Promise<NowcoderDiscoveryCandidate[]> {
   const known = normalizedKnownUrls(knownUrls);
   const pool = new Map<string, PooledSearchHit>();
   let firstSeen = 0;
-  const items = FE_JOURNEY_PRESET.nowcoder.companyQueries;
-  for (let index = 0; index < items.length; index += SEARCH_CONCURRENCY) {
-    const pair = items.slice(index, index + SEARCH_CONCURRENCY);
+  const selectedCompanies = options.companies ? new Set(options.companies) : new Set(NOWCODER_COMPANIES);
+  const items = FE_JOURNEY_PRESET.nowcoder.companyQueries.filter(item => selectedCompanies.has(item.company as NowcoderCompany));
+  // Review discovery is sequential: a challenge must be observed before the next query starts.
+  const concurrency = options.reviewOnly ? 1 : SEARCH_CONCURRENCY;
+  for (let index = 0; index < items.length; index += concurrency) {
+    const pair = items.slice(index, index + concurrency);
     for (const { item, hits } of await searchPair(fetcher, pair)) {
       const company = item.company as NowcoderCompany;
       for (const hit of hits) {
@@ -275,7 +302,7 @@ export async function discoverNowcoderPlanCandidates(
   );
   for (const hit of pool.values()) grouped.get(bestCompany(hit))?.push(hit);
 
-  return NOWCODER_COMPANIES.flatMap(company => (grouped.get(company) ?? [])
+  return NOWCODER_COMPANIES.filter(company => selectedCompanies.has(company)).flatMap(company => (grouped.get(company) ?? [])
     .sort((left, right) => (
       Number(qualifiedRelevance(right, company)) - Number(qualifiedRelevance(left, company))
       || (qualifiedRelevance(left, company) ? right.createTime - left.createTime : 0)
