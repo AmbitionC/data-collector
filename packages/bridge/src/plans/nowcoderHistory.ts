@@ -67,7 +67,8 @@ export function pendingNowcoderPlanJobs(
   const latestByContentId = new Map<string, JobRecord>();
   for (const job of jobs) {
     if (
-      job.status !== 'saved'
+      job.nowcoderReviewOnly === true
+      || job.status !== 'saved'
       || !job.outputPath
     ) continue;
     const canonicalUrl = canonicalJobUrl(job.url);

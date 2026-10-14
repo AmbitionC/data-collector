@@ -1,4 +1,4 @@
-import { descriptorForHost, isListPage, parseSupportedUrl } from '@data-collector/shared';
+import { descriptorForHost, isListPage, nowcoderScheduleConfigSchema, parseSupportedUrl } from '@data-collector/shared';
 import {
   isCollecting,
   shouldAutoReload,
@@ -421,10 +421,27 @@ chrome.runtime.onMessage.addListener((message: unknown, _sender, sendResponse) =
     if (request.type === 'plans.status') {
       return connection.planStatus();
     }
+    if (request.type === 'plans.nowcoderSchedule.get') {
+      return connection.nowcoderSchedule();
+    }
+    if (request.type === 'plans.nowcoderSchedule.configure') {
+      return connection.configureNowcoderSchedule((request as { config?: unknown }).config);
+    }
     if (request.type === 'plans.run') {
-      const input = request as { planId?: unknown; force?: unknown };
+      const input = request as { planId?: unknown; force?: unknown; nowcoderReviewOnly?: unknown; nowcoderCompanies?: unknown };
       if (input.planId !== 'zsxq-chen-teacher' && input.planId !== 'nowcoder-agent-market') {
         throw new Error('未知的采集计划');
+      }
+      if (input.nowcoderReviewOnly !== undefined || input.nowcoderCompanies !== undefined) {
+        if (input.planId !== 'nowcoder-agent-market' || input.nowcoderReviewOnly !== true) {
+          throw new Error('公司筛选只适用于牛客面经的仅待审核模式');
+        }
+        const companies = input.nowcoderCompanies === undefined ? undefined : nowcoderScheduleConfigSchema.parse({
+          enabled: false, companies: input.nowcoderCompanies, reviewOnly: true,
+        }).companies;
+        return connection.runPlan(input.planId, input.force === true, {
+          nowcoderReviewOnly: true, ...(companies ? { nowcoderCompanies: companies } : {}),
+        });
       }
       return connection.runPlan(input.planId, input.force === true);
     }

@@ -1406,6 +1406,47 @@ describe('extension Bridge connection', () => {
     );
   });
 
+  it('reads and saves strict review-only schedule settings with authorization without starting a run', async () => {
+    const token = 'x'.repeat(43);
+    const config = { enabled: false, companies: ['ant', 'tencent'], reviewOnly: true };
+    const calls: Array<{ url: string; method: string; headers: unknown; body?: unknown }> = [];
+    const fetcher: typeof fetch = async (input, init = {}) => {
+      calls.push({ url: String(input), method: init.method ?? 'GET', headers: init.headers,
+        ...(init.body ? { body: JSON.parse(String(init.body)) } : {}) });
+      return Response.json(config);
+    };
+    const connection = new BridgeConnection(dependencies(new MemoryStorage({ bridgeToken: token }), () => new MemorySocket(), fetcher));
+    expect(await connection.nowcoderSchedule()).toEqual(config);
+    expect(await connection.configureNowcoderSchedule(config)).toEqual(config);
+    expect(calls).toEqual([
+      { url: 'http://127.0.0.1:17321/v1/plans/nowcoder-schedule', method: 'GET', headers: { authorization: `Bearer ${token}` } },
+      { url: 'http://127.0.0.1:17321/v1/plans/nowcoder-schedule', method: 'PUT', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' }, body: config },
+    ]);
+  });
+
+  it('rejects unsafe schedule configuration and invalid server settings without a collection request', async () => {
+    const calls: string[] = [];
+    const fetcher: typeof fetch = async input => {
+      calls.push(String(input));
+      return Response.json({ enabled: true, companies: ['ant'], reviewOnly: false });
+    };
+    const connection = new BridgeConnection(dependencies(new MemoryStorage({ bridgeToken: 'x'.repeat(43) }), () => new MemorySocket(), fetcher));
+    await expect(connection.configureNowcoderSchedule({ enabled: true, companies: ['ant'], reviewOnly: false })).rejects.toThrow();
+    expect(calls).toEqual([]);
+    await expect(connection.nowcoderSchedule()).rejects.toThrow(/配置|响应/);
+  });
+
+  it('preserves explicit review-only mode and company targets on a manual Nowcoder run', async () => {
+    let body: unknown;
+    const fetcher: typeof fetch = async (_input, init) => {
+      body = JSON.parse(String(init?.body));
+      return Response.json({ id: 'review-batch', nowcoderReviewOnly: true });
+    };
+    const connection = new BridgeConnection(dependencies(new MemoryStorage({ bridgeToken: 'x'.repeat(43) }), () => new MemorySocket(), fetcher));
+    await connection.runPlan('nowcoder-agent-market', true, { nowcoderReviewOnly: true, nowcoderCompanies: ['ant', 'tencent'] });
+    expect(body).toEqual({ planId: 'nowcoder-agent-market', force: true, nowcoderReviewOnly: true, nowcoderCompanies: ['ant', 'tencent'] });
+  });
+
   it('forwards exact directed ownership on collect and cancel without making handler failures connection-fatal', async () => {
     const storage = new MemoryStorage({ bridgeToken: 'x'.repeat(43) });
     const socket = new MemorySocket();

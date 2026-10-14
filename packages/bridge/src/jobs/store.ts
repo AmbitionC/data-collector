@@ -43,6 +43,7 @@ export interface CreateJobInput {
   id?: string;
   url: string;
   requestedBy: JobRecord['requestedBy'];
+  nowcoderReviewOnly?: true;
   batchId?: string;
   planId?: CollectionPlanId;
   planAttempt?: CollectionPlanAttempt;
@@ -96,6 +97,7 @@ function hasNowcoderRecoveryBudget(
 function validateStoredJob(value: JobRecord): void {
   try {
     assertDirectedOwnership(value);
+    if (value.nowcoderReviewOnly !== undefined && (value.nowcoderReviewOnly !== true || value.planId !== 'nowcoder-agent-market' || !value.batchId)) throw new Error('invalid review job');
     if (value.recoveryCount !== undefined && (
       !Number.isSafeInteger(value.recoveryCount) || value.recoveryCount < 0
     )) throw new Error('invalid recovery count');
@@ -278,13 +280,15 @@ export class JobStore {
   async create(input: CreateJobInput): Promise<JobRecord> {
     return this.serializeMutation(async () => {
       assertDirectedOwnership(input);
+      if (input.nowcoderReviewOnly && (input.planId !== 'nowcoder-agent-market' || !input.batchId)) throw new Error('待审核任务必须属于牛客面经批次');
       const id = input.id ?? this.dependencies.id();
       const url = canonicalizeUrl(parseSupportedUrl(input.url)).href;
       const existing = this.jobs.get(id);
       if (existing) {
         if (existing.url !== url) throw new Error('任务 ID 已用于其他地址');
         if (
-          existing.planId !== input.planId
+          existing.nowcoderReviewOnly !== input.nowcoderReviewOnly
+          || existing.planId !== input.planId
           || existing.planAttempt !== input.planAttempt
           || existing.directedRunId !== input.directedRunId
           || existing.directedRunAttempt !== input.directedRunAttempt
@@ -296,6 +300,7 @@ export class JobStore {
         id,
         url,
         requestedBy: input.requestedBy,
+        ...(input.nowcoderReviewOnly ? { nowcoderReviewOnly: true as const } : {}),
         status: 'queued',
         createdAt: timestamp,
         updatedAt: timestamp,

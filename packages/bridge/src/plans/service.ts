@@ -25,6 +25,8 @@ import {
 } from './nowcoderPlan.js';
 import type { CollectionPlanStore } from './store.js';
 import type { ZsxqDayLedgerStore } from './zsxqLedger.js';
+import type { NowcoderScheduleConfig, NowcoderScheduleStore } from './nowcoderSchedule.js';
+import { selectCompanyCandidates, type CompanyInventory } from './nowcoderInventory.js';
 
 const PLAN_HOURS: Record<CollectionPlanId, number> = {
   'zsxq-chen-teacher': 8,
@@ -36,6 +38,7 @@ const NOWCODER_CONTENT_REJECTION_CODES = new Map([
 ]);
 const MAX_PLAN_ERROR_LENGTH = 2_000;
 const BENCHMARK_FAILURE_MESSAGE = '基准报告写入失败';
+const NOWCODER_ACCESS_STOP_CODES = new Set(['AUTH_REQUIRED', 'RATE_LIMITED', 'CAPTCHA_REQUIRED']);
 
 function benchmarkFailureError(prior?: string): string {
   if (!prior) return BENCHMARK_FAILURE_MESSAGE;
@@ -93,7 +96,9 @@ export interface CollectionPlanServiceDependencies {
   canCollectZsxq?: () => boolean;
   /** sink 正在保存当前轮结果时不得换代 attempt。 */
   canStartZsxqAttempt?: () => boolean;
-  discoverNowcoder: (knownUrls: ReadonlySet<string>) => Promise<NowcoderDiscoveryCandidate[]>;
+  discoverNowcoder: (knownUrls: ReadonlySet<string>, batch?: CollectionBatch) => Promise<NowcoderDiscoveryCandidate[]>;
+  nowcoderSchedule?: NowcoderScheduleStore;
+  companyInventory?: () => Promise<CompanyInventory>;
   dispatch: (job: JobRecord) => Promise<void>;
   collectZsxq: (
     batchId: string,
@@ -182,7 +187,7 @@ function findDurableNowcoderStopSignal(
   return jobs.find(job => (
     job.batchId === batchId
     && (job.status === 'failed' || job.status === 'needs_attention')
-    && (job.errorCode === 'TAB_CLOSED_BY_USER' || job.errorCode === 'RECOVERY_LIMIT_EXCEEDED')
+    && (job.errorCode === 'TAB_CLOSED_BY_USER' || job.errorCode === 'RECOVERY_LIMIT_EXCEEDED' || NOWCODER_ACCESS_STOP_CODES.has(job.errorCode ?? ''))
   ));
 }
 
@@ -226,19 +231,20 @@ export class CollectionPlanService {
     pending: boolean;
     nextRunAt: string;
     latest?: CollectionBatch;
-  }> } {
+  }>; nowcoderSchedule?: NowcoderScheduleConfig } {
     return {
       plans: COLLECTION_PLAN_IDS.map(id => {
         const latest = this.dependencies.store.latest(id, 1)[0];
         const due = planDueState(id, this.now(), this.lastScheduledStartedAt(id));
         return {
           id,
-          due: due.due,
+          due: due.due && (id !== 'nowcoder-agent-market' || this.dependencies.nowcoderSchedule?.settings().enabled !== false),
           pending: latest?.status === 'running' && !this.canExecute(id),
           nextRunAt: due.nextRunAt,
           ...(latest ? { latest } : {}),
         };
       }),
+      ...(this.dependencies.nowcoderSchedule ? { nowcoderSchedule: this.dependencies.nowcoderSchedule.settings() } : {}),
     };
   }
 
@@ -251,10 +257,14 @@ export class CollectionPlanService {
     options: {
       force?: boolean;
       trigger?: CollectionPlanTrigger;
+      nowcoderReviewOnly?: true;
+      nowcoderCompanies?: CollectionBatch['nowcoderCompanies'];
       zsxqMode?: ZsxqCollectionMode;
       zsxqDateRange?: ZsxqDateRange;
     } = {},
   ): Promise<CollectionBatch> {
+    if ((options.nowcoderReviewOnly || options.nowcoderCompanies) && planId !== 'nowcoder-agent-market') throw new Error('待审核模式只适用于牛客面经计划');
+    if (options.nowcoderCompanies && (!options.nowcoderReviewOnly || new Set(options.nowcoderCompanies).size !== options.nowcoderCompanies.length)) throw new Error('公司筛选需要待审核模式且不能重复');
     if (options.zsxqDateRange) {
       const range = zsxqDateRangeSchema.parse(options.zsxqDateRange);
       if (planId !== 'zsxq-chen-teacher' || options.zsxqMode === 'owner-history') {
@@ -264,6 +274,7 @@ export class CollectionPlanService {
     }
     const running = this.dependencies.store.active(planId)[0];
     if (running && !options.force) {
+      if (Boolean(running.nowcoderReviewOnly) !== Boolean(options.nowcoderReviewOnly)) throw new Error('牛客已有不同交付模式的批次，请等待结束');
       if (JSON.stringify(running.zsxqDateRange) !== JSON.stringify(options.zsxqDateRange)) {
         throw new Error('知识星球已有不同日期范围的任务运行中，请等待该批次结束');
       }
@@ -281,6 +292,8 @@ export class CollectionPlanService {
       planId,
       {
         trigger: options.trigger ?? 'manual',
+        ...(options.nowcoderReviewOnly ? { nowcoderReviewOnly: true as const } : {}),
+        ...(options.nowcoderCompanies ? { nowcoderCompanies: options.nowcoderCompanies } : {}),
         ...(options.force === undefined ? {} : { force: options.force }),
         ...(options.zsxqDateRange ? { zsxqDateRange: options.zsxqDateRange } : {}),
         ...(planId === 'zsxq-chen-teacher'
@@ -294,8 +307,10 @@ export class CollectionPlanService {
 
   async runDuePlans(): Promise<void> {
     for (const planId of COLLECTION_PLAN_IDS) {
+      const schedule = planId === 'nowcoder-agent-market' ? this.dependencies.nowcoderSchedule?.settings() : undefined;
+      if (schedule && (!schedule.enabled || !this.dependencies.extensionConnected())) continue;
       if (planDueState(planId, this.now(), this.lastScheduledStartedAt(planId)).due) {
-        await this.run(planId, { trigger: 'scheduled' });
+        await this.run(planId, { trigger: 'scheduled', ...(schedule ? { nowcoderReviewOnly: true as const, nowcoderCompanies: schedule.companies } : {}) });
       }
     }
   }
@@ -650,6 +665,14 @@ export class CollectionPlanService {
       });
       return;
     }
+    if (job.planId === 'nowcoder-agent-market' && NOWCODER_ACCESS_STOP_CODES.has(job.errorCode ?? '')) {
+      await this.stopNowcoderBatch(currentBatch, job, {
+        parentMessage: `牛客要求人工处理（${job.errorCode}），已停止本次运行`,
+        siblingCode: 'PLAN_STOPPED_ACCESS_REQUIRED',
+        siblingMessage: '同批任务遇到登录、验证码或限流，所属计划已停止',
+      });
+      return;
+    }
     if (job.planId !== 'nowcoder-agent-market' && job.status === 'saved' && !this.coveredJobs.has(job.id)) {
       this.coveredJobs.add(job.id);
       const key = await this.dependencies.coverageKey?.(job);
@@ -706,10 +729,8 @@ export class CollectionPlanService {
           ? durable
           : await this.dependencies.store.stopNowcoder(batch.id, stop.parentMessage);
         await this.terminalizeQueuedNowcoderSiblings(batch.id, job.id, stop.siblingCode, stop.siblingMessage);
-        terminal = await this.dependencies.store.reconcileStoppedNowcoder(
-          batch.id,
-          this.dependencies.jobs.list(),
-        );
+        terminal = terminal.nowcoderReviewOnly ? await this.freezeTerminalReview(terminal)
+          : await this.dependencies.store.reconcileStoppedNowcoder(batch.id, this.dependencies.jobs.list());
         await this.persistTerminalBenchmark(terminal);
         this.clearBatchRuntime(batch.id);
       });
@@ -754,10 +775,31 @@ export class CollectionPlanService {
       'PLAN_STOPPED_PARENT',
       '所属牛客固定计划已结束，任务已清理',
     );
+    if (batch.nowcoderReviewOnly && (batch.reviewIds === undefined || batch.reviewIds.length !== batch.accepted)) {
+      await this.withFixedNowcoderBatchLock(batch.id, async () => { await this.freezeTerminalReview(batch); });
+    }
     // Parent counters are a frozen selection snapshot after terminalization. Only the active
     // stop path may recount under its batch lock; reconnect cleanup must not mix detail-job
     // counters back into an already-finalized selection.
     this.clearBatchRuntime(batch.id);
+  }
+
+  private async freezeTerminalReview(
+    batch: CollectionBatch,
+    prepared?: Awaited<ReturnType<CollectionPlanService['selectSaved']>>,
+  ): Promise<CollectionBatch> {
+    if (!batch.nowcoderReviewOnly) return batch;
+    const jobs = this.dependencies.jobs.list();
+    let selection: Awaited<ReturnType<CollectionPlanService['selectSaved']>>;
+    try { selection = prepared ?? await this.selectSaved(batch, jobs.filter(job => job.batchId === batch.id)); }
+    catch (error) {
+      return await this.dependencies.store.recordTerminalReviewSelection(batch.id, [],
+        Object.fromEntries(NOWCODER_COMPANIES.map(company => [company, 0])), batch.rejections ?? {}, jobs, 0,
+        `已保存来源筛选失败：${error instanceof Error ? error.message : String(error)}`);
+    }
+    return await this.dependencies.store.recordTerminalReviewSelection(batch.id,
+      selection.selection.accepted.map(job => stableContentId(job.url)), selection.selection.coverage,
+      selection.rejectionCounts, jobs, selection.contentRejectionFailures.length);
   }
 
   /** A queued snapshot can race a dispatcher; never let one loser abort sibling cleanup. */
@@ -912,10 +954,11 @@ export class CollectionPlanService {
           next = await this.discoverRound(current, Math.min(roundSize, budget - attached.length));
         } catch (error) {
           if (this.fixedNowcoderHardStopped(current.id) || this.stoppingNowcoderBatches.has(current.id)) return;
-          const terminal = await this.dependencies.store.fail(
+          let terminal = await this.dependencies.store.fail(
             current.id,
             error instanceof Error ? error.message : '固定采集计划执行失败',
           );
+          terminal = await this.freezeTerminalReview(terminal, prepared);
           await this.persistTerminalBenchmark(terminal);
           this.clearBatchRuntime(current.id);
           return;
@@ -939,7 +982,8 @@ export class CollectionPlanService {
 
   private async selectSaved(batch: CollectionBatch, attached: readonly JobRecord[]) {
     const saved = attached.filter(candidate => candidate.status === 'saved');
-    const pooled = await this.dependencies.pendingNowcoderJobs?.(batch.id) ?? [];
+    const pooled = batch.nowcoderReviewOnly ? []
+      : (await this.dependencies.pendingNowcoderJobs?.(batch.id) ?? []).filter(job => !job.nowcoderReviewOnly);
     const candidatesByContentId = new Map<string, JobRecord>();
     for (const candidate of [...saved, ...pooled]) {
       const contentId = stableContentId(candidate.url);
@@ -978,10 +1022,15 @@ export class CollectionPlanService {
   ): Promise<NowcoderDiscoveryCandidate[]> {
     const jobs = this.dependencies.jobs.list();
     const known = knownNowcoderPlanUrls(jobs, batch.id, this.now());
-    const discovered = await this.dependencies.discoverNowcoder(known);
+    const inventory = batch.nowcoderReviewOnly && this.dependencies.companyInventory
+      ? await this.dependencies.companyInventory() : undefined;
+    const order = inventory && this.dependencies.nowcoderSchedule
+      ? await this.dependencies.nowcoderSchedule.prioritize(inventory, batch.nowcoderCompanies) : undefined;
+    const discovered = await this.dependencies.discoverNowcoder(known, batch);
     const unique = [...new Map(discovered.map(candidate => [candidate.url, candidate])).values()]
       .filter(candidate => !known.has(candidate.url));
-    return selectDiscoveryRound(unique, batch.startedAt, limit);
+    if (inventory && order) return selectCompanyCandidates(unique, inventory, order, limit);
+    return selectDiscoveryRound(batch.nowcoderCompanies ? unique.filter(candidate => batch.nowcoderCompanies!.includes(candidate.queryCompany)) : unique, batch.startedAt, limit);
   }
 
   private async createAttachAndDispatch(
@@ -999,6 +1048,7 @@ export class CollectionPlanService {
         requestedBy: 'codex',
         batchId: batch.id,
         planId: batch.planId,
+        ...(batch.nowcoderReviewOnly ? { nowcoderReviewOnly: true as const } : {}),
       }));
     }
     const discovered = await this.dependencies.store.markDiscovery(
@@ -1070,6 +1120,17 @@ export class CollectionPlanService {
       0,
       FE_JOURNEY_PRESET.nowcoder.planTargetAccepted,
     );
+    if (batch.nowcoderReviewOnly) {
+      await this.dependencies.store.markDiscovery(batch.id, Math.max(batch.discovered, accepted.length),
+        prepared.selection.coverage, prepared.rejectionCounts);
+      if (this.fixedNowcoderHardStopped(batch.id) || this.stoppingNowcoderBatches.has(batch.id)) return;
+      const terminal = await this.dependencies.store.finalizeSelection(batch.id, accepted.length,
+        prepared.selection.coverage, prepared.rejectionCounts, undefined,
+        prepared.contentRejectionFailures.length, [], accepted.map(job => stableContentId(job.url)));
+      await this.persistTerminalBenchmark(terminal);
+      this.clearBatchRuntime(batch.id);
+      return;
+    }
     const delivered = new Set(accepted.map(job => stableContentId(job.url)));
     if (this.dependencies.syncNowcoderJobs) {
       try {
@@ -1137,6 +1198,7 @@ export class CollectionPlanService {
       `牛客合格候选不足 10 条（${prepared.selection.accepted.length}/10）：${reason}`,
       prepared.contentRejectionFailures.length,
       [],
+      batch.nowcoderReviewOnly ? prepared.selection.accepted.map(job => stableContentId(job.url)) : undefined,
     );
     await this.persistTerminalBenchmark(terminal);
     this.clearBatchRuntime(batch.id);

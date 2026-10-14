@@ -1,5 +1,6 @@
-import { descriptorForHost, sourceLabel } from '@data-collector/shared';
-import type { CollectionBatch, CollectionPlanId } from '@data-collector/shared';
+import { descriptorForHost, NOWCODER_SCHEDULE_COMPANIES, sourceLabel } from '@data-collector/shared';
+import type { CollectionBatch, CollectionPlanId, NowcoderScheduleConfig } from '@data-collector/shared';
+import type { NowcoderReviewPlanOptions } from '../background/connection.js';
 import { BATCH_STALE_MS } from '../background/autoReload.js';
 import type { BatchItem, BatchPhase } from '../background/jobs.js';
 
@@ -19,6 +20,7 @@ export interface CollectionPlanStatus {
 export interface PlansStatusResponse {
   plans: CollectionPlanStatus[];
   directedRunActive?: boolean;
+  nowcoderSchedule?: NowcoderScheduleConfig;
 }
 
 /** 已入库的一条内容。 */
@@ -185,6 +187,11 @@ export type SidePanelState =
       loading: boolean;
       runningPlanId?: CollectionPlanId;
       directedRunActive?: boolean;
+      nowcoderSchedule?: NowcoderScheduleConfig;
+      nowcoderScheduleDraft?: NowcoderScheduleConfig;
+      nowcoderScheduleSaving?: boolean;
+      nowcoderScheduleNote?: string;
+      nowcoderScheduleError?: string;
       error?: string;
     }
   | {
@@ -249,7 +256,9 @@ export interface SidePanelActions {
   /** 顶部页面切换。 */
   openPage(page: TopPage): void;
   /** 用户明确要求立即补跑/重试一条固定任务。 */
-  runPlan(planId: CollectionPlanId, force: boolean): Promise<void>;
+  runPlan(planId: CollectionPlanId, force: boolean, review?: NowcoderReviewPlanOptions): Promise<void>;
+  editNowcoderSchedule?(config: NowcoderScheduleConfig): void;
+  saveNowcoderSchedule?(config: NowcoderScheduleConfig): Promise<void>;
   /** 在新标签页打开计划对应站点，用于登录或人工核对。 */
   openPlanSource(url: string): void;
   /** 重新拉取已入库列表。 */
@@ -961,6 +970,7 @@ function renderPlans(
   actions: SidePanelActions,
 ): void {
   show(document, '#plans-panel');
+  renderNowcoderSchedule(document, state, actions);
   const list = required<HTMLElement>(document, '#plans-list');
   const empty = required<HTMLElement>(document, '#plans-empty');
   const error = required<HTMLElement>(document, '#plans-error');
@@ -1008,13 +1018,19 @@ function renderPlans(
 
     const scope = document.createElement('p');
     scope.className = 'plan-scope';
-    scope.textContent = copy.scope;
+    const reviewConfiguration = state.nowcoderScheduleDraft ?? state.nowcoderSchedule;
+    scope.textContent = plan.id === 'nowcoder-agent-market' && latest?.nowcoderReviewOnly
+      ? `${latest.nowcoderCompanies?.map(company => NOWCODER_COMPANY_LABELS[company]).join(' · ') || '本轮公司范围未知'} · 仅本机待审核`
+      : plan.id === 'nowcoder-agent-market' && !latest && reviewConfiguration
+        ? `${reviewConfiguration.companies.map(company => NOWCODER_COMPANY_LABELS[company]).join(' · ')} · 仅本机待审核`
+        : copy.scope;
 
     const spine = document.createElement('dl');
     spine.className = 'plan-spine';
     for (const [term, value] of [
       ['上次', planTime(latest?.startedAt)],
-      ['下次', planTime(plan.nextRunAt)],
+      ['下次', plan.id === 'nowcoder-agent-market' && state.nowcoderSchedule?.enabled === false
+        ? '周期收集已关闭' : planTime(plan.nextRunAt)],
     ] as const) {
       const row = document.createElement('div');
       const dt = document.createElement('dt');
@@ -1032,7 +1048,7 @@ function renderPlans(
       document,
       metrics,
       plan.id === 'nowcoder-agent-market'
-        ? nowcoderSelectionComplete ? '入选' : '待筛选'
+        ? nowcoderSelectionComplete ? latest?.nowcoderReviewOnly ? '待审核' : '入选' : '待筛选'
         : '入库',
       plan.id === 'nowcoder-agent-market' && nowcoderSelectionComplete
         ? (latest?.accepted ?? 0)
@@ -1052,6 +1068,7 @@ function renderPlans(
         ['tencent', '腾讯'],
         ['alibaba', '阿里'],
         ['ant', '蚂蚁'],
+        ['other', '其他'],
       ] as const) {
         const cell = document.createElement('span');
         cell.textContent = `${label} ${latest?.coverage?.[key] ?? 0}`;
@@ -1074,13 +1091,20 @@ function renderPlans(
     run.type = 'button';
     run.className = 'primary-button plan-run';
     run.dataset.planRun = plan.id;
-    run.disabled = state.runningPlanId === plan.id || latest?.status === 'running';
+    run.disabled = state.runningPlanId === plan.id || latest?.status === 'running'
+      || (plan.id === 'nowcoder-agent-market' && (state.directedRunActive === true || !state.nowcoderSchedule || !reviewConfiguration?.companies.length));
     run.textContent = state.runningPlanId === plan.id
       ? '正在启动…'
       : latest?.status === 'failed' || (latest?.needsAttention ?? 0) > 0
         ? '重试这一轮'
-        : '立即运行';
-    run.onclick = () => { void actions.runPlan(plan.id, true); };
+        : plan.id === 'nowcoder-agent-market' ? '收集到待审核' : '立即运行';
+    run.onclick = () => {
+      if (plan.id === 'nowcoder-agent-market') {
+        if (state.nowcoderSchedule && reviewConfiguration?.companies.length) void actions.runPlan(plan.id, true, {
+          nowcoderReviewOnly: true, nowcoderCompanies: [...reviewConfiguration.companies],
+        });
+      } else void actions.runPlan(plan.id, true);
+    };
     source.type = 'button';
     source.className = 'secondary-button plan-source';
     source.textContent = '打开站点 / 登录';
@@ -1089,6 +1113,54 @@ function renderPlans(
     ticket.append(footer);
     list.append(ticket);
   }
+}
+
+const NOWCODER_COMPANY_LABELS: Record<NowcoderScheduleConfig['companies'][number], string> = {
+  bytedance: '字节', tencent: '腾讯', alibaba: '阿里', ant: '蚂蚁', other: '其他公司',
+};
+
+function renderNowcoderSchedule(
+  document: Document,
+  state: Extract<SidePanelState, { phase: 'plans' }>,
+  actions: SidePanelActions,
+): void {
+  const draft = state.nowcoderScheduleDraft ?? state.nowcoderSchedule;
+  const enabled = required<HTMLInputElement>(document, '#nowcoder-schedule-enabled');
+  const save = required<HTMLButtonElement>(document, '#nowcoder-schedule-save');
+  const status = required<HTMLElement>(document, '#nowcoder-schedule-status');
+  const note = required<HTMLElement>(document, '#nowcoder-schedule-note');
+  const error = required<HTMLElement>(document, '#nowcoder-schedule-error');
+  const available = Boolean(state.nowcoderSchedule && actions.editNowcoderSchedule && actions.saveNowcoderSchedule);
+  const busy = state.loading || state.nowcoderScheduleSaving === true;
+  const changed = JSON.stringify(draft) !== JSON.stringify(state.nowcoderSchedule);
+  enabled.checked = draft?.enabled ?? false;
+  enabled.disabled = !available || busy;
+  status.textContent = state.nowcoderSchedule?.enabled ? '已启用' : '未启用';
+  const update = (): void => {
+    if (!draft || !available) return;
+    const checked = NOWCODER_SCHEDULE_COMPANIES.filter(company =>
+      required<HTMLInputElement>(document, `[data-nowcoder-company="${company}"]`).checked);
+    // Keep the saved target order when changing only the enabled switch.
+    const retained = draft.companies.filter(company => checked.includes(company));
+    actions.editNowcoderSchedule?.({ enabled: enabled.checked, reviewOnly: true,
+      companies: [...retained, ...checked.filter(company => !retained.includes(company))] });
+  };
+  enabled.onchange = update;
+  for (const company of NOWCODER_SCHEDULE_COMPANIES) {
+    const checkbox = required<HTMLInputElement>(document, `[data-nowcoder-company="${company}"]`);
+    checkbox.checked = draft?.companies.includes(company) ?? false;
+    checkbox.disabled = !available || busy;
+    checkbox.onchange = update;
+  }
+  save.disabled = !available || busy || !changed || !draft?.companies.length;
+  save.textContent = state.nowcoderScheduleSaving ? '正在保存…' : '保存设置';
+  save.onclick = () => { if (draft?.companies.length && available) void actions.saveNowcoderSchedule?.(structuredClone(draft)); };
+  note.textContent = !available
+    ? state.loading ? '正在读取周期收集设置…' : '周期收集设置暂不可用，请检查本机 Bridge。'
+    : !draft?.companies.length ? '请选择至少一家收集公司。'
+      : state.nowcoderScheduleNote ?? (changed ? '有未保存的修改；保存后生效。' : '保存只更新配置，不会立即采集。');
+  error.hidden = !state.nowcoderScheduleError;
+  error.textContent = state.nowcoderScheduleError ?? '';
 }
 
 export function renderSidePanel(

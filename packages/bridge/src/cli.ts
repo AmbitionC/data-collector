@@ -18,6 +18,7 @@ import {
 } from './server/index.js';
 import {
   COLLECTION_PLAN_IDS,
+  nowcoderScheduleConfigSchema,
   zsxqDateRangeSchema,
   nowcoderDirectedCancelResponseSchema,
   nowcoderDirectedRetryResponseSchema,
@@ -561,9 +562,11 @@ async function feJourney(args: string[], io: CliIo): Promise<number> {
 
 async function plans(args: string[], io: CliIo): Promise<number> {
   const action = args[1];
-  if (action !== 'status' && action !== 'run' && action !== 'batches') {
-    throw new Error('用法：data-collector plans <status|run <plan-id>|batches> [--owner-history] [--force] [--limit 20]');
+  if (action !== 'status' && action !== 'run' && action !== 'batches' && action !== 'schedule') {
+    throw new Error('用法：data-collector plans <status|run <plan-id>|batches|schedule [--json JSON|--json-file PATH]> [--review-only --companies ant,tencent] [--owner-history] [--force] [--limit 20]');
   }
+  if (action !== 'run' && (args.includes('--review-only') || args.includes('--companies'))) throw new Error('--review-only 和 --companies 只适用于 plans run');
+  if (action !== 'schedule' && (args.includes('--json') || args.includes('--json-file'))) throw new Error('--json 和 --json-file 只适用于 plans schedule');
   const { baseUrl, token } = await authenticatedToken(args);
   let path = '/v1/plans/status';
   let init: RequestInit = { headers: { authorization: `Bearer ${token}` } };
@@ -575,6 +578,20 @@ async function plans(args: string[], io: CliIo): Promise<number> {
       throw new Error(`固定计划必须是：${COLLECTION_PLAN_IDS.join('、')}`);
     }
     planId = rawPlanId as CollectionPlanId;
+    const reviewOnly = args.includes('--review-only');
+    const rawCompanies = option(args, '--companies');
+    if ((reviewOnly || args.includes('--companies')) && planId !== 'nowcoder-agent-market') {
+      throw new Error('--review-only 和 --companies 只适用于 nowcoder-agent-market');
+    }
+    if (args.includes('--companies') && (!reviewOnly || !rawCompanies || rawCompanies.startsWith('--'))) {
+      throw new Error('--companies 需要 --review-only 和逗号分隔的公司列表');
+    }
+    if (args.filter(value => value === '--companies').length > 1 || args.filter(value => value === '--review-only').length > 1) {
+      throw new Error('待审核模式和公司参数不能重复');
+    }
+    const nowcoderCompanies = rawCompanies === undefined ? undefined : nowcoderScheduleConfigSchema.parse({
+      enabled: false, companies: rawCompanies.split(',').map(company => company.trim()), reviewOnly: true,
+    }).companies;
     if (args.includes('--owner-history') && planId !== 'zsxq-chen-teacher') {
       throw new Error('--owner-history 只适用于 zsxq-chen-teacher');
     }
@@ -601,10 +618,26 @@ async function plans(args: string[], io: CliIo): Promise<number> {
       body: JSON.stringify({
         planId,
         force: args.includes('--force'),
+        ...(reviewOnly ? { nowcoderReviewOnly: true } : {}),
+        ...(nowcoderCompanies ? { nowcoderCompanies } : {}),
         ...(args.includes('--owner-history') ? { zsxqMode: 'owner-history' } : {}),
         ...(zsxqDateRange ? { zsxqDateRange } : {}),
       }),
     };
+  } else if (action === 'schedule') {
+    path = '/v1/plans/nowcoder-schedule';
+    const inline = option(args, '--json'), file = option(args, '--json-file');
+    if ((args.includes('--json') && (!inline || inline.startsWith('--')))
+      || (args.includes('--json-file') && (!file || file.startsWith('--')))
+      || (args.includes('--json') && args.includes('--json-file'))
+      || args.filter(value => value === '--json').length > 1 || args.filter(value => value === '--json-file').length > 1) {
+      throw new Error('调度配置必须只指定一次 --json JSON 或 --json-file PATH');
+    }
+    if (inline !== undefined || file !== undefined) {
+      const contents = inline ?? await readFile(file!, 'utf8');
+      const settings = nowcoderScheduleConfigSchema.parse(JSON.parse(contents) as unknown);
+      init = { method: 'PUT', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' }, body: JSON.stringify(settings) };
+    }
   } else if (action === 'batches') {
     const limit = Number(option(args, '--limit') ?? 20);
     if (!Number.isInteger(limit) || limit < 1 || limit > 100) {
@@ -621,7 +654,7 @@ async function plans(args: string[], io: CliIo): Promise<number> {
       : `HTTP ${response.status}`;
     throw new Error(`固定计划${action === 'run' ? '运行' : '读取'}失败：${message}`);
   }
-  let result = body;
+  let result = action === 'schedule' ? nowcoderScheduleConfigSchema.parse(body) : body;
   if (action === 'run' && waitMs !== undefined && planId &&
     typeof body === 'object' && body !== null && typeof (body as { id?: unknown }).id === 'string') {
     const batchId = (body as { id: string }).id;
@@ -855,7 +888,7 @@ export async function runCli(args: string[], io: CliIo = PROCESS_IO): Promise<nu
     if (command === 'nowcoder') return await runNowcoderCli(args, io);
     if (command === 'bridge') return await bridge(args, io);
     io.stderr(
-      '用法：data-collector <bridge install|bridge start|bridge status|bridge uninstall|collect URL|nowcoder preview|nowcoder run|nowcoder status|nowcoder cancel|nowcoder retry|plans status|plans run|plans batches|fe-journey collect|fe-journey status|fe-journey rebuild-index|health>\n',
+      '用法：data-collector <bridge install|bridge start|bridge status|bridge uninstall|collect URL|nowcoder preview|nowcoder run|nowcoder status|nowcoder cancel|nowcoder retry|plans status|plans run|plans batches|plans schedule|fe-journey collect|fe-journey status|fe-journey rebuild-index|health>\n',
     );
     return 2;
   } catch (error) {

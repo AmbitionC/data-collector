@@ -108,3 +108,10 @@ describe('pendingNowcoderPlanJobs', () => {
     )).toEqual([detached, latest]);
   });
 });
+
+describe('held review evidence', () => {
+  it('does not reuse a held review save for ordinary pending collection', () => {
+    const held = { ...job('9001', 'saved', NOW, { outputPath: '/tmp/review/index.md' }), nowcoderReviewOnly: true } as JobRecord;
+    expect(pendingNowcoderPlanJobs([held], new Set([stableContentId(held.url)]))).toEqual([]);
+  });
+});

@@ -8,6 +8,15 @@ const LOGIN_SELECTORS = [
   'form[action*="login"]',
 ];
 
+const CAPTCHA_SELECTORS = [
+  '.captcha-modal', '.nc-captcha-modal', '.captcha-container', '#captcha',
+  '.geetest_panel', '.geetest_widget', '.yidun_panel', '.verify-dialog',
+];
+const VERIFICATION_TITLE = /^(?:安全验证|人机验证|访问验证|请完成验证|滑动验证|Access Verification|Security Verification)(?:\s*[-_|｜]\s*牛客(?:网)?)?$/iu;
+
+const RATE_LIMIT_TITLE = /^(?:(?:HTTP(?:\s+ERROR)?\s+)?429(?:\s+Too\s+Many\s+Requests)?|Too\s+Many\s+Requests|请求过于频繁|访问过于频繁)(?:\s*[-_|｜]\s*(?:牛客(?:网)?|nginx))?$/iu;
+const ACCESS_DENIED_TITLE = /^(?:(?:HTTP(?:\s+ERROR)?\s+)?403(?:\s+Forbidden)?|Forbidden|Access\s+Denied|访问被拒绝|禁止访问)(?:\s*[-_|｜]\s*(?:牛客(?:网)?|nginx))?$/iu;
+
 const TITLE_SELECTORS = [
   '.post-title',
   '.discuss-title',
@@ -276,8 +285,29 @@ function withGallery(document: Document, content: Element): Element {
   return combined;
 }
 
+/** Only page-level error labels count; technical prose and headings inside post bodies do not. */
+function explicitAccessPageCode(document: Document): 'RATE_LIMITED' | 'AUTH_REQUIRED' | undefined {
+  const pageHeadings = [...document.querySelectorAll('body > h1, body > h2, main > h1, main > h2, [role="main"] > h1, [role="main"] > h2')]
+    .filter(heading => !isHidden(heading) && !heading.closest(CONTENT_SELECTORS.join(',')))
+    .map(heading => visibleText(heading));
+  const labels = [document.title.trim(), ...pageHeadings];
+  if (labels.some(label => RATE_LIMIT_TITLE.test(label))) return 'RATE_LIMITED';
+  if (labels.some(label => ACCESS_DENIED_TITLE.test(label))) return 'AUTH_REQUIRED';
+  return undefined;
+}
+
 export function extractNowcoder(document: Document, url: URL, now: Clock) {
-  if (LOGIN_SELECTORS.some(selector => document.querySelector(selector))) {
+  const accessPageCode = explicitAccessPageCode(document);
+  if (accessPageCode) {
+    throw new ExtractionError(accessPageCode, accessPageCode === 'RATE_LIMITED'
+      ? '牛客访问过于频繁，请稍后人工确认再重试'
+      : '牛客拒绝访问，请先在浏览器人工确认后重试');
+  }
+  if (CAPTCHA_SELECTORS.some(selector => [...document.querySelectorAll(selector)].some(element => !isHidden(element)))
+    || VERIFICATION_TITLE.test(document.title.trim())) {
+    throw new ExtractionError('CAPTCHA_REQUIRED', '牛客要求完成验证码，请先在浏览器人工处理后重试');
+  }
+  if (LOGIN_SELECTORS.some(selector => [...document.querySelectorAll(selector)].some(element => !isHidden(element)))) {
     throw new ExtractionError('AUTH_REQUIRED', '请先登录牛客网，再打开需要保存的面经详情页');
   }
 

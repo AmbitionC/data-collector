@@ -4,6 +4,8 @@ export type Clock = () => string;
 
 export type ExtractionErrorCode =
   | 'AUTH_REQUIRED'
+  | 'CAPTCHA_REQUIRED'
+  | 'RATE_LIMITED'
   | 'CONTENT_EMPTY'
   | 'UNSUPPORTED_LAYOUT'
   | 'UNSUPPORTED_URL';

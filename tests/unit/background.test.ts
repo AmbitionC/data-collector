@@ -5427,6 +5427,58 @@ describe('background bootstrap', () => {
   });
 });
 
+describe('background review schedule messages', () => {
+  afterEach(() => { vi.unstubAllGlobals(); });
+
+  async function setup() {
+    vi.resetModules();
+    const mock = backgroundChromeMock(true);
+    const config = { enabled: false, companies: ['ant', 'tencent'], reviewOnly: true };
+    const requests: Array<{ url: string; method: string; body?: unknown }> = [];
+    vi.stubGlobal('chrome', mock.chromeMock);
+    vi.stubGlobal('WebSocket', BackgroundSocket);
+    vi.stubGlobal('fetch', async (input: unknown, init: RequestInit = {}) => {
+      if (String(input).endsWith('/health')) return Response.json({ status: 'ok' });
+      requests.push({ url: String(input), method: init.method ?? 'GET', ...(init.body ? { body: JSON.parse(String(init.body)) } : {}) });
+      return Response.json(String(input).endsWith('/v1/plans/run') ? { id: 'review-batch' } : config);
+    });
+    await import('../../packages/extension/src/background/index.js');
+    const send = async (message: unknown): Promise<unknown> => await new Promise(resolve => {
+      mock.messageListeners[0]!(message, {}, resolve);
+    });
+    return { config, requests, send };
+  }
+
+  it('routes explicit schedule GET and PUT messages without invoking collection', async () => {
+    const { config, requests, send } = await setup();
+    expect(await send({ type: 'plans.nowcoderSchedule.get' })).toEqual({ ok: true, value: config });
+    expect(await send({ type: 'plans.nowcoderSchedule.configure', config })).toEqual({ ok: true, value: config });
+    expect(requests).toEqual([
+      { url: 'http://127.0.0.1:17321/v1/plans/nowcoder-schedule', method: 'GET' },
+      { url: 'http://127.0.0.1:17321/v1/plans/nowcoder-schedule', method: 'PUT', body: config },
+    ]);
+  });
+
+  it('carries the manual review fence and companies across the runtime boundary', async () => {
+    const { requests, send } = await setup();
+    const request = { type: 'plans.run', planId: 'nowcoder-agent-market', force: true, nowcoderReviewOnly: true, nowcoderCompanies: ['ant'] };
+    expect(await send(request)).toEqual({ ok: true, value: { id: 'review-batch' } });
+    expect(requests).toEqual([{ url: 'http://127.0.0.1:17321/v1/plans/run', method: 'POST', body: {
+      planId: 'nowcoder-agent-market', force: true, nowcoderReviewOnly: true, nowcoderCompanies: ['ant'],
+    } }]);
+  });
+
+  it('refuses unsafe runtime company scope before making a Bridge request', async () => {
+    const { requests, send } = await setup();
+    for (const request of [
+      { type: 'plans.run', planId: 'nowcoder-agent-market', nowcoderCompanies: ['ant'] },
+      { type: 'plans.run', planId: 'zsxq-chen-teacher', nowcoderReviewOnly: true },
+      { type: 'plans.nowcoderSchedule.configure', config: { enabled: true, companies: ['ant'], reviewOnly: false } },
+    ]) expect(await send(request)).toMatchObject({ ok: false, error: expect.any(String) });
+    expect(requests).toEqual([]);
+  });
+});
+
 describe('一个帖子号都没截到时，先替用户切一次分类', () => {
   const topicDoc = (id: string) => topic(id);
 
