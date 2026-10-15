@@ -70,6 +70,24 @@ afterEach(() => {
 });
 
 describe('main-world topic capture', () => {
+  it.each([false, true])('retains and replays complete info over an identical feed preview (infoFirst=%s)', async infoFirst => {
+    const topicId = '82258281858288452';
+    const topic = { topic_id: topicId, type: 'q&a', question: { text: '开发架构师为亲戚企业提供 IT 顾问服务，假设目前税前月薪两万元...' }, answer: { text: '按工作收益或工作时长乘以三倍时薪估算。' } };
+    await loadInject(async input => new Response(JSON.stringify({ succeeded: true, resp_data:
+      String(input).endsWith('/info') ? { type: 'all', topic } : { topics: [topic] },
+    }), { headers: { 'content-type': 'application/json' } }));
+    const urls = [`https://api.zsxq.com/v2/groups/48844584441158/topics`, `https://api.zsxq.com/v2/topics/${topicId}/info`];
+    for (const [i, url] of (infoFirst ? urls.reverse() : urls).entries()) {
+      await window.fetch(url);
+      await vi.waitFor(() => expect(published).toHaveLength(i + 1));
+    }
+    requestReplay();
+    await vi.waitFor(() => expect(published.length).toBeGreaterThan(2));
+    const index = new TopicIndex();
+    index.add(published.slice(2).flatMap(message => message.records));
+    expect(index.sourceBodyTruncatedOf(topicId)).toBe(false);
+  });
+
   it('harvests topic ids from a JSON response the app itself fetched', async () => {
     await loadInject(async () =>
       new Response(JSON.stringify(TOPICS_RESPONSE), {
@@ -118,11 +136,12 @@ describe('main-world topic capture', () => {
     });
   });
 
-  it('preserves an int64 topic id from XHR responseType=json without changing the page response shape', async () => {
+  it.each([false, true])('preserves an int64 topic id from XHR JSON without changing page response shape (info=%s)', async info => {
     const exactId = '55522452154844124';
-    const raw = '{"succeeded":true,"resp_data":{"topics":[{"topic_id":'
-      + exactId
-      + ',"talk":{"text":"XHR JSON 的超大帖子号也必须逐位保持。"}}]}}';
+    const rawTopic = '{"topic_id":' + exactId + ',"talk":{"text":"XHR JSON 的超大帖子号也必须逐位保持。"}}';
+    const raw = info
+      ? '{"succeeded":true,"resp_data":{"type":"all","topic":' + rawTopic + '}}'
+      : '{"succeeded":true,"resp_data":{"topics":[' + rawTopic + ']}}';
     class FakeXMLHttpRequest extends EventTarget {
       private nativeType: XMLHttpRequestResponseType = '';
       private nativeText = '';
@@ -150,14 +169,15 @@ describe('main-world topic capture', () => {
     await loadInject(async () => new Response('{}'));
 
     const xhr = new XMLHttpRequest();
-    xhr.open('GET', 'https://api.zsxq.com/v2/groups/1/topics');
+    xhr.open('GET', info ? `https://api.zsxq.com/v2/topics/${exactId}/info` : 'https://api.zsxq.com/v2/groups/1/topics');
     xhr.responseType = 'json';
     xhr.send();
     await vi.waitFor(() => expect(published).toHaveLength(1));
 
-    expect((xhr.response as { resp_data: { topics: Array<{ topic_id: number }> } })
-      .resp_data.topics[0]?.topic_id).toBe(Number(exactId));
+    const pageData = (xhr.response as { resp_data: { topic?: { topic_id: number }; topics?: Array<{ topic_id: number }> } }).resp_data;
+    expect((info ? pageData.topic : pageData.topics?.[0])?.topic_id).toBe(Number(exactId));
     expect(published[0]?.records[0]?.topicId).toBe(exactId);
+    expect(published[0]?.records[0]?.sourceBodyProven).toBe(true);
   });
 
   it('keeps responseType=json response null until XHR reaches DONE', async () => {

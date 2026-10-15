@@ -300,7 +300,7 @@ function ensureTransport(): void {
     };
 
     const prepareLosslessJson = (xhr: XMLHttpRequest, path: string): void => {
-      const eligible = /^https:\/\/api\.zsxq\.com\/v2\/(?:groups\/\d+\/topics|topics\/\d+)\/?$/u
+      const eligible = /^https:\/\/api\.zsxq\.com\/v2\/(?:groups\/\d+\/topics|topics\/\d+(?:\/info)?)\/?$/u
         .test(path);
       const existing = losslessJson.get(xhr);
       if (existing) {

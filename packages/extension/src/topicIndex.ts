@@ -162,6 +162,10 @@ export interface TopicRecord {
    * 缺失只能视为旧协议的未知状态。
    */
   fullTextTruncated?: boolean;
+  /** true 仅表示尾部省略号启发式，未触及任何本地正文上限。 */
+  fullTextPreviewTailOnly?: true;
+  /** 匹配帖号的 /info、type=all 与完整正文 schema 已核验。 */
+  sourceBodyFullInfo?: true;
   /**
    * 这份正文是否来自已核验的帖子正文端点与直接 topic schema。
    *
@@ -226,9 +230,24 @@ export function preferredTopicRecord(
       : selected;
     return withCompatibleSourceImages(previous, candidate, sticky);
   };
+  // 完整详情可以澄清同一份原文中的作者省略号；只接受逐字相同的正文，且不能
+  // 清除本地上限、旧协议未知原因或媒体风险。两种响应顺序和 retained/replay 共用此规则。
+  const completeInfo = [previous, candidate].find(record =>
+    record.sourceBodyProven === true && record.sourceBodyFullInfo === true
+    && record.fullTextTruncated === false);
+  const tainted = [previous, candidate].filter(record => record.fullTextTruncated === true);
+  if (completeInfo && tainted.length > 0
+    && tainted.every(record => record.fullTextPreviewTailOnly === true)
+    && (previous.fullText ?? previous.text) === (candidate.fullText ?? candidate.text)
+    && sameSourceRecord(previous, candidate)) {
+    return withStickyMedia(completeInfo);
+  }
   if (previous.fullTextTruncated === true || candidate.fullTextTruncated === true) {
+    const { fullTextPreviewTailOnly: _preview, ...selected } = richer;
     return withStickyMedia(
-      richer.fullTextTruncated === true ? richer : { ...richer, fullTextTruncated: true },
+      { ...selected, fullTextTruncated: true,
+        ...(tainted.every(record => record.fullTextPreviewTailOnly === true)
+          ? { fullTextPreviewTailOnly: true as const } : {}) },
     );
   }
   const previousComplete = previous.fullTextTruncated === false;
@@ -338,6 +357,15 @@ function sanitizeTopicRecord(value: unknown): SanitizedTopicRecord | undefined {
   // 或页面同源伪消息把“未标注”偷换成完整正文。
   if (typeof sourceBodyProven !== 'boolean') return undefined;
   record.sourceBodyProven = sourceBodyProven;
+
+  if (value.fullTextPreviewTailOnly !== undefined) {
+    if (value.fullTextPreviewTailOnly !== true || !fullTextTruncated) return undefined;
+    record.fullTextPreviewTailOnly = true;
+  }
+  if (value.sourceBodyFullInfo !== undefined) {
+    if (value.sourceBodyFullInfo !== true || !sourceBodyProven) return undefined;
+    record.sourceBodyFullInfo = true;
+  }
 
   const sourceMediaProven = value.sourceMediaProven;
   if (typeof sourceMediaProven !== 'boolean') return undefined;
@@ -671,6 +699,7 @@ export interface TopicHarvestContext {
 
 const GROUP_TOPICS_RESPONSE = /^https:\/\/api\.zsxq\.com\/v2\/groups\/\d+\/topics(?:\/sticky)?\/?$/u;
 const TOPIC_DETAIL_RESPONSE = /^https:\/\/api\.zsxq\.com\/v2\/topics\/\d+\/?$/u;
+const TOPIC_INFO_RESPONSE = /^https:\/\/api\.zsxq\.com\/v2\/topics\/(\d+)\/info\/?$/u;
 
 /** 标题本身不是正文；只认已知正文容器里的 text/content。 */
 function hasBodyBearingValue(value: unknown, depth = 0): boolean {
@@ -1178,6 +1207,13 @@ function sourceBodyNodes(
     directTopics = isRecord(responseData.topic)
       ? [responseData.topic]
       : ('topic_id' in responseData || 'topicId' in responseData) ? [responseData] : [];
+  } else {
+    const info = TOPIC_INFO_RESPONSE.exec(context.responsePath);
+    const topic = responseData.topic;
+    if (info && responseData.type === 'all' && isRecord(topic)
+      && topicIdOf(topic.topic_id ?? topic.topicId) === info[1]) {
+      directTopics = [topic];
+    }
   }
   for (const candidate of directTopics) {
     if (!isRecord(candidate)) continue;
@@ -1198,6 +1234,8 @@ export function harvestTopics(
 ): TopicRecord[] {
   const found: TopicRecord[] = [];
   const provenBodyNodes = sourceBodyNodes(payload, context);
+  const fullInfoResponse = TOPIC_INFO_RESPONSE.test(context?.responsePath ?? '')
+    && isRecord(payload) && isRecord(payload.resp_data) && payload.resp_data.type === 'all';
   const seen = new Set<unknown>();
   const queue: unknown[] = [payload];
   let visited = 0;
@@ -1232,9 +1270,12 @@ export function harvestTopics(
       // the complete content resource is the exact articles.zsxq.com URL preserved below.
       const hasLinkedArticle = assets.attachments.some(attachment =>
         normalizedLinkedArticleUrl(attachment.url) !== undefined);
-      const fullTextTruncated = extractedBody.truncated
-        || rawFullText.length > FULL_TEXT_LIMIT
-        || (!hasLinkedArticle && rawParts.some(hasZsxqApiPreviewTail));
+      const localBodyLimit = extractedBody.truncated || rawFullText.length > FULL_TEXT_LIMIT;
+      // /info with type=all is the website's complete detail representation. Its literal
+      // ellipses are authored text; the feed-only preview heuristic must not taint it.
+      const previewTail = !(sourceBodyProven && fullInfoResponse)
+        && !hasLinkedArticle && rawParts.some(hasZsxqApiPreviewTail);
+      const fullTextTruncated = localBodyLimit || previewTail;
       if (
         normalizeForMatch(text)
         || assets.images.length > 0
@@ -1248,6 +1289,8 @@ export function harvestTopics(
           ...(createTime ? { createTime } : {}),
           ...(fullText.length > text.length ? { fullText } : {}),
           fullTextTruncated,
+          ...(!localBodyLimit && previewTail ? { fullTextPreviewTailOnly: true as const } : {}),
+          ...(sourceBodyProven && fullInfoResponse ? { sourceBodyFullInfo: true as const } : {}),
           sourceBodyProven,
           sourceMediaProven: sourceBodyProven && assets.proven,
           ...(assets.issues.length > 0 ? { sourceMediaIssues: assets.issues } : {}),

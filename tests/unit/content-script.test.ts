@@ -7,6 +7,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   TOPIC_HOOK_VERSION,
   TOPIC_MESSAGE,
+  harvestTopics,
 } from '../../packages/extension/src/topicIndex.js';
 import {
   CONTENT_ADVANCE_REQUEST,
@@ -330,6 +331,34 @@ async function confirmPersistentExpansionFixture(topicId: string): Promise<{
 }
 
 describe('content script list collection', () => {
+  it('saves the full all-access info Q&A when its literal question ellipsis has no visible expand control', async () => {
+    const topicId = '82258281858288452';
+    const question = '开发架构师兼职为传统企业提供 IT 顾问服务，应按什么标准估算顾问费，假设税前月薪两万元...';
+    const answer = '可以先评估给企业带来的收益；难于评估时按工作时长乘以三倍时薪估算，每月固定收费可适当下调。';
+    history.replaceState({}, '', `/group/48844584441158/topic/${topicId}`);
+    document.body.innerHTML = `<div class="topic-container" data-topic-id="${topicId}">
+      <div class="author"><div class="info"><div class="role owner">陈老师</div></div></div>
+      <div class="answer-content-container"><div class="question"><div class="content">
+        <span class="question-contain">${question}</span><p class="showAllQuestion" style="display:none">展开全部</p>
+      </div></div><div class="answer">${answer}</div><p class="showAll" style="display:none">展开全部</p></div>
+    </div>`;
+    const topic = { topic_id: topicId, type: 'q&a', question: { text: question }, answer: { text: answer } };
+    const records = [
+      ...harvestTopics({ succeeded: true, resp_data: { topics: [topic] } }, 40, {
+        responsePath: 'https://api.zsxq.com/v2/groups/48844584441158/topics',
+      }),
+      ...harvestTopics({ succeeded: true, resp_data: { type: 'all', topic } }, 40, {
+        responsePath: `https://api.zsxq.com/v2/topics/${topicId}/info`,
+      }),
+    ];
+    window.dispatchEvent(new MessageEvent('message', { source: window, origin: location.origin, data: {
+      source: TOPIC_MESSAGE, hookVersion: TOPIC_HOOK_VERSION, hookBuildId: CONTENT_BUILD_ID, records,
+    } }));
+    const result = await ask<DocumentResponse>({ type: CONTENT_DOCUMENT_REQUEST });
+    expect(result).toMatchObject({ ok: true, document: { truncated: false, sourceMetadata: { sourceBodyProven: true } } });
+    expect(result.document.text).toContain('按工作时长乘以三倍时薪');
+  });
+
   it('returns a signed exact-topic document and current build proof even without DOM body containers', async () => {
     document.body.innerHTML = '<app-root></app-root>';
     vi.stubGlobal('crypto', webcrypto);

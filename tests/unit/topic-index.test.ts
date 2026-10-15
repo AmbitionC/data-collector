@@ -11,6 +11,99 @@ import {
 } from '../../packages/extension/src/topicIndex.js';
 
 describe('harvestTopics', () => {
+  const infoTopicId = '82258281858288452';
+  const completeQuestion = '作为开发架构师为传统企业提供 IT 顾问服务，应该怎样估算顾问费，假设税前月薪两万元...';
+  const completeAnswer = '优先按给企业带来的工作收益收费；难以评估时，可以按工时乘以三倍时薪估算。';
+  const infoTopic = {
+    topic_id: infoTopicId, type: 'q&a',
+    question: { text: completeQuestion }, answer: { text: completeAnswer },
+  };
+
+  it('recognizes a matching all-content info response without treating authored ellipsis as a preview', () => {
+    const [record] = harvestTopics({ succeeded: true, resp_data: { type: 'all', topic: infoTopic } }, 40, {
+      responsePath: `https://api.zsxq.com/v2/topics/${infoTopicId}/info`,
+    });
+    expect(record).toMatchObject({ topicId: infoTopicId, sourceBodyProven: true, sourceMediaProven: true, fullTextTruncated: false });
+    expect(record?.parts).toEqual([completeQuestion, completeAnswer]);
+  });
+
+  it.each([false, true])('lets identical all-content detail resolve only a feed preview inference (infoFirst=%s)', infoFirst => {
+    const [feed] = harvestTopics({ succeeded: true, resp_data: { topics: [infoTopic] } }, 40, {
+      responsePath: 'https://api.zsxq.com/v2/groups/48844584441158/topics',
+    });
+    const [info] = harvestTopics({ succeeded: true, resp_data: { type: 'all', topic: infoTopic } }, 40, {
+      responsePath: `https://api.zsxq.com/v2/topics/${infoTopicId}/info`,
+    });
+    const index = new TopicIndex();
+    index.add(infoFirst ? [info!, feed!] : [feed!, info!]);
+    expect(index.sourceBodyConflicted(infoTopicId)).toBe(false);
+    expect(index.sourceBodyTruncatedOf(infoTopicId)).toBe(false);
+    expect(index.fullTextTruncatedOf(infoTopicId)).toBe(false);
+  });
+
+  it('does not erase genuine truncation when a preview inference is also present', () => {
+    const [feed] = harvestTopics({ succeeded: true, resp_data: { topics: [infoTopic] } }, 40, {
+      responsePath: 'https://api.zsxq.com/v2/groups/48844584441158/topics',
+    });
+    const [info] = harvestTopics({ succeeded: true, resp_data: { type: 'all', topic: infoTopic } }, 40, {
+      responsePath: `https://api.zsxq.com/v2/topics/${infoTopicId}/info`,
+    });
+    const genuine = { ...feed!, fullTextPreviewTailOnly: undefined };
+    const index = new TopicIndex();
+    index.add([genuine, feed!, info!]);
+    expect(index.sourceBodyTruncatedOf(infoTopicId)).toBe(true);
+    expect(index.fullTextTruncatedOf(infoTopicId)).toBe(true);
+  });
+
+  it('keeps media risk sticky even when complete info resolves a preview inference', () => {
+    const [feed] = harvestTopics({ succeeded: true, resp_data: { topics: [{
+      ...infoTopic, question: { ...infoTopic.question, voice_url: 'https://example.com/unknown' },
+    }] } }, 40, { responsePath: 'https://api.zsxq.com/v2/groups/48844584441158/topics' });
+    const [info] = harvestTopics({ succeeded: true, resp_data: { type: 'all', topic: infoTopic } }, 40, {
+      responsePath: `https://api.zsxq.com/v2/topics/${infoTopicId}/info`,
+    });
+    expect(feed?.sourceMediaProven).toBe(false);
+    const preferred = preferredTopicRecord(feed, info!);
+    expect(preferred.fullTextTruncated).toBe(false);
+    expect(preferred.sourceMediaProven).toBe(false);
+  });
+
+  it.each(['preview', undefined])('does not certify an info response without all-content access (%s)', type => {
+    const [record] = harvestTopics({ succeeded: true, resp_data: { type, topic: infoTopic } }, 40, {
+      responsePath: `https://api.zsxq.com/v2/topics/${infoTopicId}/info`,
+    });
+    expect(record).toMatchObject({ sourceBodyProven: false, fullTextTruncated: true });
+  });
+
+  it('does not certify an all-content info response for a different requested topic', () => {
+    const [record] = harvestTopics({ succeeded: true, resp_data: { type: 'all', topic: infoTopic } }, 40, {
+      responsePath: 'https://api.zsxq.com/v2/topics/82258281858288453/info',
+    });
+    expect(record).toMatchObject({ sourceBodyProven: false, fullTextTruncated: true });
+  });
+
+  it('retains local body caps on an all-content info response', () => {
+    const [record] = harvestTopics({ succeeded: true, resp_data: { type: 'all', topic: {
+      ...infoTopic, answer: { text: 'A'.repeat(200_001) },
+    } } }, 40, { responsePath: `https://api.zsxq.com/v2/topics/${infoTopicId}/info` });
+    expect(record).toMatchObject({ sourceBodyProven: true, fullTextTruncated: true });
+    expect(record?.fullText?.length).toBe(200_000);
+  });
+
+  it('requires both question and answer even with all-content access', () => {
+    const [record] = harvestTopics({ succeeded: true, resp_data: { type: 'all', topic: {
+      topic_id: infoTopicId, type: 'q&a', question: infoTopic.question,
+    } } }, 40, { responsePath: `https://api.zsxq.com/v2/topics/${infoTopicId}/info` });
+    expect(record).toMatchObject({ sourceBodyProven: false, fullTextTruncated: true });
+  });
+
+  it('keeps the feed preview rule when a feed happens to carry an all type marker', () => {
+    const [record] = harvestTopics({ succeeded: true, resp_data: { type: 'all', topics: [infoTopic] } }, 40, {
+      responsePath: 'https://api.zsxq.com/v2/groups/48844584441158/topics',
+    });
+    expect(record).toMatchObject({ sourceBodyProven: true, fullTextTruncated: true });
+  });
+
   it('preserves every int64 identity field used to prove topics, owners and attachments', () => {
     const payload = parseTopicJson(String.raw`{
       "topic_id":9223372036854775807,
