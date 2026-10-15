@@ -1,4 +1,4 @@
-import { mkdir, writeFile } from 'node:fs/promises';
+import { mkdir, symlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { JobStore } from '../../packages/bridge/src/jobs/store.js';
@@ -31,6 +31,17 @@ function searchResponse(
 }
 
 describe('NowcoderDirectedSessionController', () => {
+  it.each(['parent-escape', 'nested-symlink'])('rejects an unsafe configured inbox: %s', async reason => {
+    const root = await temporaryDirectories.create('nowcoder-unsafe-inbox-');
+    const target = join(root, 'target'), outside = join(root, 'outside');
+    await mkdir(join(target, 'custom-inbox'), { recursive: true });
+    await mkdir(join(outside, 'nowcoder'), { recursive: true });
+    await symlink(outside, join(target, 'custom-inbox', 'linked'));
+    const inboxDir = reason === 'parent-escape' ? '../outside' : 'custom-inbox/linked';
+    await expect(knownNowcoderSources({ libraryRoot: root, targetRoot: target, jobs: [],
+      ...{ inboxDir } })).rejects.toThrow();
+  });
+
   it('also recognizes legacy source.json review entries without treating them as missing', async () => {
     const root=await temporaryDirectories.create('nowcoder-legacy-pending-');
     await mkdir(join(root,'_inbox','nowcoder','legacy'),{recursive:true});

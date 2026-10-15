@@ -3,7 +3,8 @@ import { knownNowcoderSources } from '../../packages/bridge/src/nowcoderDirected
 import { scoreFeJourneyCandidate } from '../../packages/bridge/src/feJourney/quality.js';
 import { mkdir, readFile, symlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { runGit } from '../../packages/bridge/src/git.js';
 import { readCompanyInventory } from '../../packages/bridge/src/plans/nowcoderInventory.js';
 import { auditNowcoderIdentityProjection, loadNowcoderIdentityProjection } from '../../packages/bridge/src/plans/nowcoderIdentityProjection.js';
 import { loadStrictProcessedNowcoderHistory } from '../../packages/bridge/src/plans/nowcoderProcessedHistory.js';
@@ -17,6 +18,22 @@ const inventory = (f: Awaited<ReturnType<typeof fixture>>, commit = PUBLISHED_CO
   readCompanyInventory(f.resource, f.library, PROJECTION_NOW, f.projectionPath, commit);
 
 describe('versioned private Nowcoder identities', () => {
+  it('verifies a real published Git checkout under the restricted service PATH', async () => {
+    const f = await fixture();
+    for (const args of [['init'], ['add', 'interview'],
+      ['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-m', 'Synthetic publication']]) {
+      expect((await runGit(f.resource, args)).code).toBe(0);
+    }
+    const commit = (await runGit(f.resource, ['rev-parse', 'HEAD'])).stdout!.trim();
+    f.projection.published.commit = commit; await f.save();
+    const emptyPath = join(f.root, 'empty-path'); await mkdir(emptyPath);
+    vi.stubEnv('PATH', emptyPath);
+    try {
+      expect((await auditNowcoderIdentityProjection(f.resource, f.projectionPath, commit)).complete).toBe(true);
+      await expect(auditNowcoderIdentityProjection(f.resource, f.projectionPath, PUBLISHED_COMMIT)).rejects.toThrow();
+    } finally { vi.unstubAllEnvs(); }
+  });
+
   it.each(['status', 'evidenceGrade'] as const)('rejects a non-string raw %s at the audit and every operational consumer', async field => {
     const f = await fixture();
     f.raw.records[SOURCE_ID][field] = [f.raw.records[SOURCE_ID][field]];

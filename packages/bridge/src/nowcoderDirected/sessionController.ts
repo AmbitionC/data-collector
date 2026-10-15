@@ -26,6 +26,7 @@ export interface NowcoderDirectedSessionControllerOptions {
   jobs: JobStore;
   libraryRoot: string;
   targetRoot?: string;
+  inboxDir?: string;
   historyRoot?: string;
   historyPath?: string;
   historyCommit?: string;
@@ -52,7 +53,7 @@ export class NowcoderDirectedSessionController {
     let discovery: Awaited<ReturnType<typeof discoverNowcoderDirectedCandidates>>;
     try {
       const known = await knownNowcoderSources({ libraryRoot: this.options.libraryRoot,
-        targetRoot: this.options.targetRoot, historyRoot: this.options.historyRoot, historyPath: this.options.historyPath, historyCommit: this.options.historyCommit, jobs: this.options.jobs.list() });
+        targetRoot: this.options.targetRoot, inboxDir: this.options.inboxDir, historyRoot: this.options.historyRoot, historyPath: this.options.historyPath, historyCommit: this.options.historyCommit, jobs: this.options.jobs.list() });
       discovery = await discoverNowcoderDirectedCandidates(
         this.fetcher,
         request,

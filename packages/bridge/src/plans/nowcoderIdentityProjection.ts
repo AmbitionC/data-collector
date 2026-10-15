@@ -6,6 +6,7 @@ import { promisify } from 'node:util';
 import { canonicalNowcoderDetailUrl } from '../feJourney/nowcoderSearchRecord.js';
 import { contentFingerprint } from '../feJourney/fingerprint.js';
 import { readSafeInterviewFile } from './outsideInterviewHistory.js';
+import { explainMissingGit, gitEnvironment, resolveGitOnce } from '../git.js';
 
 const runFile = promisify(execFile);
 const HEX64 = /^[a-f0-9]{64}$/u, HEX40 = /^[a-f0-9]{40}$/u, HEX16 = /^[a-f0-9]{16}$/u, ID = /^[a-f0-9]{12}$/u;
@@ -103,7 +104,14 @@ export async function auditNowcoderIdentityProjection(resourceRoot: string, proj
   try { const metadata = await lstat(join(root, '.git')); if (metadata.isSymbolicLink()) invalid('symbolic git authority'); hasGit = true; }
   catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
   if (hasGit) {
-    const actual = await runFile('git', ['rev-parse', 'HEAD'], { cwd: root, timeout: 5000, maxBuffer: 1024, env: { ...process.env, GIT_OPTIONAL_LOCKS: '0' } });
+    const { command, tried } = await resolveGitOnce();
+    if (!command) invalid(explainMissingGit(tried));
+    let actual: { stdout: string };
+    try {
+      actual = await runFile(command, ['-C', root, 'rev-parse', 'HEAD'], {
+        timeout: 5000, maxBuffer: 1024, env: { ...gitEnvironment(), GIT_OPTIONAL_LOCKS: '0' },
+      });
+    } catch { return invalid('published checkout HEAD could not be verified by service git'); }
     if (actual.stdout.trim() !== commit) stale('published checkout HEAD differs from expected commit');
   } else {
     const marker = object(json((await readSafeInterviewFile(root, join(root, '.collector-published-snapshot.json'), 'inside')).bytes));

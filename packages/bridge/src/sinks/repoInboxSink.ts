@@ -90,7 +90,7 @@ export class RepoInboxSink implements ContentSink {
   readonly label: string;
   readonly categories: readonly string[];
   private readonly repoRoot: string;
-  private readonly inboxDir: string;
+  readonly inboxDir: string;
   private readonly commit: boolean;
   private readonly push: boolean;
   private readonly fetcher: typeof fetch;

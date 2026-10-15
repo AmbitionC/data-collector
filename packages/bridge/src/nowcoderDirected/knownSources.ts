@@ -1,13 +1,14 @@
 import { lstat, readFile, readdir, realpath } from 'node:fs/promises';
-import { join } from 'node:path';
+import { join, relative, sep } from 'node:path';
 import type { JobRecord } from '@data-collector/shared';
 import { canonicalNowcoderDetailUrl, objectRecord } from '../feJourney/nowcoderSearchRecord.js';
 import { loadStrictProcessedNowcoderHistory } from '../plans/nowcoderProcessedHistory.js';
 import { readKnownNowcoderLocalSources } from './documentLoader.js';
+import { assertInsideRoot } from '../library/paths.js';
 
 /** One URL identity set for local/pending/history search gates; explicit retry runs remain separate. */
 export async function knownNowcoderSources(input: {
-  libraryRoot: string; targetRoot?: string | undefined; jobs: readonly JobRecord[]; excludeRunId?: string;
+  libraryRoot: string; targetRoot?: string | undefined; inboxDir?: string | undefined; jobs: readonly JobRecord[]; excludeRunId?: string;
   historyPath?: string | undefined; historyRoot?: string | undefined; historyCommit?: string | undefined;
 }): Promise<{ urls: Set<string>; reasons: Map<string, string>; warnings: Record<string, number> }> {
   const reasons = new Map<string, string>();
@@ -30,10 +31,12 @@ export async function knownNowcoderSources(input: {
   }
   if (input.targetRoot) {
     const root = await realpath(input.targetRoot);
-    const directory = join(root, '_inbox', 'nowcoder');
+    const directory = assertInsideRoot(root, join(root, input.inboxDir ?? '_inbox', 'nowcoder'));
     let entries: string[] = [];
     try {
-      for (const part of [join(root, '_inbox'), directory]) {
+      let part = root;
+      for (const component of relative(root, directory).split(sep)) {
+        part = join(part, component);
         const stat = await lstat(part);
         if (stat.isSymbolicLink() || !stat.isDirectory()) throw new Error('pending source directory unsafe');
       }

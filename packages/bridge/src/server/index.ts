@@ -864,8 +864,7 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
     if (job.nowcoderReviewOnly && job.batchId && !pacingApplied) {
       try {
         const duplicate = await reviewPacer(job.batchId).run(async () => {
-          const known = await knownNowcoderSources({ libraryRoot: config.libraryRoot,
-            targetRoot: nowcoderTargetRoot, ...nowcoderHistoryInput,
+          const known = await knownNowcoderSources({ ...nowcoderSourceInput,
             jobs: jobs.list().filter(current => current.id !== job.id) });
           if (known.urls.has(job.url)) return true;
           await dispatch(job, targetSocket, true);
@@ -1090,8 +1089,12 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
       observedAt: new Date().toISOString(),
     };
   };
-  const nowcoderTargetRoot = router.directedSyncTarget('nowcoder')?.root;
-  const nowcoderHistoryInput = {
+  const nowcoderTarget = router.directedSyncTarget('nowcoder');
+  const nowcoderTargetRoot = nowcoderTarget?.root;
+  const nowcoderSourceInput = {
+    libraryRoot: config.libraryRoot,
+    targetRoot: nowcoderTargetRoot,
+    inboxDir: nowcoderTarget?.sink.inboxDir,
     historyRoot: config.interviewInventoryRoot,
     historyPath: config.interviewHistoryPath,
     historyCommit: config.interviewInventoryCommit,
@@ -1107,6 +1110,7 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
         jobs,
         libraryRoot: config.libraryRoot,
         ...(nowcoderTargetRoot ? { targetRoot: nowcoderTargetRoot } : {}),
+        ...(nowcoderTarget ? { inboxDir: nowcoderTarget.sink.inboxDir } : {}),
         ...explicitHistoryOptions,
         ...(options.fetch ? { fetch: options.fetch } : {}),
       })
@@ -1128,7 +1132,7 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
         jobs,
         dispatch,
         knownSourceUrls: async excludeRunId => (await knownNowcoderSources({
-          libraryRoot: config.libraryRoot, targetRoot: nowcoderTargetRoot, ...nowcoderHistoryInput,
+          ...nowcoderSourceInput,
           jobs: jobs.list(), excludeRunId,
         })).urls,
         sendCancel: async job => {
@@ -1222,8 +1226,7 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
           && !updateCheckInFlight
           && artifactReaders.snapshot().updateState === 'idle',
         discoverNowcoder: async (knownUrls, batch) => {
-          const known = await knownNowcoderSources({ libraryRoot: config.libraryRoot,
-            targetRoot: nowcoderTargetRoot, ...nowcoderHistoryInput, jobs: jobs.list() });
+          const known = await knownNowcoderSources({ ...nowcoderSourceInput, jobs: jobs.list() });
           const urls = new Set([...knownUrls, ...known.urls]);
           if (!batch?.nowcoderReviewOnly) return discoverNowcoderPlanCandidates(collectorFetcher, urls);
           const pacedFetch: typeof fetch = (input, init) => reviewPacer(batch.id).run(async () => {
@@ -1398,8 +1401,7 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
         .filter(url => url.startsWith('https://www.nowcoder.com/')),
     ),
     discoverNowcoder: async knownUrls => {
-      const known = await knownNowcoderSources({ libraryRoot: config.libraryRoot,
-        targetRoot: nowcoderTargetRoot, ...nowcoderHistoryInput, jobs: jobs.list() });
+      const known = await knownNowcoderSources({ ...nowcoderSourceInput, jobs: jobs.list() });
       return await discoverNowcoderUrls(collectorFetcher, new Set([...knownUrls, ...known.urls]));
     },
     enqueueNowcoder: async url => {

@@ -3960,7 +3960,7 @@ describe('自更新后的重启时机', () => {
 
 
 describe('preserved-work review dispatch integration', () => {
-  it('rechecks a source saved after preview without dispatching a duplicate detail and retains serial spacing', async () => {
+  it.each(['library', 'custom-inbox'])('rechecks a source saved after preview in %s without dispatching a duplicate detail and retains serial spacing', async sourceLocation => {
     const root = await temporaryDirectory(), configDir = join(root, '.config');
     const config = loadConfig({ libraryRoot: root, configDir, port: 0 });
     const plans = await CollectionPlanStore.open(config.plansFile);
@@ -3974,10 +3974,21 @@ describe('preserved-work review dispatch integration', () => {
     }));
     await plans.attachRound(batch.id, children.map(job => job.id));
     // The preview predates this durable local source index entry.
-    await writeFile(join(root, '_catalog', 'index.json'), JSON.stringify([{
-      id: 'local-source', source: 'nowcoder', title: '已收藏来源', url: children[0]!.url,
-      category: 'interview', relativePath: 'nowcoder/local-source/index.md', updatedAt: new Date().toISOString(),
-    }]));
+    if (sourceLocation === 'library') {
+      await writeFile(join(root, '_catalog', 'index.json'), JSON.stringify([{
+        id: 'local-source', source: 'nowcoder', title: '已收藏来源', url: children[0]!.url,
+        category: 'interview', relativePath: 'nowcoder/local-source/index.md', updatedAt: new Date().toISOString(),
+      }]));
+    } else {
+      const target = join(root, 'resource'), inboxDir = 'custom-inbox/nested';
+      await mkdir(join(target, inboxDir, 'nowcoder', 'pending'), { recursive: true });
+      await mkdir(configDir, { recursive: true });
+      await writeFile(join(target, inboxDir, 'nowcoder', 'pending', 'meta.json'), JSON.stringify({ url: children[0]!.url }));
+      await writeFile(join(configDir, 'sinks.json'), JSON.stringify({
+        sinks: { resource: { type: 'repo-inbox', repoPath: target, inboxDir, commit: false, push: false } },
+        routes: { nowcoder: ['resource'] },
+      }));
+    }
     const bridge = await startBridge({ port: 0, libraryRoot: root, configDir }); handles.push(bridge);
     const { socket, token } = await authorize(bridge);
     const frames: Array<{ type: string; requestId: string; time: number }> = [];
@@ -3996,6 +4007,38 @@ describe('preserved-work review dispatch integration', () => {
     expect(collects[1]!.time - collects[0]!.time).toBeGreaterThanOrEqual(1950);
     expect((await requestJson<{ batches: CollectionBatch[] }>(bridge.url, '/v1/plans/batches', { token })).body.batches.find(value => value.id === batch.id)?.deliveryIds).toEqual([]);
   }, 15000);
+});
+
+it.each(['fixed-plan', 'fe-journey'])('excludes configured pending inbox sources during %s discovery', async consumer => {
+  const root = await temporaryDirectory(), f = await identityProjectionFixture(root);
+  const configDir = join(root, '.config'), inboxDir = 'custom-inbox/nested';
+  const url = 'https://www.nowcoder.com/discuss/9001';
+  await mkdir(join(f.resource, inboxDir, 'nowcoder', 'pending'), { recursive: true });
+  await mkdir(configDir, { recursive: true });
+  await writeFile(join(f.resource, inboxDir, 'nowcoder', 'pending', 'meta.json'), JSON.stringify({ url }));
+  await writeFile(join(configDir, 'sinks.json'), JSON.stringify({
+    sinks: { 'fe-journey': { type: 'repo-inbox', repoPath: f.resource, inboxDir, commit: false, push: false } },
+    routes: { nowcoder: ['fe-journey'], github: ['fe-journey'] },
+  }));
+  const fetcher = vi.fn<typeof fetch>(async input => {
+    if (new globalThis.URL(String(input)).hostname === 'api.github.com') return Response.json({ items: [] });
+    return Response.json({ success: true, code: 0, data: { totalPage: 1, records: [{ contentData: {
+      url, title: '腾讯 Agent 应用开发实习一面面经', content: 'Agent 工具调用与 RAG 召回', createTime: Date.now(),
+    } }] } });
+  });
+  const bridge = await startBridge({ port: 0, libraryRoot: f.library, configDir, fetch: fetcher,
+    interviewInventoryRoot: f.resource, interviewHistoryPath: f.projectionPath, interviewInventoryCommit: PUBLISHED_COMMIT });
+  handles.push(bridge); const { socket, token } = await authorize(bridge);
+  socket.send(envelope('extension.hello', 'configured-inbox-discovery', { version: APP_VERSION }));
+  await waitForExtensionReady(bridge);
+  const result = consumer === 'fixed-plan'
+    ? await requestJson(bridge.url, '/v1/plans/run', { method: 'POST', token,
+      body: { planId: 'nowcoder-agent-market', force: true } })
+    : await requestJson(bridge.url, '/v1/fe-journey/collect', { method: 'POST', token, body: { force: true } });
+  expect(result.status).toBe(consumer === 'fixed-plan' ? 202 : 200);
+  expect(fetcher).toHaveBeenCalled();
+  expect((await JobStore.open(join(f.library, '_catalog/jobs.json'))).list()).toEqual([]);
+  if (consumer === 'fe-journey') expect(result.body).toMatchObject({ sources: { nowcoder: { status: 'completed', enqueued: 0 } } });
 });
 
 it('preserves two-second actual dispatch spacing after a slow source-index read', async () => {
