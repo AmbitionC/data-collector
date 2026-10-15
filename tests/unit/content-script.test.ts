@@ -358,6 +358,7 @@ describe('content script list collection', () => {
     const result = await ask<DocumentResponse>({ type: CONTENT_DOCUMENT_REQUEST });
     expect(result).toMatchObject({ ok: true, document: { truncated: false, sourceMetadata: { sourceBodyProven: true } } });
     expect(result.document.text).toContain('按工作时长乘以三倍时薪');
+    expect(result.document.text).toBe(`${question} ${answer}`);
   });
 
   it('returns a signed exact-topic document and current build proof even without DOM body containers', async () => {

@@ -597,7 +597,7 @@ export function inlineMarkupToHtml(value: string): string {
     .map(line => line.trim())
     .filter(Boolean)
     .map(line => `<p>${inline(line)}</p>`)
-    .join('');
+    .join('\n');
 }
 
 function decodePercent(value: string): string {
