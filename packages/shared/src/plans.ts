@@ -125,7 +125,8 @@ export interface ZsxqDocumentMergeResult {
   conflict?: 'body' | 'identity';
 }
 
-function normalizedZsxqBody(text: string): string {
+/** 跨 API 与 DOM 比较使用同一口径；不修改归档原文。 */
+export function normalizedZsxqBody(text: string): string {
   return text
     .normalize('NFKC')
     .replace(/[\u200B-\u200D\uFEFF]/gu, '')

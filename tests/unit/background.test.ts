@@ -4530,6 +4530,45 @@ describe('list page batch capture', () => {
   });
 
   describe('工单 D2：帖子只是导语时，把长文正文取回来接上', () => {
+    it('keeps the topic incomplete when two authoritative copies disagree on retained media', async () => {
+      const { tabs, runner } = listRunner();
+      const text = '这是一条完整的投资与创业问答，两份来源文字相同但一份有图片。';
+      const image = 'https://images.example/owner-chart.png';
+      const proof = { sourceBodyProven: true, sourceMediaProven: true, sourceCoversDom: true };
+      const preview = { ...topic('82258281858288452'), text, html: `<p>${text}</p><img src="${image}">`,
+        images: [{ url: image }], truncated: true, sourceMetadata: proof };
+      tabs.sendMessage = async () => ({ ok: true as const, document: {
+        ...preview, html: `<p>${text}</p>`, images: [], truncated: false,
+      } });
+      const completed = await (runner as unknown as {
+        withLinkedArticle(document: CollectedDocument): Promise<CollectedDocument>;
+      }).withLinkedArticle(preview);
+      expect(completed.truncated).toBe(true);
+      expect(completed.sourceMetadata?.topicDetailFailure).toBe('detail-assets-conflict');
+    });
+
+    it.each([
+      { missingText: false, suffix: '' },
+      { missingText: false, suffix: '尾' },
+      { missingText: true, suffix: '' },
+    ])('compares detail body coverage after whitespace normalization ($missingText, $suffix)', async ({ missingText, suffix }) => {
+      const { tabs, runner } = listRunner();
+      const raw = '开发架构师为传统企业兼职提供 IT 顾问服务。\n\n原项目已经运行几年，如何评估新增需求和报价？\n\n按给企业带来的收益收费，难以评估时按工时乘三倍时薪。';
+      const preview = { ...topic('82258281858288452'), text: raw, html: `<p>${raw}</p>`, truncated: true };
+      const normalized = raw.replace(/\s+/gu, ' ').trim();
+      const detailText = missingText ? normalized.slice(0, -10) : normalized + suffix;
+      tabs.sendMessage = async () => ({ ok: true as const, document: {
+        ...preview, text: detailText, html: `<p>${detailText}</p>`, truncated: false,
+        sourceMetadata: { sourceBodyProven: true, sourceMediaProven: true, sourceCoversDom: true },
+      } });
+      const completed = await (runner as unknown as {
+        withLinkedArticle(document: CollectedDocument): Promise<CollectedDocument>;
+      }).withLinkedArticle(preview);
+      expect(completed.truncated).toBe(missingText);
+      if (missingText) expect(completed.sourceMetadata?.topicDetailFailure).toBe('detail-shorter');
+      else expect(completed.text.replace(/\s+/gu, ' ').trim()).toBe(normalized + suffix);
+    });
+
     /**
      * 星球长文帖在信息流里只有一段引子加一个 articles.zsxq.com 链接——
      * 实测 77 条投递里 54 条（70%）是这形态，43 条正文不足 400 字。

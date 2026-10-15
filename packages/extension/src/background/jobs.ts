@@ -2,6 +2,7 @@ import {
   canonicalizeUrl,
   isHighConfidenceZsxqDuplicate,
   mergeZsxqDocumentCopies,
+  normalizedZsxqBody,
   parseSupportedUrl,
   unionZsxqViewDocuments,
   zsxqSemanticSignature,
@@ -2224,7 +2225,11 @@ export class JobRunner {
       if (detail.source !== 'zsxq') return failed('detail-source-mismatch');
       if (detail.canonicalUrl !== document.canonicalUrl) return failed('detail-url-mismatch');
       if (detail.truncated !== false) return failed('detail-truncated');
-      if (detail.text.length < document.text.length) return failed('detail-shorter');
+      // API 保留段落双换行，DOM buildDocument 把空白压成单空格；先统一空白再比较，
+      // 避免同一正文仅因序列化方式不同而被算作缺字。后续仍核对正文、身份与资源兼容。
+      if (normalizedZsxqBody(detail.text).length < normalizedZsxqBody(document.text).length) {
+        return failed('detail-shorter');
+      }
       const comparison = mergeZsxqDocumentCopies(document, detail);
       if (comparison.conflict) return failed('detail-body-conflict');
       const sourceMetadata = {
@@ -2235,6 +2240,8 @@ export class JobRunner {
         zsxqDocumentAssetUrls(document),
         zsxqDocumentAssetUrls(detail),
       );
+      if (!assetsAgree && hasAuthoritativeSourceMedia(document)
+        && hasAuthoritativeSourceMedia(detail)) return failed('detail-assets-conflict');
       if (!assetsAgree && !hasAuthoritativeSourceMedia(detail)) {
         // 等长正文 + 成功展开只能证明文字；若两视图的资源集合不同且接口未给出权威
         // 媒体清单，任何一侧都可能是虚拟节点残留。保留详情正文便于诊断，但移除所有
@@ -2257,7 +2264,8 @@ export class JobRunner {
         };
       }
       return {
-        ...comparison.document,
+        // 详情已证明完整且覆盖列表；不能再按原始字符串长度选回换行更多的旧预览。
+        ...detail,
         ...(detail.author
           ? { author: detail.author }
           : document.author ? { author: document.author } : {}),
