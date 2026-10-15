@@ -605,6 +605,7 @@ async function preflightDirectedLocalLibraryState(
     let recoveryPending = false;
     const sourceFingerprints: unknown[] = [];
     const catalog: CatalogEntry[] = [];
+    const entriesToRead: Array<{ entry: CatalogEntry; path: string }> = [];
     for (const entry of value) {
       const parsed = parseSupportedUrl(entry.url);
       const canonicalUrl = canonicalizeUrl(parsed).href;
@@ -631,19 +632,38 @@ async function preflightDirectedLocalLibraryState(
       paths.add(entryPath);
       catalog.push({ ...entry, relativePath: normalizedRelativePath });
       if (entry.id === targetId) targetRegistered = true;
-      const canonicalEntryPath = (await strictExistingRegularFile(canonicalRoot, entryPath)).canonicalPath;
-      const sourceSnapshot = await strictOptionalExistingRegularFile(
-        canonicalRoot,
-        join(dirname(canonicalEntryPath), SOURCE_FILE),
-      );
-      if (sourceSnapshot) {
-        const stored = projectOrganized(JSON.parse(sourceSnapshot.contents) as unknown);
-        if (stored.document.source !== entry.source
-          || stored.document.canonicalUrl !== entry.url
-          || stableContentId(stored.document.canonicalUrl) !== entry.id) {
-          throw new Error('catalog source identity mismatch');
+      entriesToRead.push({ entry, path: entryPath });
+    }
+    // Validate the full catalog as before, overlapping only independent read-only snapshots.
+    // Bound handles, drain every started worker on failure, and retain catalog-order fingerprints
+    // so the locked revalidation/transaction comparison has exactly the same authority.
+    const sourceSnapshots = new Array<StrictRegularFile | undefined>(entriesToRead.length);
+    let nextRead = 0;
+    const readers = Array.from({ length: Math.min(8, entriesToRead.length) }, async () => {
+      while (nextRead < entriesToRead.length) {
+        const index = nextRead++;
+        const { entry, path } = entriesToRead[index]!;
+        const canonicalEntryPath = (await strictExistingRegularFile(canonicalRoot, path)).canonicalPath;
+        const sourceSnapshot = await strictOptionalExistingRegularFile(
+          canonicalRoot,
+          join(dirname(canonicalEntryPath), SOURCE_FILE),
+        );
+        if (sourceSnapshot) {
+          const stored = projectOrganized(JSON.parse(sourceSnapshot.contents) as unknown);
+          if (stored.document.source !== entry.source
+            || stored.document.canonicalUrl !== entry.url
+            || stableContentId(stored.document.canonicalUrl) !== entry.id) {
+            throw new Error('catalog source identity mismatch');
+          }
         }
+        sourceSnapshots[index] = sourceSnapshot;
       }
+    });
+    const reads = await Promise.allSettled(readers);
+    const failedRead = reads.find(result => result.status === 'rejected');
+    if (failedRead?.status === 'rejected') throw failedRead.reason;
+    for (const [index, { entry }] of entriesToRead.entries()) {
+      const sourceSnapshot = sourceSnapshots[index];
       sourceFingerprints.push([
         entry.id,
         sourceSnapshot

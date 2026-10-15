@@ -1,3 +1,5 @@
+import { loadNowcoderIdentityProjection } from './nowcoderIdentityProjection.js';
+import { readOutsideInterviewHistory } from './outsideInterviewHistory.js';
 import { createHash } from 'node:crypto';
 import { lstat, readFile, realpath } from 'node:fs/promises';
 import { join, relative, sep } from 'node:path';
@@ -55,7 +57,7 @@ function stringArray(value: unknown): value is string[] {
   return Array.isArray(value) && value.every(item => typeof item === 'string' && item.length > 0);
 }
 
-function parseStrictRecord(value: unknown): { url: string; contentHash: string; clusterId: string } {
+function parseStrictRecord(value: unknown, identityOnly = false): { url: string; contentHash: string; clusterId: string } {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return corruptHistory();
   const record = value as Record<string, unknown>;
   if (
@@ -65,8 +67,8 @@ function parseStrictRecord(value: unknown): { url: string; contentHash: string; 
     || !/^[a-f0-9]{16}$/u.test(record.contentHash)
     || typeof record.clusterId !== 'string'
     || record.clusterId.length === 0
-    || !HISTORY_GRADES.has(String(record.evidenceGrade))
-    || !HISTORY_STATUSES.has(String(record.status))
+    || !(HISTORY_GRADES.has(String(record.evidenceGrade)) || (identityOnly && record.evidenceGrade === 'B-partial'))
+    || !(HISTORY_STATUSES.has(String(record.status)) || (identityOnly && record.status === 'prepared'))
     || !Array.isArray(record.publicFiles)
     || !record.publicFiles.every(item => typeof item === 'string' && item.length > 0)
     || !(stringArray(record.knowledgeKeys) || (Array.isArray(record.knowledgeKeys) && record.knowledgeKeys.length === 0))
@@ -138,7 +140,7 @@ export function validateProcessedNowcoderHistorySnapshot(
   return structuredClone(snapshot);
 }
 
-export async function loadStrictProcessedNowcoderHistory(repoRoot: string): Promise<{
+export async function loadStrictProcessedNowcoderHistory(repoRoot: string, outsidePath?: string, expectedPublishedCommit?: string): Promise<{
   snapshot: ProcessedNowcoderHistorySnapshot;
   digest: string;
   history: ProcessedNowcoderHistory;
@@ -150,46 +152,67 @@ export async function loadStrictProcessedNowcoderHistory(repoRoot: string): Prom
   } catch {
     return corruptHistory();
   }
-  const codexPath = join(canonicalRoot, '.codex');
-  const historyPath = join(codexPath, 'interview-source-history.json');
-  let historyStat;
-  try {
-    historyStat = await lstat(historyPath);
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') return corruptHistory();
-    try {
-      const codexStat = await lstat(codexPath);
-      if (codexStat.isSymbolicLink() || !codexStat.isDirectory()) return corruptHistory();
-      const canonicalCodex = await realpath(codexPath);
-      if (!isInside(canonicalRoot, canonicalCodex)) return corruptHistory();
-    } catch (parentError) {
-      if ((parentError as NodeJS.ErrnoException).code !== 'ENOENT') return corruptHistory();
-    }
-    const snapshot: ProcessedNowcoderHistorySnapshot = { version: 1, hashesByUrl: [], clusterIds: [] };
-    return { snapshot, digest: processedNowcoderHistoryDigest(snapshot), history: historyFromSnapshot(snapshot) };
-  }
-  if (historyStat.isSymbolicLink() || !historyStat.isFile()) return corruptHistory();
-  if (historyStat.size > MAX_HISTORY_BYTES) return limitedHistory();
-  let canonicalHistory: string;
-  try {
-    canonicalHistory = await realpath(historyPath);
-  } catch {
-    return corruptHistory();
-  }
-  if (!isInside(canonicalRoot, canonicalHistory)) return corruptHistory();
   let parsed: unknown;
-  try {
-    const raw = await readFile(canonicalHistory);
-    if (raw.byteLength > MAX_HISTORY_BYTES) return limitedHistory();
-    parsed = JSON.parse(raw.toString('utf8')) as unknown;
-  } catch (error) {
-    if (error instanceof StrictNowcoderHistoryError) throw error;
-    return corruptHistory();
+  if (outsidePath !== undefined) {
+    try { parsed = await readOutsideInterviewHistory(canonicalRoot, outsidePath); }
+    catch (error) {
+      if (error instanceof Error && /exceeds/u.test(error.message)) return limitedHistory();
+      return corruptHistory();
+    }
+  } else {
+    const codexPath = join(canonicalRoot, '.codex');
+    const historyPath = join(codexPath, 'interview-source-history.json');
+    let historyStat;
+    try {
+      historyStat = await lstat(historyPath);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') return corruptHistory();
+      try {
+        const codexStat = await lstat(codexPath);
+        if (codexStat.isSymbolicLink() || !codexStat.isDirectory()) return corruptHistory();
+        const canonicalCodex = await realpath(codexPath);
+        if (!isInside(canonicalRoot, canonicalCodex)) return corruptHistory();
+      } catch (parentError) {
+        if ((parentError as NodeJS.ErrnoException).code !== 'ENOENT') return corruptHistory();
+      }
+      const snapshot: ProcessedNowcoderHistorySnapshot = { version: 1, hashesByUrl: [], clusterIds: [] };
+      return { snapshot, digest: processedNowcoderHistoryDigest(snapshot), history: historyFromSnapshot(snapshot) };
+    }
+    if (historyStat.isSymbolicLink() || !historyStat.isFile()) return corruptHistory();
+    if (historyStat.size > MAX_HISTORY_BYTES) return limitedHistory();
+    let canonicalHistory: string;
+    try {
+      canonicalHistory = await realpath(historyPath);
+    } catch {
+      return corruptHistory();
+    }
+    if (!isInside(canonicalRoot, canonicalHistory)) return corruptHistory();
+    try {
+      const raw = await readFile(canonicalHistory);
+      if (raw.byteLength > MAX_HISTORY_BYTES) return limitedHistory();
+      parsed = JSON.parse(raw.toString('utf8')) as unknown;
+    } catch (error) {
+      if (error instanceof StrictNowcoderHistoryError) throw error;
+      return corruptHistory();
+    }
   }
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return corruptHistory();
   const envelope = parsed as Record<string, unknown>;
+  if (envelope.schemaVersion === 2 && outsidePath) {
+    try {
+      const projection = await loadNowcoderIdentityProjection(canonicalRoot, outsidePath, expectedPublishedCommit);
+      const byUrl = new Map<string, Set<string>>(), clusters = new Set<string>();
+      for (const item of projection.identities) {
+        const hashes = byUrl.get(item.url) ?? new Set<string>(); hashes.add(item.contentHash); byUrl.set(item.url, hashes); clusters.add(item.clusterId);
+      }
+      const snapshot: ProcessedNowcoderHistorySnapshot = { version: 1,
+        hashesByUrl: [...byUrl].sort(([left], [right]) => compareUtf8(left, right)).map(([url, hashes]) => ({ url, hashes: [...hashes].sort(compareUtf8) })),
+        clusterIds: [...clusters].sort(compareUtf8) };
+      return { snapshot, digest: processedNowcoderHistoryDigest(snapshot), history: historyFromSnapshot(snapshot) };
+    } catch { return corruptHistory(); }
+  }
   if (envelope.schemaVersion !== 1 || typeof envelope.updatedAt !== 'string'
-    || !/^\d{4}-\d{2}-\d{2}$/u.test(envelope.updatedAt)
+    || !(/^\d{4}-\d{2}-\d{2}$/u.test(envelope.updatedAt) || (outsidePath !== undefined && Number.isFinite(Date.parse(envelope.updatedAt))))
     || !envelope.records || typeof envelope.records !== 'object' || Array.isArray(envelope.records)) {
     return corruptHistory();
   }
@@ -199,7 +222,7 @@ export async function loadStrictProcessedNowcoderHistory(repoRoot: string): Prom
   const clusters = new Set<string>();
   for (const [id, rawRecord] of records) {
     if (!/^[a-f0-9]{12}$/u.test(id)) return corruptHistory();
-    const record = parseStrictRecord(rawRecord);
+    const record = parseStrictRecord(rawRecord, outsidePath !== undefined);
     const hashes = hashesByUrl.get(record.url) ?? new Set<string>();
     hashes.add(record.contentHash);
     hashesByUrl.set(record.url, hashes);

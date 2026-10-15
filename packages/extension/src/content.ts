@@ -31,6 +31,7 @@ import {
   CONTENT_API_COLLECT_REQUEST,
   CONTENT_API_COLLECT_OWNER_PAGE_REQUEST,
   CONTENT_API_COLLECT_ARTICLE_REQUEST,
+  CONTENT_API_COLLECT_TOPIC_REQUEST,
   CONTENT_DIAGNOSE_REQUEST,
   CONTENT_DOCUMENT_REQUEST,
   CONTENT_ADVANCE_REQUEST,
@@ -48,6 +49,7 @@ import {
 import {
   collectZsxqApiOwnerPage,
   collectZsxqApiArticle,
+  collectZsxqApiTopic,
   collectZsxqApiViews,
   type ZsxqOwnerApiContext,
 } from './zsxqApiFallback.js';
@@ -154,6 +156,7 @@ interface ExtractMessage {
     | typeof CONTENT_API_COLLECT_REQUEST
     | typeof CONTENT_API_COLLECT_OWNER_PAGE_REQUEST
     | typeof CONTENT_API_COLLECT_ARTICLE_REQUEST
+    | typeof CONTENT_API_COLLECT_TOPIC_REQUEST
     | typeof CONTENT_RESTORE_REQUEST
     | typeof CONTENT_ADVANCE_REQUEST
     | typeof CONTENT_REFRESH_TOPICS_REQUEST
@@ -173,7 +176,8 @@ interface ExtractMessage {
     | 'list.selectView'
     | 'list.apiCollect'
     | 'list.apiCollectOwnerPage'
-    | 'document.apiCollectArticle';
+    | 'document.apiCollectArticle'
+    | 'document.apiCollectTopic';
   /** list.highlight：要滚过去并高亮的那一条。 */
   key?: string;
   label?: ZsxqPlanView;
@@ -181,6 +185,8 @@ interface ExtractMessage {
   dateRange?: { since: string; until: string };
   context?: ZsxqOwnerApiContext;
   articleUrl?: string;
+  groupId?: string;
+  topicId?: string;
   overrides?: {
     userCategory?: string;
     userTags?: string[];
@@ -1631,6 +1637,7 @@ if (!alreadyRegistered) chrome.runtime.onMessage.addListener((message: unknown, 
     request.type !== 'list.apiCollect' &&
     request.type !== 'list.apiCollectOwnerPage' &&
     request.type !== 'document.apiCollectArticle' &&
+    request.type !== 'document.apiCollectTopic' &&
     !currentRequest
   ) {
     return false;
@@ -1645,6 +1652,24 @@ if (!alreadyRegistered) chrome.runtime.onMessage.addListener((message: unknown, 
         }
       : response);
   };
+
+  if (request.type === 'document.apiCollectTopic' || request.type === CONTENT_API_COLLECT_TOPIC_REQUEST) {
+    if (typeof request.groupId !== 'string' || !/^\d{6,25}$/u.test(request.groupId)
+      || typeof request.topicId !== 'string' || !/^\d{15,25}$/u.test(request.topicId)) {
+      respond({ ok: false, error: { code: 'UNSUPPORTED_LAYOUT', message: '单条详情缺少有效编号' } });
+      return false;
+    }
+    void collectZsxqApiTopic(request.groupId, request.topicId, { aduid: zsxqAduid() }).then(
+      topicDocument => respond({ ok: true, document: topicDocument }),
+      error => {
+        const message = error instanceof Error ? error.message : '知识星球单条详情接口采集失败';
+        respond({ ok: false, error: {
+          code: message.startsWith('AUTH_REQUIRED') ? 'AUTH_REQUIRED' : 'COLLECTION_FAILED', message,
+        } });
+      },
+    );
+    return true;
+  }
 
   if (
     request.type === 'document.apiCollectArticle'

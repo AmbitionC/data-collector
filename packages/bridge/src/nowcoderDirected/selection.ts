@@ -89,6 +89,7 @@ function counts(codes: readonly NowcoderDirectedRejectionCode[]): NowcoderDirect
 }
 
 function terminalCode(job: JobRecord): NowcoderDirectedRejectionCode {
+  if (job.errorCode === 'SOURCE_ALREADY_COLLECTED') return 'SOURCE_ALREADY_COLLECTED';
   if (job.status === 'failed') return 'DETAIL_FAILED';
   if (job.status === 'needs_attention') return 'DETAIL_NEEDS_ATTENTION';
   return 'DETAIL_NOT_SAVED';
@@ -99,6 +100,9 @@ export interface NowcoderDirectedSelectionCoordinatorOptions {
   service: () => NowcoderDirectedService;
   libraryRoot: string;
   targetRoot?: string;
+  historyRoot?: string;
+  historyPath?: string;
+  historyCommit?: string;
   now?: () => string;
 }
 
@@ -167,7 +171,7 @@ export class NowcoderDirectedSelectionCoordinator {
         if (!this.options.targetRoot) {
           return await this.finishSystemic(context, 'DIRECTED_SELECTION_INVARIANT_FAILED');
         }
-        const loaded = await loadStrictProcessedNowcoderHistory(this.options.targetRoot);
+        const loaded = await loadStrictProcessedNowcoderHistory(this.options.historyRoot ?? this.options.targetRoot, this.options.historyPath, this.options.historyCommit);
         const persisted = await this.options.store.persistHistorySnapshotCurrent(
           run.id, run.attempt, loaded.snapshot, loaded.digest,
         );

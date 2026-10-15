@@ -122,3 +122,33 @@ describe('Nowcoder response access detection', () => {
     await expect(detectNowcoderResponseStop(new Response('<div style="display:none"><form action="/login">请登录</form></div><article>正常面经</article>'))).resolves.toBeUndefined();
   });
 });
+
+
+it('does not stop a readable SSR post for an ordinary header login entry', async () => {
+  const html = '<title>Agent 面经 - 牛客网</title><header><form action="/login"><input type="password"><button>登录</button></form></header>'
+    + '<article class="nc-post-content">面试官让设计验证码系统，讨论限流、缓存和失败重试，然后继续问 Agent 工具调用和 RAG 召回。</article>';
+  await expect(detectNowcoderResponseStop(new Response(html))).resolves.toBeUndefined();
+});
+
+it('still stops an explicit reading wall in SSR HTML even when the body remains behind it', async () => {
+  await expect(detectNowcoderResponseStop(new Response('<article>' + '真实面经问题。'.repeat(10)
+    + '</article><div class="login-modal">登录后查看完整面经</div>'))).resolves.toMatchObject({ code: 'AUTH_REQUIRED' });
+});
+
+
+it.each([['429 Too Many Requests', 'RATE_LIMITED'], ['Access Denied', 'AUTH_REQUIRED']])('stops an explicit SSR access-error title returned with HTTP 200: %s', async (title, code) => {
+  await expect(detectNowcoderResponseStop(new Response(`<title>${title}</title>`))).resolves.toMatchObject({ code });
+});
+
+
+it.each(['opacity:0', 'content-visibility:hidden', 'visibility:collapse'])('ignores inline %s login remnants in SSR responses', async style => {
+  const readable = '<article>' + '面试官讨论 Agent 工具调用、缓存和失败重试。'.repeat(8) + '</article>';
+  await expect(detectNowcoderResponseStop(new Response(readable + `<div class="login-modal" style="${style}">登录后查看完整面经</div>`))).resolves.toBeUndefined();
+});
+
+it.each([['', 'AUTH_REQUIRED'], ['pointer-events:none;', undefined]])('distinguishes a covering fixed SSR login layer from a noninteractive remnant: %s', async (extra, code) => {
+  const html = '<article>' + 'Agent 工具调用和失败恢复问题。'.repeat(8) + '</article>'
+    + `<div class="login-modal" style="${extra}position:fixed;inset:0;z-index:9999;background:white">手机号登录<input type="tel"></div>`;
+  if (code) await expect(detectNowcoderResponseStop(new Response(html))).resolves.toMatchObject({ code });
+  else await expect(detectNowcoderResponseStop(new Response(html))).resolves.toBeUndefined();
+});

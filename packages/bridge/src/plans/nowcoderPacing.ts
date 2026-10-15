@@ -58,6 +58,11 @@ export class NowcoderRequestPacer {
     return pending;
   }
 
+  /** Called synchronously at the real wire boundary after any asynchronous preparation. */
+  markRequestStart(): void {
+    this.lastStart = this.now();
+  }
+
   stop(error: NowcoderCollectionStopError): void {
     this.stopError ??= error;
   }
@@ -105,27 +110,65 @@ function explicitJsonStop(payload: unknown): NowcoderCollectionStopError | undef
   return undefined;
 }
 
+function inlineStyle(value: string): Record<string, string> {
+  return Object.fromEntries(value.split(';').flatMap(declaration => {
+    const match = declaration.match(/^\s*([a-z-]+)\s*:\s*(.+?)\s*$/iu);
+    return match ? [[match[1]!.toLowerCase(), match[2]!.replace(/\s*!important\s*$/iu, '').trim().toLowerCase()]] : [];
+  }));
+}
+
+function inlineHidden(value: string): boolean {
+  const style = inlineStyle(value);
+  return style.display === 'none' || ['hidden', 'collapse'].includes(style.visibility ?? '')
+    || (style.opacity !== undefined && /^(?:0+(?:\.0*)?|\.0+)%?$/u.test(style.opacity))
+    || style['content-visibility'] === 'hidden';
+}
+
 function visibleHtmlStop(html: string): NowcoderCollectionStopError | undefined {
   const visible = sanitizeHtml(html, {
     allowedTags: [...sanitizeHtml.defaults.allowedTags, 'title', 'form', 'input', 'iframe'],
-    allowedAttributes: { '*': ['class', 'id', 'style', 'hidden', 'aria-hidden', 'action', 'src', 'name'] },
+    allowedAttributes: { '*': ['class', 'id', 'style', 'hidden', 'aria-hidden', 'action', 'src', 'name', 'role', 'aria-modal'] },
     parseStyleAttributes: false,
     // Keep the boolean hidden attribute until exclusiveFilter sees the complete parent frame.
     nonBooleanAttributes: sanitizeHtml.defaults.nonBooleanAttributes.filter(attribute => attribute !== 'hidden'),
     exclusiveFilter: frame => Object.hasOwn(frame.attribs, 'hidden')
       || frame.attribs['aria-hidden'] === 'true'
-      || /display\s*:\s*none|visibility\s*:\s*hidden/i.test(frame.attribs.style ?? ''),
+      || inlineHidden(frame.attribs.style ?? ''),
   });
   const title = visible.match(/<title\b[^>]*>([^<]*)<\/title>/iu)?.[1]?.trim();
   if (title && VERIFICATION_TITLE.test(title)) return stopError('CAPTCHA_REQUIRED');
-  for (const match of visible.matchAll(/\b(?:class|id)="([^"]*)"/giu)) {
-    const tokens = match[1]?.split(/\s+/u) ?? [];
-    if (tokens.some(token => CAPTCHA_WIDGETS.has(token))) return stopError('CAPTCHA_REQUIRED');
-    if (tokens.some(token => LOGIN_WIDGETS.has(token))) return stopError('AUTH_REQUIRED');
-  }
-  if (/<form\b[^>]*\baction="[^"]*(?:\/login(?:[/?#"]|$)|\/signin(?:[/?#"]|$))/iu.test(visible)) {
-    return stopError('AUTH_REQUIRED');
-  }
+  if (title && /^(?:(?:HTTP(?:\s+ERROR)?\s+)?429(?:\s+Too\s+Many\s+Requests)?|Too\s+Many\s+Requests|请求过于频繁|访问过于频繁)(?:\s*[-_|｜]\s*(?:牛客(?:网)?|nginx))?$/iu.test(title)) return stopError('RATE_LIMITED');
+  if (title && /^(?:(?:HTTP(?:\s+ERROR)?\s+)?403(?:\s+Forbidden)?|Forbidden|Access\s+Denied|访问被拒绝|禁止访问)(?:\s*[-_|｜]\s*(?:牛客(?:网)?|nginx))?$/iu.test(title)) return stopError('AUTH_REQUIRED');
+  let loginEntry = false, loginWall = false, captcha = false;
+  // Inspect only the already-filtered tree: a hidden ancestor must hide its children too.
+  sanitizeHtml(visible, {
+    allowedTags: [...sanitizeHtml.defaults.allowedTags, 'title', 'form', 'input', 'iframe'],
+    allowedAttributes: { '*': ['class', 'id', 'action', 'role', 'aria-modal', 'style'] },
+    parseStyleAttributes: false,
+    exclusiveFilter: frame => {
+      const tokens = `${frame.attribs.class ?? ''} ${frame.attribs.id ?? ''}`.split(/\s+/u);
+      if (tokens.some(token => CAPTCHA_WIDGETS.has(token))) captcha = true;
+      const login = tokens.some(token => LOGIN_WIDGETS.has(token))
+        || (frame.tag === 'form' && /\/(?:login|signin)(?:[/?#]|$)/iu.test(frame.attribs.action ?? ''));
+      if (login) {
+        loginEntry = true;
+        if (/登[录陆](?:后|才能|以)[^。！？\n]{0,16}(?:查看|阅读|访问|继续)|(?:sign|log)\s*in\s+to\s+(?:view|read|continue)/iu.test(frame.text)) loginWall = true;
+      }
+      const style = inlineStyle(frame.attribs.style ?? '');
+      const zero = (value: string | undefined): boolean => value !== undefined && /^0(?:px|%)?$/u.test(value);
+      const covering = style.position === 'fixed' && style['pointer-events'] !== 'none'
+        && ((style.inset !== undefined && /^(?:0(?:px|%)?\s*){1,4}$/u.test(style.inset))
+          || ['top', 'right', 'bottom', 'left'].every(edge => zero(style[edge])));
+      if (covering && /登[录陆]|(?:sign|log)\s*in/iu.test(frame.text)) loginWall = true;
+      if (frame.attribs.role === 'dialog' && frame.attribs['aria-modal'] === 'true'
+        && /登[录陆]|(?:sign|log)\s*in/iu.test(frame.text)) loginWall = true;
+      return false;
+    },
+  });
+  if (captcha) return stopError('CAPTCHA_REQUIRED');
+  const readableText = sanitizeHtml(visible, { allowedTags: [], allowedAttributes: {} }).trim();
+  const loginTitle = title && /^(?:登[录陆]|Login|Sign\s*in)(?:\s*[-_|｜]\s*牛客(?:网)?)?$/iu.test(title);
+  if (loginWall || loginTitle || (loginEntry && readableText.length < 40)) return stopError('AUTH_REQUIRED');
   return undefined;
 }
 

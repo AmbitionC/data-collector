@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { JSDOM } from 'jsdom';
 import {
   collectZsxqApiArticle,
+  collectZsxqApiTopic,
   collectZsxqApiOwnerPage,
   collectZsxqApiViews,
 } from '../../packages/extension/src/zsxqApiFallback.js';
@@ -50,6 +51,61 @@ function menuResponse(): Response {
 }
 
 describe('ZSXQ API fallback', () => {
+  const exactTopicId = '82258285555521452';
+  const exactTopicTime = '2026-09-28T09:20:00.000+0800';
+  const exactGroup = { group_id: GROUP_ID, owner: { user_id: '1001', name: '陈老师' } };
+  const exactTopic = () => ({
+    ...topic(exactTopicId, exactTopicTime),
+    group: { group_id: GROUP_ID },
+  });
+  const exactFetcher = (group: unknown, item: unknown) => vi.fn(async (input: RequestInfo | URL) => {
+    const url = String(input);
+    if (url === `${API}/groups/${GROUP_ID}`) return response(JSON.stringify({ succeeded: true, resp_data: { group } }));
+    if (url === `${API}/topics/${exactTopicId}`) return response(JSON.stringify({ succeeded: true, resp_data: { topic: item } }));
+    throw new Error(`unexpected request ${url}`);
+  });
+
+  it('reads exactly one signed topic with proven group, owner and publication time', async () => {
+    const fetcher = exactFetcher(exactGroup, exactTopic());
+    const result = await collectZsxqApiTopic(GROUP_ID, exactTopicId, { fetcher, aduid: 'test-device' });
+    expect(result).toMatchObject({
+      canonicalUrl: `https://wx.zsxq.com/group/${GROUP_ID}/topic/${exactTopicId}`,
+      author: '陈老师', publishedAt: new Date(exactTopicTime).toISOString(), truncated: false,
+      sourceMetadata: { topicId: exactTopicId, authorRole: 'owner', apiTopicDetail: true },
+    });
+    expect(fetcher).toHaveBeenCalledTimes(2);
+  });
+
+  it.each([
+    ['group response', { ...exactGroup, group_id: '123456789' }, exactTopic()],
+    ['topic response', exactGroup, { ...exactTopic(), topic_id: '82258285555521453' }],
+    ['topic group', exactGroup, { ...exactTopic(), group: { group_id: '123456789' } }],
+    ['publication', exactGroup, { ...exactTopic(), create_time: undefined }],
+    ['owner', exactGroup, { ...exactTopic(), talk: { text: '另一位成员的正文', owner: { user_id: '1002' } } }],
+  ])('rejects an unproven single topic %s', async (_label, group, item) => {
+    await expect(collectZsxqApiTopic(GROUP_ID, exactTopicId, {
+      fetcher: exactFetcher(group, item), aduid: 'test-device',
+    })).rejects.toThrow(/UNPROVEN|CONFLICT/u);
+  });
+
+  it('preserves incompleteness from a signed single-topic preview', async () => {
+    const item = { ...exactTopic(), talk: {
+      text: '这里只显示副业经营的开头，后面的具体案例和完整结论还没有返回。'.repeat(4) + '...',
+      owner: exactGroup.owner,
+    } };
+    const result = await collectZsxqApiTopic(GROUP_ID, exactTopicId, {
+      fetcher: exactFetcher(exactGroup, item), aduid: 'test-device',
+    });
+    expect(result.truncated).toBe(true);
+  });
+
+  it('reports unavailable member access without trying a topic or feed request', async () => {
+    const fetcher = vi.fn(async () => response('{"succeeded":false,"code":1030}', 403));
+    await expect(collectZsxqApiTopic(GROUP_ID, exactTopicId, { fetcher, aduid: 'test-device' }))
+      .rejects.toThrow('AUTH_REQUIRED');
+    expect(fetcher).toHaveBeenCalledTimes(1);
+  });
+
   it('overlaps an inclusive midnight boundary instead of skipping tied posts', async () => {
     const boundary = '2026-08-31T16:00:00.000Z';
     const first = Array.from({ length: 20 }, (_, index) => topic(String(93000 + index), boundary));

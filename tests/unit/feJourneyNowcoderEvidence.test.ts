@@ -36,6 +36,24 @@ function numberedQuestions(count: number): string {
 }
 
 describe('Nowcoder interview evidence', () => {
+  it('keeps vivo as the interviewed company when Huawei appears only in a product comparison', () => {
+    const evidence = analyzeNowcoderEvidence(nowcoder(
+      '(秋招) vivo线下面面经 - Agent开发',
+      '9.22 vivo线下面。面试官让我详细讲讲 Harness，如何排查 Agent 工程问题。反问团队业务：蓝心小V，类似于华为小艺。',
+    ));
+    expect(evidence.companyLabel).toBe('vivo');
+    expect(evidence.company).toBe('other');
+    expect(evidence.role).toBe('Agent 开发');
+  });
+
+  it('preserves the explicit AI application engineer role seen in a real ByteDance post', () => {
+    const evidence = analyzeNowcoderEvidence(nowcoder(
+      '【面经】字节/AI 应用工程师 一面挂经',
+      '岗位：AI 应用工程师（飞书多维表格方向）。我的面试中面试官追问了 Agent runtime、memory 和回归评测。',
+    ));
+    expect(evidence.role).toBe('AI 应用工程师');
+  });
+
   it('recognizes a first-person Alibaba one-round post without requiring the word 面经', () => {
     const document = nowcoder(
       '阿里云-agent开发-8.18一面（面完秒挂）',

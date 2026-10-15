@@ -1,3 +1,4 @@
+import { normalizeNowcoderSearchRecord } from './nowcoderSearchRecord.js';
 import { canonicalizeUrl } from '@data-collector/shared';
 import { FE_JOURNEY_PRESET } from './preset.js';
 import type { NowcoderCompany } from './nowcoderEvidence.js';
@@ -105,10 +106,6 @@ function recordValue(value: unknown): Record<string, unknown> | undefined {
   return typeof value === 'object' && value !== null ? value as Record<string, unknown> : undefined;
 }
 
-function stringValue(value: unknown): string {
-  return typeof value === 'string' ? value : '';
-}
-
 async function searchJsonPage(
   fetcher: typeof fetch,
   query: string,
@@ -129,28 +126,12 @@ async function searchJsonPage(
   if (payload?.success !== true || payload.code !== 0 || !data || !Array.isArray(data.records)) {
     throw new Error('JSON API 返回格式异常');
   }
-  const base = new URL('https://www.nowcoder.com/');
   const hits: SearchHit[] = [];
   for (const rawRecord of data.records) {
-    const contentData = recordValue(recordValue(rawRecord)?.contentData);
-    if (!contentData) continue;
-    const returnedUrl = [contentData.url, contentData.detailUrl, contentData.detailURL, contentData.link,
-      contentData.contentUrl, contentData.contentURL, contentData.targetUrl, contentData.targetURL]
-      .map(value => typeof value === 'string' ? canonicalNowcoderDetail(value, base) : undefined)
-      .find((value): value is string => value !== undefined);
-    const id = typeof contentData.id === 'string' || typeof contentData.id === 'number'
-      ? String(contentData.id)
-      : '';
-    const url = returnedUrl ?? canonicalNowcoderDetail(`/discuss/${id}`, base);
-    if (!url) continue;
-    hits.push({
-      url,
-      title: stringValue(contentData.title),
-      content: stringValue(contentData.content),
-      createTime: typeof contentData.createTime === 'number' && Number.isFinite(contentData.createTime)
-        ? contentData.createTime
-        : 0,
-    });
+    const parsed = normalizeNowcoderSearchRecord(rawRecord);
+    if ('reason' in parsed) continue;
+    hits.push({ url: parsed.hit.canonicalUrl, title: parsed.hit.title,
+      content: parsed.hit.snippet, createTime: parsed.hit.publishedAt ? Date.parse(parsed.hit.publishedAt) : 0 });
   }
   const totalPage = typeof data.totalPage === 'number' && Number.isSafeInteger(data.totalPage)
     ? Math.max(1, data.totalPage)

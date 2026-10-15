@@ -55,3 +55,9 @@ describe('Nowcoder detail access error pages', () => {
     expect(extractNowcoder(document, URL_VALUE, NOW).text).toContain('RAG');
   });
 });
+
+
+it('stops an explicit login-only page without classifying a still-loading post as logout', () => {
+  const document = new JSDOM('<title>登录 - 牛客网</title><form action="/login"><input type="password"><button>登录</button></form>').window.document;
+  expect(() => extractNowcoder(document, URL_VALUE, NOW)).toThrowError(expect.objectContaining({ code: 'AUTH_REQUIRED' }));
+});

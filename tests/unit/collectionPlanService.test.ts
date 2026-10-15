@@ -2457,3 +2457,23 @@ describe('review collection access stops', () => {
     expect(context.synced).toEqual([]);
   });
 });
+
+
+it('refills an all-duplicate round and counts source skips separately from layout faults', async () => {
+  let searches = 0;
+  const context = await fixture({ shouldAutoSync: async () => true, discoverNowcoder: async () => ++searches === 1 ? [
+    { url: 'https://www.nowcoder.com/discuss/8001', queryCompany: 'bytedance' },
+    { url: 'https://www.nowcoder.com/discuss/8002', queryCompany: 'tencent' },
+  ] : searches === 2 ? [{ url: 'https://www.nowcoder.com/discuss/8003', queryCompany: 'alibaba' }] : [] });
+  const batch = await context.service.run('nowcoder-agent-market', { nowcoderReviewOnly: true });
+  for (const child of context.jobs.list().filter(job => job.batchId === batch.id)) {
+    const duplicate = await context.jobs.transition(child.id, 'failed', { errorCode: 'SOURCE_ALREADY_COLLECTED', errorMessage: '预览后已由其他采集保存' });
+    await context.service.onJobTerminal(duplicate);
+  }
+  const fresh = context.jobs.list().find(job => job.batchId === batch.id && job.url.endsWith('/8003'));
+  expect(fresh).toBeDefined();
+  expect(context.store.get(batch.id)).toMatchObject({ status: 'running', failed: 0, skipped: 2 });
+  await saveJobs(context, [fresh!]);
+  expect(context.store.get(batch.id)).toMatchObject({ status: 'completed_with_attention', failed: 0, skipped: 2,
+    rejections: { '来源已在本地或待审链中': 2 }, deliveryIds: [] });
+});

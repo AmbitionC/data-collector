@@ -40,6 +40,7 @@ const COMPANIES: readonly CompanyDefinition[] = [
   { id: 'other', label: '影石创新', aliases: [/影石创新|影石|Insta360/i] },
   { id: 'other', label: '大疆创新', aliases: [/大疆创新|大疆|DJI/i] },
   { id: 'other', label: 'OPPO', aliases: [/OPPO|欧珀/i] },
+  { id: 'other', label: 'vivo', aliases: [/\bvivo\b|维沃/i] },
 ];
 
 const BUSINESS_UNITS: readonly [RegExp, string][] = [
@@ -55,6 +56,7 @@ const BUSINESS_UNITS: readonly [RegExp, string][] = [
 
 const ROLE_PATTERNS: readonly [RegExp, string][] = [
   [/(?:AI\s*)?Agent\s*(?:平台)?开发/i, 'Agent 开发'],
+  [/AI\s*应用工程师/i, 'AI 应用工程师'],
   [/大模型应用开发/i, '大模型应用开发'],
   [/AI\s*应用开发/i, 'AI 应用开发'],
   [/AI\s*全栈开发/i, 'AI 全栈开发'],

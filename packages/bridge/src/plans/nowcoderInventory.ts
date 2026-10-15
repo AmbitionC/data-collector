@@ -1,6 +1,7 @@
-import { constants } from 'node:fs';
-import { lstat, open, readFile, realpath } from 'node:fs/promises';
-import { dirname, isAbsolute, join, parse, relative, resolve, sep } from 'node:path';
+import { loadNowcoderIdentityProjection, NowcoderIdentityProjectionError } from './nowcoderIdentityProjection.js';
+import { readOutsideInterviewHistory, OutsideInterviewHistoryError } from './outsideInterviewHistory.js';
+import { lstat, readFile, realpath } from 'node:fs/promises';
+import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { canonicalizeUrl, parseSupportedUrl, stableContentId, type CollectedDocument } from '@data-collector/shared';
 import { contentFingerprint } from '../feJourney/fingerprint.js';
 import type { NowcoderDiscoveryCandidate } from '../feJourney/nowcoderDiscovery.js';
@@ -152,56 +153,6 @@ async function jsonFile(root: string, path: string, optional = false): Promise<u
   catch (error) { throw new NowcoderInventoryError('inventory-invalid', `${path} is invalid JSON`, { cause: error }); }
 }
 
-function inside(root: string, path: string): boolean {
-  const location = relative(root, path);
-  return location === '' || (location !== '..' && !location.startsWith(`..${sep}`) && !isAbsolute(location));
-}
-
-/** The resource ledger is private input, explicitly selected outside the public repository. */
-async function outsideHistory(resourceRoot: string, historyPath: string): Promise<unknown> {
-  if (!isAbsolute(historyPath) || historyPath.includes('\0')
-    || historyPath.split(sep).some(part => part === '.' || part === '..')) {
-    invalid('private interview historyPath must be an explicit absolute path');
-  }
-  const path = resolve(historyPath);
-  if (inside(resourceRoot, path)) invalid('private interview historyPath must be outside the resource repository');
-  try {
-    const root = parse(path).root;
-    const parts = path.slice(root.length).split(sep);
-    let current = root;
-    for (const [index, part] of parts.entries()) {
-      current = join(current, part);
-      const stat = await lstat(current);
-      if (stat.isSymbolicLink() || (index === parts.length - 1 ? !stat.isFile() : !stat.isDirectory())) {
-        invalid('private interview historyPath must be a regular file without symbolic path components');
-      }
-    }
-    const physical = await realpath(path);
-    if (inside(resourceRoot, physical)) invalid('private interview historyPath resolves inside the resource repository');
-    const expected = await lstat(physical);
-    if (!expected.isFile() || expected.isSymbolicLink() || expected.size > MAX_FILE_BYTES) {
-      invalid('private interview source history exceeds the inventory read limit or is not a regular file');
-    }
-    const handle = await open(physical, constants.O_RDONLY | constants.O_NOFOLLOW);
-    let contents: string;
-    try {
-      const observed = await handle.stat();
-      if (!observed.isFile() || observed.dev !== expected.dev || observed.ino !== expected.ino
-        || observed.size > MAX_FILE_BYTES || await realpath(path) !== physical) {
-        invalid('private interview source history changed while opening');
-      }
-      const bytes = await handle.readFile();
-      if (bytes.byteLength > MAX_FILE_BYTES) invalid('private interview source history exceeds the inventory read limit');
-      contents = bytes.toString('utf8');
-    } finally { await handle.close(); }
-    try { return JSON.parse(contents) as unknown; }
-    catch (error) { throw new NowcoderInventoryError('inventory-invalid', 'private interview source history is invalid JSON', { cause: error }); }
-  } catch (error) {
-    if (error instanceof NowcoderInventoryError) throw error;
-    throw new NowcoderInventoryError('inventory-unavailable', 'explicit outside interview source history cannot be read', { cause: error });
-  }
-}
-
 interface PublishedLeaf { key: string; file: string; company: CompanyId }
 
 function publishedLeaves(value: unknown): PublishedLeaf[] {
@@ -309,6 +260,7 @@ export async function readCompanyInventory(
   libraryRoot: string,
   now: string,
   historyPath?: string,
+  expectedPublishedCommit?: string,
 ): Promise<CompanyInventory> {
   if (!Number.isFinite(Date.parse(now))) invalid('current inventory time is invalid');
   const resource = await canonicalRoot(resourceRoot, 'resource'), library = await canonicalRoot(libraryRoot, 'local library');
@@ -320,7 +272,22 @@ export async function readCompanyInventory(
     inventory[leaf.company].published += 1;
   }
   const pending = await qualifiedSnapshots(library, now);
-  const published = publishedIdentities(historyPath === undefined ? undefined : await outsideHistory(resource, historyPath), leaves);
+  const history = historyPath === undefined ? undefined : await readOutsideInterviewHistory(resource, historyPath).catch(error => {
+    if (error instanceof OutsideInterviewHistoryError) throw new NowcoderInventoryError(error.code, error.message, { cause: error });
+    throw error;
+  });
+  let published: PublishedIdentities;
+  if (record(history) && history.schemaVersion === 2 && historyPath) {
+    try {
+      const projection = await loadNowcoderIdentityProjection(resource, historyPath, expectedPublishedCommit);
+      published = { complete: true, urls: new Set(projection.identities.map(item => item.url)),
+        hashes: new Set(projection.identities.map(item => item.contentHash)), clusters: new Set(projection.identities.map(item => item.clusterId)) };
+    } catch (error) {
+      if (error instanceof NowcoderIdentityProjectionError) throw new NowcoderInventoryError(
+        error.code === 'PROJECTION_INVALID' ? 'inventory-invalid' : 'inventory-unverifiable', error.message, { cause: error });
+      throw error;
+    }
+  } else published = publishedIdentities(history, leaves);
   if (pending.length > 0 && !published.complete) {
     throw new NowcoderInventoryError('inventory-unverifiable',
       'qualified pending stock cannot be checked against all published interviews; an explicit complete outside interview historyPath is required');

@@ -174,9 +174,11 @@ function contentAccessOf(document: Document, content: Element): ContentAccess {
   return TRUNCATION_SIGNAL.test(visibleText(content)) ? 'truncated' : 'full';
 }
 
-function firstWithin(root: ParentNode, selectors: string[]): Element | null {
+function firstWithin(root: ParentNode, selectors: string[], onlyVisible = false): Element | null {
   for (const selector of selectors) {
-    const element = root.querySelector(selector);
+    const element = onlyVisible
+      ? [...root.querySelectorAll(selector)].find(candidate => !isHidden(candidate))
+      : root.querySelector(selector);
     if (element) return element;
   }
   return null;
@@ -188,10 +190,11 @@ function isHidden(element: Element): boolean {
     if (
       current.hasAttribute('hidden') ||
       current.getAttribute('aria-hidden') === 'true' ||
-      /display\s*:\s*none|visibility\s*:\s*hidden/i.test(current.getAttribute('style') ?? '')
+      /display\s*:\s*none|visibility\s*:\s*(?:hidden|collapse)/i.test(current.getAttribute('style') ?? '')
     ) return true;
     const style = current.ownerDocument.defaultView?.getComputedStyle(current);
-    if (style?.display === 'none' || style?.visibility === 'hidden') return true;
+    if (style?.display === 'none' || style?.visibility === 'hidden' || style?.visibility === 'collapse'
+      || style?.opacity === '0' || style?.contentVisibility === 'hidden') return true;
     current = current.parentElement;
   }
   return false;
@@ -207,6 +210,46 @@ function visibleText(element: Element): string {
     node = walker.nextNode();
   }
   return parts.join(' ').replace(/\s+/g, ' ').trim();
+}
+
+/** 常驻登录组件不等于访问限制；只接受当前可见的阅读限制或活动模态登录框。 */
+function hasVisibleLoginBlock(document: Document): boolean {
+  const view = document.defaultView;
+  const hasLayout = document.documentElement.getClientRects().length > 0;
+  const viewportWidth = view?.innerWidth ?? 0;
+  const viewportHeight = view?.innerHeight ?? 0;
+  const readingRestriction = /(?:请先|需要|必须)?登[录陆](?:后|才能|以)[^。！？\n]{0,16}(?:查看|阅读|访问|继续)|(?:查看|阅读|访问)[^。！？\n]{0,12}(?:先|需要|必须)登[录陆]|(?:sign|log)\s*in\s+to\s+(?:view|read|continue)/iu;
+  for (const selector of LOGIN_SELECTORS) {
+    for (const element of document.querySelectorAll(selector)) {
+      if (isHidden(element)) continue;
+      // DOM-only fixtures have no layout. In a browser, zero-area/offscreen layers cannot
+      // block reading; checking the viewport also excludes collapsed/translated remnants.
+      if (hasLayout && ![...element.getClientRects()].some(rect => rect.width > 0 && rect.height > 0
+        && rect.bottom > 0 && rect.right > 0 && rect.top < viewportHeight && rect.left < viewportWidth)) continue;
+      const text = visibleText(element);
+      if (readingRestriction.test(text)) return true;
+      let modal = element.closest('[role="dialog"][aria-modal="true"]');
+      if (!modal) {
+        try { modal = element.closest('dialog:modal'); } catch { /* Older DOM engines lack :modal. */ }
+      }
+      // Some login overlays have no ARIA role. A visible, hit-testing layer covering the
+      // viewport still blocks reading; a small fixed login badge does not establish that.
+      if (!modal && hasLayout) {
+        for (let ancestor: Element | null = element; ancestor; ancestor = ancestor.parentElement) {
+          const style = view?.getComputedStyle(ancestor);
+          if ((style?.position !== 'fixed' && style?.position !== 'absolute') || style.pointerEvents === 'none') continue;
+          if ([...ancestor.getClientRects()].some(rect => rect.left <= 0 && rect.top <= 0
+            && rect.right >= viewportWidth && rect.bottom >= viewportHeight)) {
+            modal = ancestor;
+            break;
+          }
+        }
+      }
+      if (modal && !isHidden(modal)
+        && (/登[录陆]|(?:sign|log)\s*in/iu.test(text) || element.querySelector('input[type="password"]'))) return true;
+    }
+  }
+  return false;
 }
 
 /**
@@ -307,19 +350,20 @@ export function extractNowcoder(document: Document, url: URL, now: Clock) {
     || VERIFICATION_TITLE.test(document.title.trim())) {
     throw new ExtractionError('CAPTCHA_REQUIRED', '牛客要求完成验证码，请先在浏览器人工处理后重试');
   }
-  if (LOGIN_SELECTORS.some(selector => [...document.querySelectorAll(selector)].some(element => !isHidden(element)))) {
-    throw new ExtractionError('AUTH_REQUIRED', '请先登录牛客网，再打开需要保存的面经详情页');
-  }
-
   const embedded = embeddedNowcoderPost(document, url);
-  const primary = firstWithin(document, CONTENT_SELECTORS);
+  const primary = firstWithin(document, CONTENT_SELECTORS, true);
   const content = primary ? withGallery(document, primary) : embedded?.content ?? scoredFallback(document);
   const title =
-    elementText(firstWithin(document, TITLE_SELECTORS)) ||
+    elementText(firstWithin(document, TITLE_SELECTORS, true)) ||
     embedded?.title ||
     elementText(document.querySelector('title'));
 
-  if (!content || !title || elementText(content).length < 40) {
+  const explicitLoginPage = /^(?:登[录陆]|Login|Sign\s*in)(?:\s*[-_|｜]\s*牛客(?:网)?)?$/iu.test(document.title.trim());
+  if (hasVisibleLoginBlock(document) || (explicitLoginPage && (!content || visibleText(content).length < 40))) {
+    throw new ExtractionError('AUTH_REQUIRED', '牛客网当前显示可见的登录访问阻挡；请在正常页面恢复访问后重试');
+  }
+
+  if (!content || !title || visibleText(content).length < 40) {
     throw new ExtractionError(
       'UNSUPPORTED_LAYOUT',
       '请在牛客网打开一篇面经或讨论的详情页后重试',

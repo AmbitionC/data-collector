@@ -8,6 +8,7 @@ import {
   ZSXQ_COMPLETE_CONTENT_CAPABILITY,
   ZSXQ_PLAN_VIEWS,
   type CollectedDocument,
+  type JobRecord,
   type CollectionPlanAttempt,
   type CollectionPlanRejection,
   type CollectionPlanId,
@@ -299,6 +300,9 @@ export interface TabsApi {
 
 export interface BridgeClient {
   send(type: string, requestId: string, payload: unknown): void;
+  /** Durable authority when the worker's bounded acknowledgement cache is full. */
+  getJob?(jobId: string): Promise<Pick<JobRecord,
+    'id' | 'url' | 'status' | 'directedRunId' | 'directedRunAttempt'>>;
   createJob(
     url: string,
     overrides?: {
@@ -459,6 +463,7 @@ interface OrdinaryRemoteJobLifecycle {
 
 interface DirectedRemoteJobLifecycle extends DirectedRemoteJobOwnership {
   requestId: string;
+  acknowledged?: boolean;
   controller: AbortController;
   activeTabIds: Set<number>;
   closingByTabId: Map<number, Promise<void>>;
@@ -2161,8 +2166,10 @@ export class JobRunner {
         last = response;
         continue;
       }
+      // Browser load completion precedes SPA mounting; a missing ZSXQ layout is retryable
+      // within the same bounded observation window, before full-body stability can begin.
       const retryable = response.error.code === 'CONTENT_EMPTY'
-        || (retryUnsupportedLayout && response.error.code === 'UNSUPPORTED_LAYOUT');
+        || ((retryUnsupportedLayout || stabilizeZsxq) && response.error.code === 'UNSUPPORTED_LAYOUT');
       if (!retryable) return response;
       stableSignature = undefined;
       stableForMs = 0;
@@ -2452,7 +2459,7 @@ export class JobRunner {
     // This is deliberately before the ordinary/directed ownership split. A buffered collect can
     // be replayed with either shape after an ack raced the connection's awaited state update.
     if (this.acknowledgedRemoteJobIds.has(requestId)) return;
-    if (this.remoteAckOverflow) {
+    if (this.remoteAckOverflow && !this.options.bridge.getJob) {
       throw new Error('远程采集任务确认缓冲已达安全上限，已停止接收新任务');
     }
     if (!ownership) {
@@ -2583,6 +2590,7 @@ export class JobRunner {
     }
     const lifecycle = this.directedRemoteJobs.get(requestId);
     if (lifecycle) {
+      lifecycle.acknowledged = true;
       this.rememberAcknowledgedRemoteJob(requestId);
       if (!lifecycle.terminal) {
         return;
@@ -2620,6 +2628,12 @@ export class JobRunner {
     let terminal: RemoteJobTerminal | undefined;
     let closeError: unknown;
     const signal = lifecycle?.controller.signal;
+    const discardUnstartedLifecycle = (): void => {
+      if (ordinaryLifecycle) ordinaryLifecycle.acknowledged = true;
+      if (lifecycle && this.directedRemoteJobs.get(requestId) === lifecycle) {
+        this.directedRemoteJobs.delete(requestId);
+      }
+    };
     const sendTerminal = (type: 'job.result' | 'job.error', payload: unknown): void => {
       if (lifecycle) {
         terminal = { type, payload };
@@ -2632,6 +2646,35 @@ export class JobRunner {
     };
     try {
       throwIfAborted(signal);
+      if (this.remoteAckOverflow) {
+        // The cache is bounded for this worker's lifetime. Filling it must not disable a
+        // long-lived worker: the authenticated Bridge still has authoritative job state.
+        // Query inside the registered lifecycle so an ack racing this await stays visible.
+        const job = await this.options.bridge.getJob!(requestId);
+        throwIfAborted(signal);
+        if (
+          job.id !== requestId
+          || !sameCanonicalUrl(job.url, rawUrl)
+          || job.directedRunId !== lifecycle?.directedRunId
+          || job.directedRunAttempt !== lifecycle?.directedRunAttempt
+        ) {
+          // A stale or mismatched request cannot terminalize the actual durable owner.
+          discardUnstartedLifecycle();
+          return;
+        }
+        if (
+          ['saved', 'failed', 'needs_attention'].includes(job.status)
+          || ordinaryLifecycle?.acknowledged
+          || lifecycle?.acknowledged
+        ) {
+          discardUnstartedLifecycle();
+          return;
+        }
+        if (job.status !== 'dispatched' && job.status !== 'collecting') {
+          discardUnstartedLifecycle();
+          return;
+        }
+      }
       const parsedUrl = parseSupportedUrl(rawUrl);
       const url = parsedUrl.href;
       const tab = await this.createRemoteTab(
@@ -2643,7 +2686,7 @@ export class JobRunner {
       await this.options.waitForTabComplete(tabId, 30_000, signal);
       throwIfAborted(signal);
       this.options.bridge.send('job.progress', requestId, { stage: 'collecting' });
-      const response = await this.extractWithRetry(
+      let response = await this.extractWithRetry(
         tabId,
         undefined,
         parsedUrl.hostname === 'www.nowcoder.com',
@@ -2653,6 +2696,24 @@ export class JobRunner {
           : 5,
         signal,
       );
+      throwIfAborted(signal);
+      const topicIdentity = parsedUrl.hostname === 'wx.zsxq.com'
+        ? /^\/group\/(\d+)\/topic\/(\d+)\/?$/u.exec(parsedUrl.pathname) : undefined;
+      if (!response.ok && topicIdentity
+        && (response.error.code === 'UNSUPPORTED_LAYOUT' || response.error.code === 'CONTENT_EMPTY')) {
+        response = await this.ask(tabId, {
+          type: this.contentMessageType('document.apiCollectTopic'),
+          groupId: topicIdentity[1], topicId: topicIdentity[2],
+        }, signal);
+        if (response.ok) {
+          const candidate = payloadOf(response, 'document');
+          if (candidate.source !== 'zsxq' || candidate.kind !== 'post'
+            || !sameCanonicalUrl(candidate.canonicalUrl, url)
+            || candidate.sourceMetadata?.apiTopicDetail !== true) {
+            throw new Error('单条详情接口未返回可核验的目标帖子');
+          }
+        }
+      }
       throwIfAborted(signal);
       if (!response.ok) {
         const needsAttention = response.error.code === 'AUTH_REQUIRED';
@@ -2676,6 +2737,10 @@ export class JobRunner {
         sendTerminal,
       );
     } catch (error) {
+      if (tabId === undefined && (ordinaryLifecycle?.acknowledged || lifecycle?.acknowledged)) {
+        discardUnstartedLifecycle();
+        return;
+      }
       if (lifecycle && (isAbortError(error) || signal?.aborted)) {
         terminal = cancelledTerminal();
         lifecycle.pendingTerminal = terminal;

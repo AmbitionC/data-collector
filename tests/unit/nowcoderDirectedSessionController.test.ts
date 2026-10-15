@@ -1,9 +1,10 @@
-import { mkdir, writeFile } from 'node:fs/promises';
+import { mkdir, symlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { JobStore } from '../../packages/bridge/src/jobs/store.js';
 import { NowcoderDirectedSessionController } from '../../packages/bridge/src/nowcoderDirected/sessionController.js';
 import { NowcoderDirectedStore } from '../../packages/bridge/src/nowcoderDirected/store.js';
+import { knownNowcoderSources } from '../../packages/bridge/src/nowcoderDirected/knownSources.js';
 import { createTemporaryDirectoryTracker } from '../helpers/temp.js';
 
 const NOW = '2026-08-30T00:00:00.000Z';
@@ -30,7 +31,50 @@ function searchResponse(
 }
 
 describe('NowcoderDirectedSessionController', () => {
-  it('excludes only published history while allowing local and old-job URLs to be recollected', async () => {
+  it.each(['parent-escape', 'nested-symlink'])('rejects an unsafe configured inbox: %s', async reason => {
+    const root = await temporaryDirectories.create('nowcoder-unsafe-inbox-');
+    const target = join(root, 'target'), outside = join(root, 'outside');
+    await mkdir(join(target, 'custom-inbox'), { recursive: true });
+    await mkdir(join(outside, 'nowcoder'), { recursive: true });
+    await symlink(outside, join(target, 'custom-inbox', 'linked'));
+    const inboxDir = reason === 'parent-escape' ? '../outside' : 'custom-inbox/linked';
+    await expect(knownNowcoderSources({ libraryRoot: root, targetRoot: target, jobs: [],
+      ...{ inboxDir } })).rejects.toThrow();
+  });
+
+  it('also recognizes legacy source.json review entries without treating them as missing', async () => {
+    const root=await temporaryDirectories.create('nowcoder-legacy-pending-');
+    await mkdir(join(root,'_inbox','nowcoder','legacy'),{recursive:true});
+    await writeFile(join(root,'_inbox','nowcoder','legacy','source.json'),JSON.stringify({document:{canonicalUrl:LOCAL_URL}}));
+    const known=await knownNowcoderSources({libraryRoot:root,targetRoot:root,jobs:[]});
+    expect(known.urls.has(LOCAL_URL)).toBe(true);
+    expect(known.reasons.get(LOCAL_URL)).toBe('pending_inbox');
+    expect(known.warnings).toEqual({});
+  });
+  it('persists undated hits for review and does not send them into automatic detail collection', async () => {
+    const root=await temporaryDirectories.create('nowcoder-review-only-');
+    const store=await NowcoderDirectedStore.open(join(root,'directed.json'));
+    const jobs=await JobStore.open(join(root,'jobs.json'));
+    const controller=new NowcoderDirectedSessionController({store,jobs,libraryRoot:root,
+      fetch:async()=>Response.json({success:true,code:0,data:{totalPage:1,records:[{momentData:{uuid:'undated',title:'Agent 一面'}}]}}),
+      id:()=>SESSION_ID,now:()=>new Date(NOW)});
+    const session=await controller.create({queries:['Agent'],target:1,sort:'latest'});
+    expect(session.candidates).toEqual([]);
+    expect(session.reviewOnlyCandidates).toMatchObject([{canonicalUrl:'https://www.nowcoder.com/feed/main/detail/undated',reason:'missing_published_at'}]);
+    expect((await NowcoderDirectedStore.open(join(root,'directed.json'))).getSession(SESSION_ID)?.reviewOnlyCandidates).toEqual(session.reviewOnlyCandidates);
+  });
+
+  it('stops before network search when the local deduplication catalog is corrupt', async () => {
+    const root=await temporaryDirectories.create('nowcoder-search-corrupt-');
+    await mkdir(join(root,'_catalog'));
+    await writeFile(join(root,'_catalog','index.json'),'broken');
+    const store=await NowcoderDirectedStore.open(join(root,'directed.json'));
+    const jobs=await JobStore.open(join(root,'jobs.json'));const fetcher=vi.fn<typeof fetch>();
+    const controller=new NowcoderDirectedSessionController({store,jobs,libraryRoot:root,fetch:fetcher});
+    await expect(controller.create({queries:['Agent'],target:1,sort:'latest'})).rejects.toThrow('牛客最新搜索暂时不可用');
+    expect(fetcher).not.toHaveBeenCalled();
+  });
+  it('excludes local pending sources, active jobs, pending inbox and processed history', async () => {
     const root = await temporaryDirectories.create('nowcoder-directed-session-controller-');
     const storePath = join(root, 'directed.json');
     const store = await NowcoderDirectedStore.open(storePath);
@@ -52,12 +96,14 @@ describe('NowcoderDirectedSessionController', () => {
       updatedAt: '2026-08-30',
       records: {
         aaaaaaaaaaaa: {
-          source: 'nowcoder', url: LOCAL_URL, contentHash: '1'.repeat(16),
+          source: 'nowcoder', url: 'https://www.nowcoder.com/feed/main/detail/processed-only', contentHash: '1'.repeat(16),
           clusterId: 'cluster-known', evidenceGrade: 'B', status: 'skipped',
           publicFiles: [], knowledgeKeys: [], processedAt: NOW,
         },
       },
     })}\n`, 'utf8');
+    await mkdir(join(root, '_inbox', 'nowcoder', 'pending'), {recursive:true});
+    await writeFile(join(root, '_inbox', 'nowcoder', 'pending', 'meta.json'), JSON.stringify({url:'https://www.nowcoder.com/feed/main/detail/pending-inbox'}));
     const bodies: unknown[] = [];
     const fetcher = vi.fn<typeof fetch>(async (_url, init) => {
       const body = JSON.parse(String(init?.body)) as { page: number };
@@ -67,6 +113,8 @@ describe('NowcoderDirectedSessionController', () => {
             { url: LOCAL_URL, createTime: Date.parse('2026-08-29T23:00:00.000Z') },
             { url: OLDER_URL, createTime: Date.parse('2026-08-28T00:00:00.000Z') },
             { url: JOB_URL, createTime: Date.parse('2026-08-27T00:00:00.000Z') },
+            {url:'https://www.nowcoder.com/feed/main/detail/pending-inbox',createTime:Date.parse(NOW)},
+            {url:'https://www.nowcoder.com/feed/main/detail/processed-only',createTime:Date.parse(NOW)},
           ], 2)
         : searchResponse([
             { url: NEWEST_URL, createTime: Date.parse('2026-08-29T00:00:00.000Z') },
@@ -105,8 +153,10 @@ describe('NowcoderDirectedSessionController', () => {
     expect(session.candidates.map(candidate => candidate.canonicalUrl)).toEqual([
       NEWEST_URL,
       OLDER_URL,
-      JOB_URL,
     ]);
+    expect(session.discovery?.knownSourcesRemoved).toBe(4);
+    expect(session.discovery?.knownSourceCounts).toMatchObject({local_pending:1,active_or_saved_job:1,pending_inbox:1,processed_history:1});
+    expect(session.discovery?.sourceIndexWarnings).toEqual({});
     expect(fetcher.mock.calls.every(([url]) =>
       new URL(String(url)).hostname === 'gw-c.nowcoder.com')).toBe(true);
     const reopened = await NowcoderDirectedStore.open(storePath);

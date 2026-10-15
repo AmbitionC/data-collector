@@ -153,6 +153,29 @@ async function createStoredSession(
 }
 
 describe('minimal directed Nowcoder HTTP routes', () => {
+  it.each(['_inbox', 'custom-inbox/nested'])('excludes pending sources in the configured %s destination', async inboxDir => {
+    const root = await temporaryDirectories.create('nowcoder-configured-inbox-');
+    const configDir = join(root, '.config'), target = join(root, 'resource');
+    await mkdir(join(target, inboxDir, 'nowcoder', 'pending'), { recursive: true });
+    await mkdir(configDir, { recursive: true });
+    await writeFile(join(target, inboxDir, 'nowcoder', 'pending', 'meta.json'), JSON.stringify({ url: CANDIDATE_URL }));
+    await writeFile(join(configDir, 'sinks.json'), JSON.stringify({
+      sinks: { resource: { type: 'repo-inbox', repoPath: target, inboxDir, commit: false, push: false } },
+      routes: { nowcoder: ['resource'] },
+    }));
+    const bridge = await startBridge({ libraryRoot: join(root, 'library'), configDir, port: 0,
+      fetch: async () => searchResponse([{ url: CANDIDATE_URL, createTime: Date.parse('2026-08-29T00:00:00Z') }]) });
+    bridges.push(bridge);
+    const { token } = await authorizeOnly(bridge);
+    const created = await request(bridge, token, '/v1/nowcoder/search-sessions', {
+      method: 'POST', body: JSON.stringify({ queries: ['Agent'], target: 1, sort: 'latest' }),
+    });
+    expect(created.response.status).toBe(201);
+    expect(created.body.session).toMatchObject({ candidates: [], discovery: {
+      knownSourcesRemoved: 1, knownSourceCounts: { pending_inbox: 1 }, sourceIndexWarnings: {},
+    } });
+  });
+
   it('keeps preview/session routes behind bearer auth and redacts search failures', async () => {
     const root = await temporaryDirectories.create('nowcoder-directed-http-preview-');
     const configDir = join(root, '.config');

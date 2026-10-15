@@ -921,9 +921,10 @@ export class CollectionPlanService {
           return;
         }
 
-        const wholeBatchLayoutOutage = attached.length > 0 &&
+        const attempted = attached.filter(job => job.errorCode !== 'SOURCE_ALREADY_COLLECTED');
+        const wholeBatchLayoutOutage = attempted.length > 0 &&
           prepared.saved.length === 0 &&
-          attached.every(job =>
+          attempted.every(job =>
             job.status === 'failed' && NOWCODER_CONTENT_REJECTION_CODES.has(job.errorCode ?? ''));
         if (wholeBatchLayoutOutage) {
           const terminal = await this.dependencies.store.finalizeSelection(
@@ -1009,6 +1010,8 @@ export class CollectionPlanService {
     for (const rejected of selection.rejected.filter(item => currentUrls.has(item.url))) {
       rejectionCounts[rejected.reason] = (rejectionCounts[rejected.reason] ?? 0) + 1;
     }
+    const duplicates = attached.filter(job => job.status === 'failed' && job.errorCode === 'SOURCE_ALREADY_COLLECTED');
+    if (duplicates.length > 0) rejectionCounts['来源已在本地或待审链中'] = duplicates.length;
     for (const rejected of contentRejectionFailures) {
       const reason = NOWCODER_CONTENT_REJECTION_CODES.get(rejected.errorCode ?? '')!;
       rejectionCounts[reason] = (rejectionCounts[reason] ?? 0) + 1;

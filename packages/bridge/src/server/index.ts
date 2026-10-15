@@ -1,3 +1,4 @@
+import { knownNowcoderSources } from '../nowcoderDirected/knownSources.js';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
@@ -862,11 +863,23 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
     ) return;
     if (job.nowcoderReviewOnly && job.batchId && !pacingApplied) {
       try {
-        await reviewPacer(job.batchId).run(async () => dispatch(job, targetSocket, true), () =>
+        const duplicate = await reviewPacer(job.batchId).run(async () => {
+          const known = await knownNowcoderSources({ ...nowcoderSourceInput,
+            jobs: jobs.list().filter(current => current.id !== job.id) });
+          if (known.urls.has(job.url)) return true;
+          await dispatch(job, targetSocket, true);
+          return false;
+        }, () =>
           !closing && targetSocket === extensionSocket && extensionReady
           && targetSocket?.readyState === WebSocket.OPEN
           && jobs.get(job.id)?.status === 'queued'
           && collectionPlans?.acceptsFixedNowcoderJob(job) === true);
+        // Release the pacing queue before reconciliation can schedule its next child.
+        if (duplicate && collectionPlans?.acceptsFixedNowcoderJob(job) && jobs.get(job.id)?.status === 'queued') {
+          await terminalizeFixedNowcoderChild(job, 'failed', {
+            errorCode: 'SOURCE_ALREADY_COLLECTED', errorMessage: '该来源已在本地或待审链中，无需重采',
+          });
+        }
       } catch (error) {
         if (error instanceof NowcoderCollectionStopError && collectionPlans?.acceptsFixedNowcoderJob(job)) {
           await terminalizeFixedNowcoderChild(job, 'needs_attention', { errorCode: error.code, errorMessage: error.message });
@@ -994,6 +1007,9 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
           .catch(error => console.warn('固定牛客任务发送围栏清理失败', error));
         return;
       }
+      if (sendCandidate.nowcoderReviewOnly && sendCandidate.batchId) {
+        reviewPacer(sendCandidate.batchId).markRequestStart();
+      }
       targetSocket.send(JSON.stringify(envelope('job.collect', sendCandidate.id, {
         url: sendCandidate.url,
         interactive: sendCandidate.directedRunId ? false : !sendCandidate.batchId,
@@ -1073,13 +1089,29 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
       observedAt: new Date().toISOString(),
     };
   };
-  const nowcoderTargetRoot = router.directedSyncTarget('nowcoder')?.root;
+  const nowcoderTarget = router.directedSyncTarget('nowcoder');
+  const nowcoderTargetRoot = nowcoderTarget?.root;
+  const nowcoderSourceInput = {
+    libraryRoot: config.libraryRoot,
+    targetRoot: nowcoderTargetRoot,
+    inboxDir: nowcoderTarget?.sink.inboxDir,
+    historyRoot: config.interviewInventoryRoot,
+    historyPath: config.interviewHistoryPath,
+    historyCommit: config.interviewInventoryCommit,
+  };
+  const explicitHistoryOptions = {
+    ...(config.interviewInventoryRoot ? { historyRoot: config.interviewInventoryRoot } : {}),
+    ...(config.interviewHistoryPath ? { historyPath: config.interviewHistoryPath } : {}),
+    ...(config.interviewInventoryCommit ? { historyCommit: config.interviewInventoryCommit } : {}),
+  };
   const directedSessionController = directedStore
     ? new NowcoderDirectedSessionController({
         store: directedStore,
         jobs,
         libraryRoot: config.libraryRoot,
         ...(nowcoderTargetRoot ? { targetRoot: nowcoderTargetRoot } : {}),
+        ...(nowcoderTarget ? { inboxDir: nowcoderTarget.sink.inboxDir } : {}),
+        ...explicitHistoryOptions,
         ...(options.fetch ? { fetch: options.fetch } : {}),
       })
     : undefined;
@@ -1099,6 +1131,10 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
         store: directedStore,
         jobs,
         dispatch,
+        knownSourceUrls: async excludeRunId => (await knownNowcoderSources({
+          ...nowcoderSourceInput,
+          jobs: jobs.list(), excludeRunId,
+        })).urls,
         sendCancel: async job => {
           const socket = extensionSocket;
           if (!socket || !extensionReady || socket.readyState !== WebSocket.OPEN) return;
@@ -1140,6 +1176,7 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
       service: () => directedService!,
       libraryRoot: config.libraryRoot,
       ...(nowcoderTargetRoot ? { targetRoot: nowcoderTargetRoot } : {}),
+        ...explicitHistoryOptions,
     });
   }
   if (directedService) {
@@ -1179,24 +1216,26 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
         jobs,
         nowcoderSchedule,
         companyInventory: async () => {
-          const resourceRoot = router.syncTarget('nowcoder')?.root;
+          const resourceRoot = config.interviewInventoryRoot ?? router.syncTarget('nowcoder')?.root;
           if (!resourceRoot) throw new Error('请先配置面经资源仓库；库存不可核验，待审核收集未开始');
-          return await readCompanyInventory(resourceRoot, config.libraryRoot, new Date().toISOString(), config.interviewHistoryPath);
+          return await readCompanyInventory(resourceRoot, config.libraryRoot, new Date().toISOString(), config.interviewHistoryPath, config.interviewInventoryCommit);
         },
         extensionConnected: () => extensionReady && extensionSocket?.readyState === WebSocket.OPEN,
         canCollectZsxq: extensionCanCollectZsxq,
         canStartZsxqAttempt: () => persistingJobIds.size === 0
           && !updateCheckInFlight
           && artifactReaders.snapshot().updateState === 'idle',
-        discoverNowcoder: (knownUrls, batch) => {
-          if (!batch?.nowcoderReviewOnly) return discoverNowcoderPlanCandidates(collectorFetcher, knownUrls);
+        discoverNowcoder: async (knownUrls, batch) => {
+          const known = await knownNowcoderSources({ ...nowcoderSourceInput, jobs: jobs.list() });
+          const urls = new Set([...knownUrls, ...known.urls]);
+          if (!batch?.nowcoderReviewOnly) return discoverNowcoderPlanCandidates(collectorFetcher, urls);
           const pacedFetch: typeof fetch = (input, init) => reviewPacer(batch.id).run(async () => {
             const response = await collectorFetcher(input, init);
             const stop = await detectNowcoderResponseStop(response);
             if (stop) throw stop;
             return response;
           }, () => !closing && planStore?.get(batch.id)?.status === 'running');
-          return discoverNowcoderPlanCandidates(pacedFetch, knownUrls, { reviewOnly: true, ...(batch.nowcoderCompanies ? { companies: batch.nowcoderCompanies } : {}) });
+          return discoverNowcoderPlanCandidates(pacedFetch, urls, { reviewOnly: true, ...(batch.nowcoderCompanies ? { companies: batch.nowcoderCompanies } : {}) });
         },
         dispatch,
         collectZsxq: async (
@@ -1361,7 +1400,10 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
         .map(job => job.url)
         .filter(url => url.startsWith('https://www.nowcoder.com/')),
     ),
-    discoverNowcoder: knownUrls => discoverNowcoderUrls(collectorFetcher, knownUrls),
+    discoverNowcoder: async knownUrls => {
+      const known = await knownNowcoderSources({ ...nowcoderSourceInput, jobs: jobs.list() });
+      return await discoverNowcoderUrls(collectorFetcher, new Set([...knownUrls, ...known.urls]));
+    },
     enqueueNowcoder: async url => {
       const id = `fe-journey-nowcoder-${stableContentId(url)}`;
       const existing = jobs.get(id);

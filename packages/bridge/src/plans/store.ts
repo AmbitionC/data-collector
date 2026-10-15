@@ -29,7 +29,7 @@ interface ParsedStoredPlans {
   migrated: boolean;
 }
 
-const SKIPPED_ERROR_CODES = new Set(['DUPLICATE', 'QUALITY_REJECTED', 'SKIPPED']);
+const SKIPPED_ERROR_CODES = new Set(['DUPLICATE', 'QUALITY_REJECTED', 'SKIPPED', 'SOURCE_ALREADY_COLLECTED']);
 
 function repairLegacyNowcoderSelectionCounters(value: unknown): unknown {
   if (typeof value !== 'object' || value === null) return value;

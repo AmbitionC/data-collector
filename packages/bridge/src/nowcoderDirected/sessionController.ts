@@ -5,7 +5,7 @@ import {
   type NowcoderSearchSession,
 } from '@data-collector/shared';
 import type { JobStore } from '../jobs/store.js';
-import { loadStrictProcessedNowcoderHistory } from '../plans/nowcoderProcessedHistory.js';
+import { knownNowcoderSources } from './knownSources.js';
 import { discoverNowcoderDirectedCandidates } from './discovery.js';
 import type { NowcoderDirectedStore } from './store.js';
 
@@ -26,6 +26,10 @@ export interface NowcoderDirectedSessionControllerOptions {
   jobs: JobStore;
   libraryRoot: string;
   targetRoot?: string;
+  inboxDir?: string;
+  historyRoot?: string;
+  historyPath?: string;
+  historyCommit?: string;
   fetch?: typeof fetch;
   now?: () => Date;
   id?: () => string;
@@ -48,17 +52,16 @@ export class NowcoderDirectedSessionController {
     const now = new Date(this.now().getTime());
     let discovery: Awaited<ReturnType<typeof discoverNowcoderDirectedCandidates>>;
     try {
-      const knownUrls = new Set<string>();
-      if (this.options.targetRoot) {
-        const { snapshot } = await loadStrictProcessedNowcoderHistory(this.options.targetRoot);
-        for (const entry of snapshot.hashesByUrl) knownUrls.add(entry.url);
-      }
+      const known = await knownNowcoderSources({ libraryRoot: this.options.libraryRoot,
+        targetRoot: this.options.targetRoot, inboxDir: this.options.inboxDir, historyRoot: this.options.historyRoot, historyPath: this.options.historyPath, historyCommit: this.options.historyCommit, jobs: this.options.jobs.list() });
       discovery = await discoverNowcoderDirectedCandidates(
         this.fetcher,
         request,
-        knownUrls,
+        known.urls,
         now,
+        known.reasons,
       );
+      discovery.diagnostics.sourceIndexWarnings = known.warnings;
     } catch {
       throw new NowcoderDirectedSearchError();
     }
@@ -74,6 +77,8 @@ export class NowcoderDirectedSessionController {
       createdAt: now.toISOString(),
       expiresAt: new Date(now.getTime() + SESSION_TTL_MS).toISOString(),
       candidates: discovery.candidates,
+      discovery: discovery.diagnostics,
+      reviewOnlyCandidates: discovery.previewOnly,
     };
     return await this.options.store.createSession(session, { target: request.target });
   }

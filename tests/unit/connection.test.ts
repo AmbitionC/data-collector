@@ -1406,6 +1406,114 @@ describe('extension Bridge connection', () => {
     );
   });
 
+  it('reads durable job state through the authenticated encoded job route', async () => {
+    const storage = new MemoryStorage({ bridgeToken: 'x'.repeat(43) });
+    const job = { id: 'job/one', url: 'https://www.nowcoder.com/discuss/10001', status: 'dispatched' };
+    const fetcher = vi.fn<typeof fetch>(async function (this: unknown) {
+      if (this !== undefined) throw new TypeError('Illegal invocation');
+      return new Response(JSON.stringify(job));
+    });
+    const connection = new BridgeConnection(dependencies(storage, () => new MemorySocket(), fetcher));
+
+    await expect(connection.getJob('job/one')).resolves.toEqual(job);
+    expect(fetcher).toHaveBeenCalledWith('http://127.0.0.1:17321/v1/jobs/job%2Fone', {
+      headers: { authorization: `Bearer ${'x'.repeat(43)}` },
+      signal: expect.any(AbortSignal),
+    });
+  });
+
+  it.each([
+    null,
+    { id: 'other', url: 'https://www.nowcoder.com/discuss/10001', status: 'dispatched' },
+    { id: 'job/one', status: 'dispatched' },
+    { id: 'job/one', url: 'https://www.nowcoder.com/discuss/10001', status: 'unknown' },
+  ])('rejects malformed durable job proof: %j', async job => {
+    const storage = new MemoryStorage({ bridgeToken: 'x'.repeat(43) });
+    const fetcher = vi.fn<typeof fetch>(async () => new Response(JSON.stringify(job)));
+    const connection = new BridgeConnection(dependencies(storage, () => new MemorySocket(), fetcher));
+    await expect(connection.getJob('job/one')).rejects.toThrow('Bridge 返回了无效任务');
+  });
+
+  it('reports a rejected collect handler to Bridge instead of silently stranding the dispatched job', async () => {
+    const storage = new MemoryStorage({ bridgeToken: 'x'.repeat(43) });
+    const socket = new MemorySocket();
+    const connection = new BridgeConnection(dependencies(storage, () => socket));
+    connection.onCollect(async () => { throw new Error('普通采集任务已达安全上限'); });
+    await connection.start();
+    socket.emit('open');
+    await vi.waitFor(() => expect(socket.sent).toHaveLength(1));
+
+    socket.emit('message', JSON.stringify({
+      protocolVersion: 1,
+      type: 'job.collect',
+      requestId: 'rejected-collect',
+      timestamp: '2026-09-28T12:00:00.000Z',
+      payload: { url: 'https://www.nowcoder.com/discuss/10001', interactive: false },
+    }));
+
+    await vi.waitFor(() => expect(socket.sent.map(frame => JSON.parse(frame))).toContainEqual(
+      expect.objectContaining({
+        type: 'job.error',
+        requestId: 'rejected-collect',
+        payload: { code: 'COLLECTION_FAILED', message: '普通采集任务已达安全上限', needsAttention: false },
+      }),
+    ));
+    expect(storage.values.bridgeStatus).toBe('connected');
+  });
+
+  it('does not overwrite an emitted collection result with a handler cleanup error', async () => {
+    const storage = new MemoryStorage({ bridgeToken: 'x'.repeat(43) });
+    const socket = new MemorySocket();
+    const connection = new BridgeConnection(dependencies(storage, () => socket));
+    connection.onCollect(async requestId => {
+      connection.send('job.result', requestId, { document: { title: 'captured' } });
+      throw new Error('tab close failed after result');
+    });
+    await connection.start();
+    socket.emit('open');
+    await vi.waitFor(() => expect(socket.sent).toHaveLength(1));
+
+    socket.emit('message', JSON.stringify({
+      protocolVersion: 1,
+      type: 'job.collect',
+      requestId: 'result-before-cleanup-error',
+      timestamp: '2026-09-28T12:00:00.000Z',
+      payload: { url: 'https://www.nowcoder.com/discuss/10001', interactive: false },
+    }));
+    await vi.waitFor(() => expect(socket.sent.map(frame => JSON.parse(frame)))
+      .toContainEqual(expect.objectContaining({ type: 'job.result' })));
+    await flushPromises();
+
+    expect(socket.sent.map(frame => JSON.parse(frame)).filter(frame => frame.type === 'job.error'))
+      .toHaveLength(0);
+  });
+
+  it('does not turn a rejected directed ownership tuple into a tab-clear terminal proof', async () => {
+    const storage = new MemoryStorage({ bridgeToken: 'x'.repeat(43) });
+    const socket = new MemorySocket();
+    const connection = new BridgeConnection(dependencies(storage, () => socket));
+    connection.onCollect(async () => { throw new Error('定向采集任务归属不匹配'); });
+    await connection.start();
+    socket.emit('open');
+    await vi.waitFor(() => expect(socket.sent).toHaveLength(1));
+
+    socket.emit('message', JSON.stringify({
+      protocolVersion: 1,
+      type: 'job.collect',
+      requestId: 'wrong-directed-ownership',
+      timestamp: '2026-09-28T12:00:00.000Z',
+      payload: {
+        url: 'https://www.nowcoder.com/discuss/10001', interactive: false,
+        directedRunId: 'wrong-run', directedRunAttempt: PLAN_ATTEMPT,
+      },
+    }));
+    await vi.waitFor(() => expect(storage.values.lastJobId).toBe('wrong-directed-ownership'));
+    await flushPromises();
+
+    expect(socket.sent.map(frame => JSON.parse(frame)).filter(frame => frame.type === 'job.error'))
+      .toHaveLength(0);
+  });
+
   it('reads and saves strict review-only schedule settings with authorization without starting a run', async () => {
     const token = 'x'.repeat(43);
     const config = { enabled: false, companies: ['ant', 'tencent'], reviewOnly: true };
