@@ -89,6 +89,7 @@ function counts(codes: readonly NowcoderDirectedRejectionCode[]): NowcoderDirect
 }
 
 function terminalCode(job: JobRecord): NowcoderDirectedRejectionCode {
+  if (job.errorCode === 'SOURCE_ALREADY_COLLECTED') return 'SOURCE_ALREADY_COLLECTED';
   if (job.status === 'failed') return 'DETAIL_FAILED';
   if (job.status === 'needs_attention') return 'DETAIL_NEEDS_ATTENTION';
   return 'DETAIL_NOT_SAVED';

@@ -100,6 +100,7 @@ export interface NowcoderDirectedServiceDependencies {
   store: NowcoderDirectedStore;
   jobs: JobStore;
   dispatch: (job: JobRecord) => Promise<void>;
+  knownSourceUrls?: (excludeRunId: string) => Promise<ReadonlySet<string>>;
   /** Send an exact tuple cancellation frame; the service calls this only after intent is durable. */
   sendCancel?: (job: JobRecord) => Promise<void>;
   /** Republish job.saved/job.failed only after the JobStore transition is durable. */
@@ -500,6 +501,8 @@ export class NowcoderDirectedService {
       if (snapshot.currentRoundJobIds.some(id => !isTerminalJob(this.dependencies.jobs.get(id)))) {
         throw new Error('当前采集轮次尚未结束');
       }
+      // A different collection may finish after preview. Recheck before opening any detail tabs.
+      const known = await this.dependencies.knownSourceUrls?.(runId);
       const ids = candidates.map(candidate => childId(snapshot.id, snapshot.attempt, candidate.canonicalUrl));
       const currentJobIds = [...snapshot.currentJobIds, ...ids];
       if (new Set(currentJobIds).size !== currentJobIds.length) {
@@ -580,6 +583,12 @@ export class NowcoderDirectedService {
           directedRunId: runId,
           directedRunAttempt: attempt,
         }));
+        if (known?.has(candidate.canonicalUrl)) {
+          const duplicate = await this.dependencies.jobs.transition(ids[index]!, 'failed', {
+            errorCode: 'SOURCE_ALREADY_COLLECTED', errorMessage: '该来源已在本地或待审链中，无需重采',
+          });
+          jobs[jobs.length - 1] = duplicate;
+        }
       }
       for (const job of jobs) {
         this.throwIfRunAborted(signal);

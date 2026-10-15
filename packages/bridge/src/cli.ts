@@ -103,6 +103,8 @@ export interface ParsedNowcoderCommand {
   action: NowcoderAction;
   queries: string[];
   target?: number;
+  maxPagesPerQuery?: number;
+  maxRequests?: number;
   sessionId?: string;
   runId?: string;
   idempotencyKey?: string;
@@ -120,7 +122,7 @@ class NowcoderCliError extends Error {
 }
 
 const NOWCODER_USAGE = [
-  '用法：data-collector nowcoder preview --query Q... --target N --latest',
+  '用法：data-collector nowcoder preview --query Q... --target N --latest [--max-pages 1..4] [--max-requests 1..24]',
   '或：data-collector nowcoder run (--session ID | --query Q... --target N) --latest --deliver --idempotency-key KEY [--wait MS]',
   '或：data-collector nowcoder status --run ID',
   '或：data-collector nowcoder cancel --run ID',
@@ -142,7 +144,7 @@ function parseNowcoderCommand(args: string[]): ParsedNowcoderCommand {
   const switches = new Set<string>();
   const valueFlags = new Set([
     '--query', '--target', '--session', '--run', '--idempotency-key', '--wait',
-    '--port', '--library', '--config',
+    '--port', '--library', '--config', '--max-pages', '--max-requests',
   ]);
   const switchFlags = new Set(['--latest', '--deliver']);
   for (let index = 2; index < args.length; index += 1) {
@@ -174,6 +176,9 @@ function parseNowcoderCommand(args: string[]): ParsedNowcoderCommand {
   parseInteger('--port', 0, 65_535);
   const target = parseInteger('--target', 1, 10);
   const waitMs = parseInteger('--wait', 100, 30 * 60 * 1_000);
+  const maxPagesPerQuery = parseInteger('--max-pages', 1, 4);
+  const maxRequests = parseInteger('--max-requests', 1, 24);
+  if ((maxRequests ?? 24) < queries.length) return nowcoderUsage();
   const nonempty = (flag: string): string | undefined => {
     const value = values.get(flag);
     if (value !== undefined && value.trim().length === 0) return nowcoderUsage();
@@ -190,14 +195,14 @@ function parseNowcoderCommand(args: string[]): ParsedNowcoderCommand {
 
   if (action === 'preview') {
     if (queries.length < 1 || target === undefined || !switches.has('--latest')
-      || switches.size !== 1 || !onlyActionFlags('--target')) return nowcoderUsage();
+      || switches.size !== 1 || !onlyActionFlags('--target', '--max-pages', '--max-requests')) return nowcoderUsage();
   } else if (action === 'run') {
     const queryMode = queries.length > 0;
     const sessionMode = sessionId !== undefined;
     if (queryMode === sessionMode || !switches.has('--latest') || !switches.has('--deliver')
       || switches.size !== 2 || idempotencyKey === undefined
-      || !onlyActionFlags('--target', '--session', '--idempotency-key', '--wait')
-      || (queryMode && target === undefined) || (sessionMode && target !== undefined)) {
+      || !onlyActionFlags('--target', '--session', '--idempotency-key', '--wait', '--max-pages', '--max-requests')
+      || (queryMode && target === undefined) || (sessionMode && (target !== undefined || maxPagesPerQuery !== undefined || maxRequests !== undefined))) {
       return nowcoderUsage();
     }
   } else if (action === 'status' || action === 'cancel') {
@@ -212,6 +217,8 @@ function parseNowcoderCommand(args: string[]): ParsedNowcoderCommand {
     action,
     queries,
     ...(target === undefined ? {} : { target }),
+    ...(maxPagesPerQuery === undefined ? {} : { maxPagesPerQuery }),
+    ...(maxRequests === undefined ? {} : { maxRequests }),
     ...(sessionId === undefined ? {} : { sessionId }),
     ...(runId === undefined ? {} : { runId }),
     ...(idempotencyKey === undefined ? {} : { idempotencyKey }),
@@ -363,7 +370,9 @@ export async function runNowcoderCli(
         '/v1/nowcoder/search-sessions',
         {
           method: 'POST',
-          body: JSON.stringify({ queries: command.queries, target: command.target, sort: 'latest' }),
+          body: JSON.stringify({ queries: command.queries, target: command.target, sort: 'latest',
+            ...(command.maxPagesPerQuery === undefined ? {} : {maxPagesPerQuery: command.maxPagesPerQuery}),
+            ...(command.maxRequests === undefined ? {} : {maxRequests: command.maxRequests}) }),
         },
         [201],
         nowcoderSearchPreviewResponseSchema,
@@ -418,7 +427,9 @@ export async function runNowcoderCli(
           '/v1/nowcoder/search-sessions',
           {
             method: 'POST',
-            body: JSON.stringify({ queries: command.queries, target: command.target, sort: 'latest' }),
+            body: JSON.stringify({ queries: command.queries, target: command.target, sort: 'latest',
+            ...(command.maxPagesPerQuery === undefined ? {} : {maxPagesPerQuery: command.maxPagesPerQuery}),
+            ...(command.maxRequests === undefined ? {} : {maxRequests: command.maxRequests}) }),
           },
           [201],
           nowcoderSearchPreviewResponseSchema,

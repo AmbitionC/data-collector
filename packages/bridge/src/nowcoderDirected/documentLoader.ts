@@ -110,6 +110,37 @@ async function readCatalog<T>(
   }
 }
 
+/** Search dedupe needs catalog identities, not another read of every saved article body. */
+export async function readKnownNowcoderLocalSources(libraryRoot: string): Promise<Array<{
+  url: string; reason: 'local_pending' | 'local_library';
+}>> {
+  try {
+    let root: string;
+    try {
+      const metadata = await lstat(libraryRoot);
+      if (metadata.isSymbolicLink() || !metadata.isDirectory()) throw new Error('invalid library root');
+      root = await realpath(libraryRoot);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return [];
+      throw error;
+    }
+    const directory = join(root, '_catalog');
+    try {
+      const metadata = await lstat(directory);
+      if (metadata.isSymbolicLink() || !metadata.isDirectory()) throw new Error('invalid catalog directory');
+      await lstat(join(directory, 'index.json'));
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return [];
+      throw error;
+    }
+    const entries = await readCatalog(root, join(directory, 'index.json'), localCatalogSchema,
+      'DIRECTED_LOCAL_LIBRARY_CORRUPT');
+    return entries.filter(entry => entry.source === 'nowcoder').map(entry => ({
+      url: entry.url, reason: entry.sync?.state === 'synced' ? 'local_library' : 'local_pending',
+    }));
+  } catch { throw new NowcoderDirectedDocumentError('DIRECTED_LOCAL_LIBRARY_CORRUPT'); }
+}
+
 export async function loadNowcoderDirectedDocuments(input: {
   libraryRoot: string;
   run: NowcoderDirectedReconciliationSnapshot;

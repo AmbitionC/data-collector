@@ -31,6 +31,13 @@ function apiSearchResponse(ids: readonly string[], totalPage = 1): Response {
 }
 
 describe('Nowcoder plan discovery query expansion', () => {
+  it('finds dynamic interview UUIDs with the same detail URL safety checks', async () => {
+    const result=await discoverNowcoderUrls(async()=>Response.json({success:true,code:0,data:{totalPage:1,records:[
+      {momentData:{uuid:'real-feed',title:'字节 Agent 实习一面',createdAt:1_725_000_000_000}},
+      {momentData:{uuid:'external',url:'https://example.test/discuss/1',createdAt:1_725_000_000_000}},
+    ]}}),new Set());
+    expect(result).toEqual(['https://www.nowcoder.com/feed/main/detail/real-feed']);
+  });
   it('requests newest posts through the public JSON search API and stops after two pages', async () => {
     const firstQuery = FE_JOURNEY_PRESET.nowcoder.queries[0];
     const bodies: Array<{ type: string; query: string; order: string; page: number }> = [];

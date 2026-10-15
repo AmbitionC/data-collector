@@ -103,7 +103,7 @@ function pendingSingleAudit(jobId: string) {
   };
 }
 
-async function fixture() {
+async function fixture(known?: ReadonlySet<string>) {
   const root = await temporaryDirectories.create('nowcoder-directed-ownership-');
   const store = await NowcoderDirectedStore.open(join(root, 'directed.json'), {
     now: () => NOW,
@@ -135,6 +135,7 @@ async function fixture() {
     store,
     jobs,
     dispatch: async job => { dispatched.push(job.id); },
+    ...(known ? {knownSourceUrls: async () => known} : {}),
     reconcileSelection,
     recoverPublisher,
   });
@@ -261,6 +262,13 @@ function zsxqDocument(url: string): CollectedDocument {
 }
 
 describe('directed Nowcoder job ownership', () => {
+  it('does not open a detail tab when the source was collected after the immutable preview', async () => {
+    const context=await fixture(new Set([URL]));
+    const [job]=await context.service.enqueueRound(context.run.id,context.run.attempt,1);
+    expect(job).toMatchObject({status:'failed',errorCode:'SOURCE_ALREADY_COLLECTED'});
+    expect(context.dispatched).toEqual([]);
+    expect(context.jobs.get(job!.id)?.errorCode).toBe('SOURCE_ALREADY_COLLECTED');
+  });
   it('routes a typed user tab close through one durable directed cancellation without a refill', async () => {
     const root = await temporaryDirectories.create('nowcoder-directed-tab-close-');
     const configDir = join(root, '.config');

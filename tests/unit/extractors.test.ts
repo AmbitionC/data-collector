@@ -819,6 +819,104 @@ describe('ZSXQ extraction（按真实 Angular DOM）', () => {
 });
 
 describe('Nowcoder extraction', () => {
+  const NOWCODER_DETAIL = 'https://www.nowcoder.com/discuss/999';
+  const READABLE_INTERVIEW = '<h1 class="post-title">字节全栈一面</h1>'
+    + '<article class="feed-content-text">面试官让我解释事件循环和微任务顺序，再讨论 HTTP 缓存的响应头、项目中的流式响应处理以及错误重试边界。</article>';
+
+  it.each([
+    ['display:none', '<div class="login-modal" style="display:none">登录后查看完整面经</div>'],
+    ['visibility:hidden', '<div class="nc-login-modal" style="visibility:hidden">登录后查看完整面经</div>'],
+    ['visibility:collapse', '<div class="login-modal" style="visibility:collapse">登录后查看完整面经</div>'],
+    ['opacity:0', '<div class="login-modal" style="opacity:0">登录后查看完整面经</div>'],
+    ['content-visibility:hidden', '<div class="login-modal" style="content-visibility:hidden">登录后查看完整面经</div>'],
+    ['hidden attribute', '<div hidden class="login-container">登录后查看完整面经</div>'],
+    ['aria-hidden ancestor', '<section aria-hidden="true"><div class="nc-login-modal">登录后查看完整面经</div></section>'],
+    ['display:none ancestor', '<section style="display:none"><form action="/login">登录后查看完整面经</form></section>'],
+    ['visibility:hidden ancestor', '<section style="visibility:hidden"><div class="login-modal">登录后查看完整面经</div></section>'],
+    ['opacity:0 ancestor', '<section style="opacity:0"><div class="login-modal">登录后查看完整面经</div></section>'],
+    ['closed dialog', '<dialog class="login-modal">登录后查看完整面经</dialog>'],
+    ['stylesheet-hidden modal', '<style>.inactive-login { display:none }</style><div class="login-modal inactive-login">登录后查看完整面经</div>'],
+  ])('extracts readable body despite %s login DOM', (_name, login) => {
+    const doc = new JSDOM(login + READABLE_INTERVIEW).window.document;
+    const result = extractDocument(doc, NOWCODER_DETAIL, NOW);
+    expect(result.text).toContain('事件循环和微任务顺序');
+    expect(result.text).not.toContain('登录后查看');
+    expect(result.sourceMetadata).toMatchObject({ contentAccess: 'full' });
+  });
+
+  it.each([
+    '<header><form action="/login"><input type="password"><button>登录</button></form></header>',
+    '<aside class="login-container"><a href="/login">登录 / 注册</a></aside>',
+    '<div class="login-modal"><a href="/login">登录</a></div>',
+  ])('does not mistake a visible nonblocking login entry for a reading wall', login => {
+    const result = extractDocument(new JSDOM(login + READABLE_INTERVIEW).window.document, NOWCODER_DETAIL, NOW);
+    expect(result.text).toContain('流式响应处理');
+  });
+
+  it.each([
+    '<div class="login-modal">请先登录才能查看完整面经</div>',
+    '<div role="dialog" aria-modal="true"><div class="login-container">手机号登录<input type="tel"></div></div>',
+  ])('rejects a visible blocking login even when body DOM exists behind it', login => {
+    expect(() => extractDocument(new JSDOM(login + READABLE_INTERVIEW).window.document, NOWCODER_DETAIL, NOW))
+      .toThrowError(expect.objectContaining<Partial<ExtractionError>>({ code: 'AUTH_REQUIRED' }));
+  });
+
+  it('checks every matching login node so a hidden first node does not mask a visible wall', () => {
+    const doc = new JSDOM('<div class="login-modal" hidden>登录后查看</div>'
+      + '<div class="login-modal">登录后查看完整面经</div>' + READABLE_INTERVIEW).window.document;
+    expect(() => extractDocument(doc, NOWCODER_DETAIL, NOW))
+      .toThrowError(expect.objectContaining<Partial<ExtractionError>>({ code: 'AUTH_REQUIRED' }));
+  });
+
+  it.each([
+    '<div class="login-modal" hidden>登录后查看完整面经</div>',
+    '<aside class="login-container"><button>登录 / 注册</button></aside>',
+    '<div class="login-modal" hidden>登录后查看</div><article class="feed-content-text">正在加载</article>',
+  ])('keeps absent or still-loading body retryable instead of declaring logout', html => {
+    const doc = new JSDOM('<h1>面经加载中</h1>' + html).window.document;
+    expect(() => extractDocument(doc, NOWCODER_DETAIL, NOW))
+      .toThrowError(expect.objectContaining<Partial<ExtractionError>>({ code: 'UNSUPPORTED_LAYOUT' }));
+  });
+
+  it.each(['offscreen', 'zero-area'])('ignores %s login layers in a laid-out document', kind => {
+    const doc = new JSDOM('<div class="login-modal">登录后查看完整面经</div>' + READABLE_INTERVIEW).window.document;
+    const viewport = { x: 0, y: 0, left: 0, top: 0, right: 1024, bottom: 768, width: 1024, height: 768, toJSON: () => ({}) };
+    Object.defineProperty(doc.documentElement, 'getClientRects', { value: () => [viewport] });
+    const modal = doc.querySelector('.login-modal')!;
+    Object.defineProperty(modal, 'getClientRects', { value: () => kind === 'offscreen'
+      ? [{ ...viewport, x: -1200, left: -1200, right: -200, width: 1000 }]
+      : [{ ...viewport, right: 0, bottom: 0, width: 0, height: 0 }] });
+    expect(extractDocument(doc, NOWCODER_DETAIL, NOW).text).toContain('事件循环');
+  });
+
+  it('uses the visible content container rather than a hidden stale body', () => {
+    const doc = new JSDOM('<article class="feed-content-text" hidden>' + '这是旧帖子残留的隐藏正文，不能被当作本次面经。'.repeat(3)
+      + '</article>' + READABLE_INTERVIEW).window.document;
+    expect(extractDocument(doc, NOWCODER_DETAIL, NOW).text).toContain('流式响应处理');
+  });
+
+  it.each([true, false])('distinguishes a covering login overlay from a small fixed entry (covering=%s)', covering => {
+    const doc = new JSDOM('<div class="login-modal" style="position:fixed">手机号登录</div>' + READABLE_INTERVIEW).window.document;
+    const viewport = { x: 0, y: 0, left: 0, top: 0, right: 1024, bottom: 768, width: 1024, height: 768, toJSON: () => ({}) };
+    Object.defineProperty(doc.documentElement, 'getClientRects', { value: () => [viewport] });
+    Object.defineProperty(doc.querySelector('.login-modal')!, 'getClientRects', { value: () => covering
+      ? [viewport] : [{ ...viewport, right: 80, bottom: 30, width: 80, height: 30 }] });
+    if (covering) {
+      expect(() => extractDocument(doc, NOWCODER_DETAIL, NOW))
+        .toThrowError(expect.objectContaining<Partial<ExtractionError>>({ code: 'AUTH_REQUIRED' }));
+    } else {
+      expect(extractDocument(doc, NOWCODER_DETAIL, NOW).text).toContain('事件循环');
+    }
+  });
+
+  it('retains a paywall signal when the login dialog is hidden', async () => {
+    const doc = await fixture('nowcoder-paywalled.html', NOWCODER_DETAIL);
+    doc.body.insertAdjacentHTML('beforeend', '<div class="login-modal" hidden>登录后查看</div>');
+    const result = extractDocument(doc, NOWCODER_DETAIL, NOW);
+    expect(result.truncated).toBe(true);
+    expect(result.sourceMetadata).toMatchObject({ contentAccess: 'paywalled' });
+  });
+
   it('extracts an interview post and drops query-only tracking from the identity', async () => {
     const url = 'https://www.nowcoder.com/discuss/123456?channel=feed&from=push';
     const result = extractDocument(await fixture('nowcoder-post.html', url), url, NOW);
