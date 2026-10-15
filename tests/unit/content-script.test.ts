@@ -336,13 +336,14 @@ describe('content script list collection', () => {
     const question = '开发架构师兼职为传统企业提供 IT 顾问服务，应按什么标准估算顾问费，假设税前月薪两万元...';
     const answer = '可以先评估给企业带来的收益；难于评估时按工作时长乘以三倍时薪估算，每月固定收费可适当下调。';
     history.replaceState({}, '', `/group/48844584441158/topic/${topicId}`);
-    document.body.innerHTML = `<div class="topic-container" data-topic-id="${topicId}">
+    document.body.innerHTML = `<div class="topic-detail-panel">
       <div class="author"><div class="info"><div class="role owner">陈老师</div></div></div>
       <div class="answer-content-container"><div class="question"><div class="content">
+        <div class="question-owner"><span>匿名用户</span> 提问：</div>
         <span class="question-contain">${question}</span><p class="showAllQuestion" style="display:none">展开全部</p>
       </div></div><div class="answer">${answer}</div><p class="showAll" style="display:none">展开全部</p></div>
     </div>`;
-    const topic = { topic_id: topicId, type: 'q&a', question: { text: question }, answer: { text: answer } };
+    const topic = { topic_id: topicId, type: 'q&a', title: '可以先评估给企业带来的收益...', question: { text: question }, answer: { text: answer } };
     const records = [
       ...harvestTopics({ succeeded: true, resp_data: { topics: [topic] } }, 40, {
         responsePath: 'https://api.zsxq.com/v2/groups/48844584441158/topics',

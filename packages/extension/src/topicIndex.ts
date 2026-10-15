@@ -663,7 +663,7 @@ const BODY_NODE_LIMIT = 1_024;
 const BODY_DEPTH_LIMIT = 12;
 const TOPIC_BODY_KEYS = ['talk', 'article', 'question', 'answer', 'task', 'solution'] as const;
 
-function partsOf(node: Record<string, unknown>): { parts: string[]; truncated: boolean } {
+function partsOf(node: Record<string, unknown>, sourceBodyProven = false): { parts: string[]; truncated: boolean } {
   const parts: string[] = [];
   let visited = 0;
   let truncated = false;
@@ -685,6 +685,9 @@ function partsOf(node: Record<string, unknown>): { parts: string[]; truncated: b
     }
     if (!isRecord(value)) return;
     for (const key of ['text', 'title', 'content', ...TOPIC_BODY_KEYS]) {
+      // 经核验 topic 的顶层 title 是站点生成的列表摘要，真实正文在已知组件中。
+      // 诊断型记录仍可用标题对号；组件内的文章标题与内联链接标题也继续保留。
+      if (sourceBodyProven && depth === 0 && key === 'title') continue;
       if (key in value) visit(value[key], depth + 1);
     }
   };
@@ -1254,14 +1257,14 @@ export function harvestTopics(
     if (rawId) {
       // 必须留足长度：接口正文和页面文本常常**开头就不一样**，
       // 截太短等于把「整段包含」这条退路也砍掉了。
-      const extractedBody = partsOf(node);
+      const sourceBodyProven = provenBodyNodes.has(node);
+      const extractedBody = partsOf(node, sourceBodyProven);
       const rawParts = extractedBody.parts;
       const parts = rawParts.map(part => part.slice(0, RAW_TEXT_LIMIT));
       const text = parts.join(' ').slice(0, RAW_TEXT_LIMIT);
       // 对号只需要前若干字，归档要的是全文，两者分开留。
       const rawFullText = rawParts.join('\n\n');
       const fullText = rawFullText.slice(0, FULL_TEXT_LIMIT);
-      const sourceBodyProven = provenBodyNodes.has(node);
       const assets = sourceBodyProven
         ? sourceAssetsOf(node)
         : { images: [], attachments: [], proven: false, issues: [] };

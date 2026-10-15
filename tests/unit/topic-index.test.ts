@@ -15,7 +15,7 @@ describe('harvestTopics', () => {
   const completeQuestion = '作为开发架构师为传统企业提供 IT 顾问服务，应该怎样估算顾问费，假设税前月薪两万元...';
   const completeAnswer = '优先按给企业带来的工作收益收费；难以评估时，可以按工时乘以三倍时薪估算。';
   const infoTopic = {
-    topic_id: infoTopicId, type: 'q&a',
+    topic_id: infoTopicId, type: 'q&a', title: '优先按给企业带来的工作收益收费...',
     question: { text: completeQuestion }, answer: { text: completeAnswer },
   };
 
