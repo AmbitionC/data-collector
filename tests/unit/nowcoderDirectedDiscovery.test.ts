@@ -1,3 +1,4 @@
+import { nowcoderSearchSessionSchema } from '@data-collector/shared';
 import { describe, expect, it, vi } from 'vitest';
 import { discoverNowcoderDirectedCandidates } from '../../packages/bridge/src/nowcoderDirected/discovery.js';
 
@@ -194,4 +195,25 @@ describe('directed Nowcoder latest discovery', () => {
     }, new Set(), new Date(NOW));
     expect(result.candidates[0]?.canonicalUrl).toBe('https://www.nowcoder.com/feed/main/detail/valid-after-invalid');
   });
+});
+
+
+it.each([true, false])('bounds large dated/undated preview sets and persists valid session input: dated=%s', async dated => {
+  const request = { queries: ['Agent 面经', 'AI 工程师面经'], target: 10, sort: 'latest' as const };
+  const found = await discoverNowcoderDirectedCandidates(async (_input, init) => {
+    const { query, page } = JSON.parse(String(init?.body));
+    const prefix = query.startsWith('Agent') ? 100000 : 200000;
+    return response(Array.from({ length: 100 }, (_, rank) => ({ id: prefix + page * 1000 + rank,
+      ...(dated ? { createTime: 1760000000000 } : {}) })), 4);
+  }, request, new Set(), new Date(NOW));
+  expect(found.candidates).toHaveLength(dated ? 500 : 0);
+  expect(found.previewOnly).toHaveLength(dated ? 0 : 500);
+  expect(found.diagnostics.skippedCounts[dated ? 'candidate_limit' : 'review_only_limit']).toBe(300);
+  const retained = dated ? found.candidates : found.previewOnly;
+  expect(retained[0]?.canonicalUrl).toBe('https://www.nowcoder.com/discuss/101000');
+  expect(retained[499]?.canonicalUrl).toBe('https://www.nowcoder.com/discuss/201099');
+  expect(nowcoderSearchSessionSchema.safeParse({ id: 'bounded-preview-session',
+    queries: request.queries, queryHash: 'a'.repeat(64), requestedSort: 'latest', provider: 'nowcoder-json', sortVerified: true,
+    createdAt: '2026-10-14T00:00:00.000Z', expiresAt: '2026-10-14T00:30:00.000Z',
+    candidates: found.candidates, discovery: found.diagnostics, reviewOnlyCandidates: found.previewOnly }).success).toBe(true);
 });

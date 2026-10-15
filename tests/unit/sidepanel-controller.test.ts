@@ -118,6 +118,7 @@ describe('fixed collection plans page', () => {
         return {
           ok: true,
           value: {
+            nowcoderSchedule: { enabled: false, companies: ['bytedance', 'tencent', 'alibaba', 'ant', 'other'], reviewOnly: true },
             plans: [{
               id: 'nowcoder-agent-market',
               due: false,
@@ -141,7 +142,125 @@ describe('fixed collection plans page', () => {
       type: 'plans.run',
       planId: 'nowcoder-agent-market',
       force: true,
+      nowcoderReviewOnly: true,
+      nowcoderCompanies: ['bytedance', 'tencent', 'alibaba', 'ant', 'other'],
     }));
+  });
+
+  it('keeps schedule disabled until an explicit save and saving never starts collection', async () => {
+    const requests: Array<Record<string, unknown>> = [];
+    const config = { enabled: false, companies: ['ant', 'tencent'], reviewOnly: true };
+    handler = async message => {
+      requests.push(message as unknown as Record<string, unknown>);
+      if (message.type === 'plans.status') return { ok: true, value: { plans: [], nowcoderSchedule: config } };
+      if (message.type === 'plans.nowcoderSchedule.configure') return { ok: true, value: (message as unknown as { config: unknown }).config };
+      return { ok: true, value: readyStatus() };
+    };
+    document.querySelector<HTMLButtonElement>('#nav-plans')!.click();
+    await vi.waitFor(() => expect(document.querySelector<HTMLInputElement>('#nowcoder-schedule-enabled')?.disabled).toBe(false));
+    const enabled = document.querySelector<HTMLInputElement>('#nowcoder-schedule-enabled')!;
+    expect(enabled.checked).toBe(false);
+    enabled.click();
+    expect(requests.some(request => request.type === 'plans.nowcoderSchedule.configure')).toBe(false);
+    document.querySelector<HTMLButtonElement>('#nowcoder-schedule-save')!.click();
+    await vi.waitFor(() => expect(requests).toContainEqual({
+      type: 'plans.nowcoderSchedule.configure', config: { ...config, enabled: true },
+    }));
+    expect(requests.some(request => request.type === 'plans.run' || request.type === 'library.sync')).toBe(false);
+    await vi.waitFor(() => expect(document.querySelector('#nowcoder-schedule-note')?.textContent).toContain('已保存'));
+    expect(document.querySelector('#nowcoder-schedule')?.textContent).toContain('09:00');
+    expect(document.querySelector('#nowcoder-schedule')?.textContent).toContain('上海时间');
+    expect(document.querySelector('#nowcoder-schedule')?.textContent).toContain('仅本机待审核');
+  });
+
+  it('keeps unsaved company changes through status polls and blocks an empty company scope', async () => {
+    let polls = 0;
+    handler = async message => {
+      if (message.type === 'plans.status') {
+        polls += 1;
+        return { ok: true, value: { plans: [], nowcoderSchedule: { enabled: false, companies: ['ant', 'tencent'], reviewOnly: true } } };
+      }
+      return { ok: true, value: readyStatus() };
+    };
+    document.querySelector<HTMLButtonElement>('#nav-plans')!.click();
+    await vi.waitFor(() => expect(document.querySelector<HTMLInputElement>('[data-nowcoder-company="tencent"]')?.disabled).toBe(false));
+    document.querySelector<HTMLInputElement>('[data-nowcoder-company="tencent"]')!.click();
+    await vi.waitFor(() => expect(polls).toBeGreaterThan(1), { timeout: 2500 });
+    expect(document.querySelector<HTMLInputElement>('[data-nowcoder-company="tencent"]')!.checked).toBe(false);
+    expect(document.querySelector<HTMLInputElement>('[data-nowcoder-company="ant"]')!.checked).toBe(true);
+    document.querySelector<HTMLInputElement>('[data-nowcoder-company="ant"]')!.click();
+    expect(document.querySelector<HTMLButtonElement>('#nowcoder-schedule-save')!.disabled).toBe(true);
+    expect(document.querySelector('#nowcoder-schedule-note')?.textContent).toContain('至少一家');
+  });
+
+  it('keeps a failed save visible during polling without displaying a successful saved state', async () => {
+    let polls = 0;
+    handler = async message => {
+      if (message.type === 'plans.status') {
+        polls += 1;
+        return { ok: true, value: { plans: [], nowcoderSchedule: { enabled: false, companies: ['ant'], reviewOnly: true } } };
+      }
+      if (message.type === 'plans.nowcoderSchedule.configure') return { ok: false, error: '保存配置失败：磁盘不可写' };
+      return { ok: true, value: readyStatus() };
+    };
+    document.querySelector<HTMLButtonElement>('#nav-plans')!.click();
+    await vi.waitFor(() => expect(document.querySelector<HTMLInputElement>('#nowcoder-schedule-enabled')?.disabled).toBe(false));
+    document.querySelector<HTMLInputElement>('#nowcoder-schedule-enabled')!.click();
+    document.querySelector<HTMLButtonElement>('#nowcoder-schedule-save')!.click();
+    await vi.waitFor(() => expect(document.querySelector('#nowcoder-schedule-error')?.textContent).toContain('磁盘不可写'));
+    await vi.waitFor(() => expect(polls).toBeGreaterThan(1), { timeout: 2500 });
+    expect(document.querySelector('#nowcoder-schedule-error')?.textContent).toContain('磁盘不可写');
+    expect(document.querySelector('#nowcoder-schedule-note')?.textContent).not.toContain('已保存');
+    expect(document.querySelector<HTMLInputElement>('#nowcoder-schedule-enabled')!.checked).toBe(true);
+  });
+
+  it('does not let a poll started before saving overwrite the successful saved configuration', async () => {
+    let polls = 0;
+    let releaseStale!: (value: unknown) => void;
+    const stalePoll = new Promise<unknown>(resolve => { releaseStale = resolve; });
+    const initial = { enabled: false, companies: ['ant'], reviewOnly: true };
+    const plans = [{ id: 'nowcoder-agent-market', due: false, pending: false, nextRunAt: '2026-10-14T01:00:00.000Z' }];
+    let persisted = initial;
+    handler = async message => {
+      if (message.type === 'plans.status') {
+        polls += 1;
+        if (polls === 2) return stalePoll;
+        return { ok: true, value: { plans, nowcoderSchedule: persisted } };
+      }
+      if (message.type === 'plans.nowcoderSchedule.configure') {
+        persisted = (message as unknown as { config: typeof initial }).config;
+        return { ok: true, value: persisted };
+      }
+      return { ok: true, value: readyStatus() };
+    };
+    document.querySelector<HTMLButtonElement>('#nav-plans')!.click();
+    await vi.waitFor(() => expect(polls).toBe(2), { timeout: 2500 });
+    document.querySelector<HTMLInputElement>('#nowcoder-schedule-enabled')!.click();
+    document.querySelector<HTMLButtonElement>('#nowcoder-schedule-save')!.click();
+    await vi.waitFor(() => expect(document.querySelector('#nowcoder-schedule-status')?.textContent).toBe('已启用'));
+    releaseStale({ ok: true, value: { plans, nowcoderSchedule: initial } });
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect(document.querySelector('#nowcoder-schedule-status')?.textContent).toBe('已启用');
+    expect(document.querySelector<HTMLButtonElement>('#nowcoder-schedule-save')!.disabled).toBe(true);
+  });
+
+  it('reflects externally changed saved settings when the form has no unsaved changes', async () => {
+    let polls = 0;
+    handler = async message => {
+      if (message.type === 'plans.status') {
+        polls += 1;
+        return { ok: true, value: { plans: [], nowcoderSchedule: {
+          enabled: polls > 1, companies: polls > 1 ? ['tencent'] : ['ant'], reviewOnly: true,
+        } } };
+      }
+      return { ok: true, value: readyStatus() };
+    };
+    document.querySelector<HTMLButtonElement>('#nav-plans')!.click();
+    await vi.waitFor(() => expect(polls).toBeGreaterThan(1), { timeout: 2500 });
+    expect(document.querySelector<HTMLInputElement>('#nowcoder-schedule-enabled')!.checked).toBe(true);
+    expect(document.querySelector<HTMLInputElement>('[data-nowcoder-company="tencent"]')!.checked).toBe(true);
+    expect(document.querySelector<HTMLInputElement>('[data-nowcoder-company="ant"]')!.checked).toBe(false);
+    expect(document.querySelector<HTMLButtonElement>('#nowcoder-schedule-save')!.disabled).toBe(true);
   });
 });
 

@@ -1,6 +1,7 @@
 import { mkdir, readFile, rename, rmdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { stableContentId } from '@data-collector/shared';
 import type {
   CollectionBatch,
   CollectionPlanAttempt,
@@ -14,6 +15,8 @@ import {
   ZsxqDayLedgerStore,
   planDueState,
 } from '../../packages/bridge/src/plans/index.js';
+import { NowcoderScheduleStore } from '../../packages/bridge/src/plans/nowcoderSchedule.js';
+import type { CompanyInventory } from '../../packages/bridge/src/plans/nowcoderInventory.js';
 import { writePlanBenchmark } from '../../packages/bridge/src/plans/benchmark.js';
 import { createTemporaryDirectoryTracker } from '../helpers/temp.js';
 
@@ -30,6 +33,8 @@ async function fixture(options: {
     url: string;
     queryCompany: DiscoveryCompany;
   }>>;
+  nowcoderSchedule?: NowcoderScheduleStore;
+  companyInventory?: () => Promise<CompanyInventory>;
   shouldAutoSync?: (job: JobRecord) => Promise<boolean>;
   pendingNowcoderJobs?: (
     jobs: readonly JobRecord[],
@@ -114,6 +119,8 @@ async function fixture(options: {
     collectZsxq,
     zsxqLedger,
     replayDurableJobTerminal: job => { replayedTerminals.push(job.id); },
+    ...(options.nowcoderSchedule ? { nowcoderSchedule: options.nowcoderSchedule } : {}),
+    ...(options.companyInventory ? { companyInventory: options.companyInventory } : {}),
     shouldAutoSync,
     pendingNowcoderJobs: deliveryBatchId =>
       options.pendingNowcoderJobs?.(jobs.list(), deliveryBatchId) ?? Promise.resolve([]),
@@ -160,7 +167,9 @@ async function fixture(options: {
         collectZsxq,
         zsxqLedger: reopenedLedger,
         replayDurableJobTerminal: job => { replayedTerminals.push(job.id); },
-        shouldAutoSync,
+        ...(options.nowcoderSchedule ? { nowcoderSchedule: options.nowcoderSchedule } : {}),
+    ...(options.companyInventory ? { companyInventory: options.companyInventory } : {}),
+    shouldAutoSync,
         pendingNowcoderJobs: deliveryBatchId =>
           options.pendingNowcoderJobs?.(reopenedJobs.list(), deliveryBatchId) ?? Promise.resolve([]),
         selectNowcoderJobs: options.selectNowcoderJobs ?? (async planJobs => {
@@ -2278,4 +2287,193 @@ describe('CollectionPlanService', () => {
       error: '搜索端不可用',
     });
   });
+});
+
+describe('review-only Nowcoder batches', () => {
+  it('persists review mode before child creation and through reopen', async () => {
+    const context = await fixture();
+    const batch = await context.service.run('nowcoder-agent-market', { nowcoderReviewOnly: true } as never);
+    expect(batch).toMatchObject({ nowcoderReviewOnly: true });
+    expect(context.jobs.list().filter(job => job.batchId === batch.id).every(job => (job as any).nowcoderReviewOnly === true)).toBe(true);
+    const reopened = await context.reopen();
+    expect(reopened.store.get(batch.id)).toMatchObject({ nowcoderReviewOnly: true });
+  });
+
+  it('retains ten exact local review IDs with no automatic delivery', async () => {
+    const context = await fixture({
+      candidates: Array.from({ length: 10 }, (_, i) => ({ url: `https://www.nowcoder.com/discuss/${99000+i}`, queryCompany: 'bytedance' })),
+      shouldAutoSync: async () => true,
+    });
+    const batch = await context.service.run('nowcoder-agent-market', { nowcoderReviewOnly: true } as never);
+    for (let i = 0; i < 24 && context.store.get(batch.id)?.status === 'running'; i++) {
+      const job = context.jobs.list().find(job => job.batchId === batch.id && ['queued', 'dispatched'].includes(job.status));
+      if (!job) break;
+      await context.jobs.transition(job.id, 'collecting');
+      const saved = await context.jobs.transition(job.id, 'saved', { outputPath: `/tmp/${job.id}/index.md` });
+      await context.service.onJobTerminal(saved);
+    }
+    const completed = context.store.get(batch.id)! as any;
+    expect(completed.status).toBe('completed');
+    expect(context.synced).toEqual([]);
+    expect(completed.deliveryIds).toEqual([]);
+    expect(completed.reviewIds).toHaveLength(10);
+  });
+
+  it('does not fill a review batch from unrelated pending evidence', async () => {
+    const context = await fixture({ candidates: [], shouldAutoSync: async () => true,
+      pendingNowcoderJobs: async () => Array.from({ length: 10 }, (_, i) => ({
+        id: `old-${i}`, url: `https://www.nowcoder.com/discuss/${98000+i}`, requestedBy: 'codex' as const,
+        status: 'saved' as const, createdAt: '2026-08-22T00:00:00.000Z', updatedAt: '2026-08-22T00:00:00.000Z', outputPath: `/tmp/old-${i}/index.md`,
+      })),
+    });
+    const batch = await context.service.run('nowcoder-agent-market', { nowcoderReviewOnly: true } as never);
+    expect(context.synced).toEqual([]);
+    expect(batch.accepted).toBe(0);
+    expect(batch.deliveryIds).toEqual([]);
+  });
+});
+
+
+describe('opt-in company review schedule', () => {
+  it('leaves the daily schedule unstarted while the extension is offline', async () => {
+    const root = await temporaryDirectories.create('review-schedule-offline-');
+    const nowcoderSchedule = await NowcoderScheduleStore.open(join(root, 'schedule.json'));
+    await nowcoderSchedule.configure({ enabled: true, companies: ['ant'], reviewOnly: true });
+    const context = await fixture({ nowcoderSchedule, connected: false });
+    await context.service.runDuePlans();
+    expect(context.store.latest('nowcoder-agent-market')).toEqual([]);
+    expect(context.discover).not.toHaveBeenCalled();
+  });
+  it('does not run Nowcoder automatically with default disabled settings', async () => {
+    const root = await temporaryDirectories.create('review-schedule-');
+    const nowcoderSchedule = await NowcoderScheduleStore.open(join(root, 'schedule.json'));
+    const context = await fixture({ nowcoderSchedule });
+    await context.service.runDuePlans();
+    expect(context.store.latest('nowcoder-agent-market')).toEqual([]);
+  });
+
+  it('snapshots enabled company settings into a held batch and filters other companies', async () => {
+    const root = await temporaryDirectories.create('review-schedule-');
+    const nowcoderSchedule = await NowcoderScheduleStore.open(join(root, 'schedule.json'));
+    await nowcoderSchedule.configure({ enabled: true, companies: ['ant'], reviewOnly: true });
+    const companyInventory = async () => Object.fromEntries(['bytedance','tencent','alibaba','ant','other'].map(company => [company,{published:0,qualifiedPending:0}])) as CompanyInventory;
+    const context = await fixture({ nowcoderSchedule, companyInventory, candidates: [
+      {url:'https://www.nowcoder.com/discuss/97900',queryCompany:'bytedance'},
+      {url:'https://www.nowcoder.com/discuss/97901',queryCompany:'ant'},
+    ] });
+    await context.service.runDuePlans();
+    const batch = context.store.latest('nowcoder-agent-market')[0]!;
+    expect(batch).toMatchObject({ nowcoderReviewOnly: true, nowcoderCompanies:['ant'], trigger:'scheduled' });
+    expect(context.jobs.list().filter(job => job.batchId === batch.id).map(job => job.url)).toEqual(['https://www.nowcoder.com/discuss/97901']);
+  });
+});
+
+describe('review collection access stops', () => {
+  it('preserves a sealed partial review list when the benchmark write fails', async () => {
+    const context = await fixture({ shouldAutoSync: async () => true,
+      writeBenchmark: async () => { throw new Error('报告写入失败'); } });
+    const batch = await context.service.run('nowcoder-agent-market', { nowcoderReviewOnly: true });
+    const first = context.jobs.list().find(job => job.batchId === batch.id)!;
+    await context.jobs.transition(first.id, 'collecting');
+    await context.service.onJobTerminal(await context.jobs.transition(first.id, 'saved', { outputPath: '/tmp/report-first/index.md' }));
+    const second = context.jobs.list().find(job => job.batchId === batch.id && job.id !== first.id)!;
+    await context.jobs.transition(second.id, 'collecting');
+    await context.service.onJobTerminal(await context.jobs.transition(second.id, 'needs_attention', { errorCode: 'CAPTCHA_REQUIRED', errorMessage: '验证码' }));
+    expect(context.store.get(batch.id)).toMatchObject({ status: 'completed_with_attention', accepted: 1,
+      saved: 1, reviewIds: [stableContentId(first.url)], deliveryIds: [] });
+    expect(context.store.get(batch.id)?.error).toContain('基准报告写入失败');
+    const reopened = await context.reopen();
+    await reopened.service.onExtensionConnected();
+    expect(reopened.store.get(batch.id)?.reviewIds).toEqual([stableContentId(first.url)]);
+    expect(context.synced).toEqual([]);
+  });
+  it('repairs the review list after a crash between durable parent stop and review selection', async () => {
+    const context = await fixture({ shouldAutoSync: async () => true });
+    const batch = await context.service.run('nowcoder-agent-market', { nowcoderReviewOnly: true });
+    const first = context.jobs.list().find(job => job.batchId === batch.id)!;
+    await context.jobs.transition(first.id, 'collecting');
+    await context.jobs.transition(first.id, 'saved', { outputPath: '/tmp/crash-first/index.md' });
+    await context.store.stopNowcoder(batch.id, '中途验证码已停批');
+    const reopened = await context.reopen();
+    await reopened.service.onExtensionConnected();
+    expect(reopened.store.get(batch.id)).toMatchObject({ status: 'completed_with_attention', selectionStatus: 'completed', accepted: 1,
+      saved: 1, reviewIds: [stableContentId(first.url)], deliveryIds: [] });
+    expect(context.dispatched).toHaveLength(1);
+    expect(context.synced).toEqual([]);
+  });
+  it('retains only qualified saved IDs and honest counts after a partial access stop, including reopen', async () => {
+    let selectionAllowed = true;
+    const context = await fixture({ shouldAutoSync: async () => true, selectNowcoderJobs: async jobs => {
+      if (!selectionAllowed) throw new Error('归档审核快照不应在重启时重新筛选');
+      return { accepted: [...jobs], coverage: { ant: jobs.length }, rejected: [] };
+    } });
+    const batch = await context.service.run('nowcoder-agent-market', { nowcoderReviewOnly: true });
+    const first = context.jobs.list().find(job => job.batchId === batch.id)!;
+    await context.jobs.transition(first.id, 'collecting');
+    await context.service.onJobTerminal(await context.jobs.transition(first.id, 'saved', { outputPath: '/tmp/review-first/index.md' }));
+    const second = context.jobs.list().find(job => job.batchId === batch.id && job.id !== first.id)!;
+    await context.jobs.transition(second.id, 'collecting');
+    await context.service.onJobTerminal(await context.jobs.transition(second.id, 'needs_attention', { errorCode: 'CAPTCHA_REQUIRED', errorMessage: '验证码' }));
+    const expected = { status: 'completed_with_attention', selectionStatus: 'completed', accepted: 1, saved: 1,
+      reviewIds: [stableContentId(first.url)], deliveryIds: [] };
+    expect(context.store.get(batch.id)).toMatchObject(expected);
+    selectionAllowed = false;
+    const reopened = await context.reopen();
+    await reopened.service.onExtensionConnected();
+    expect(reopened.store.get(batch.id)).toMatchObject(expected);
+    expect(context.synced).toEqual([]);
+  });
+
+  it('keeps an exact partial review list when refill search fails without reopening collection', async () => {
+    let calls = 0;
+    const context = await fixture({ shouldAutoSync: async () => true, discoverNowcoder: async () => {
+      if (++calls === 1) return [{ url: 'https://www.nowcoder.com/discuss/97701', queryCompany: 'ant' }];
+      throw new Error('补搜要求人工处理');
+    } });
+    const batch = await context.service.run('nowcoder-agent-market', { nowcoderReviewOnly: true });
+    const first = context.jobs.list().find(job => job.batchId === batch.id)!;
+    await context.jobs.transition(first.id, 'collecting');
+    await context.service.onJobTerminal(await context.jobs.transition(first.id, 'saved', { outputPath: '/tmp/refill-first/index.md' }));
+    const expected = { status: 'failed', selectionStatus: 'completed', accepted: 1, saved: 1,
+      reviewIds: [stableContentId(first.url)], deliveryIds: [] };
+    expect(context.store.get(batch.id)).toMatchObject(expected);
+    const reopened = await context.reopen();
+    await reopened.service.onExtensionConnected();
+    expect(reopened.store.get(batch.id)).toMatchObject(expected);
+    expect(calls).toBe(2);
+    expect(context.synced).toEqual([]);
+  });
+  it.each(['AUTH_REQUIRED', 'RATE_LIMITED', 'CAPTCHA_REQUIRED'])('stops the batch and queued siblings on %s, including a crash before parent reconciliation', async errorCode => {
+    const context = await fixture();
+    const batch = await context.service.run('nowcoder-agent-market', { nowcoderReviewOnly: true });
+    const first = context.jobs.list().find(job => job.batchId === batch.id)!;
+    await context.jobs.transition(first.id, 'collecting');
+    await context.jobs.transition(first.id, 'needs_attention', { errorCode, errorMessage: '站点要求人工处理' });
+    const reopened = await context.reopen();
+    await reopened.service.onExtensionConnected();
+    expect(reopened.store.get(batch.id)?.status).toBe('completed_with_attention');
+    expect(reopened.jobs.list().filter(job => job.batchId === batch.id && job.id !== first.id).every(job => job.status === 'failed')).toBe(true);
+    expect(context.dispatched).toHaveLength(1);
+    expect(context.synced).toEqual([]);
+  });
+});
+
+
+it('refills an all-duplicate round and counts source skips separately from layout faults', async () => {
+  let searches = 0;
+  const context = await fixture({ shouldAutoSync: async () => true, discoverNowcoder: async () => ++searches === 1 ? [
+    { url: 'https://www.nowcoder.com/discuss/8001', queryCompany: 'bytedance' },
+    { url: 'https://www.nowcoder.com/discuss/8002', queryCompany: 'tencent' },
+  ] : searches === 2 ? [{ url: 'https://www.nowcoder.com/discuss/8003', queryCompany: 'alibaba' }] : [] });
+  const batch = await context.service.run('nowcoder-agent-market', { nowcoderReviewOnly: true });
+  for (const child of context.jobs.list().filter(job => job.batchId === batch.id)) {
+    const duplicate = await context.jobs.transition(child.id, 'failed', { errorCode: 'SOURCE_ALREADY_COLLECTED', errorMessage: '预览后已由其他采集保存' });
+    await context.service.onJobTerminal(duplicate);
+  }
+  const fresh = context.jobs.list().find(job => job.batchId === batch.id && job.url.endsWith('/8003'));
+  expect(fresh).toBeDefined();
+  expect(context.store.get(batch.id)).toMatchObject({ status: 'running', failed: 0, skipped: 2 });
+  await saveJobs(context, [fresh!]);
+  expect(context.store.get(batch.id)).toMatchObject({ status: 'completed_with_attention', failed: 0, skipped: 2,
+    rejections: { '来源已在本地或待审链中': 2 }, deliveryIds: [] });
 });

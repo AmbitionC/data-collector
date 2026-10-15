@@ -370,6 +370,14 @@ button { appearance: none; }
 
 .plans-list { display: grid; gap: 12px; }
 
+.nowcoder-schedule { margin-bottom: 16px; }
+.schedule-toggle { display: flex; align-items: center; gap: 8px; margin-top: 16px; }
+.schedule-companies { display: flex; flex-wrap: wrap; gap: 10px 14px; margin: 14px 0; padding: 0; border: 0; }
+.schedule-companies legend { margin-bottom: 8px; color: var(--muted); font-size: 12px; }
+.schedule-companies label { display: flex; align-items: center; gap: 5px; font-size: 13px; }
+.nowcoder-schedule input { accent-color: var(--ink); }
+.nowcoder-schedule > button { margin-top: 14px; }
+
 .plan-ticket {
   padding: 16px;
   border: 1px solid var(--hairline-strong);

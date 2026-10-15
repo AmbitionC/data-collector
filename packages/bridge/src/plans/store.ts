@@ -29,7 +29,7 @@ interface ParsedStoredPlans {
   migrated: boolean;
 }
 
-const SKIPPED_ERROR_CODES = new Set(['DUPLICATE', 'QUALITY_REJECTED', 'SKIPPED']);
+const SKIPPED_ERROR_CODES = new Set(['DUPLICATE', 'QUALITY_REJECTED', 'SKIPPED', 'SOURCE_ALREADY_COLLECTED']);
 
 function repairLegacyNowcoderSelectionCounters(value: unknown): unknown {
   if (typeof value !== 'object' || value === null) return value;
@@ -161,6 +161,8 @@ export class CollectionPlanStore {
     options: {
       force?: boolean;
       trigger?: CollectionPlanTrigger;
+      nowcoderReviewOnly?: true;
+      nowcoderCompanies?: CollectionBatch['nowcoderCompanies'];
       zsxqMode?: ZsxqCollectionMode;
       zsxqDateRange?: ZsxqDateRange;
     } = {},
@@ -181,6 +183,8 @@ export class CollectionPlanStore {
         needsAttention: 0,
         deliveryIds: [],
         trigger: options.trigger ?? 'manual',
+        ...(options.nowcoderReviewOnly ? { nowcoderReviewOnly: true as const, reviewIds: [] } : {}),
+        ...(options.nowcoderCompanies ? { nowcoderCompanies: [...options.nowcoderCompanies] } : {}),
         ...(options.force === true ? { force: true } : {}),
         ...(planId === 'zsxq-chen-teacher' && options.zsxqMode
           ? { zsxqMode: options.zsxqMode }
@@ -454,6 +458,7 @@ export class CollectionPlanStore {
     syncError?: string,
     reclassifiedFailureCount = 0,
     deliveryIds?: readonly string[],
+    reviewIds?: readonly string[],
   ): Promise<CollectionBatch> {
     return this.serializeTransactionalMutation(async () => {
       const batch = this.require(batchId);
@@ -485,6 +490,7 @@ export class CollectionPlanStore {
       batch.coverage = { ...coverage };
       batch.rejections = { ...rejections };
       if (uniqueDeliveryIds) batch.deliveryIds = uniqueDeliveryIds;
+      if (reviewIds) batch.reviewIds = [...new Set(reviewIds)];
       batch.selectionStatus = 'completed';
       if (syncError) {
         batch.status = 'completed_with_attention';
@@ -572,6 +578,7 @@ export class CollectionPlanStore {
     return this.serializeMutation(async () => {
       const batch = this.require(batchId);
       batch.status = 'failed';
+      if (batch.nowcoderReviewOnly) { batch.selectionStatus = 'completed'; delete batch.reviewIds; batch.accepted = 0; batch.saved = 0; }
       batch.finishedAt = this.now();
       batch.error = message;
       await this.persist();
@@ -583,6 +590,9 @@ export class CollectionPlanStore {
     return this.serializeMutation(async () => {
       const batch = this.require(batchId);
       batch.status = 'completed_with_attention';
+      if (batch.nowcoderReviewOnly && (batch.selectionStatus !== 'completed' || batch.reviewIds === undefined)) {
+        batch.selectionStatus = 'completed'; delete batch.reviewIds; batch.accepted = 0; batch.saved = 0;
+      }
       batch.finishedAt = this.now();
       batch.error = message;
       await this.persist();
@@ -601,12 +611,47 @@ export class CollectionPlanStore {
       batch.selectionStatus = 'completed';
       batch.finishedAt = this.now();
       batch.error = message;
+      if (batch.nowcoderReviewOnly) { delete batch.reviewIds; batch.accepted = 0; batch.saved = 0; }
       await this.persist();
       return publicBatch(batch);
     });
   }
 
   /** Recount the child partition only inside the active fixed-batch hard-stop lock. */
+  recordTerminalReviewSelection(
+    batchId: string,
+    reviewIds: readonly string[],
+    coverage: Record<string, number>,
+    rejections: Record<string, number>,
+    jobs: readonly JobRecord[],
+    reclassifiedFailureCount = 0,
+    selectionError?: string,
+  ): Promise<CollectionBatch> {
+    return this.serializeTransactionalMutation(async () => {
+      const batch = this.require(batchId);
+      if (!batch.nowcoderReviewOnly || batch.planId !== 'nowcoder-agent-market' || batch.status === 'running') throw new Error('审核清单只能冻结已终止的待审核牛客批次');
+      const children = jobs.filter(job => job.batchId === batchId && batch.jobIds.includes(job.id));
+      const savedIds = new Set(children.filter(job => job.status === 'saved').map(job => stableContentId(job.url)));
+      const ids = [...new Set(reviewIds)];
+      if (ids.some(id => !savedIds.has(id))) throw new Error('审核清单必须精确属于当前批次已保存来源');
+      if (!Number.isSafeInteger(reclassifiedFailureCount) || reclassifiedFailureCount < 0) throw new Error('重分类失败数无效');
+      batch.reviewIds = ids;
+      batch.deliveryIds = [];
+      batch.accepted = ids.length;
+      batch.saved = ids.length;
+      batch.failed = Math.max(0, children.filter(job => job.status === 'failed' && !SKIPPED_ERROR_CODES.has(job.errorCode ?? '')).length - reclassifiedFailureCount);
+      batch.needsAttention = children.filter(job => job.status === 'needs_attention').length;
+      batch.discovered = Math.max(batch.discovered, ids.length + batch.failed + batch.needsAttention);
+      batch.skipped = Math.max(0, batch.discovered - ids.length - batch.failed - batch.needsAttention);
+      batch.coverage = { ...coverage };
+      batch.rejections = { ...rejections };
+      batch.selectionStatus = 'completed';
+      if (selectionError) batch.error = `${batch.error ? `${batch.error}；` : ''}${selectionError}`.slice(0, 2_000);
+      await this.persist();
+      return publicBatch(batch);
+    });
+  }
+
   reconcileStoppedNowcoder(batchId: string, jobs: readonly JobRecord[]): Promise<CollectionBatch> {
     return this.serializeMutation(async () => {
       const batch = this.require(batchId);

@@ -84,6 +84,8 @@ interface JobRecordBase {
   id: string;
   url: string;
   requestedBy: 'codex' | 'cli' | 'extension';
+  /** Held local evidence; automatic delivery/pending pooling is forbidden. */
+  nowcoderReviewOnly?: true;
   status: JobStatus;
   createdAt: string;
   updatedAt: string;

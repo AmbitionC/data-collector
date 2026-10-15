@@ -315,3 +315,111 @@ describe('Nowcoder plan discovery query expansion', () => {
     });
   });
 });
+
+
+describe('Nowcoder review discovery access and company boundaries', () => {
+  it('filters selected companies before any request and rejects differently attributed results', async () => {
+    const queries: string[] = [];
+    const fetcher: typeof fetch = async (_input, init) => {
+      queries.push(JSON.parse(String(init?.body)).query);
+      return apiRecordResponse([
+        { id: '81001', title: '蚂蚁 Agent 一面面经', content: 'Agent RAG 面试复盘' },
+        { id: '81002', title: '腾讯 Agent 一面面经', content: 'Agent RAG 面试复盘' },
+      ]);
+    };
+    const result = await discoverNowcoderPlanCandidates(fetcher, new Set(), {
+      companies: ['ant'], reviewOnly: true,
+    });
+    expect(queries.length).toBeGreaterThan(0);
+    expect(queries.every(query => query.startsWith('蚂蚁 '))).toBe(true);
+    expect(result).toEqual([{ url: 'https://www.nowcoder.com/discuss/81001', queryCompany: 'ant' }]);
+  });
+
+  it('sends no requests for an explicitly empty company set', async () => {
+    const requested: string[] = [];
+    const result = await discoverNowcoderPlanCandidates(async input => {
+      requested.push(String(input));
+      return apiSearchResponse([]);
+    }, new Set(), { companies: [], reviewOnly: true });
+    expect(result).toEqual([]);
+    expect(requested).toEqual([]);
+  });
+
+  it.each([[429, 'RATE_LIMITED'], [401, 'AUTH_REQUIRED'], [403, 'AUTH_REQUIRED']])(
+    'stops on HTTP %s without SSR fallback, next page or next query', async (status, code) => {
+      const requests: string[] = [];
+      const pending = discoverNowcoderPlanCandidates(async input => {
+        requests.push(String(input));
+        return new Response('访问需要人工处理', { status: Number(status) });
+      }, new Set(), { companies: ['ant'], reviewOnly: true });
+      await expect(pending).rejects.toMatchObject({ name: 'NowcoderCollectionStopError', code });
+      expect(requests).toEqual(['https://gw-c.nowcoder.com/api/sparta/pc/search']);
+    },
+  );
+
+  it.each([
+    [{ code: 10086, success: false, msg: '请先登录' }, 'AUTH_REQUIRED'],
+    [{ code: 10401, success: false, message: '请完成验证码验证' }, 'CAPTCHA_REQUIRED'],
+    [{ code: 429, success: false, message: '请求被限流' }, 'RATE_LIMITED'],
+  ])('propagates an explicit JSON access challenge before a further search', async (payload, code) => {
+    const requests: string[] = [];
+    const pending = discoverNowcoderPlanCandidates(async input => {
+      requests.push(String(input));
+      return Response.json(payload);
+    }, new Set(), { companies: ['ant'], reviewOnly: true });
+    await expect(pending).rejects.toMatchObject({ code });
+    expect(requests).toHaveLength(1);
+  });
+
+  it('does not guess that an unknown JSON error code is an access challenge', async () => {
+    const requested: string[] = [];
+    const result = await discoverNowcoderPlanCandidates(async input => {
+      requested.push(String(input));
+      if (new URL(String(input)).hostname === 'gw-c.nowcoder.com') {
+        return Response.json({ code: 10401, success: false, message: '暂时没有数据' });
+      }
+      return new Response('<a href="/discuss/82001">蚂蚁 Agent 面经</a>');
+    }, new Set(), { companies: ['ant'], reviewOnly: true });
+    expect(result).toEqual([{ url: 'https://www.nowcoder.com/discuss/82001', queryCompany: 'ant' }]);
+    expect(requested.some(input => new URL(input).pathname === '/search')).toBe(true);
+  });
+
+  it('stops when SSR fallback displays a captcha instead of following later queries', async () => {
+    const requested: string[] = [];
+    const pending = discoverNowcoderPlanCandidates(async input => {
+      requested.push(String(input));
+      if (new URL(String(input)).hostname === 'gw-c.nowcoder.com') return new Response('', { status: 503 });
+      return new Response('<main><div class="captcha-modal">请完成滑动验证</div></main>');
+    }, new Set(), { companies: ['ant'], reviewOnly: true });
+    await expect(pending).rejects.toMatchObject({ code: 'CAPTCHA_REQUIRED' });
+    expect(requested).toHaveLength(2);
+  });
+
+  it('keeps an interview discussing captcha and ignores hidden challenge markup', async () => {
+    const result = await discoverNowcoderPlanCandidates(async input => {
+      if (new URL(String(input)).hostname === 'gw-c.nowcoder.com') return new Response('', { status: 503 });
+      return new Response('<div hidden><div class="captcha-modal">请完成验证</div></div><article>面试官问验证码实现<a href="/discuss/82002">蚂蚁面经</a></article>');
+    }, new Set(), { companies: ['ant'], reviewOnly: true });
+    expect(result).toEqual([{ url: 'https://www.nowcoder.com/discuss/82002', queryCompany: 'ant' }]);
+  });
+});
+
+
+describe('Nowcoder legacy concurrent access stop', () => {
+  it('does not send SSR or another page after its concurrent sibling requests an access stop', async () => {
+    const requests: string[] = [];
+    let releaseSibling!: () => void;
+    const sibling = new Promise<void>(resolve => { releaseSibling = resolve; });
+    const result = discoverNowcoderPlanCandidates(async input => {
+      requests.push(String(input));
+      if (requests.length === 1) return new Response('', { status: 429 });
+      if (requests.length === 2) { await sibling; return new Response('', { status: 503 }); }
+      return new Response('<a href="/discuss/84001">面经</a>');
+    }, new Set());
+    await expect(result).rejects.toMatchObject({ code: 'RATE_LIMITED' });
+    releaseSibling();
+    await new Promise<void>(resolve => setImmediate(resolve));
+    await new Promise<void>(resolve => setImmediate(resolve));
+    expect(requests).toHaveLength(2);
+  });
+});
