@@ -20,6 +20,8 @@ import {
 } from './jobs.js';
 import { OwnedTabRegistry, type OwnedTabsStorage } from './ownedTabs.js';
 import { planErrorNeedsAttention } from './planAttention.js';
+import { HotMaterialSession } from './hotMaterials.js';
+import { collectedDocumentSchema, type CollectedDocument } from '@data-collector/shared';
 
 const storage: ExtensionStorage = {
   get: keys => chrome.storage.local.get(keys),
@@ -146,18 +148,21 @@ const runner = new JobRunner({
   reportItems: items => { void chrome.storage.local.set({ batchItems: items }); },
   // 本机库是唯一的去重依据：采之前先问一遍库里有什么，已有的不再重复采。
   knownUrls: async () => {
-    const entries = (await connection.library()) as { url?: unknown }[];
-    return new Set(entries.map(entry => String(entry.url ?? '')).filter(Boolean));
+    const entries = (await connection.library()) as { url?: unknown; materialKind?: unknown; id?: string }[];
+    return new Set(entries.filter(entry => entry.materialKind !== 'nowcoder-hot' && !entry.id?.startsWith('hot-')).map(entry => String(entry.url ?? '')).filter(Boolean));
   },
   knownContent: async () => {
     // 旧 Bridge 的目录没有 contentComplete；此时退回 knownUrls，不能把所有旧条目每天重投。
     if (!connection.supportsVersion('0.4.29')) return undefined;
     const entries = (await connection.library()) as Array<{
+      id?: string;
+      materialKind?: string;
       url?: unknown;
       contentComplete?: unknown;
       contentCompletenessVersion?: unknown;
     }>;
     return new Map(entries
+      .filter(entry => entry.materialKind !== 'nowcoder-hot' && !entry.id?.startsWith('hot-'))
       .map(entry => {
         const url = String(entry.url ?? '');
         const complete = trustedZsxqContentCompleteness(entry);
@@ -168,6 +173,12 @@ const runner = new JobRunner({
   knownZsxqIndex: () => connection.zsxqIndex(),
 });
 let activePlanCollections = 0;
+const hotMaterials = new HotMaterialSession({
+  storage: sessionStorage,
+  readList: () => runner.previewHotList(),
+  library: async () => await connection.library() as { id: string; url: string; materialKind?: string }[],
+  save: document => runner.saveHotDocument(document),
+});
 const activePlanAttempts = new Set<string>();
 connection.onCollect((requestId, url, interactive, ownership) =>
   runner.runRemoteJob(requestId, url, interactive, ownership));
@@ -259,7 +270,7 @@ function updateSignal(values: Record<string, unknown>): UpdateSignal {
     buildFailed: update?.buildFailed === true,
     updateMessage: update?.message,
     directedRunActive: values.directedRunActive === true,
-    busy: isCollecting({
+    busy: hotMaterials.processing || isCollecting({
       batch: values.batch as { phase?: string; updatedAt?: number } | undefined,
       lastJobStatus: values.lastJobStatus as string | undefined,
       lastJobUpdatedAt: values.lastJobUpdatedAt as number | undefined,
@@ -350,6 +361,24 @@ chrome.runtime.onMessage.addListener((message: unknown, _sender, sendResponse) =
   const action = async () => {
     if (request.type === 'status.get') {
       return status();
+    }
+    if (request.type === 'hot.preview' || request.type === 'hot.save' || request.type === 'hot.export') {
+      // Older Bridge schemas strip unknown fields, which would destroy the private-material boundary.
+      if (!connection.supportsHotMaterials()) throw new Error('本机服务尚未声明热帖素材支持，请使用配套版本后重试');
+      if (request.type === 'hot.preview') return hotMaterials.preview();
+      if (request.type === 'hot.save') {
+        const input = request as unknown as { token: string; selections: import('@data-collector/shared').HotSelection[] };
+        return hotMaterials.save(input.token, input.selections);
+      }
+      const entries = await connection.library() as { id: string; materialKind?: string }[];
+      const materials: { id: string; document: CollectedDocument }[] = [];
+      for (const entry of entries.filter(entry => entry.materialKind === 'nowcoder-hot' || entry.id.startsWith('hot-'))) {
+        const content = await connection.libraryEntry(entry.id) as { document?: CollectedDocument };
+        const document = collectedDocumentSchema.parse(content.document) as CollectedDocument;
+        if (!document.operationMaterial) throw new Error('素材元信息缺失，已停止导出；请核对本机库');
+        materials.push({ id: entry.id, document });
+      }
+      return { schemaVersion: 1, type: 'nowcoder-hot-materials', visibility: 'private', exportedAt: new Date().toISOString(), materials };
     }
     if (request.type === 'capture.current') {
       // 单页任务与批量记录互斥：同一页不可能两者同时进行，清掉另一边免得状态打架。

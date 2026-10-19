@@ -21,6 +21,7 @@ import {
   CONTENT_HOOK_STATS_REQUEST,
   CONTENT_ITEM_DIAGNOSE_REQUEST,
   CONTENT_LIST_REQUEST,
+  CONTENT_HOT_LIST_REQUEST,
   CONTENT_REFRESH_TOPICS_REQUEST,
   CONTENT_RESTORE_REQUEST,
   CONTENT_SELECT_VIEW_REQUEST,
@@ -406,6 +407,17 @@ describe('content script list collection', () => {
     expect(foreignRequest).not.toBe(CONTENT_ADVANCE_REQUEST);
     expect(listener({ type: foreignRequest }, {}, sendResponse)).toBe(false);
     expect(sendResponse).not.toHaveBeenCalled();
+  });
+
+  it('accepts only the current build hot-list message, ignoring literal and foreign listeners', async () => {
+    for (const type of ['hot.list', contentRequestType('hot.list', `${CONTENT_BUILD_ID}-foreign`)]) {
+      const response = vi.fn();
+      expect(listener({ type }, {}, response)).toBe(false);
+      expect(response).not.toHaveBeenCalled();
+    }
+    expect(await ask<Record<string, unknown>>({ type: CONTENT_HOT_LIST_REQUEST })).toMatchObject({
+      ok: false, contentBuildId: CONTENT_BUILD_ID, contentProtocol: CONTENT_EXTRACTION_PROTOCOL,
+    });
   });
 
   it('attests every current extraction and control response, including errors', async () => {

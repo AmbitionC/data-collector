@@ -43,6 +43,7 @@ describe('content-script request build fence', () => {
       contentRequestType: (request: string, buildId: string) => string;
     };
     const operations = {
+      CONTENT_HOT_LIST_REQUEST: 'hot.list',
       CONTENT_DOCUMENT_REQUEST: 'extract.document',
       CONTENT_LIST_REQUEST: 'extract.list',
       CONTENT_SELECT_VIEW_REQUEST: 'list.selectView',

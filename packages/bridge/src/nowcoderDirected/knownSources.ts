@@ -19,6 +19,7 @@ export async function knownNowcoderSources(input: {
   };
   for (const entry of await readKnownNowcoderLocalSources(input.libraryRoot)) add(entry.url, entry.reason);
   for (const job of input.jobs) {
+    if (job.materialKind === 'nowcoder-hot') continue;
     if (job.directedRunId === input.excludeRunId && input.excludeRunId) continue;
     if (['queued', 'dispatched', 'collecting', 'saved'].includes(job.status)) add(job.url, 'active_or_saved_job');
   }

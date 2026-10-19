@@ -9,6 +9,7 @@ import { z } from 'zod';
 import { WebSocket, type RawData } from 'ws';
 import {
   APP_VERSION,
+  NOWCODER_HOT_MATERIAL_CAPABILITY,
   EXTENSION_REPLACED_CLOSE_CODE,
   EXTENSION_REPLACED_CLOSE_REASON,
   TRUSTED_EXTENSION_ID,
@@ -139,12 +140,16 @@ const createJobSchema = z.object({
   id: z.string().min(1).max(100).optional(),
   url: z.string().url().max(4096),
   requestedBy: z.enum(['codex', 'cli', 'extension']).default('cli'),
+  materialKind: z.literal('nowcoder-hot').optional(),
   /** 用户为本次采集显式选择的落地去向（sink id）；缺省按来源默认路由。 */
   sinks: z.array(z.string().trim().min(1).max(100)).max(10).optional(),
   batchId: z.string().trim().min(1).max(200).optional(),
   planId: z.enum(COLLECTION_PLAN_IDS).optional(),
   attempt: collectionPlanAttemptSchema.optional(),
 }).superRefine((input, context) => {
+  if (input.materialKind && (input.requestedBy !== 'extension' || input.planId || input.batchId)) {
+    context.addIssue({ code: 'custom', path: ['materialKind'], message: '热帖素材只支持扩展手动保存' });
+  }
   if (Boolean(input.batchId) !== Boolean(input.planId)) {
     context.addIssue({ code: 'custom', path: ['batchId'], message: 'batchId 与 planId 必须同时提供' });
   }
@@ -860,6 +865,7 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
       !extensionReady ||
       targetSocket.readyState !== WebSocket.OPEN ||
       job.status !== 'queued'
+      || job.materialKind === 'nowcoder-hot'
     ) return;
     if (job.nowcoderReviewOnly && job.batchId && !pacingApplied) {
       try {
@@ -1396,7 +1402,7 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
     now: () => new Date().toISOString(),
     knownNowcoderUrls: () => new Set(
       jobs.list()
-        .filter(job => job.status !== 'failed' && job.status !== 'needs_attention')
+        .filter(job => job.materialKind !== 'nowcoder-hot' && job.status !== 'failed' && job.status !== 'needs_attention')
         .map(job => job.url)
         .filter(url => url.startsWith('https://www.nowcoder.com/')),
     ),
@@ -1672,6 +1678,9 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
     }
     if (parsedEnvelope.type === 'job.result') {
       const result = jobResultPayloadSchema.parse(parsedEnvelope.payload);
+      if (Boolean(result.document.operationMaterial) !== (job.materialKind === 'nowcoder-hot')) {
+        throw new Error('热帖素材快照与任务类型不一致，已拒绝保存');
+      }
       if (result.document.canonicalUrl !== job.url) {
         throw new Error('回传内容 URL 与采集任务不一致');
       }
@@ -1920,6 +1929,7 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
       return sendJson(response, 200, {
         ok: true,
         version: APP_VERSION,
+        bridgeCapabilities: [NOWCODER_HOT_MATERIAL_CAPABILITY],
         trustedExtensionId: TRUSTED_EXTENSION_ID,
         extensionConnected: extensionReady && extensionSocket?.readyState === WebSocket.OPEN,
         directedRunActive: directedService?.hasActiveRun() ?? false,
@@ -2089,6 +2099,7 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
       const job = await jobs.create({
         url: input.url,
         requestedBy: input.requestedBy,
+        ...(input.materialKind ? { materialKind: input.materialKind } : {}),
         ...(input.id
           ? { id: input.id }
           : input.batchId

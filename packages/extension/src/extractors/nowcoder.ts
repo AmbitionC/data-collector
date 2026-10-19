@@ -1,5 +1,6 @@
 import { buildDocument, elementText, parsePublishedAt } from './common.js';
 import { ExtractionError, type Clock } from './types.js';
+export { extractNowcoderHotList } from './nowcoderHot.js';
 
 const LOGIN_SELECTORS = [
   '.login-modal',

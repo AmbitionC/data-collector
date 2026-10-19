@@ -57,6 +57,24 @@ async function sidePanelFor(targetPage: Page): Promise<{ page: Page; worker: Web
   return { page: sidePanel, worker };
 }
 
+/** 热帖截图需要真实前台绘制；完成后还原来源页供后续采集识别。 */
+async function screenshotHotPanel(page: Page, sourcePage: Page, path: string): Promise<void> {
+  try {
+    await page.bringToFront();
+    // 后台扩展页重绘后可能没有可截图的 compositor frame；等实际前台绘制，不加超时或重试。
+    await page.evaluate(() => new Promise<void>(resolveFrame => {
+      requestAnimationFrame(() => requestAnimationFrame(() => resolveFrame()));
+    }));
+    expect(await page.evaluate(() => document.visibilityState)).toBe('visible');
+    const png = Buffer.from(await page.screenshot({ path, fullPage: true }));
+    expect([...png.subarray(0, 8)]).toEqual([137, 80, 78, 71, 13, 10, 26, 10]);
+    expect(png.readUInt32BE(16)).toBe(390);
+    expect(png.readUInt32BE(20)).toBeGreaterThanOrEqual(1100);
+  } finally {
+    await sourcePage.bringToFront();
+  }
+}
+
 async function waitForVisiblePanel(page: Page, selector: string, timeout: number): Promise<void> {
   const session = await page.createCDPSession();
   const deadline = Date.now() + timeout;
@@ -373,6 +391,49 @@ describe('built Chrome extension', () => {
     expect(plans.batches ?? []).toEqual([]);
     await sidePanel.screenshot({ path: join(screenshotDirectory, 'company-review-schedule-saved.png'), fullPage: true });
   });
+  it('previews and saves checked private hot materials through the existing Chrome pipeline', async () => {
+    const { libraryRoot } = await startStack();
+    const url = 'https://www.nowcoder.com/';
+    const fixture = await readFile(join(WORKSPACE, 'tests', 'fixtures', 'nowcoder-hot-list.html'), 'utf8');
+    const sourcePage = await browser!.newPage();
+    await serveArticleFixture(sourcePage, fixture, url);
+    await sourcePage.goto(url, { waitUntil: 'domcontentloaded' });
+    const { page: sidePanel } = await sidePanelFor(sourcePage);
+    await sidePanel.setViewport({ width: 390, height: 1100 });
+    await sidePanel.emulateMediaFeatures([{ name: 'prefers-reduced-motion', value: 'reduce' }]);
+    await waitForVisiblePanel(sidePanel, '#ready-panel', 15_000);
+    await clickSidePanel(sidePanel, '#nav-hot');
+    await waitForVisiblePanel(sidePanel, '#hot-panel', 10_000);
+    await clickSidePanel(sidePanel, '#hot-read');
+    await waitForValue(sidePanel, 'document.querySelectorAll(".hot-card").length', value => value === '2', 15_000, '热帖预览');
+    expect(await sidePanel.evaluate(() => [...document.querySelectorAll<HTMLInputElement>('.hot-select')].every(input => !input.checked))).toBe(true);
+    await sidePanel.evaluate(() => {
+      const selected = document.querySelector<HTMLInputElement>('.hot-select')!;
+      selected.checked = true; selected.dispatchEvent(new Event('change'));
+      const note = document.querySelector<HTMLTextAreaElement>('.hot-note')!;
+      note.value = '围绕等待回复时的节奏管理找选题'; note.dispatchEvent(new Event('input'));
+      const tag = document.querySelector<HTMLInputElement>('fieldset input')!;
+      tag.checked = true; tag.dispatchEvent(new Event('change'));
+    });
+    const screenshots = join(WORKSPACE, 'artifacts', 'screenshots');
+    await mkdir(screenshots, { recursive: true });
+    await screenshotHotPanel(sidePanel, sourcePage, join(screenshots, 'nowcoder-hot-preview.png'));
+    await clickSidePanel(sidePanel, '#hot-save');
+    await waitForText(sidePanel, '#hot-status', '已保存 1 条，已跳过 0 条，失败 0 条。', 15_000);
+    const catalog = JSON.parse(await readFile(join(libraryRoot, '_catalog', 'index.json'), 'utf8')) as { id: string; materialKind: string; relativePath: string }[];
+    expect(catalog).toHaveLength(1);
+    expect(catalog[0]?.id).toMatch(/^hot-/u);
+    expect(catalog[0]?.materialKind).toBe('nowcoder-hot');
+    const result = await sidePanel.evaluate(async () => await chrome.runtime.sendMessage({ type: 'hot.export' }));
+    expect(result.ok).toBe(true);
+    expect(result.value.materials[0].document.operationMaterial.editorial.inspirationNote).toBe('围绕等待回复时的节奏管理找选题');
+    expect(result.value.materials[0].document.operationMaterial.editorial.emotionTags).toEqual(['焦虑']);
+    expect(result.value.materials[0].document.author).toBeUndefined();
+    const checkboxes = await sidePanel.evaluate(() => [...document.querySelectorAll<HTMLInputElement>('.hot-select')].map(input => input.getBoundingClientRect().width));
+    expect(checkboxes.every(width => width <= 24)).toBe(true);
+    await screenshotHotPanel(sidePanel, sourcePage, join(screenshots, 'nowcoder-hot-saved.png'));
+  });
+
   it('automatically authorizes the side panel and captures the current page into the local library', async () => {
     const { libraryRoot } = await startStack();
 

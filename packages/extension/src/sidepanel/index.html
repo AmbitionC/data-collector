@@ -17,6 +17,7 @@
           <button id="nav-collect" type="button" aria-pressed="true">采集</button>
           <button id="nav-plans" type="button" aria-pressed="false">任务</button>
           <button id="nav-library" type="button" aria-pressed="false">已入库</button>
+          <button id="nav-hot" type="button" aria-pressed="false">热帖素材</button>
         </nav>
       </header>
 
@@ -26,6 +27,20 @@
       </div>
 
       <div class="panel-content">
+        <section id="hot-panel" class="state-panel" hidden>
+          <p class="section-kicker">私有运营素材 · 手动采集</p>
+          <h2>从热帖情绪找选题灵感</h2>
+          <p class="support compact">只读取当前页面已加载内容（DOM）中前 60 条可识别帖子，不按屏幕可视区域筛选。滚动后重读不保证覆盖后续条目。原文说法保持未核实；短摘不自动脱敏，需人工检查个人信息。标签仅供选题参考，不用于诊断或推断身份。</p>
+          <div class="result-actions">
+            <button id="hot-read" class="primary-button" type="button">读取当前牛客列表 / 重试</button>
+            <button id="hot-export" class="secondary-button" type="button">导出私有素材 JSON</button>
+          </div>
+          <p id="hot-status" class="support compact" role="status">先打开牛客列表，再读取并勾选需要的素材。</p>
+          <ul id="hot-list" class="hot-list"></ul>
+          <button id="hot-save" class="primary-button" type="button" disabled>保存勾选的 0 条素材</button>
+          <p class="support compact">保存去向：本机库 / 热帖素材。只保留必要短摘和原文链接；不会同步到题库收件箱。</p>
+          <p id="hot-notice" class="support compact"></p>
+        </section>
         <section id="loading-panel" class="state-panel" aria-live="polite">
           <p class="lead">正在读取当前页面…</p>
         </section>

@@ -29,6 +29,23 @@ describe('bridge configuration', () => {
 });
 
 describe('durable jobs', () => {
+  it('persists private material purpose and stops worker-loss recovery before full-detail dispatch', async () => {
+    const root = await temporaryDirectory();
+    const path = join(root, 'jobs.json');
+    const jobs = await JobStore.open(path);
+    for (const status of ['queued', 'collecting'] as const) {
+      const input = { id: `hot-${status}`, url: 'https://www.nowcoder.com/discuss/9001',
+        requestedBy: 'extension' as const, materialKind: 'nowcoder-hot' as const };
+      await jobs.create(input);
+      if (status === 'collecting') await jobs.transition(input.id, status);
+    }
+    const reopened = await JobStore.open(path);
+    expect(reopened.get('hot-queued')).toMatchObject({ materialKind: 'nowcoder-hot' });
+    const recovery = await reopened.recover();
+    expect(recovery.requeued).toEqual([]);
+    expect(recovery.terminalized).toHaveLength(2);
+    expect(reopened.get('hot-collecting')).toMatchObject({ status: 'needs_attention', errorCode: 'HOT_SAVE_INTERRUPTED' });
+  });
   it('keeps active and attention jobs plus only the newest 1000 terminal jobs', async () => {
     const root = await temporaryDirectory();
     const path = join(root, 'jobs.json');
@@ -671,4 +688,15 @@ describe('durable jobs', () => {
     await jobs.transition(saved.id, 'saved', { outputPath: '/tmp/current.md' });
     await expect(jobs.retry(saved.id)).rejects.toBeInstanceOf(JobStateError);
   });
+});
+
+
+it('rejects mixing manual materials with review, fixed-plan, or directed ownership', async () => {
+  const root = await temporaryDirectory();
+  const jobs = await JobStore.open(join(root, 'jobs.json'));
+  const base = { url: 'https://www.nowcoder.com/discuss/9001', requestedBy: 'extension' as const, materialKind: 'nowcoder-hot' as const };
+  await expect(jobs.create({ ...base, nowcoderReviewOnly: true })).rejects.toThrow();
+  await expect(jobs.create({ ...base, planId: 'nowcoder-agent-market', batchId: 'fixed-batch', planAttempt: '0123456789abcdef' })).rejects.toThrow();
+  await expect(jobs.create({ ...base, directedRunId: 'directed-run', directedRunAttempt: '0123456789abcdef' })).rejects.toThrow();
+  expect(jobs.list()).toEqual([]);
 });

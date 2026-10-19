@@ -35,6 +35,10 @@ export async function saveCollectedDocument(
     currentJobId: string;
   },
 ): Promise<SinkResult[]> {
+  if (document.operationMaterial) {
+    if (directedEvidence) throw new Error('热帖素材不能参与面经定向交付');
+    return router.save(organize(document), ['markdown']);
+  }
   if (!candidateIndex) {
     if (document.source === 'nowcoder' || document.source === 'github') {
       throw new Error('fe-journey 候选索引不可用，已停止候选来源落盘');

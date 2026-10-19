@@ -1140,3 +1140,18 @@ select:focus {
 }
 .refresh-toggle span { font-size: 12px; line-height: 1.5; color: var(--ink); }
 .refresh-toggle em { display: block; font-style: normal; color: var(--muted); font-size: 11px; }
+
+/* Manual private Nowcoder material preview. */
+.hot-list { list-style: none; padding: 0; margin: 18px 0; }
+.hot-card { border: 1px solid var(--line, #e0ded8); border-radius: 10px; padding: 12px; margin-bottom: 14px; background: var(--paper, #fff); }
+.hot-card-head { display: flex; gap: 9px; align-items: flex-start; font-weight: 600; }
+.hot-card-head a { color: var(--ink, #222); overflow-wrap: anywhere; }
+.hot-card input[type="checkbox"] { width: 16px; height: 16px; flex: 0 0 16px; }
+.hot-card blockquote { margin: 12px 0; padding-left: 10px; border-left: 3px solid var(--line, #ddd); font-size: 13px; overflow-wrap: anywhere; }
+.hot-card > label { display: grid; gap: 5px; margin-top: 12px; font-size: 12px; }
+.hot-card select, .hot-card textarea { width: 100%; box-sizing: border-box; border: 1px solid var(--line, #ddd); border-radius: 6px; background: transparent; color: inherit; padding: 8px; font: inherit; }
+.hot-card fieldset { border: 0; padding: 0; margin-top: 12px; font-size: 12px; }
+.hot-card fieldset label { display: inline-flex; align-items: center; gap: 4px; margin: 5px 8px 0 0; }
+.hot-card[data-saved="true"] { opacity: .75; }
+#hot-status { white-space: pre-wrap; overflow-wrap: anywhere; }
+#hot-notice { margin-top: 16px; }

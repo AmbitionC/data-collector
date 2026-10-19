@@ -3,6 +3,7 @@ import { dirname, isAbsolute, join, posix, relative, sep, win32 } from 'node:pat
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   stableContentId,
+  renderHotMaterial,
   ZSXQ_COMPLETE_CONTENT_CAPABILITY,
   type CollectedDocument,
 } from '@data-collector/shared';
@@ -1181,4 +1182,47 @@ describe('「已提交但没推上去」不算送到', () => {
     );
     expect(await pendingIds(root)).toEqual([]);
   });
+});
+
+
+function privateHotInput(url: string) {
+  const material: NonNullable<CollectedDocument['operationMaterial']> = {
+    schemaVersion: 1, purpose: 'nowcoder-hot', visibility: 'private', verificationStatus: 'unverified',
+    observation: { listUrl: 'https://www.nowcoder.com/', listTitle: 'fixture', publishedAtText: null,
+      metrics: { heat: null, likes: null, comments: null, views: null }, observedAt: '2026-10-10T00:00:00.000Z' },
+    evidence: { excerpt: 'private fixture excerpt', attribution: 'source-quote' },
+    editorial: { emotionTags: [], inspirationNote: '' }, screenshotPolicy: 'redact-before-public-use',
+  };
+  const doc = collected({ source: 'nowcoder', kind: 'post', url, canonicalUrl: url, images: [],
+    text: material.evidence.excerpt, html: renderHotMaterial(material), operationMaterial: material });
+  delete doc.author;
+  return organize(doc);
+}
+
+it.each([false, true])('preserves valid hot catalogs through directed saves, same-URL interview=%s', async sameUrl => {
+  const root = await temporaryDirectory();
+  const library = new MarkdownLibrary({ root });
+  const url = 'https://www.nowcoder.com/discuss/900001';
+  const hot = await library.save(privateHotInput(url));
+  if (sameUrl) await library.save(directedNowcoder(url));
+  const next = 'https://www.nowcoder.com/discuss/900002', input = directedNowcoder(next);
+  const saved = await library.save(input, directedLocalEvidence(next, input));
+  const catalog = JSON.parse(await readFile(join(root, '_catalog/index.json'), 'utf8'));
+  expect(catalog).toHaveLength(sameUrl ? 3 : 2);
+  expect(catalog.find((entry: { id: string }) => entry.id === hot.id).materialKind).toBe('nowcoder-hot');
+  expect(saved.id).toBe(stableContentId(next));
+  await preflightDirectedLocalLibrary(root);
+});
+
+it('refuses corrupt hot namespace markers before a directed catalog mutation', async () => {
+  const root = await temporaryDirectory();
+  const library = new MarkdownLibrary({ root });
+  await library.save(privateHotInput('https://www.nowcoder.com/discuss/900001'));
+  const path = join(root, '_catalog/index.json'), catalog = JSON.parse(await readFile(path, 'utf8'));
+  catalog[0].materialKind = 'unexpected-purpose';
+  await writeFile(path, JSON.stringify(catalog));
+  const before = await readFile(path, 'utf8');
+  const next = 'https://www.nowcoder.com/discuss/900002', input = directedNowcoder(next);
+  await expect(library.save(input, directedLocalEvidence(next, input))).rejects.toMatchObject({ code: 'DIRECTED_LOCAL_LIBRARY_CORRUPT' });
+  expect(await readFile(path, 'utf8')).toBe(before);
 });
