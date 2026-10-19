@@ -1,8 +1,9 @@
+import { isHotMaterialCatalogEntry } from '../library/hotMaterial.js';
 import { loadNowcoderIdentityProjection, NowcoderIdentityProjectionError } from './nowcoderIdentityProjection.js';
 import { readOutsideInterviewHistory, OutsideInterviewHistoryError } from './outsideInterviewHistory.js';
 import { lstat, readFile, realpath } from 'node:fs/promises';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
-import { canonicalizeUrl, parseSupportedUrl, stableContentId, type CollectedDocument } from '@data-collector/shared';
+import { canonicalizeUrl, parseSupportedUrl, stableContentId, hotMaterialId, type CollectedDocument } from '@data-collector/shared';
 import { contentFingerprint } from '../feJourney/fingerprint.js';
 import type { NowcoderDiscoveryCandidate } from '../feJourney/nowcoderDiscovery.js';
 import { projectOrganized } from '../library/storedDocument.js';
@@ -228,9 +229,12 @@ async function qualifiedSnapshots(root: string, now: string): Promise<CollectedD
     if (identities.has(item.id) || paths.has(item.relativePath)) invalid('local library catalog contains duplicate identities');
     identities.add(item.id); paths.add(item.relativePath);
     safeRelativePath(item.relativePath);
+    let hot: boolean;
+    try { hot = isHotMaterialCatalogEntry({ id: item.id, source: item.source, url: item.url, materialKind: item.materialKind, nowcoderReviewOnly: item.nowcoderReviewOnly }); }
+    catch { invalid('local hot material catalog identity is invalid'); }
     if (item.source !== 'nowcoder') continue;
     const url = canonicalNowcoderUrl(item.url);
-    if (!url || item.id !== stableContentId(item.url) || !item.relativePath.endsWith('/index.md')) invalid('local Nowcoder catalog identity is invalid');
+    if (!url || item.id !== (hot ? hotMaterialId(item.url) : stableContentId(item.url)) || !item.relativePath.endsWith('/index.md')) invalid('local Nowcoder catalog identity is invalid');
     await boundedFile(root, item.relativePath);
     const sourcePath = relative(root, join(dirname(resolve(root, item.relativePath)), 'source.json')).split(sep).join('/');
     let document: CollectedDocument;
@@ -241,6 +245,8 @@ async function qualifiedSnapshots(root: string, now: string): Promise<CollectedD
     }
     if (document.source !== 'nowcoder' || canonicalNowcoderUrl(document.canonicalUrl) !== url
       || canonicalNowcoderUrl(document.url) !== url) invalid('local source snapshot/catalog identity mismatch');
+    if (Boolean(document.operationMaterial) !== hot) invalid('local source material kind does not match its catalog');
+    if (hot) continue;
     const accepted = selectNowcoderPlanCandidates([document], now, 1).accepted[0];
     if (!accepted) continue;
     if (!accepted.feJourney || !/^[a-f0-9]{16}$/u.test(accepted.feJourney.contentHash)

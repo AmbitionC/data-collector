@@ -16,6 +16,7 @@ import {
   type SidePanelActions,
   type SidePanelState,
 } from './state.js';
+import { bindHotMaterials } from './hotMaterials.js';
 
 interface BackgroundResponse<T> {
   ok: boolean;
@@ -37,6 +38,7 @@ async function message<T>(payload: unknown): Promise<T> {
 }
 
 let pollTimer: number | undefined;
+const hotPanel = bindHotMaterials(document, message);
 
 /**
  * 侧栏被关掉后就别再轮询了：页面已经不在，继续问后台纯属浪费，
@@ -65,6 +67,14 @@ let itemsFilter: ItemFilter = 'all';
 
 /** 「已入库」页面的本地视图状态。 */
 let page: TopPage = 'collect';
+
+/** Late responses may update cached data, but must not replace the user's current page. */
+function renderCurrentPanel(panelDocument: Document, state: SidePanelState, panelActions: SidePanelActions): void {
+  const target: TopPage = state.phase === 'library' ? 'library' : state.phase === 'plans' ? 'plans' : 'collect';
+  if (page !== target) return;
+  renderSidePanel(panelDocument, state, panelActions);
+}
+
 let library: LibraryEntry[] = [];
 let librarySource = '';
 let libraryLoading = false;
@@ -110,7 +120,7 @@ async function loadPlans(): Promise<void> {
   const observedScheduleRevision = nowcoderScheduleRevision;
   plansLoading = plans.length === 0;
   plansError = undefined;
-  renderSidePanel(document, plansState(), actions);
+  renderCurrentPanel(document, plansState(), actions);
   try {
     const status = await message<PlansStatusResponse>({ type: 'plans.status' });
     plans = status.plans;
@@ -131,7 +141,7 @@ async function loadPlans(): Promise<void> {
   } finally {
     plansLoading = false;
     if (page === 'plans') {
-      renderSidePanel(document, plansState(), actions);
+      renderCurrentPanel(document, plansState(), actions);
       scheduleRefresh('plans');
     }
   }
@@ -155,7 +165,7 @@ function libraryState(): SidePanelState {
 /** 读一条已入库内容的正文，失败如实写在浮层上。 */
 async function loadEntry(id: string, title: string): Promise<void> {
   viewing = { id, title, loading: true };
-  renderSidePanel(document, libraryState(), actions);
+  renderCurrentPanel(document, libraryState(), actions);
   try {
     const entry = await message<{
       markdown: string;
@@ -183,14 +193,14 @@ async function loadEntry(id: string, title: string): Promise<void> {
     if (viewing?.id !== id) return;
     viewing = { id, title, loading: false, error: errorMessage(error, '读取这一条的内容失败。') };
   } finally {
-    if (viewing?.id === id) renderSidePanel(document, libraryState(), actions);
+    if (viewing?.id === id) renderCurrentPanel(document, libraryState(), actions);
   }
 }
 
 async function loadLibrary(): Promise<void> {
   libraryLoading = true;
   libraryError = undefined;
-  renderSidePanel(document, libraryState(), actions);
+  renderCurrentPanel(document, libraryState(), actions);
   try {
     const { entries } = await message<{ entries: LibraryEntry[] }>({ type: 'library.list' });
     library = entries;
@@ -198,7 +208,7 @@ async function loadLibrary(): Promise<void> {
     libraryError = errorMessage(error, '读取已入库内容失败。');
   } finally {
     libraryLoading = false;
-    renderSidePanel(document, libraryState(), actions);
+    renderCurrentPanel(document, libraryState(), actions);
   }
 }
 
@@ -224,7 +234,7 @@ function errorMessage(error: unknown, fallback: string): string {
 
 function showStickyError(error: unknown, fallback: string): void {
   stickyError = errorMessage(error, fallback);
-  renderSidePanel(document, { phase: 'job_error', message: stickyError }, actions);
+  renderCurrentPanel(document, { phase: 'job_error', message: stickyError }, actions);
   scheduleRefresh('job_error');
 }
 
@@ -233,7 +243,7 @@ async function capturePage(
 ): Promise<void> {
   stickyError = undefined;
   try {
-    renderSidePanel(document, { phase: 'collecting', activeStage: 0 }, actions);
+    renderCurrentPanel(document, { phase: 'collecting', activeStage: 0 }, actions);
     scheduleRefresh('collecting');
     await message({ type: 'capture.current', overrides });
     await refresh();
@@ -243,10 +253,15 @@ async function capturePage(
 }
 
 async function refresh(): Promise<void> {
+  if (page === 'hot') {
+    renderTopNav(document, page, actions);
+    hotPanel.show();
+    return;
+  }
   // 「已入库」是个独立页面，不跟着采集状态走。
   if (page === 'library') {
     renderTopNav(document, page, actions);
-    renderSidePanel(document, libraryState(), actions);
+    renderCurrentPanel(document, libraryState(), actions);
     return;
   }
   if (page === 'plans') {
@@ -257,7 +272,7 @@ async function refresh(): Promise<void> {
   renderTopNav(document, page, actions);
   // 粘性错误挡住一切推导状态：不清掉它之前，轮询不许改屏。
   if (stickyError) {
-    renderSidePanel(document, { phase: 'job_error', message: stickyError }, actions);
+    renderCurrentPanel(document, { phase: 'job_error', message: stickyError }, actions);
     scheduleRefresh('job_error');
     return;
   }
@@ -274,7 +289,7 @@ async function refresh(): Promise<void> {
         }
       : derived;
     if (derived.phase !== 'batch') itemsOpen = false;
-    renderSidePanel(document, state, actions);
+    renderCurrentPanel(document, state, actions);
     renderUpdateBanner(
       document,
       { available: status.updateAvailable === true, note: status.updateNote },
@@ -282,7 +297,7 @@ async function refresh(): Promise<void> {
     );
     scheduleRefresh(state.phase === 'items' ? 'batch' : state.phase);
   } catch {
-    renderSidePanel(document, { phase: 'bridge_unavailable' }, actions);
+    renderCurrentPanel(document, { phase: 'bridge_unavailable' }, actions);
     scheduleRefresh('bridge_unavailable');
   }
 }
@@ -349,7 +364,7 @@ async function captureListPage(
 ): Promise<void> {
   stickyError = undefined;
   try {
-    renderSidePanel(
+    renderCurrentPanel(
       document,
       { phase: 'batch', batchPhase: 'running', collected: 0, skipped: 0, failed: 0, message: '' },
       actions,
@@ -406,12 +421,12 @@ const actions: SidePanelActions = {
   async retry() {
     stickyError = undefined;
     try {
-      renderSidePanel(document, { phase: 'connecting' }, actions);
+      renderCurrentPanel(document, { phase: 'connecting' }, actions);
       scheduleRefresh('connecting');
       await message({ type: 'connection.retry' });
       await refresh();
     } catch {
-      renderSidePanel(document, { phase: 'bridge_unavailable' }, actions);
+      renderCurrentPanel(document, { phase: 'bridge_unavailable' }, actions);
       scheduleRefresh('bridge_unavailable');
     }
   },
@@ -499,7 +514,7 @@ const actions: SidePanelActions = {
   async runPlan(planId, force, review) {
     runningPlanId = planId;
     plansError = undefined;
-    renderSidePanel(document, plansState(), actions);
+    renderCurrentPanel(document, plansState(), actions);
     try {
       await message({ type: 'plans.run', planId, force, ...(review ?? {}) });
     } catch (error) {
@@ -519,11 +534,11 @@ const actions: SidePanelActions = {
   },
   filterLibrary(source) {
     librarySource = source;
-    renderSidePanel(document, libraryState(), actions);
+    renderCurrentPanel(document, libraryState(), actions);
   },
   filterSync(filter) {
     syncFilter = filter;
-    renderSidePanel(document, libraryState(), actions);
+    renderCurrentPanel(document, libraryState(), actions);
   },
   async syncLibrary(ids) {
     // 不传 id = 同步全部未同步的；由 Bridge 展开成具体 id，
@@ -533,7 +548,7 @@ const actions: SidePanelActions = {
     if (targets.length === 0) return;
     syncing = targets;
     syncNote = undefined;
-    renderSidePanel(document, libraryState(), actions);
+    renderCurrentPanel(document, libraryState(), actions);
     try {
       const outcome = await message<{
         synced: number;
@@ -553,7 +568,7 @@ const actions: SidePanelActions = {
   },
   closeEntry() {
     viewing = undefined;
-    renderSidePanel(document, libraryState(), actions);
+    renderCurrentPanel(document, libraryState(), actions);
   },
   openSource(url) {
     // 新标签页打开原文，不动用户当前所在的页面。
@@ -563,11 +578,11 @@ const actions: SidePanelActions = {
     // 只进入确认态，绝不在这里动文件。
     libraryPending = target;
     libraryError = undefined;
-    renderSidePanel(document, libraryState(), actions);
+    renderCurrentPanel(document, libraryState(), actions);
   },
   cancelDelete() {
     libraryPending = undefined;
-    renderSidePanel(document, libraryState(), actions);
+    renderCurrentPanel(document, libraryState(), actions);
   },
   async confirmDelete() {
     const target = libraryPending;
@@ -584,7 +599,7 @@ const actions: SidePanelActions = {
       await loadLibrary();
     } catch (error) {
       libraryError = errorMessage(error, '删除失败。');
-      renderSidePanel(document, libraryState(), actions);
+      renderCurrentPanel(document, libraryState(), actions);
     }
   },
   async copyLog(log) {
@@ -622,6 +637,6 @@ const actions: SidePanelActions = {
 const buildId = document.querySelector<HTMLElement>('#build-id');
 if (buildId) buildId.textContent = typeof __BUILD_ID__ === 'string' ? __BUILD_ID__ : '开发构建';
 
-renderSidePanel(document, { phase: 'loading' }, actions);
+renderCurrentPanel(document, { phase: 'loading' }, actions);
 renderTopNav(document, page, actions);
 void refresh();

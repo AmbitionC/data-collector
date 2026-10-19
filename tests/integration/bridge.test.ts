@@ -7,6 +7,8 @@ import WebSocket, { type RawData } from 'ws';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   APP_VERSION,
+  NOWCODER_HOT_MATERIAL_CAPABILITY,
+  NOWCODER_DETAIL_CAPABILITY,
   EXTENSION_REPLACED_CLOSE_CODE,
   EXTENSION_REPLACED_CLOSE_REASON,
   TRUSTED_EXTENSION_ID,
@@ -2839,6 +2841,7 @@ describe('local Bridge', () => {
       body: {
         ok: true,
         version: APP_VERSION,
+        bridgeCapabilities: [NOWCODER_HOT_MATERIAL_CAPABILITY],
         trustedExtensionId: TRUSTED_EXTENSION_ID,
         extensionConnected: false,
         directedRunActive: false,
@@ -4092,4 +4095,28 @@ it('records a blocked modern identity inventory without search requests, child j
   expect(fetcher).not.toHaveBeenCalled();
   expect((await JobStore.open(join(f.library, '_catalog/jobs.json'))).list()).toEqual([]);
   expect((await requestJson<{ batches: CollectionBatch[] }>(bridge.url, '/v1/plans/batches', { token })).body.batches).toHaveLength(1);
+});
+
+
+it('advertises hot support and rejects a full-detail result for a private material job', async () => {
+  const root = await temporaryDirectory();
+  const bridge = await startBridge({ port: 0, libraryRoot: root, configDir: join(root, '.config'), enableAutoUpdate: false });
+  handles.push(bridge);
+  const health = await requestJson<{ bridgeCapabilities: string[] }>(bridge.url, '/health');
+  expect(health.body.bridgeCapabilities).toContain(NOWCODER_HOT_MATERIAL_CAPABILITY);
+  const { socket, token } = await authorize(bridge);
+  socket.send(envelope('extension.hello', 'hot-protocol-test', { version: APP_VERSION, capabilities: [NOWCODER_DETAIL_CAPABILITY] }));
+  await waitForExtensionReady(bridge);
+  const url = 'https://www.nowcoder.com/discuss/9001';
+  const created = await requestJson<{ id: string }>(bridge.url, '/v1/jobs', {
+    method: 'POST', token, body: { url, requestedBy: 'extension', materialKind: 'nowcoder-hot' },
+  });
+  expect(created.status).toBe(202);
+  const error = nextMessage<{ code: string; message: string }>(socket);
+  socket.send(envelope('job.result', created.body.id, { document: document({ source: 'nowcoder', kind: 'post', url, canonicalUrl: url }) }));
+  expect((await error).payload.message).toMatch(/任务类型不一致/);
+  const job = await requestJson<{ status: string; outputPath?: string }>(bridge.url, `/v1/jobs/${created.body.id}`, { token });
+  expect(job.body.status).not.toBe('saved');
+  expect(job.body.outputPath).toBeUndefined();
+  expect(await readFile(join(root, '_catalog/index.json'), 'utf8').catch(() => '[]')).toBe('[]');
 });

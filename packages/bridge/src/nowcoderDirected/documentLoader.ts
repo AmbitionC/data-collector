@@ -1,6 +1,7 @@
 import { lstat, readFile, realpath } from 'node:fs/promises';
 import { dirname, join, relative, sep } from 'node:path';
 import { z } from 'zod';
+import { isHotMaterialCatalogEntry } from '../library/hotMaterial.js';
 import {
   stableContentId,
   type CollectedDocument,
@@ -26,6 +27,7 @@ const localCatalogEntrySchema = z.object({
   updatedAt: z.string(),
   publishedAt: z.string().optional(),
   nowcoderReviewOnly: z.literal(true).optional(),
+  materialKind: z.literal('nowcoder-hot').optional(),
   contentComplete: z.boolean().optional(),
   contentCompletenessVersion: z.string().optional(),
   contentCompletenessBuildId: z.string().optional(),
@@ -40,7 +42,10 @@ const localCatalogEntrySchema = z.object({
     pushFailed: z.boolean().optional(),
     error: z.string().optional(),
   }).strict().optional(),
-}).strict();
+}).strict().superRefine((entry, context) => {
+  try { isHotMaterialCatalogEntry(entry); }
+  catch { context.addIssue({ code: 'custom', path: ['materialKind'], message: '热帖素材目录身份不一致' }); }
+});
 const localCatalogSchema = z.array(localCatalogEntrySchema);
 
 const candidateEntrySchema = z.object({
@@ -136,7 +141,7 @@ export async function readKnownNowcoderLocalSources(libraryRoot: string): Promis
     }
     const entries = await readCatalog(root, join(directory, 'index.json'), localCatalogSchema,
       'DIRECTED_LOCAL_LIBRARY_CORRUPT');
-    return entries.filter(entry => entry.source === 'nowcoder').map(entry => ({
+    return entries.filter(entry => entry.source === 'nowcoder' && !isHotMaterialCatalogEntry(entry)).map(entry => ({
       url: entry.url, reason: entry.sync?.state === 'synced' ? 'local_library' : 'local_pending',
     }));
   } catch { throw new NowcoderDirectedDocumentError('DIRECTED_LOCAL_LIBRARY_CORRUPT'); }

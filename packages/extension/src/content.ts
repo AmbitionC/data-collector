@@ -26,6 +26,7 @@ import {
   topicRecordsFromMessage,
 } from './topicIndex.js';
 import { commercialSignals } from './adFilter.js';
+import { extractNowcoderHotList } from './extractors/nowcoder.js';
 import {
   CONTENT_BUILD_ID,
   CONTENT_API_COLLECT_REQUEST,
@@ -44,6 +45,7 @@ import {
   CONTENT_SELECT_VIEW_REQUEST,
   CONTENT_EXTRACTION_PROTOCOL,
   CONTENT_LIST_REQUEST,
+  CONTENT_HOT_LIST_REQUEST,
   isCurrentContentRequest,
 } from './contentProtocol.js';
 import {
@@ -165,6 +167,7 @@ interface ExtractMessage {
     | typeof CONTENT_ITEM_DIAGNOSE_REQUEST
     | typeof CONTENT_HOOK_STATS_REQUEST
     | typeof CONTENT_FOCUS_LAST_REQUEST
+    | typeof CONTENT_HOT_LIST_REQUEST
     | 'list.advance'
     | 'list.diagnose'
     | 'list.restore'
@@ -1669,6 +1672,15 @@ if (!alreadyRegistered) chrome.runtime.onMessage.addListener((message: unknown, 
       },
     );
     return true;
+  }
+
+  if (request.type === CONTENT_HOT_LIST_REQUEST) {
+    try {
+      respond({ ok: true, hotList: extractNowcoderHotList(document, new URL(window.location.href), () => new Date().toISOString()) });
+    } catch (error) {
+      respond({ ok: false, error: { code: 'UNSUPPORTED_LAYOUT', message: error instanceof Error ? error.message : '读取牛客热帖失败' } });
+    }
+    return false;
   }
 
   if (

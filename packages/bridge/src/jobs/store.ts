@@ -44,6 +44,7 @@ export interface CreateJobInput {
   url: string;
   requestedBy: JobRecord['requestedBy'];
   nowcoderReviewOnly?: true;
+  materialKind?: JobRecord['materialKind'];
   batchId?: string;
   planId?: CollectionPlanId;
   planAttempt?: CollectionPlanAttempt;
@@ -94,10 +95,20 @@ function hasNowcoderRecoveryBudget(
     && descriptorForHost(new URL(value.url).hostname)?.id === 'nowcoder';
 }
 
+function assertMaterialOwnership(value: CreateJobInput): void {
+  if (value.materialKind === undefined) return;
+  if (value.materialKind !== 'nowcoder-hot' || value.requestedBy !== 'extension'
+    || value.planId || value.batchId || value.directedRunId || value.nowcoderReviewOnly
+    || descriptorForHost(new URL(value.url).hostname)?.id !== 'nowcoder') {
+    throw new Error('热帖素材只能由扩展手动保存牛客列表快照');
+  }
+}
+
 function validateStoredJob(value: JobRecord): void {
   try {
     assertDirectedOwnership(value);
     if (value.nowcoderReviewOnly !== undefined && (value.nowcoderReviewOnly !== true || value.planId !== 'nowcoder-agent-market' || !value.batchId)) throw new Error('invalid review job');
+    assertMaterialOwnership(value);
     if (value.recoveryCount !== undefined && (
       !Number.isSafeInteger(value.recoveryCount) || value.recoveryCount < 0
     )) throw new Error('invalid recovery count');
@@ -281,6 +292,7 @@ export class JobStore {
     return this.serializeMutation(async () => {
       assertDirectedOwnership(input);
       if (input.nowcoderReviewOnly && (input.planId !== 'nowcoder-agent-market' || !input.batchId)) throw new Error('待审核任务必须属于牛客面经批次');
+      assertMaterialOwnership(input);
       const id = input.id ?? this.dependencies.id();
       const url = canonicalizeUrl(parseSupportedUrl(input.url)).href;
       const existing = this.jobs.get(id);
@@ -288,6 +300,7 @@ export class JobStore {
         if (existing.url !== url) throw new Error('任务 ID 已用于其他地址');
         if (
           existing.nowcoderReviewOnly !== input.nowcoderReviewOnly
+          || existing.materialKind !== input.materialKind
           || existing.planId !== input.planId
           || existing.planAttempt !== input.planAttempt
           || existing.directedRunId !== input.directedRunId
@@ -301,6 +314,7 @@ export class JobStore {
         url,
         requestedBy: input.requestedBy,
         ...(input.nowcoderReviewOnly ? { nowcoderReviewOnly: true as const } : {}),
+        ...(input.materialKind ? { materialKind: input.materialKind } : {}),
         status: 'queued',
         createdAt: timestamp,
         updatedAt: timestamp,
@@ -355,6 +369,7 @@ export class JobStore {
       if (current.status !== 'failed' && current.status !== 'needs_attention') {
         throw new JobStateError(`任务状态不可重试：${current.status}`);
       }
+      if (current.materialKind === 'nowcoder-hot') throw new JobStateError('请在热帖素材预览中手动重试保存');
       const {
         outputPath: _outputPath,
         markdownOutput: _markdownOutput,
@@ -387,6 +402,18 @@ export class JobStore {
       const terminalized: JobRecord[] = [];
       for (const [id, job] of this.jobs) {
         if (excludedIds.has(id)) continue;
+        // The source snapshot lives in the extension session. A restarted worker must obtain
+        // a fresh manual selection; redispatching this URL would collect an unrelated full body.
+        if (reason === 'worker-loss' && job.materialKind === 'nowcoder-hot'
+          && ['queued', 'dispatched', 'collecting'].includes(job.status)) {
+          const terminal: JobRecord = { ...job, status: 'needs_attention',
+            updatedAt: this.dependencies.now(), errorCode: 'HOT_SAVE_INTERRUPTED',
+            errorMessage: '热帖快照保存已中断，请在素材预览中手动重试；不会自动打开详情采集' };
+          this.jobs.set(id, terminal);
+          terminalized.push(structuredClone(terminal));
+          changed = true;
+          continue;
+        }
         const budgetedNowcoder = hasNowcoderRecoveryBudget(job);
         if (
           reason === 'worker-loss'

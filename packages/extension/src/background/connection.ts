@@ -1,5 +1,6 @@
 import {
   APP_VERSION,
+  NOWCODER_HOT_MATERIAL_CAPABILITY,
   JOB_STATUSES,
   EXTENSION_REPLACED_CLOSE_CODE,
   EXTENSION_REPLACED_CLOSE_REASON,
@@ -155,6 +156,7 @@ export class BridgeConnection {
   private ignoreStoredToken = false;
   private reconnectSuppressed = false;
   private bridgeVersion: string | undefined;
+  private bridgeCapabilities = new Set<string>();
   /** WebSocket 终态可能比调用方注册 waiter 更快，保留一个有界抢先回执缓存。 */
   private readonly recentJobTerminals = new Map<string, JobTerminalNotice>();
   private readonly jobTerminalWaiters = new Map<string, Set<JobTerminalWaiter>>();
@@ -215,6 +217,7 @@ export class BridgeConnection {
       if (!response.ok) return;
       const health = (await response.json()) as {
         version?: unknown;
+        bridgeCapabilities?: unknown;
         routing?: unknown;
         update?: unknown;
         buildId?: unknown;
@@ -233,6 +236,7 @@ export class BridgeConnection {
           : {}),
       });
       if (typeof health.version === 'string') this.bridgeVersion = health.version;
+      this.bridgeCapabilities = new Set(Array.isArray(health.bridgeCapabilities) && health.bridgeCapabilities.every(value => typeof value === 'string') ? health.bridgeCapabilities : []);
     } catch {
       // 忽略。
     }
@@ -243,6 +247,7 @@ export class BridgeConnection {
     const settings = await this.settings();
     // 每次建连都重新验证；health 失败时必须保守按旧 Bridge 发送。
     this.bridgeVersion = undefined;
+    this.bridgeCapabilities.clear();
     if (!force && settings.status === 'replaced') {
       this.reconnectSuppressed = true;
       return;
@@ -263,6 +268,7 @@ export class BridgeConnection {
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
         const health = (await response.json()) as {
           version?: unknown;
+          bridgeCapabilities?: unknown;
           trustedExtensionId?: unknown;
           routing?: unknown;
           buildId?: unknown;
@@ -273,6 +279,7 @@ export class BridgeConnection {
         }
         trustedExtensionId = health.trustedExtensionId;
         if (typeof health.version === 'string') this.bridgeVersion = health.version;
+        this.bridgeCapabilities = new Set(Array.isArray(health.bridgeCapabilities) && health.bridgeCapabilities.every(value => typeof value === 'string') ? health.bridgeCapabilities : []);
         // 缓存路由说明（可选去向 + 各自分类 + 来源默认去向），供侧边栏渲染选择器。
         if (health.routing && typeof health.routing === 'object') {
           await this.dependencies.storage.set({ routing: health.routing });
@@ -365,6 +372,7 @@ export class BridgeConnection {
         event.code === EXTENSION_REPLACED_CLOSE_CODE &&
         event.reason === EXTENSION_REPLACED_CLOSE_REASON;
       disconnected = true;
+      this.bridgeCapabilities.clear();
       if (replaced) {
         this.reconnectSuppressed = true;
         this.cancelReconnect();
@@ -475,6 +483,7 @@ export class BridgeConnection {
       userCategory?: string;
       userTags?: string[];
       sinks?: string[];
+      materialKind?: 'nowcoder-hot';
       batchId?: string;
       planId?: CollectionPlanId;
       attempt?: CollectionPlanAttempt;
@@ -482,6 +491,7 @@ export class BridgeConnection {
   ): Promise<{ id: string }> {
     const settings = await this.settings();
     if (!settings.token) throw new Error('浏览器扩展仍在自动连接 Bridge');
+    if (overrides?.materialKind && !this.supportsHotMaterials()) throw new Error('本机服务尚未声明热帖素材支持');
     const generation = this.generation;
     const isCurrent = () => this.isCurrent(generation);
     const fetcher = this.dependencies.fetch;
@@ -496,6 +506,7 @@ export class BridgeConnection {
         body: JSON.stringify({
           url,
           requestedBy: 'extension',
+          ...(overrides?.materialKind ? { materialKind: overrides.materialKind } : {}),
           ...(overrides?.sinks?.length ? { sinks: overrides.sinks } : {}),
           ...(overrides?.batchId ? { batchId: overrides.batchId } : {}),
           ...(overrides?.planId ? { planId: overrides.planId } : {}),
@@ -669,6 +680,10 @@ export class BridgeConnection {
   }
 
   /** 当前 Bridge 是否达到某项扩展侧兼容逻辑要求的最低版本。 */
+  supportsHotMaterials(): boolean {
+    return this.socket?.readyState === 1 && this.bridgeCapabilities.has(NOWCODER_HOT_MATERIAL_CAPABILITY);
+  }
+
   supportsVersion(minimum: string): boolean {
     return versionAtLeast(this.bridgeVersion, minimum);
   }

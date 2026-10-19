@@ -1,5 +1,6 @@
 import {
   canonicalizeUrl,
+  collectedDocumentSchema,
   isHighConfidenceZsxqDuplicate,
   mergeZsxqDocumentCopies,
   normalizedZsxqBody,
@@ -262,6 +263,7 @@ export interface BatchItem {
 }
 
 export type ExtractionResponse = (
+  | { ok: true; hotList: { documents: CollectedDocument[]; capped: boolean } }
   | { ok: true; document: CollectedDocument }
   | { ok: true; list: ListPayload }
   | { ok: true; advance: { collapsed: number; loaded: number; uncertain?: boolean; scroll?: string } }
@@ -310,6 +312,7 @@ export interface BridgeClient {
       userCategory?: string;
       userTags?: string[];
       sinks?: string[];
+      materialKind?: 'nowcoder-hot';
       batchId?: string;
       planId?: CollectionPlanId;
       attempt?: CollectionPlanAttempt;
@@ -2783,6 +2786,23 @@ export class JobRunner {
     }
   }
 
+  async previewHotList(): Promise<{ documents: CollectedDocument[]; capped: boolean }> {
+    const [tab] = await this.options.tabs.query({ active: true, lastFocusedWindow: true });
+    if (tab?.id === undefined || !tab.url) throw new Error('请先打开牛客热榜或讨论列表');
+    const url = parseSupportedUrl(tab.url);
+    if (url.hostname !== 'nowcoder.com' && !url.hostname.endsWith('.nowcoder.com')) throw new Error('请在牛客列表中读取热帖素材');
+    const response = await this.ask(tab.id, { type: contentRequestType('hot.list') });
+    if (!response.ok) throw new Error(response.error.message);
+    if (!('hotList' in response)) throw new Error('页面脚本版本不匹配，请重新读取预览');
+    return response.hotList;
+  }
+
+  async saveHotDocument(input: CollectedDocument): Promise<'ok' | 'failed' | 'bridge-down'> {
+    const document = collectedDocumentSchema.parse(input) as CollectedDocument;
+    if (!document.operationMaterial) throw new Error('缺少热帖素材元信息');
+    return this.saveCollected(document, { sinks: ['markdown'] });
+  }
+
   async captureCurrent(overrides: CaptureOverrides = {}): Promise<string> {
     const [tab] = await this.options.tabs.query({ active: true, lastFocusedWindow: true });
     if (tab?.id === undefined || !tab.url) throw new Error('当前没有可采集的浏览器页面');
@@ -3340,7 +3360,8 @@ export class JobRunner {
   ): Promise<'ok' | 'failed' | 'bridge-down'> {
     let job: { id: string };
     try {
-      job = await this.options.bridge.createJob(document.canonicalUrl, overrides);
+      job = await this.options.bridge.createJob(document.canonicalUrl, { ...overrides,
+        ...(document.operationMaterial ? { materialKind: 'nowcoder-hot' as const } : {}) });
     } catch (error) {
       const message = error instanceof Error ? error.message : '';
       // 只有「连不上 / 没授权」才是整条链路的问题，值得中断整批；

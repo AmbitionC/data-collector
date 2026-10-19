@@ -1667,3 +1667,32 @@ describe('extension Bridge connection', () => {
     expect(storage.values.bridgeStatus).toBe('connected');
   });
 });
+
+
+describe('explicit private hot-material compatibility', () => {
+  it.each([
+    ['0.4.47', undefined, false],
+    ['9.0.0', [], false],
+    ['0.4.48', ['nowcoder-hot-material-v1'], true],
+    ['0.4.48', 'nowcoder-hot-material-v1', false],
+  ])('requires a capability, not just Bridge version %s', async (version, capabilities, supported) => {
+    const storage = new MemoryStorage({ bridgeToken: 'existing-test-token' });
+    const socket = new MemorySocket(1);
+    const connection = new BridgeConnection(dependencies(storage, () => socket, async () =>
+      Response.json({ ok: true, version, trustedExtensionId: TRUSTED_EXTENSION_ID, bridgeCapabilities: capabilities })));
+    await connection.start();
+    expect(connection.supportsHotMaterials()).toBe(supported);
+    socket.emit('close');
+    expect(connection.supportsHotMaterials()).toBe(false);
+  });
+});
+
+
+it('rejects hot job creation before POST when an old Bridge lacks the feature', async () => {
+  const storage = new MemoryStorage({ bridgeToken: 'existing-test-token' });
+  const fetcher = vi.fn<typeof fetch>(async () => healthResponse(TRUSTED_EXTENSION_ID, '0.4.47'));
+  const connection = new BridgeConnection(dependencies(storage, () => new MemorySocket(1), fetcher));
+  await connection.start();
+  await expect(connection.createJob('https://www.nowcoder.com/discuss/9001', { materialKind: 'nowcoder-hot' })).rejects.toThrow(/热帖素材支持/);
+  expect(fetcher.mock.calls.every(([url]) => String(url).endsWith('/health'))).toBe(true);
+});

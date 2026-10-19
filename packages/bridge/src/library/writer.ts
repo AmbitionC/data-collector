@@ -20,9 +20,11 @@ import {
   parseSupportedUrl,
   SOURCES,
   stableContentId,
+  hotMaterialId,
   ZSXQ_COMPLETE_CONTENT_CAPABILITY,
   type Source,
 } from '@data-collector/shared';
+import { isHotMaterialCatalogEntry } from './hotMaterial.js';
 import { renderMarkdown } from './markdown.js';
 import type { OrganizedDocument } from '../organize/index.js';
 import { downloadAssets } from './assets.js';
@@ -81,6 +83,7 @@ export interface SyncInfo {
 
 interface CatalogEntry {
   nowcoderReviewOnly?: true;
+  materialKind?: 'nowcoder-hot';
   id: string;
   source: Source;
   title: string;
@@ -607,6 +610,8 @@ async function preflightDirectedLocalLibraryState(
     const catalog: CatalogEntry[] = [];
     const entriesToRead: Array<{ entry: CatalogEntry; path: string }> = [];
     for (const entry of value) {
+      const hot = isHotMaterialCatalogEntry(entry);
+      const urlIdentity = `${hot ? 'nowcoder-hot' : 'document'}:${entry.url}`;
       const parsed = parseSupportedUrl(entry.url);
       const canonicalUrl = canonicalizeUrl(parsed).href;
       let normalizedRelativePath: string;
@@ -618,17 +623,17 @@ async function preflightDirectedLocalLibraryState(
       if (canonicalUrl !== entry.url
         || descriptorForHost(parsed.hostname)?.id !== entry.source
         || (entry.source === 'nowcoder' && parsed.hostname !== 'www.nowcoder.com')
-        || stableContentId(canonicalUrl) !== entry.id
+        || (hot ? hotMaterialId(canonicalUrl) : stableContentId(canonicalUrl)) !== entry.id
         || !isSafeCatalogRelativePath(normalizedRelativePath)) {
         throw new Error('invalid catalog identity');
       }
       const entryPath = catalogEntryPath(canonicalRoot, normalizedRelativePath);
       if (!insideCanonicalRoot(canonicalRoot, entryPath)
         || ids.has(entry.id)
-        || urls.has(entry.url)
+        || urls.has(urlIdentity)
         || paths.has(entryPath)) throw new Error('duplicate or escaped catalog identity');
       ids.add(entry.id);
-      urls.add(entry.url);
+      urls.add(urlIdentity);
       paths.add(entryPath);
       catalog.push({ ...entry, relativePath: normalizedRelativePath });
       if (entry.id === targetId) targetRegistered = true;
@@ -648,11 +653,14 @@ async function preflightDirectedLocalLibraryState(
           canonicalRoot,
           join(dirname(canonicalEntryPath), SOURCE_FILE),
         );
+        const hot = isHotMaterialCatalogEntry(entry);
+        if (hot && !sourceSnapshot) throw new Error('private material source snapshot is missing');
         if (sourceSnapshot) {
           const stored = projectOrganized(JSON.parse(sourceSnapshot.contents) as unknown);
           if (stored.document.source !== entry.source
             || stored.document.canonicalUrl !== entry.url
-            || stableContentId(stored.document.canonicalUrl) !== entry.id) {
+            || Boolean(stored.document.operationMaterial) !== hot
+            || (hot ? hotMaterialId(stored.document.canonicalUrl) : stableContentId(stored.document.canonicalUrl)) !== entry.id) {
             throw new Error('catalog source identity mismatch');
           }
         }
@@ -1607,7 +1615,7 @@ function isCatalogEntry(value: unknown): value is CatalogEntry {
   const allowed = new Set([
     'id', 'source', 'title', 'url', 'category', 'relativePath', 'updatedAt', 'publishedAt',
     'contentComplete', 'contentCompletenessVersion', 'contentCompletenessBuildId',
-    'deliveryRevision', 'deliveryBatchId', 'sync', 'nowcoderReviewOnly',
+    'deliveryRevision', 'deliveryBatchId', 'sync', 'nowcoderReviewOnly', 'materialKind',
   ]);
   if (Object.keys(value).some(key => !allowed.has(key))) return false;
   if (typeof value.id !== 'string' || value.id.length === 0
@@ -1616,6 +1624,8 @@ function isCatalogEntry(value: unknown): value is CatalogEntry {
     || typeof value.category !== 'string' || typeof value.relativePath !== 'string' || value.relativePath.length === 0
     || typeof value.updatedAt !== 'string') return false;
   if (value.nowcoderReviewOnly !== undefined && value.nowcoderReviewOnly !== true) return false;
+  try { isHotMaterialCatalogEntry({ id: value.id, source: value.source, url: value.url, materialKind: value.materialKind, nowcoderReviewOnly: value.nowcoderReviewOnly }); }
+  catch { return false; }
   if (value.publishedAt !== undefined && typeof value.publishedAt !== 'string') return false;
   if (value.contentComplete !== undefined && typeof value.contentComplete !== 'boolean') return false;
   if (value.contentCompletenessVersion !== undefined && typeof value.contentCompletenessVersion !== 'string') return false;
@@ -1740,6 +1750,7 @@ export class MarkdownLibrary {
   }
 
   async save(input: OrganizedDocument, localEvidence?: LocalDocumentEvidence): Promise<SavedContent> {
+    if (input.document.operationMaterial && localEvidence?.nowcoderDirected) throw new Error('热帖素材不能参与面经定向保存');
     const result = this.saveQueue.then(async () => {
       const directedEvidence = localEvidence?.nowcoderDirected;
       const directed = directedEvidence !== undefined;
@@ -1799,7 +1810,7 @@ export class MarkdownLibrary {
     const catalog = directedPreflight
       ? structuredClone(directedPreflight.catalog)
       : await this.readCatalog(catalogPath);
-    const id = stableContentId(input.document.canonicalUrl);
+    const id = input.document.operationMaterial ? hotMaterialId(input.document.canonicalUrl) : stableContentId(input.document.canonicalUrl);
     const existing = catalog.find(entry => entry.id === id);
     const directedEvidence = localEvidence?.nowcoderDirected;
     const directed = directedEvidence !== undefined;
@@ -1975,6 +1986,7 @@ export class MarkdownLibrary {
     const nextEntry: CatalogEntry = {
       ...(input.document.sourceMetadata?.nowcoderReviewOnly === true || existing?.nowcoderReviewOnly === true
         ? { nowcoderReviewOnly: true as const } : {}),
+      ...(input.document.operationMaterial ? { materialKind: 'nowcoder-hot' as const } : {}),
       id,
       source: input.document.source,
       title: input.document.title,
