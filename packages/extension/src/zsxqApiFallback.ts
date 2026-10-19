@@ -1077,6 +1077,8 @@ export async function collectZsxqApiViews(
     documents: new Map(),
     seenRawIds: new Set(),
     pagesFetched: 0,
+    // Start historical windows at their upper bound instead of spending the page budget on newer posts.
+    ...(dateRange ? { endTime: new Date(endExclusive).toISOString() } : {}),
     exhausted: false,
   }));
   const pruneBusinessSkips = (): void => {

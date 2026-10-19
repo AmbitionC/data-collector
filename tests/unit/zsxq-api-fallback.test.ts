@@ -106,6 +106,49 @@ describe('ZSXQ API fallback', () => {
     expect(fetcher).toHaveBeenCalledTimes(1);
   });
 
+  it('starts historical windows at their Shanghai upper bound despite a dense newer feed', async () => {
+    const newer = Array.from({ length: 260 }, (_, index) =>
+      topic(String(95000 + index), new Date(Date.UTC(2026, 9, 19, 12, 0, -index)).toISOString()));
+    const feed = [
+      ...newer,
+      topic('96001', '2026-10-07T15:59:59.999Z'),
+      topic('96002', '2026-09-30T16:00:00.000Z'),
+      topic('96003', '2026-09-30T15:59:59.999Z'),
+    ];
+    const fetcher = vi.fn(async (input: RequestInfo | URL) => {
+      const url = new URL(String(input));
+      if (url.pathname.endsWith('/menus')) return menuResponse();
+      if (url.pathname.endsWith(`/groups/${GROUP_ID}`)) return groupResponse();
+      if (url.pathname.endsWith('/sticky')) return topicResponse([]);
+      const cursor = url.searchParams.get('end_time');
+      const before = cursor ? Date.parse(cursor) : Infinity;
+      return topicResponse(feed.filter(item => Date.parse(item.create_time as string) < before).slice(0, 20));
+    });
+    const result = await collectZsxqApiViews(GROUP_ID, {
+      fetcher, aduid: 'test-device', now: () => new Date('2026-10-19T12:00:00.000Z'),
+      dateRange: { since: '2026-10-01', until: '2026-10-07' },
+    });
+    expect(result.documents.map(document => document.sourceMetadata?.topicId).sort()).toEqual(['96001', '96002']);
+    for (const label of ['最新', '精华', '只看星主']) {
+      expect(result.coverage[`分页:${label}`]).toBe(1);
+      expect(result.coverage[`日期范围已核验:${label}`]).toBe(1);
+    }
+  });
+
+  it('rejects a source page newer than the explicit Shanghai upper bound', async () => {
+    const fetcher = vi.fn(async (input: RequestInfo | URL) => {
+      const url = new URL(String(input));
+      if (url.pathname.endsWith('/menus')) return menuResponse();
+      if (url.pathname.endsWith(`/groups/${GROUP_ID}`)) return groupResponse();
+      if (url.pathname.endsWith('/sticky')) return topicResponse([]);
+      return topicResponse([topic('96004', '2026-10-19T12:00:00.000Z')]);
+    });
+    await expect(collectZsxqApiViews(GROUP_ID, {
+      fetcher, aduid: 'test-device',
+      dateRange: { since: '2026-10-01', until: '2026-10-07' },
+    })).rejects.toThrow(/ZSXQ_API_CURSOR_UNPROVEN/u);
+  });
+
   it('overlaps an inclusive midnight boundary instead of skipping tied posts', async () => {
     const boundary = '2026-08-31T16:00:00.000Z';
     const first = Array.from({ length: 20 }, (_, index) => topic(String(93000 + index), boundary));
@@ -114,7 +157,7 @@ describe('ZSXQ API fallback', () => {
       if (url.pathname.endsWith('/menus')) return menuResponse();
       if (url.pathname.endsWith(`/groups/${GROUP_ID}`)) return groupResponse();
       if (url.pathname.endsWith('/sticky')) return topicResponse([]);
-      if (!url.searchParams.has('end_time')) return topicResponse(first);
+      if (url.searchParams.get('end_time') === '2026-09-09T16:00:00.000Z') return topicResponse(first);
       expect(url.searchParams.get('end_time')).toBe('2026-08-31T16:00:00.001Z');
       return topicResponse([first[19]!, topic('94000', boundary), topic('94001', '2026-08-31T15:59:59.000Z')]);
     });
@@ -135,7 +178,7 @@ describe('ZSXQ API fallback', () => {
       if (url.pathname.endsWith(`/groups/${GROUP_ID}`)) return groupResponse();
       if (url.pathname.endsWith('/sticky')) return topicResponse([]);
       pageRequests.push(url);
-      return topicResponse(url.searchParams.has('end_time') ? [
+      return topicResponse(url.searchParams.get('end_time') !== '2026-09-09T16:00:00.000Z' ? [
         topic('92001', '2026-08-31T16:00:00.000Z'), // September 1, Shanghai
         topic('92002', '2026-08-31T15:59:59.000Z'),
       ] : firstPage);
