@@ -57,6 +57,24 @@ async function sidePanelFor(targetPage: Page): Promise<{ page: Page; worker: Web
   return { page: sidePanel, worker };
 }
 
+/** 热帖截图需要真实前台绘制；完成后还原来源页供后续采集识别。 */
+async function screenshotHotPanel(page: Page, sourcePage: Page, path: string): Promise<void> {
+  try {
+    await page.bringToFront();
+    // 后台扩展页重绘后可能没有可截图的 compositor frame；等实际前台绘制，不加超时或重试。
+    await page.evaluate(() => new Promise<void>(resolveFrame => {
+      requestAnimationFrame(() => requestAnimationFrame(() => resolveFrame()));
+    }));
+    expect(await page.evaluate(() => document.visibilityState)).toBe('visible');
+    const png = Buffer.from(await page.screenshot({ path, fullPage: true }));
+    expect([...png.subarray(0, 8)]).toEqual([137, 80, 78, 71, 13, 10, 26, 10]);
+    expect(png.readUInt32BE(16)).toBe(390);
+    expect(png.readUInt32BE(20)).toBeGreaterThanOrEqual(1100);
+  } finally {
+    await sourcePage.bringToFront();
+  }
+}
+
 async function waitForVisiblePanel(page: Page, selector: string, timeout: number): Promise<void> {
   const session = await page.createCDPSession();
   const deadline = Date.now() + timeout;
@@ -399,7 +417,7 @@ describe('built Chrome extension', () => {
     });
     const screenshots = join(WORKSPACE, 'artifacts', 'screenshots');
     await mkdir(screenshots, { recursive: true });
-    await sidePanel.screenshot({ path: join(screenshots, 'nowcoder-hot-preview.png'), fullPage: true });
+    await screenshotHotPanel(sidePanel, sourcePage, join(screenshots, 'nowcoder-hot-preview.png'));
     await clickSidePanel(sidePanel, '#hot-save');
     await waitForText(sidePanel, '#hot-status', '已保存 1 条，已跳过 0 条，失败 0 条。', 15_000);
     const catalog = JSON.parse(await readFile(join(libraryRoot, '_catalog', 'index.json'), 'utf8')) as { id: string; materialKind: string; relativePath: string }[];
@@ -413,7 +431,7 @@ describe('built Chrome extension', () => {
     expect(result.value.materials[0].document.author).toBeUndefined();
     const checkboxes = await sidePanel.evaluate(() => [...document.querySelectorAll<HTMLInputElement>('.hot-select')].map(input => input.getBoundingClientRect().width));
     expect(checkboxes.every(width => width <= 24)).toBe(true);
-    await sidePanel.screenshot({ path: join(screenshots, 'nowcoder-hot-saved.png'), fullPage: true });
+    await screenshotHotPanel(sidePanel, sourcePage, join(screenshots, 'nowcoder-hot-saved.png'));
   });
 
   it('automatically authorizes the side panel and captures the current page into the local library', async () => {
