@@ -364,7 +364,11 @@ export function extractNowcoder(document: Document, url: URL, now: Clock) {
     throw new ExtractionError('AUTH_REQUIRED', '牛客网当前显示可见的登录访问阻挡；请在正常页面恢复访问后重试');
   }
 
-  if (!content || !title || visibleText(content).length < 40) {
+  // Genuine feed bodies can be a single short question. Keep the length gate for generic fallbacks.
+  const preciseText = primary ? visibleText(primary).trim() : '';
+  const preciseShortBody = primary?.matches('.feed-content-text, .post-topic-des, .nc-post-content, .js-post-content')
+    && preciseText.length >= 2 && !/^(?:正在加载|加载中|loading)[\s.。…]*$/iu.test(preciseText);
+  if (!content || !title || (!preciseShortBody && visibleText(content).length < 40)) {
     throw new ExtractionError(
       'UNSUPPORTED_LAYOUT',
       '请在牛客网打开一篇面经或讨论的详情页后重试',

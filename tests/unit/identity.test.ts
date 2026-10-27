@@ -22,7 +22,7 @@ describe('fixed extension identity and authorization payload', () => {
       `chrome-extension://${derived}`,
       `extension://${derived}`,
     ]));
-    expect(APP_VERSION).toBe('0.4.49');
+    expect(APP_VERSION).toBe('0.4.50');
   });
 
   it('keeps every public package and extension version aligned', async () => {

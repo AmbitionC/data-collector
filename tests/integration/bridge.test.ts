@@ -4120,3 +4120,20 @@ it('advertises hot support and rejects a full-detail result for a private materi
   expect(job.body.outputPath).toBeUndefined();
   expect(await readFile(join(root, '_catalog/index.json'), 'utf8').catch(() => '[]')).toBe('[]');
 });
+
+it('binds private research source snapshots to the server-owned collection job', async () => {
+  const root = await temporaryDirectory();
+  const bridge = await startBridge({ port: 0, libraryRoot: root, configDir: join(root, '.config'), enableAutoUpdate: false });
+  handles.push(bridge);
+  const {socket, token}=await authorize(bridge);
+  socket.send(envelope('extension.hello','research-lineage-hello',{version:APP_VERSION,capabilities:[NOWCODER_DETAIL_CAPABILITY]}));
+  await waitForExtensionReady(bridge);
+  const url='https://www.nowcoder.com/discuss/9021', id='nowcoder-research-test-owned-job';
+  const created=await requestJson<{id:string}>(bridge.url,'/v1/jobs',{method:'POST',token,body:{id,url,requestedBy:'cli',sinks:['markdown']}});
+  expect(created.status).toBe(202);
+  socket.send(envelope('job.result',id,{document:document({source:'nowcoder',kind:'post',url,canonicalUrl:url,collectedAt:new Date().toISOString(),sourceMetadata:{collectionJobId:'untrusted-job'}})}));
+  let outputPath:string|undefined;
+  await vi.waitFor(async()=>{const job=await requestJson<{status:string;outputPath?:string}>(bridge.url,`/v1/jobs/${id}`,{token});expect(job.body.status).toBe('saved');outputPath=job.body.outputPath;},{timeout:10000});
+  const stored=JSON.parse(await readFile(join(outputPath!,'..','source.json'),'utf8'));
+  expect(stored.document.sourceMetadata.collectionJobId).toBe(id);
+});

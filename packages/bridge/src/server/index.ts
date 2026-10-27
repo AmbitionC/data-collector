@@ -1767,7 +1767,7 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
           && !await directedService?.guardJobBoundary(current, 'before-result-save')
         ) return;
         const override = sinkOverrides.get(job.id);
-        const document: CollectedDocument = job.batchId && job.planId
+        let document: CollectedDocument = job.batchId && job.planId
           ? {
               ...(result.document as CollectedDocument),
               sourceMetadata: {
@@ -1778,6 +1778,9 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
               },
             }
           : result.document as CollectedDocument;
+        if (job.requestedBy === 'cli' && job.id.startsWith('nowcoder-research-') && document.source === 'nowcoder') {
+          document = { ...document, sourceMetadata: { ...document.sourceMetadata, collectionJobId: job.id } };
+        }
         const persistSink = async () => await saveCollectedDocument(
           router,
           candidateIndex,

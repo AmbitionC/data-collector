@@ -31,6 +31,16 @@ function searchResponse(
 }
 
 describe('NowcoderDirectedSessionController', () => {
+  it('preserves a configured source-history failure before attempting external discovery', async () => {
+    const root = await temporaryDirectories.create('nowcoder-history-error-');
+    const store = await NowcoderDirectedStore.open(join(root, 'directed.json'));
+    const jobs = await JobStore.open(join(root, 'jobs.json'));
+    const historyPath = join(root, 'missing-outside-history.json');
+    const controller = new NowcoderDirectedSessionController({ store, jobs, libraryRoot: root,
+      targetRoot: root, historyPath, fetch: async () => { throw new Error('network must not run'); } });
+    await expect(controller.create({ queries: ['Agent'], target: 1, sort: 'latest' }))
+      .rejects.toMatchObject({ code: 'DIRECTED_HISTORY_CORRUPT', message: '历史记录无法安全读取' });
+  });
   it.each(['parent-escape', 'nested-symlink'])('rejects an unsafe configured inbox: %s', async reason => {
     const root = await temporaryDirectories.create('nowcoder-unsafe-inbox-');
     const target = join(root, 'target'), outside = join(root, 'outside');

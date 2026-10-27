@@ -8,16 +8,15 @@ import type { JobStore } from '../jobs/store.js';
 import { knownNowcoderSources } from './knownSources.js';
 import { discoverNowcoderDirectedCandidates } from './discovery.js';
 import type { NowcoderDirectedStore } from './store.js';
+import { StrictNowcoderHistoryError } from '../plans/nowcoderProcessedHistory.js';
 
 const QUERY_HASH_PREFIX = 'nowcoder-directed-query-v1\\0';
 const SESSION_TTL_MS = 30 * 60_000;
 
 export class NowcoderDirectedSearchError extends Error {
   override readonly name = 'NowcoderDirectedSearchError';
-  readonly code = 'NOWCODER_SEARCH_UNAVAILABLE';
-
-  constructor() {
-    super('牛客最新搜索暂时不可用');
+  constructor(readonly code: string = 'NOWCODER_SEARCH_UNAVAILABLE', message = '牛客最新搜索暂时不可用') {
+    super(message);
   }
 }
 
@@ -62,7 +61,10 @@ export class NowcoderDirectedSessionController {
         known.reasons,
       );
       discovery.diagnostics.sourceIndexWarnings = known.warnings;
-    } catch {
+    } catch (error) {
+      if (error instanceof StrictNowcoderHistoryError) {
+        throw new NowcoderDirectedSearchError(error.code, error.message);
+      }
       throw new NowcoderDirectedSearchError();
     }
     const session: NowcoderSearchSession = {

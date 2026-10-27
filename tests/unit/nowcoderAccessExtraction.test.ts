@@ -6,6 +6,13 @@ const URL_VALUE = new URL('https://www.nowcoder.com/discuss/83001');
 const NOW = () => '2026-10-13T00:00:00.000Z';
 const BODY = '<article class="nc-post-content"><h1>Agent 面经</h1><p>面试官让设计验证码系统，讨论限流、缓存和失败重试，然后继续问 Agent 工具调用和 RAG 召回。</p></article>';
 
+it('captures a short discussion from the precise feed body while rejecting a short generic article fallback', () => {
+  const precise = new JSDOM('<h1>项目求助</h1><div class="feed-content-text">我的项目讲不清楚，求建议。</div>').window.document;
+  expect(extractNowcoder(precise, URL_VALUE, NOW).text).toBe('我的项目讲不清楚，求建议。');
+  const generic = new JSDOM('<h1>项目求助</h1><article>我的项目讲不清楚，求建议。</article>').window.document;
+  expect(() => extractNowcoder(generic, URL_VALUE, NOW)).toThrowError(expect.objectContaining({code:'UNSUPPORTED_LAYOUT'}));
+});
+
 describe('Nowcoder visible access challenges', () => {
   it.each([
     '<div class="captcha-modal">请完成验证码验证</div>',

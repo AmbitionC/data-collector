@@ -10,6 +10,7 @@ import { autostartPlan, UnsupportedPlatformError } from './autostart.js';
 import { buildStampCommit, updateWorkspace } from './autoUpdate.js';
 import { rebuildFeJourneyCandidateIndex } from './feJourney/index.js';
 import { runTool } from './git.js';
+import { parseResearchArgs, runPrivateNowcoderResearch } from './nowcoderResearch.js';
 import { loadConfig, type ConfigOverrides } from './config.js';
 import {
   discoverRepoRoot,
@@ -896,6 +897,17 @@ export async function runCli(args: string[], io: CliIo = PROCESS_IO): Promise<nu
     if (command === 'health') return await health(args, io);
     if (command === 'fe-journey') return await feJourney(args, io);
     if (command === 'plans') return await plans(args, io);
+    if (command === 'nowcoder' && args[1] === 'research') {
+      const spec = parseResearchArgs(args.slice(2));
+      const credentials = await authenticatedToken(args);
+      const config = loadConfig();
+      const result = await runPrivateNowcoderResearch(spec, {
+        ...credentials, fetch, libraryRoot: config.libraryRoot, runsRoot: join(config.configDir, 'research'),
+        progress: message => io.stderr(`${message}\n`),
+      });
+      io.stdout(`${JSON.stringify(result)}\n`);
+      return result.status === 'completed' ? 0 : 1;
+    }
     if (command === 'nowcoder') return await runNowcoderCli(args, io);
     if (command === 'bridge') return await bridge(args, io);
     io.stderr(

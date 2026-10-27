@@ -1,4 +1,4 @@
-# 牛客热帖私有素材（v0.4.48）
+# 牛客热帖私有素材
 
 手动读取用户当前可正常访问的牛客热榜/讨论列表，供内容线 2「热帖观察」使用。不会生成或发布运营帖。现有面经、自主总结流程独立。
 
@@ -10,7 +10,31 @@
 4. 点「保存勾选的 N 条素材」。逐条等候本机库落盘回执；失败保留选择可重试，已成功条目跳过。
 5. 在「已入库」查看、打开原文或定位文件；「热帖素材」页的「导出私有素材 JSON」导出所有已入库热帖的精确 source.json 快照，包含此前保存的编辑笔记。
 
-Bridge 和扩展必须支持同一热帖协议。服务通过 `/health.bridgeCapabilities` 明确声明 `nowcoder-hot-material-v1`；扩展在未声明或断线时拒绝预览、保存和导出，不以数字版本高低推断功能。旧主干0.4.47即使高于原分支0.4.42，也没有此协议。候选0.4.48尚未安装，部署仍需单独审核。
+Bridge 和扩展必须支持同一热帖协议。服务通过 `/health.bridgeCapabilities` 明确声明 `nowcoder-hot-material-v1`；扩展在未声明或断线时拒绝预览、保存和导出，不以数字版本高低推断功能。
+
+## 私密用户调研命令
+
+经用户授权的产品用户调研使用 `nowcoder research`，与公开面经交付分开。命令复用既有 JSON 最新搜索适配器，每组最多 6 个词、每词最多 2 页、两组共最多 24 次搜索请求；分别冻结最新讨论和困难讨论的候选。研究不读取或修改面经发布历史，不发起同步或仓库投递；详情仍由已连接扩展按普通本机采集协议读取。
+
+```sh
+node packages/bridge/dist/cli.js nowcoder research \
+  --query 秋招 --query 求职 --query Agent \
+  --complaint-query 吐槽 --complaint-query 简历挂 --complaint-query 迷茫 \
+  --latest-target 30 --complaint-target 20 --days 7 \
+  --idempotency-key research-YYYYMMDD-unique
+```
+
+可选 `--hot-export /absolute/plugin-export.private.json` 接收上述原始插件导出，仅采用一小时内观察的素材。另可用 `--hot-observation /absolute/observation.json` 接收**另行标明来源的公开页面观察**；它不是插件导出，不得伪装成插件预览或宣称未经证明的榜单范围。两种输入互斥。公开观察仅包含实际可见的列表标题、观察时点、范围、真实点击或链接得到的详情地址，以及原样热度；不得从脚本内部状态推导帖子号。登录、验证码、访问限制或工具安全拒绝不得绕过。
+
+公开观察格式为 `schemaVersion:1, type:nowcoder-public-hot-observation, visibility:private, observer:browser-visible-dom, listUrl, listTitle, observedAt, scope, items`；每条 item 为 `{canonicalUrl,title,metrics:{heat,likes,comments,views}}`，未知指标为 null。仅接收 HTTPS 牛客列表及 1–60 个互不重复的规范详情 URL。观察时间不得早于运行开始前一小时，允许的时钟超前最多 60 秒。
+
+运行证据保存在配置目录的 `research/<runId>/`：原始热榜输入、搜索诊断、冻结清单、逐条任务 ID 和 source.json 快照及哈希。相同幂等键只返回已保存运行，不重复提交；中断、失败和样本不足均保留原运行，不自动换词、换浏览器或拼其他运行补数。stdout 只有一个 JSON，进度写 stderr。只有 `status:completed` 可消费为本次完整样本。
+
+搜索命中不等于用户困难：困难样本需在标题或短摘中出现明确困难/求助信号，题单汇编另记排除原因。详情发现付费或截断预览时，保存可见预览作为排除证据，**不计入完整正文**；latest/complaint 仅从本次搜索已冻结的同层候选继续取下一条，以满足原定完整正文配额。详情任务至少间隔 2 秒，整轮最多 160 次尝试。热榜保持原有观察全集，每条给出完整正文或不可读处置，不用其他帖子替代榜内条目。登录、验证码、限流、任务或来源错配仍立即停止整轮。
+
+完成要求为完整 latest/complaint 正文分别达到请求配额、热榜条目均有明确处置、至少一篇完整正文且无失败或未完成任务。付费/截断排除数与完整正文数分列；任何配额不足仍不得作为完成样本。重启新范围必须使用新键并重新采集，先前失败运行保持原样，其已保存内容不混入新轮计数。
+
+调研详情的 `sourceMetadata.collectionJobId` 由 Bridge 绑定到当前任务。读取快照时核对任务身份、采集时间、规范 URL、显式发布时间及截断状态；完整正文只进本机库和私有研究快照。7 天的 latest/complaint 样本与按观察时间记录的 hot 样本分别统计；热榜中更老的帖子不冒充最新帖子。
 
 ## 观察范围与限制
 
