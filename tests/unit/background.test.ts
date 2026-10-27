@@ -738,6 +738,110 @@ describe('extension job runner', () => {
     });
   });
 
+  it('adds a new owner comment to a stored complete article and keeps its existing URL/body; the second run creates no job', async () => {
+    const tabs = new InMemoryTabs();
+    const bridge = new InMemoryBridge();
+    const id = '22258242158441211';
+    const preview = { ...topic(id), text: '投资文章导语', html: '<p>投资文章导语</p>',
+      publishedAt: '2026-10-18T13:26:00.000Z', sourceMetadata: { topicId: id, authorRole: 'owner' } };
+    let full = { ...preview, kind: 'article' as const, canonicalUrl: 'https://articles.zsxq.com/id_fixture.html',
+      url: 'https://articles.zsxq.com/id_fixture.html', text: '已收集的完整长文正文', html: '<p>已收集的完整长文正文</p>' };
+    const originalHtml = full.html;
+    const bundle = { groupId: '48844584441158', topicId: id, ownerId: '1001', ownerName: '陈老师',
+      collectedAt: '2026-10-28T00:00:00.000Z', pagesFetched: 1, exhausted: true, unavailableReplyCount: 0,
+      comments: [{ id: '45811454854222258', rootId: '55188252152425154', text: '先做低成本试错。',
+        publishedAt: '2026-10-19T01:00:00.000Z', contextText: '副业如何开始？', contextAuthor: '成员', images: [], attachments: [] }] };
+    tabs.sendMessage = async (_tabId, message) => {
+      const request = message as { type: string };
+      if (request.type === 'list.apiCollect') return { ok: true, apiCollection: { documents: [preview], businessSkips: [], coverage: {} } } as never;
+      if (request.type === 'document.apiCollectComments') return { ok: true, ownerComments: bundle } as never;
+      if (request.type === 'list.apiCollectOwnerPage') return { ok: true, ownerPage: { documents: [], businessSkips: [], rawCount: 0,
+        pageKey: 'empty', exhausted: true, context: { ownerId: '1001', scope: 'by_owner' } } } as never;
+      throw new Error(`Unexpected request ${request.type}`);
+    };
+    const runner = new JobRunner({ tabs, bridge, waitForTabComplete: async () => undefined,
+      knownZsxqIndex: async () => [{ id: 'existing-id', url: full.canonicalUrl, topicId: id, contentComplete: true }],
+      storedDocument: async () => full });
+    const options = { zsxqMode: 'daily-ledger' as const,
+      zsxqDateRange: { since: '2026-10-15', until: '2026-10-21' }, targetDays: [] };
+    await runner.runZsxqCollectionPlan('comments-first', PLAN_ATTEMPT, undefined, options);
+    expect(bridge.createdFor).toEqual([full.canonicalUrl]);
+    const saved = bridge.sent.find(item => item.type === 'job.result')?.payload as { document?: CollectedDocument } | undefined;
+    expect(saved?.document?.html.startsWith(originalHtml)).toBe(true);
+    expect(saved?.document?.text).toContain('先做低成本试错。');
+    full = saved!.document! as typeof full;
+    await runner.runZsxqCollectionPlan('comments-repeat', PLAN_ATTEMPT, undefined, options);
+    expect(bridge.createdFor).toEqual([full.canonicalUrl]);
+  });
+
+  it.each(['direct-article', 'stored-member', 'pending-delivery', 'pending-member-deleted', 'pending-already-synced'])('updates owner comments on an existing %s without losing identity or delivery eligibility', async mode => {
+    const tabs = new InMemoryTabs();
+    const bridge = new InMemoryBridge();
+    const id = '22258242158441211';
+    const articleUrl = 'https://articles.zsxq.com/id_fixture.html';
+    const preview = { ...topic(id), title: '副业投资方法', text: '副业方法导语',
+      html: `<p>副业方法导语</p><a href="${articleUrl}">完整长文</a>`,
+      publishedAt: '2026-10-18T13:26:25.518Z',
+      sourceMetadata: { topicId: id, authorRole: ['stored-member', 'pending-member-deleted'].includes(mode) ? 'member' : 'owner' } };
+    const stored = { ...preview,
+      canonicalUrl: mode === 'direct-article' ? articleUrl : preview.canonicalUrl,
+      url: mode === 'direct-article' ? articleUrl : preview.canonicalUrl,
+      author: mode === 'stored-member' ? '成员' : '陈老师',
+      publishedAt: mode === 'direct-article' ? '2026-10-18T13:26:00.000Z' : preview.publishedAt,
+      kind: mode === 'direct-article' ? 'article' as const : 'post' as const,
+      html: '<p>留存完整正文</p>', text: '留存完整正文',
+      sourceMetadata: mode === 'direct-article' ? { articleId: 'fixture' }
+        : mode === 'pending-member-deleted' ? { topicId: id, authorRole: 'owner', originalAuthorRole: 'member',
+          ownerCommentIds: '["45811454854222258"]', ownerCommentsOwnerId: '1001' }
+        : { topicId: id, authorRole: mode === 'stored-member' ? 'member' : 'owner' },
+      ...(mode === 'pending-member-deleted' ? { questioner: '提问成员' } : {}),
+    };
+    const bundle = { groupId: '48844584441158', topicId: id, ownerId: '1001', ownerName: '陈老师',
+      collectedAt: '2026-10-28T00:00:00.000Z', pagesFetched: 1, exhausted: true, unavailableReplyCount: 0,
+      comments: mode.startsWith('pending-') ? [] : [{ id: '45811454854222258', rootId: '55188252152425154', text: '先做低成本试错。',
+        publishedAt: '2026-10-19T01:00:00.000Z', contextText: '副业如何开始？', contextAuthor: '成员', images: [], attachments: [] }] };
+    tabs.sendMessage = async (_tabId, message) => {
+      const request = message as { type: string };
+      if (request.type === 'list.apiCollect') return { ok: true, apiCollection: { documents: [preview], businessSkips: [], coverage: {} } } as never;
+      if (request.type === 'document.apiCollectComments') return { ok: true, ownerComments: bundle } as never;
+      if (request.type === 'list.apiCollectOwnerPage') return { ok: true, ownerPage: { documents: [], businessSkips: [], rawCount: 0,
+        pageKey: 'empty', exhausted: true, context: { ownerId: '1001', scope: 'by_owner' } } } as never;
+      throw new Error(`Unexpected remote re-collection ${request.type}`);
+    };
+    const runner = new JobRunner({ tabs, bridge, waitForTabComplete: async () => undefined,
+      knownZsxqIndex: async () => [{ id: 'existing-id', url: stored.canonicalUrl, contentComplete: true,
+        deliveryPending: mode.startsWith('pending-') }],
+      storedDocument: async () => ({ ...stored, deliveryPending: mode.startsWith('pending-') && mode !== 'pending-already-synced' }) });
+    await runner.runZsxqCollectionPlan('comments-identity', PLAN_ATTEMPT, undefined, {
+      zsxqMode: 'daily-ledger', zsxqDateRange: { since: '2026-10-15', until: '2026-10-21' }, targetDays: [],
+    });
+    expect(bridge.createdFor).toEqual(mode === 'pending-already-synced' ? [] : [stored.canonicalUrl]);
+    if (mode === 'pending-already-synced') return;
+    const saved = bridge.sent.find(item => item.type === 'job.result')?.payload as { document: CollectedDocument };
+    expect(saved.document.html.startsWith(stored.html)).toBe(true);
+    expect(saved.document.sourceMetadata?.authorRole).toBe('owner');
+    expect(saved.document.sourceMetadata?.topicId).toBe(id);
+    expect(saved.document.author).toBe('陈老师');
+    if (mode === 'pending-member-deleted') expect(saved.document.questioner).toBe('提问成员');
+  });
+
+  it('keeps non-range daily collection ignoring undated member posts before publication validation', async () => {
+    const tabs = new InMemoryTabs();
+    const bridge = new InMemoryBridge();
+    const member = { ...topic('22258242158441211'), sourceMetadata: { authorRole: 'member' } };
+    tabs.sendMessage = async (_tabId, message) => {
+      const request = message as { type: string };
+      if (request.type === 'list.apiCollectOwnerPage') return { ok: true, ownerPage: { documents: [], businessSkips: [], rawCount: 0,
+        pageKey: 'empty', exhausted: true, context: { ownerId: '1001', scope: 'by_owner' } } } as never;
+      throw new Error(`Unexpected request ${request.type}`);
+    };
+    const runner = new JobRunner({ tabs, bridge, waitForTabComplete: async () => undefined, knownZsxqIndex: async () => [] });
+    vi.spyOn(runner, 'collectZsxqPlanViews').mockResolvedValue([member]);
+    await expect(runner.runZsxqCollectionPlan('daily-undated-member', PLAN_ATTEMPT, undefined,
+      { zsxqMode: 'daily-ledger', targetDays: ['2026-10-18'] })).resolves.toBeDefined();
+    expect(bridge.createdFor).toEqual([]);
+  });
+
   it.each([false, true])('collects daily views with explicit range=%s and deduplicates before jobs', async rangeMode => {
     const tabs = new InMemoryTabs();
     const bridge = new InMemoryBridge();
@@ -757,6 +861,11 @@ describe('extension job runner', () => {
         return { ok: true, apiCollection: {
           documents: [known], businessSkips: [], coverage: { '视图:最新': 1 },
         } } as never;
+      }
+      if (request.type === 'document.apiCollectComments') {
+        return { ok: true, ownerComments: { groupId: '48844584441158', topicId: '80011', ownerId: '1001',
+          ownerName: '陈老师', collectedAt: '2026-08-24T12:00:00.000Z', comments: [], pagesFetched: 1,
+          exhausted: true, unavailableReplyCount: 0 } } as never;
       }
       if (request.type === 'list.apiCollectOwnerPage') {
         return {
@@ -808,7 +917,7 @@ describe('extension job runner', () => {
 
     if (rangeMode) expect(collectViews).not.toHaveBeenCalled();
     else expect(collectViews).toHaveBeenCalledWith(42, ['最新', '精华'], expect.any(Object));
-    expect(tabs.asked).toEqual(rangeMode ? ['list.apiCollect', 'list.apiCollectOwnerPage'] : ['list.apiCollectOwnerPage']);
+    expect(tabs.asked).toEqual(rangeMode ? ['list.apiCollect', 'document.apiCollectComments', 'list.apiCollectOwnerPage'] : ['list.apiCollectOwnerPage']);
     expect(bridge.createdFor).toEqual([]);
     expect(phases.at(-1)).toMatchObject({
       discovered: 2,

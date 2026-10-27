@@ -1,4 +1,5 @@
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, writeFile, symlink } from 'node:fs/promises';
+import { stableContentId } from '@data-collector/shared';
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -56,6 +57,31 @@ const SEEDS: Seed[] = [
 ];
 
 describe('已入库内容管理', () => {
+  it('returns the validated stored ZSXQ source for comment updates and rejects a different source identity', async () => {
+    const root = await seedLibrary([]);
+    const url = 'https://wx.zsxq.com/group/48844584441158/topic/22258242158441211';
+    const id = stableContentId(url);
+    const directory = join(root, id);
+    await mkdir(directory);
+    await writeFile(join(directory, 'index.md'), '# 已有完整正文');
+    await writeFile(join(root, '_catalog', 'index.json'), JSON.stringify([{ id, source: 'zsxq', url,
+      title: '原文', category: '投资', relativePath: `${id}/index.md`, updatedAt: '2026-10-19T00:00:00.000Z' }]));
+    const document = { schemaVersion: 1, source: 'zsxq', kind: 'post', url, canonicalUrl: url,
+      title: '原文', collectedAt: '2026-10-19T00:00:00.000Z', html: '<p>完整正文</p>', text: '完整正文', images: [], truncated: false };
+    const source = { document, sanitizedHtml: document.html, summary: '', category: '投资', tags: [] };
+    await writeFile(join(directory, 'source.json'), JSON.stringify(source));
+    expect((await readEntry(root, id))?.document).toEqual(document);
+    await writeFile(join(directory, 'source.json'), JSON.stringify({ ...source,
+      document: { ...document, url: url.replace('22258242158441211', '22258242158441212'),
+        canonicalUrl: url.replace('22258242158441211', '22258242158441212') } }));
+    await expect(readEntry(root, id)).rejects.toThrow(/身份/u);
+    const outside = await temporaryDirectories.create('outside-source-');
+    await writeFile(join(outside, 'source.json'), JSON.stringify(source));
+    const { unlink } = await import('node:fs/promises');
+    await unlink(join(directory, 'source.json'));
+    await symlink(join(outside, 'source.json'), join(directory, 'source.json'));
+    await expect(readEntry(root, id)).rejects.toThrow();
+  });
   it('按时间倒序列出条目', async () => {
     const root = await seedLibrary(SEEDS);
 

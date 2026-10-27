@@ -13,12 +13,124 @@ import {
   parseTopicJson,
   preferredTopicRecord,
   stripInlineMarkup,
+  sourceAssetsOf,
   TOPIC_MESSAGE_CHARACTER_LIMIT,
   type TopicRecord,
 } from './topicIndex.js';
 import { advertisementIn } from './adFilter.js';
 import { excludedBy, isLifeTeacherInterest } from './topicFilter.js';
 import { buildDocument } from './extractors/common.js';
+import type { ZsxqOwnerComment, ZsxqOwnerComments } from './zsxqOwnerComments.js';
+export { appendZsxqOwnerComments } from './zsxqOwnerComments.js';
+
+/** The web client returns nested replies inline; page root comments with its observed cursor. */
+export async function collectZsxqApiOwnerComments(
+  groupId: string,
+  topicId: string,
+  dependencies: ZsxqApiFallbackDependencies,
+): Promise<ZsxqOwnerComments> {
+  function invalid(part: string, detail: string): never {
+    throw new Error(`ZSXQ_COMMENTS_${part}_UNPROVEN：${detail}`);
+  }
+  if (!/^\d{6,25}$/u.test(groupId) || !/^\d{15,25}$/u.test(topicId)) invalid('PARENT', '原帖编号无效');
+  const common = { fetcher: dependencies.fetcher ?? fetch.bind(globalThis),
+    requestId: dependencies.requestId ?? (() => crypto.randomUUID()), aduid: dependencies.aduid };
+  const group = responseData(await apiGet(`${API_ROOT}/groups/${groupId}`, common))?.group;
+  if (!isRecord(group) || identifier(group.group_id ?? group.groupId) !== groupId) invalid('GROUP', '星球身份不一致');
+  const owner = isRecord(group.owner) ? group.owner : undefined;
+  const ownerId = owner ? identifier(owner.user_id ?? owner.userId) : undefined;
+  if (!ownerId) invalid('OWNER', '缺少可核验星主账号');
+  const topic = responseData(await apiGet(`${API_ROOT}/topics/${topicId}`, common))?.topic;
+  if (!isRecord(topic) || identifier(topic.topic_id ?? topic.topicId) !== topicId
+    || !isRecord(topic.group) || identifier(topic.group.group_id ?? topic.group.groupId) !== groupId) invalid('PARENT', '原帖身份不一致');
+  const result: ZsxqOwnerComments = { groupId, topicId, ownerId,
+    ownerName: nameOf(owner) ?? '陈老师', collectedAt: (dependencies.now ?? (() => new Date()))().toISOString(),
+    pagesFetched: 0, exhausted: false, unavailableReplyCount: 0, comments: [] };
+  const seen = new Map<string, string>();
+  const rootIds = new Set<string>();
+  let cursor: string | undefined;
+  const identity = (value: unknown): { node: Record<string, unknown>; id: string; ownerId: string; time: string } => {
+    if (!isRecord(value)) invalid('BODY', '评论不是对象');
+    const id = identifier(value.comment_id);
+    const author = isRecord(value.owner) ? identifier(value.owner.user_id) : undefined;
+    const time = typeof value.create_time === 'string' && /^\d{4}-\d{2}-\d{2}T/u.test(value.create_time)
+      && Number.isFinite(Date.parse(value.create_time)) ? value.create_time : undefined;
+    if (!id || !/^\d{15,25}$/u.test(id) || !author || !time) invalid('IDENTITY', '评论编号、作者或时间无法核验');
+    return { node: value, id, ownerId: author, time };
+  };
+  for (let page = 0; page < MAX_VIEW_PAGES; page += 1) {
+    const url = new URL(`${API_ROOT}/topics/${topicId}/comments`);
+    url.searchParams.set('sort', 'asc'); url.searchParams.set('count', '30'); url.searchParams.set('with_sticky', 'true');
+    if (cursor) url.searchParams.set('begin_time', cursor);
+    const data = responseData(await apiGet(url.href, common));
+    if (!data || !Array.isArray(data.comments) || data.comments.length > 30) invalid('BODY', '评论分页结构无效');
+    result.pagesFetched += 1;
+    let previousTime = cursor ? Date.parse(cursor) : -Infinity;
+    let newRoots = 0;
+    let lastTime: string | undefined;
+    for (const value of data.comments) {
+      const root = identity(value);
+      if (root.node.sticky !== true) {
+        if (Date.parse(root.time) < previousTime) invalid('CURSOR', '评论未按创建时间正序返回');
+        previousTime = Date.parse(root.time); lastTime = root.time;
+      }
+      const newRoot = !rootIds.has(root.id);
+      if (newRoot) { rootIds.add(root.id); newRoots += 1; }
+      const nested = root.node.replied_comments ?? [];
+      if (!Array.isArray(nested) || nested.length > 2_000) invalid('BODY', '嵌套回复结构无效');
+      const replyCount = root.node.replies_count ?? 0;
+      if (typeof replyCount !== 'number' || !Number.isSafeInteger(replyCount) || replyCount < 0) invalid('BODY', '回复计数无效');
+      if (newRoot) result.unavailableReplyCount += Math.max(0, replyCount - nested.length);
+      const thread = [root, ...nested.map(identity)];
+      for (const [position, candidate] of thread.entries()) {
+        if (candidate !== root && identifier(candidate.node.parent_comment_id) !== root.id) invalid('PARENT', '嵌套回复不属于该评论');
+        const text = candidate.node.text ?? '';
+        if (typeof text !== 'string' || text.length > 200_000) invalid('BODY', '评论正文无效或过长');
+        const fingerprint = JSON.stringify([candidate.ownerId, candidate.time, text,
+          ...['parent_comment_id', 'images', 'files', 'attachments', 'audio', 'audios', 'video', 'videos', 'article']
+            .map(key => candidate.node[key])]);
+        const old = seen.get(candidate.id);
+        if (old !== undefined && old !== fingerprint) invalid('CONFLICT', '同一评论编号返回不同正文');
+        if (old !== undefined) continue;
+        seen.set(candidate.id, fingerprint);
+        if (candidate.ownerId !== ownerId) continue;
+        const rootText = root.node.text ?? '';
+        if (typeof rootText !== 'string') invalid('BODY', '评论上下文无效');
+        const assets = sourceAssetsOf({ talk: candidate.node });
+        const replieeId = isRecord(candidate.node.repliee) ? identifier(candidate.node.repliee.user_id) : undefined;
+        // The API identifies the replied-to user, not a unique nested comment. Retain all of
+        // that user's earlier visible questions plus the root instead of guessing one.
+        const contextNodes = candidate === root ? [] : thread.slice(0, position).filter((entry, index) =>
+          index === 0 || replieeId === undefined || entry.ownerId === replieeId);
+        const contextAssets = contextNodes.map(entry => sourceAssetsOf({ talk: entry.node }));
+        if (!assets.proven || contextAssets.some(a => !a.proven)) invalid('MEDIA', '评论或上下文资源未能完整解析');
+        if (!stripInlineMarkup(text).trim() && assets.images.length === 0 && assets.attachments.length === 0) {
+          invalid('BODY', '星主评论没有可归档正文或资源');
+        }
+        const comment: ZsxqOwnerComment = {
+          id: candidate.id, rootId: root.id, publishedAt: new Date(candidate.time).toISOString(), text,
+          contextText: candidate === root ? '' : rootText,
+          contextAuthor: nameOf(root.node.owner) ?? '成员',
+          contextComments: contextNodes.map(entry => {
+            const contextText = entry.node.text ?? '';
+            if (typeof contextText !== 'string' || contextText.length > 200_000) invalid('BODY', '嵌套提问正文无法核验');
+            return { id: entry.id, author: nameOf(entry.node.owner) ?? '成员',
+              publishedAt: new Date(entry.time).toISOString(), text: contextText };
+          }),
+          ...(nameOf(candidate.node.repliee) ? { replyTo: nameOf(candidate.node.repliee)! } : {}),
+          images: [...assets.images, ...contextAssets.flatMap(a => a.images)],
+          attachments: [...assets.attachments, ...contextAssets.flatMap(a => a.attachments)],
+        };
+        result.comments.push(comment);
+      }
+    }
+    if (JSON.stringify(result).length > TOPIC_MESSAGE_CHARACTER_LIMIT) invalid('PAYLOAD', '评论超过安全上限');
+    if (data.comments.length < 30) { result.exhausted = true; return result; }
+    if (!newRoots || !lastTime || (cursor && Date.parse(lastTime) <= Date.parse(cursor))) invalid('CURSOR', '评论游标未前进');
+    cursor = lastTime;
+  }
+  return invalid('LIMIT', '评论达到分页安全上限，未证明耗尽');
+}
 
 const API_ROOT = 'https://api.zsxq.com/v2';
 const WEB_ROOT = 'https://wx.zsxq.com/group';

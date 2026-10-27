@@ -33,6 +33,7 @@ import {
   CONTENT_API_COLLECT_OWNER_PAGE_REQUEST,
   CONTENT_API_COLLECT_ARTICLE_REQUEST,
   CONTENT_API_COLLECT_TOPIC_REQUEST,
+  CONTENT_API_COLLECT_COMMENTS_REQUEST,
   CONTENT_DIAGNOSE_REQUEST,
   CONTENT_DOCUMENT_REQUEST,
   CONTENT_ADVANCE_REQUEST,
@@ -52,6 +53,7 @@ import {
   collectZsxqApiOwnerPage,
   collectZsxqApiArticle,
   collectZsxqApiTopic,
+  collectZsxqApiOwnerComments,
   collectZsxqApiViews,
   type ZsxqOwnerApiContext,
 } from './zsxqApiFallback.js';
@@ -159,6 +161,7 @@ interface ExtractMessage {
     | typeof CONTENT_API_COLLECT_OWNER_PAGE_REQUEST
     | typeof CONTENT_API_COLLECT_ARTICLE_REQUEST
     | typeof CONTENT_API_COLLECT_TOPIC_REQUEST
+    | typeof CONTENT_API_COLLECT_COMMENTS_REQUEST
     | typeof CONTENT_RESTORE_REQUEST
     | typeof CONTENT_ADVANCE_REQUEST
     | typeof CONTENT_REFRESH_TOPICS_REQUEST
@@ -180,7 +183,8 @@ interface ExtractMessage {
     | 'list.apiCollect'
     | 'list.apiCollectOwnerPage'
     | 'document.apiCollectArticle'
-    | 'document.apiCollectTopic';
+    | 'document.apiCollectTopic'
+    | 'document.apiCollectComments';
   /** list.highlight：要滚过去并高亮的那一条。 */
   key?: string;
   label?: ZsxqPlanView;
@@ -1641,6 +1645,7 @@ if (!alreadyRegistered) chrome.runtime.onMessage.addListener((message: unknown, 
     request.type !== 'list.apiCollectOwnerPage' &&
     request.type !== 'document.apiCollectArticle' &&
     request.type !== 'document.apiCollectTopic' &&
+    request.type !== 'document.apiCollectComments' &&
     !currentRequest
   ) {
     return false;
@@ -1655,6 +1660,21 @@ if (!alreadyRegistered) chrome.runtime.onMessage.addListener((message: unknown, 
         }
       : response);
   };
+
+  if (request.type === 'document.apiCollectComments' || request.type === CONTENT_API_COLLECT_COMMENTS_REQUEST) {
+    if (typeof request.groupId !== 'string' || typeof request.topicId !== 'string') {
+      respond({ ok: false, error: { code: 'UNSUPPORTED_LAYOUT', message: '评论采集缺少原帖编号' } });
+      return false;
+    }
+    void collectZsxqApiOwnerComments(request.groupId, request.topicId, { aduid: zsxqAduid() }).then(
+      ownerComments => respond({ ok: true, ownerComments }),
+      error => {
+        const message = error instanceof Error ? error.message : '知识星球评论采集失败';
+        respond({ ok: false, error: { code: message.startsWith('AUTH_REQUIRED') ? 'AUTH_REQUIRED' : 'COLLECTION_FAILED', message } });
+      },
+    );
+    return true;
+  }
 
   if (request.type === 'document.apiCollectTopic' || request.type === CONTENT_API_COLLECT_TOPIC_REQUEST) {
     if (typeof request.groupId !== 'string' || !/^\d{6,25}$/u.test(request.groupId)

@@ -29,6 +29,7 @@ import type { HookStats } from '../topicIndex.js';
 import type { OwnedTabPurpose } from './ownedTabs.js';
 import { RemoteJobScheduler } from './remoteJobScheduler.js';
 import type { ZsxqApiCollection, ZsxqOwnerPage } from '../zsxqApiFallback.js';
+import { appendZsxqOwnerComments, type ZsxqOwnerComments } from '../zsxqOwnerComments.js';
 import {
   CONTENT_BUILD_ID,
   CONTENT_EXTRACTION_PROTOCOL,
@@ -338,6 +339,7 @@ interface PayloadMap {
   selected: { label: ZsxqPlanView; topicIds: string[] };
   apiCollection: ZsxqApiCollection;
   ownerPage: ZsxqOwnerPage;
+  ownerComments: ZsxqOwnerComments;
 }
 
 const TRANSIENT_TAB_ERROR = /Tabs cannot be edited right now|tab.*(?:temporarily|busy)|No tab with id/i;
@@ -446,6 +448,8 @@ export interface JobRunnerOptions {
   knownContent?: () => Promise<ReadonlyMap<string, boolean | undefined> | undefined>;
   /** 正文无关的知识星球精确/语义去重索引；逐日与历史模式必须可用。 */
   knownZsxqIndex?: () => Promise<readonly ZsxqLibraryIndexEntry[]>;
+  /** Validated source snapshot; range comment updates must preserve the existing complete body. */
+  storedDocument?: (id: string) => Promise<CollectedDocument & { deliveryPending?: boolean }>;
 }
 
 export interface DirectedRemoteJobOwnership {
@@ -1276,7 +1280,7 @@ export class JobRunner {
           `AUTHOR_IDENTITY_UNPROVEN：无法证明知识星球帖子作者身份：${document.canonicalUrl}`,
         );
       }
-      if (authorRole === 'member') {
+      if (authorRole === 'member' && !dateRange) {
         reject(document, '非星主');
         continue;
       }
@@ -1293,10 +1297,92 @@ export class JobRunner {
       const topicId = typeof document.sourceMetadata?.topicId === 'string'
         ? document.sourceMetadata.topicId
         : undefined;
-      const exact = byUrl.get(document.canonicalUrl) ?? (topicId ? byTopicId.get(topicId) : undefined);
-      if (exact?.contentComplete === true) {
-        reject(document, '本机库已有完整正文');
+      let comments: ZsxqOwnerComments | undefined;
+      if (dateRange) {
+        const groupId = /\/group\/(\d+)/u.exec(document.canonicalUrl)?.[1];
+        if (!groupId || !topicId) throw new Error('ZSXQ_COMMENTS_PARENT_UNPROVEN：原帖编号缺失');
+        const response = await this.ask(tabId, {
+          type: this.contentMessageType('document.apiCollectComments'), groupId, topicId,
+        });
+        if (!response.ok) throw new Error(response.error.message);
+        comments = payloadOf(response, 'ownerComments');
+        if (!comments.exhausted || comments.groupId !== groupId || comments.topicId !== topicId) {
+          throw new Error('ZSXQ_COMMENTS_PARENT_UNPROVEN：评论未证明完整或原帖不一致');
+        }
+        audit.coverage['评论核验帖子'] = (audit.coverage['评论核验帖子'] ?? 0) + 1;
+        audit.coverage['评论分页'] = (audit.coverage['评论分页'] ?? 0) + comments.pagesFetched;
+        audit.coverage['星主评论条数'] = (audit.coverage['星主评论条数'] ?? 0) + comments.comments.length;
+        audit.coverage['源站不可读回复计数差'] = (audit.coverage['源站不可读回复计数差'] ?? 0) + comments.unavailableReplyCount;
+      }
+      const articleUrl = dateRange && authorRole === 'owner' ? linkedArticleUrl(document.html) : undefined;
+      const exact = byUrl.get(document.canonicalUrl) ?? (topicId ? byTopicId.get(topicId) : undefined)
+        ?? (articleUrl ? byUrl.get(articleUrl) : undefined);
+      const recoveryCandidate = dateRange !== undefined && exact?.contentComplete === true && exact.deliveryPending === true;
+      if (authorRole === 'member' && !comments?.comments.length && !recoveryCandidate) {
+        reject(document, '非星主');
         continue;
+      }
+      let completedDocument: CollectedDocument | undefined;
+      if (exact?.contentComplete === true) {
+        if (!comments || (!comments.comments.length && !recoveryCandidate)) {
+          reject(document, '本机库已有完整正文');
+          continue;
+        }
+        if (!this.options.storedDocument) throw new Error('BRIDGE_UPDATE_REQUIRED：无法读取留存完整正文');
+        const currentEntry = await this.options.storedDocument(exact.id);
+        const recoverDelivery = recoveryCandidate && currentEntry.deliveryPending === true;
+        let stored = collectedDocumentSchema.parse(currentEntry);
+        if (!comments.comments.length && !recoverDelivery) {
+          reject(document, '本机库已完成同步');
+          continue;
+        }
+        const linkedMinuteMatches = stored.canonicalUrl === articleUrl && stored.publishedAt !== undefined
+          && Math.floor(Date.parse(stored.publishedAt) / 60_000) === Math.floor(Date.parse(document.publishedAt!) / 60_000);
+        if (stored.canonicalUrl !== exact.url || (stored.publishedAt !== document.publishedAt && !linkedMinuteMatches)) {
+          throw new Error('ZSXQ_COMMENTS_PARENT_UNPROVEN：留存正文与原帖身份或时间不一致');
+        }
+        if (authorRole === 'member' && !comments.comments.length) {
+          let retained: unknown = [];
+          if (typeof stored.sourceMetadata?.ownerCommentIds === 'string') {
+            try { retained = JSON.parse(stored.sourceMetadata.ownerCommentIds); }
+            catch { throw new Error('ZSXQ_COMMENTS_IDS_UNPROVEN：留存评论编号无效'); }
+          }
+          const ownerEvidence = stored.sourceMetadata?.authorRole === 'owner'
+            && stored.sourceMetadata.ownerCommentsOwnerId === comments.ownerId
+            && Array.isArray(retained) && retained.length > 0
+            && retained.every(id => typeof id === 'string' && /^\d{15,25}$/u.test(id));
+          if (!ownerEvidence) {
+            reject(document, '非星主（无可恢复的已核验星主回复）');
+            continue;
+          }
+        }
+        // A directly saved article has articleId, while its signed parent feed supplies topicId.
+        // Bind only through that exact observed article link; never synthesize a different URL.
+        if (stored.sourceMetadata?.topicId === undefined && stored.canonicalUrl === articleUrl) {
+          stored = { ...stored, sourceMetadata: { ...stored.sourceMetadata, topicId: comments.topicId,
+            parentTopicPublishedAt: document.publishedAt! } };
+        }
+        if (authorRole === 'member' || stored.sourceMetadata?.authorRole === 'member') {
+          stored = { ...stored, author: comments.ownerName,
+            questioner: stored.questioner ?? (stored.sourceMetadata?.authorRole === 'member' ? stored.author : document.author) ?? '成员',
+            sourceMetadata: { ...stored.sourceMetadata, authorRole: 'owner', originalAuthorRole: 'member' } };
+        } else if (stored.sourceMetadata?.authorRole === undefined && stored.canonicalUrl === articleUrl) {
+          stored = { ...stored, sourceMetadata: { ...stored.sourceMetadata, authorRole: 'owner' } };
+        }
+        const appended = appendZsxqOwnerComments(stored as CollectedDocument, comments);
+        if (!appended.added && !recoverDelivery) {
+          reject(document, '本机库已有完整正文及星主评论');
+          continue;
+        }
+        completedDocument = appended.document;
+        audit.coverage['新增星主评论'] = (audit.coverage['新增星主评论'] ?? 0) + appended.added;
+        if (recoverDelivery) {
+          audit.coverage['待同步正文恢复'] = (audit.coverage['待同步正文恢复'] ?? 0) + 1;
+          completedDocument = { ...completedDocument, collectedAt: comments.collectedAt,
+            sourceMetadata: { ...completedDocument.sourceMetadata, deliveryRecovery: true,
+              ...(typeof stored.sourceMetadata?.batchId === 'string'
+                ? { recoveredFromBatch: stored.sourceMetadata.batchId } : {}) } };
+        }
       }
       const signature = zsxqSemanticSignature({
         publishedAt: document.publishedAt!,
@@ -1305,12 +1391,26 @@ export class JobRunner {
       });
       const semantic = completeSemantic.find(entry => entry.semanticSignature
         && isHighConfidenceZsxqDuplicate(entry.semanticSignature, signature));
-      if (semantic) {
+      if (semantic && !completedDocument && !comments?.comments.length) {
         reject(document, '高置信语义重复', semantic.url);
         continue;
       }
 
-      const completedDocument = await this.withLinkedArticle(document, tabId);
+      if (!completedDocument) {
+        completedDocument = await this.withLinkedArticle(document, tabId);
+        if (comments?.comments.length && completedDocument.truncated === false) {
+          // A member's original post is context; the selected owner comments are the authored content.
+          if (authorRole === 'member') completedDocument = { ...completedDocument,
+            author: comments.ownerName, questioner: document.author ?? '成员', kind: 'answer',
+            html: `<h2>原帖上下文</h2>${completedDocument.html}`,
+            text: `原帖上下文（${document.author ?? '成员'}）\n${completedDocument.text}`,
+            sourceMetadata: { ...completedDocument.sourceMetadata, authorRole: 'owner', originalAuthorRole: 'member' },
+          };
+          const appended = appendZsxqOwnerComments(completedDocument, comments);
+          completedDocument = appended.document;
+          audit.coverage['新增星主评论'] = (audit.coverage['新增星主评论'] ?? 0) + appended.added;
+        }
+      }
       if (!isLifeTeacherInterest(`${completedDocument.title}\n${completedDocument.text}`)) {
         reject(document, '非投资创业主题');
         continue;
@@ -1362,6 +1462,7 @@ export class JobRunner {
       this.sendDocumentResult(item.id, item.document);
     }
     await Promise.all(terminalReceipts);
+    if (dateRange) audit.coverage['评论范围已核验'] = 1;
     return {
       discovered: documents.length + [...audit.businessSkips].filter(([key, skipped]) =>
         !documentUrls.has(skipped.url ?? key)).length,

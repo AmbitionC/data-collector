@@ -778,6 +778,7 @@ export function parseTopicJson(body: string): unknown {
     'group_id', 'groupId',
     'menu_id', 'menuId',
     'file_id', 'fileId',
+    'comment_id', 'commentId', 'parent_comment_id', 'parentCommentId',
   ]);
   let rewritten = '';
   let copiedUntil = 0;
@@ -911,7 +912,7 @@ function normalizedLinkedArticleUrl(value: unknown): string | undefined {
 }
 
 /** 只遍历已知正文分支；评论/引用/作者头像绝不能混进当前帖资源。 */
-function sourceAssetsOf(candidate: Record<string, unknown>): SourceAssets {
+export function sourceAssetsOf(candidate: Record<string, unknown>): SourceAssets {
   const images = new Map<string, TopicRecordImage>();
   const attachments = new Map<string, TopicRecordAttachment>();
   let proven = true;

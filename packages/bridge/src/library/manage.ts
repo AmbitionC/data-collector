@@ -1,9 +1,9 @@
-import { readdir, readFile, rm, rmdir } from 'node:fs/promises';
+import { readdir, readFile, realpath, rm, rmdir } from 'node:fs/promises';
 import { dirname, join, relative } from 'node:path';
 import { atomicWriteText } from './writer.js';
 import { assertInsideRoot } from './paths.js';
 import { withCatalogTransaction } from './catalogTransaction.js';
-import { collectedDocumentSchema, hotMaterialId, type CollectedDocument } from '@data-collector/shared';
+import { collectedDocumentSchema, hotMaterialId, stableContentId, type CollectedDocument } from '@data-collector/shared';
 import { projectOrganized } from './storedDocument.js';
 
 /**
@@ -100,6 +100,14 @@ export async function readEntry(
   }
   const truncated = markdown.length > MAX_CONTENT_BYTES;
   let document: CollectedDocument | undefined;
+  if (entry.source === 'zsxq') {
+    const sourcePath = await realpath(join(dirname(absolutePath), 'source.json'));
+    assertInsideRoot(await realpath(root), sourcePath);
+    const stored = projectOrganized(JSON.parse(await readFile(sourcePath, 'utf8')));
+    document = collectedDocumentSchema.parse(stored.document) as CollectedDocument;
+    if (document.source !== 'zsxq' || document.canonicalUrl !== entry.url
+      || stableContentId(document.canonicalUrl) !== entry.id) throw new Error('知识星球留存正文身份与目录不一致');
+  }
   if (entry.materialKind === 'nowcoder-hot' || entry.id.startsWith('hot-')) {
     const stored = projectOrganized(JSON.parse(await readFile(join(dirname(absolutePath), 'source.json'), 'utf8')));
     document = collectedDocumentSchema.parse(stored.document) as CollectedDocument;

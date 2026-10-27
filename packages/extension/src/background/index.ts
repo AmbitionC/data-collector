@@ -171,6 +171,11 @@ const runner = new JobRunner({
       .filter(([url]) => Boolean(url)));
   },
   knownZsxqIndex: () => connection.zsxqIndex(),
+  storedDocument: async id => {
+    const entry = await connection.libraryEntry(id) as { document?: CollectedDocument; sync?: { state?: string } };
+    if (!entry.document) throw new Error('知识星球完整留存正文不可读取，请更新本机服务');
+    return { ...entry.document, deliveryPending: entry.sync?.state === 'pending' || entry.sync?.state === 'failed' };
+  },
 });
 let activePlanCollections = 0;
 const hotMaterials = new HotMaterialSession({

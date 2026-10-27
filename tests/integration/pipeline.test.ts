@@ -344,6 +344,8 @@ describe('采集 → 本地 → 同步 → 归档 的完整链路', () => {
         contentCompletenessBuildId: 'v0.4.30 · build-B',
         batchId: 'capture-batch-B',
         planId: 'zsxq-chen-teacher',
+        deliveryRecovery: true,
+        recoveredFromBatch: 'failed-batch-before-recovery',
       },
     })));
     const duplicate = await syncEntries(

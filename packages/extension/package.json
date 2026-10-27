@@ -1,12 +1,12 @@
 {
   "name": "@data-collector/extension",
   "private": true,
-  "version": "0.4.50",
+  "version": "0.4.51",
   "type": "module",
   "scripts": {
     "build": "node scripts/build.mjs"
   },
   "dependencies": {
-    "@data-collector/shared": "0.4.50"
+    "@data-collector/shared": "0.4.51"
   }
 }

@@ -14,6 +14,8 @@ export interface ZsxqLibraryIndexEntry {
   authorRole?: 'owner' | 'member';
   /** `undefined` means a legacy entry whose completeness has not been proven. */
   contentComplete?: boolean;
+  /** Explicit local pending/failed sync state; range runs may recover it in a fresh batch. */
+  deliveryPending?: boolean;
   semanticSignature?: ZsxqSemanticSignature;
 }
 

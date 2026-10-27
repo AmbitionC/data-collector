@@ -31,6 +31,7 @@ export const CONTENT_API_COLLECT_ARTICLE_REQUEST = contentRequestType(
   'document.apiCollectArticle',
 );
 export const CONTENT_API_COLLECT_TOPIC_REQUEST = contentRequestType('document.apiCollectTopic');
+export const CONTENT_API_COLLECT_COMMENTS_REQUEST = contentRequestType('document.apiCollectComments');
 export const CONTENT_RESTORE_REQUEST = contentRequestType('list.restore');
 export const CONTENT_ADVANCE_REQUEST = contentRequestType('list.advance');
 export const CONTENT_REFRESH_TOPICS_REQUEST = contentRequestType('list.refreshTopics');
@@ -49,6 +50,7 @@ const CURRENT_CONTENT_REQUESTS: ReadonlySet<string> = new Set([
   CONTENT_API_COLLECT_OWNER_PAGE_REQUEST,
   CONTENT_API_COLLECT_ARTICLE_REQUEST,
   CONTENT_API_COLLECT_TOPIC_REQUEST,
+  CONTENT_API_COLLECT_COMMENTS_REQUEST,
   CONTENT_RESTORE_REQUEST,
   CONTENT_ADVANCE_REQUEST,
   CONTENT_REFRESH_TOPICS_REQUEST,

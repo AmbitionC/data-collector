@@ -133,6 +133,9 @@ export async function loadZsxqLibraryIndex(root: string): Promise<ZsxqLibraryInd
         ...(document.publishedAt ? { publishedAt: document.publishedAt } : {}),
         ...(role ? { authorRole: role } : {}),
         ...(contentComplete === undefined ? {} : { contentComplete }),
+        ...(isRecord(rawEntry) && isRecord(rawEntry.sync) && typeof rawEntry.sync.state === 'string'
+          ? { deliveryPending: rawEntry.sync.state === 'pending' || rawEntry.sync.state === 'failed' }
+          : {}),
       };
       if (document.publishedAt && role) {
         compact.semanticSignature = zsxqSemanticSignature({

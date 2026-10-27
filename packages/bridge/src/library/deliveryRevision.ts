@@ -13,6 +13,8 @@ const VOLATILE_SOURCE_METADATA = new Set([
   'deliveryBatchId',
   'planId',
   'contentCompletenessBuildId',
+  'deliveryRecovery',
+  'recoveredFromBatch',
 ]);
 
 function stableValue(value: unknown): unknown {

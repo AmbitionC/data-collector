@@ -60,6 +60,17 @@ async function writeEntry(
 }
 
 describe('ZSXQ local library index', () => {
+  it('exposes pending and failed sync state separately from source completeness for a fresh range recovery', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'zsxq-index-pending-'));
+    const entries = await Promise.all(['1001', '1002', '1003'].map(id => writeEntry(root, id, true)));
+    const states = ['pending', 'failed', 'synced'];
+    await mkdir(join(root, '_catalog'), { recursive: true });
+    await writeFile(join(root, '_catalog', 'index.json'), JSON.stringify(entries.map((entry, i) =>
+      ({ ...entry, sync: { state: states[i] } }))));
+    const index = await loadZsxqLibraryIndex(root);
+    expect(index.map(entry => entry.deliveryPending)).toEqual([true, true, false]);
+    expect(index.map(entry => entry.contentComplete)).toEqual([true, true, true]);
+  });
   it('returns compact exact, completeness, and semantic facts without article bodies', async () => {
     const root = await mkdtemp(join(tmpdir(), 'zsxq-index-'));
     const entries = await Promise.all([

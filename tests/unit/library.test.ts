@@ -535,6 +535,8 @@ describe('Markdown library', () => {
         batchId: 'zsxq-batch-B',
         planId: 'zsxq-chen-teacher',
         authorRole: 'owner',
+        deliveryRecovery: true,
+        recoveredFromBatch: 'failed-batch-before-recovery',
       },
     })));
 
