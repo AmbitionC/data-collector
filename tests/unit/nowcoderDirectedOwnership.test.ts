@@ -1,4 +1,4 @@
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, readdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import WebSocket, { type RawData } from 'ws';
@@ -261,7 +261,125 @@ function zsxqDocument(url: string): CollectedDocument {
   };
 }
 
+async function pendingCancellationFixture() {
+  const root = await temporaryDirectories.create('nowcoder-invalid-cancel-terminal-');
+  const configDir = join(root, '.config');
+  const config = loadConfig({ libraryRoot: root, configDir, port: 0 });
+  await mkdir(configDir, { recursive: true });
+  const store = await NowcoderDirectedStore.open(join(configDir, 'nowcoder-directed.json'), {
+    now: () => NOW, id: () => 'run-invalid-terminal', attempt: () => CURRENT_ATTEMPT,
+  });
+  await writeFile(config.sinksFile, JSON.stringify({
+    sinks: { markdown: { type: 'markdown' } }, routes: { nowcoder: ['markdown'] },
+  }));
+  await store.createSession({
+    id: 'session-invalid-terminal', queries: ['Agent'], queryHash: 'a'.repeat(64),
+    requestedSort: 'latest', provider: 'nowcoder-json', sortVerified: true,
+    createdAt: NOW, expiresAt: '2026-08-30T00:30:00.000Z', candidates: [candidate()],
+  }, { target: 1 });
+  const run = await store.startRun({
+    searchSessionId: 'session-invalid-terminal', selectedCandidateIds: ['candidate-1'],
+    idempotencyKey: 'invalid-terminal-cancel', deliveryAuthorized: true,
+  }, RUN_EVIDENCE);
+  const jobId = nowcoderDirectedJobId(run.id, run.attempt, URL);
+  await store.checkpointCurrentRun(run.id, run.attempt, {
+    candidateCursor: 1, currentJobIds: [jobId], currentRoundJobIds: [jobId],
+    ...pendingSingleAudit(jobId),
+  });
+  await store.recordDispatchedJobCurrent(run.id, run.attempt, jobId);
+  await store.beginCancellationCurrent(run.id, run.attempt);
+  const jobs = await JobStore.open(config.jobsFile, { now: () => NOW });
+  await jobs.create({ id: jobId, url: URL, requestedBy: 'codex',
+    directedRunId: run.id, directedRunAttempt: run.attempt });
+  await jobs.transition(jobId, 'dispatched');
+  const bridge = await startBridge({ libraryRoot: root, configDir, port: 0,
+    repoRoot: root, enableAutoUpdate: false, readArtifactBuildId: async () => BUILD });
+  bridges.push(bridge);
+  const { socket, token } = await authorize(bridge);
+  const cancelled = nextMessage(socket);
+  socket.send(envelope('extension.hello', 'invalid-terminal-hello', DIRECTED_HELLO));
+  expect(await cancelled).toMatchObject({ type: 'job.cancel', requestId: jobId });
+  return { root, configDir, config, bridge, socket, token, run, jobId };
+}
+
 describe('directed Nowcoder job ownership', () => {
+  it('finishes cancellation from a closed remote result with too many images without ingesting it', async () => {
+    const { root, configDir, config, bridge, socket, run, jobId } = await pendingCancellationFixture();
+    const invalidDocument = { ...nowcoderDocument(), images: Array.from({ length: 31 }, (_, i) => ({
+      url: `https://example.com/diagnostic-${i}.png`,
+    })) };
+    const acknowledged = nextMessage(socket);
+    socket.send(envelope('job.result', jobId, { document: invalidDocument }));
+    expect(await acknowledged).toMatchObject({
+      type: 'job.failed', requestId: jobId, payload: { code: 'CANCELLED' },
+    });
+    const alive = waitForMessageType(socket, 'bridge.pong');
+    socket.send(envelope('bridge.ping', 'after-invalid-terminal-cancel', {}));
+    await alive;
+    const persisted = await NowcoderDirectedStore.open(join(configDir, 'nowcoder-directed.json'));
+    expect(persisted.getRun(run.id)).toMatchObject({ status: 'cancelled', accepted: 0, delivered: 0 });
+    expect((await JobStore.open(config.jobsFile)).get(jobId)).toMatchObject({ status: 'failed', errorCode: 'CANCELLED' });
+    expect((await readdir(root, { recursive: true })).filter(path => path.endsWith('.md'))).toEqual([]);
+    expect(await health(bridge)).toMatchObject({ extensionConnected: true, directedRunActive: false });
+    const replayed = nextMessage(socket);
+    socket.send(envelope('job.result', jobId, { document: invalidDocument }));
+    expect(await replayed).toMatchObject({ type: 'job.failed', requestId: jobId, payload: { code: 'CANCELLED' } });
+    socket.close();
+    await bridge.close();
+    const restarted = await startBridge({ libraryRoot: root, configDir, port: 0,
+      repoRoot: root, enableAutoUpdate: false, readArtifactBuildId: async () => BUILD });
+    bridges.push(restarted);
+    const reconnected = await authorize(restarted);
+    const ready = waitForMessageType(reconnected.socket, 'bridge.pong');
+    reconnected.socket.send(envelope('extension.hello', 'after-cancel-restart', DIRECTED_HELLO));
+    reconnected.socket.send(envelope('bridge.ping', 'after-cancel-restart-barrier', {}));
+    await ready;
+    const afterRestart = nextMessage(reconnected.socket);
+    reconnected.socket.send(envelope('job.result', jobId, { document: invalidDocument }));
+    expect(await afterRestart).toMatchObject({ type: 'job.failed', requestId: jobId, payload: { code: 'CANCELLED' } });
+    const raw = JSON.parse(await readFile(join(configDir, 'nowcoder-directed.json'), 'utf8'));
+    expect(raw.runs[0].tabClearEvidence).toEqual([{ jobId, kind: 'remote_terminal_after_close' }]);
+    expect((await readdir(root, { recursive: true })).filter(path => path.endsWith('.md'))).toEqual([]);
+  });
+
+  it('still rejects oversized content outside the cancellation terminal fence', async () => {
+    const { root, configDir, config, bridge, socket, token, run } = await pendingCancellationFixture();
+    const url = 'https://www.nowcoder.com/discuss/invalid-normal-result';
+    const collecting = nextMessage(socket);
+    const response = await fetch(`${bridge.url}/v1/jobs`, { method: 'POST',
+      headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ url }),
+    });
+    expect(response.status).toBe(202);
+    const job = await response.json() as { id: string };
+    expect(await collecting).toMatchObject({ type: 'job.collect', requestId: job.id });
+    const rejected = nextMessage(socket);
+    socket.send(envelope('job.result', job.id, { document: {
+      ...nowcoderDocument(), url, canonicalUrl: url,
+      images: Array.from({ length: 31 }, (_, i) => ({ url: `https://example.com/normal-${i}.png` })),
+    } }));
+    expect(await rejected).toMatchObject({ type: 'protocol.error' });
+    const persisted = await NowcoderDirectedStore.open(join(configDir, 'nowcoder-directed.json'));
+    expect(persisted.getRun(run.id)).toMatchObject({ status: 'cancelling', accepted: 0, delivered: 0 });
+    const raw = JSON.parse(await readFile(join(configDir, 'nowcoder-directed.json'), 'utf8'));
+    expect(raw.runs[0].tabClearEvidence).toEqual([]);
+    expect((await JobStore.open(config.jobsFile)).get(job.id)?.outputPath).toBeUndefined();
+    expect((await readdir(root, { recursive: true })).filter(path => path.endsWith('.md'))).toEqual([]);
+  });
+
+  it.each([{}, { document: null }, { document: [] }, { document: 'invalid' }])(
+    'does not treat a malformed cancellation result shell as close evidence: %j', async payload => {
+      const { configDir, socket, run, jobId } = await pendingCancellationFixture();
+      const rejected = nextMessage(socket);
+      socket.send(envelope('job.result', jobId, payload));
+      expect(await rejected).toMatchObject({ type: 'protocol.error' });
+      const persisted = await NowcoderDirectedStore.open(join(configDir, 'nowcoder-directed.json'));
+      expect(persisted.getRun(run.id)).toMatchObject({ status: 'cancelling', accepted: 0, delivered: 0 });
+      const raw = JSON.parse(await readFile(join(configDir, 'nowcoder-directed.json'), 'utf8'));
+      expect(raw.runs[0].tabClearEvidence).toEqual([]);
+    },
+  );
+
   it('does not open a detail tab when the source was collected after the immutable preview', async () => {
     const context=await fixture(new Set([URL]));
     const [job]=await context.service.enqueueRound(context.run.id,context.run.attempt,1);

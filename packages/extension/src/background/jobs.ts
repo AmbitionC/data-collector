@@ -747,7 +747,16 @@ export class JobRunner {
           },
         }
       : document;
-    send('job.result', { document: attestedDocument });
+    const validated = collectedDocumentSchema.safeParse(attestedDocument);
+    if (!validated.success) {
+      send('job.error', {
+        code: 'INVALID_DOCUMENT',
+        message: '采集结果不符合内容协议，已拒绝入库和交付',
+        needsAttention: true,
+      });
+      return false;
+    }
+    send('job.result', { document: validated.data });
     return true;
   }
 
@@ -2840,14 +2849,14 @@ export class JobRunner {
           message: response.error.message,
           needsAttention,
         });
-        return;
+      } else {
+        // 单条采集同样要补长文：按 URL 定向重采（收件箱那 48 条）走的就是这条路。
+        this.sendDocumentResult(
+          requestId,
+          await this.withLinkedArticle(payloadOf(response, 'document'), tabId, lifecycle),
+          sendTerminal,
+        );
       }
-      // 单条采集同样要补长文：按 URL 定向重采（收件箱那 48 条）走的就是这条路。
-      this.sendDocumentResult(
-        requestId,
-        await this.withLinkedArticle(payloadOf(response, 'document'), tabId, lifecycle),
-        sendTerminal,
-      );
     } catch (error) {
       if (tabId === undefined && (ordinaryLifecycle?.acknowledged || lifecycle?.acknowledged)) {
         discardUnstartedLifecycle();

@@ -2535,6 +2535,75 @@ describe('extension job runner', () => {
     }));
   });
 
+  it('rejects an oversized remote document after closing its tab instead of caching an invalid result', async () => {
+    const tabs = new InMemoryTabs();
+    tabs.response = { ok: true, document: { ...document(), images: Array.from({ length: 31 }, (_, i) => ({
+      url: `https://example.com/image-${i}.png`,
+    })) } };
+    const bridge = new InMemoryBridge();
+    const sent: typeof bridge.sent = [];
+    bridge.send = (type, requestId, payload) => {
+      if (type === 'job.result' || type === 'job.error') expect(tabs.removed).toEqual([42]);
+      sent.push({ type, requestId, payload });
+    };
+    const runner = new JobRunner({ tabs, bridge, waitForTabComplete: async () => undefined });
+    const ownership = { directedRunId: 'invalid-document', directedRunAttempt: PLAN_ATTEMPT };
+    await runner.runRemoteJob('invalid-image-document', URL, false, ownership);
+    expect(sent.filter(message => message.type === 'job.result')).toEqual([]);
+    expect(sent.filter(message => message.type === 'job.error')).toEqual([
+      expect.objectContaining({ requestId: 'invalid-image-document', payload: expect.objectContaining({
+        code: 'INVALID_DOCUMENT', needsAttention: true,
+      }) }),
+    ]);
+    await runner.cancelRemoteJob('invalid-image-document', ownership.directedRunId, PLAN_ATTEMPT);
+    expect(tabs.created).toHaveLength(1);
+    expect(sent.filter(message => message.type === 'job.result')).toEqual([]);
+  });
+
+  it('retains an invalid-document error until a failed physical close is retried', async () => {
+    const tabs = new InMemoryTabs();
+    tabs.response = { ok: true, document: { ...document(), images: Array.from({ length: 31 }, (_, i) => ({
+      url: `https://example.com/retry-image-${i}.png`,
+    })) } };
+    let closeAttempts = 0;
+    tabs.remove = async id => {
+      closeAttempts += 1;
+      if (closeAttempts === 1) throw new Error('Tabs cannot be edited right now');
+      tabs.removed.push(id);
+    };
+    const bridge = new InMemoryBridge();
+    const runner = new JobRunner({ tabs, bridge, waitForTabComplete: async () => undefined });
+    const ownership = { directedRunId: 'invalid-document-close', directedRunAttempt: PLAN_ATTEMPT };
+    await runner.runRemoteJob('invalid-image-close-retry', URL, false, ownership);
+    expect(bridge.sent.filter(message => ['job.result', 'job.error'].includes(message.type))).toEqual([]);
+    await runner.runRemoteJob('invalid-image-close-retry', URL, false, ownership);
+    expect(tabs.created).toHaveLength(1);
+    expect(closeAttempts).toBe(2);
+    expect(tabs.removed).toEqual([42]);
+    expect(bridge.sent.filter(message => ['job.result', 'job.error'].includes(message.type))).toEqual([
+      expect.objectContaining({ type: 'job.error', payload: expect.objectContaining({ code: 'INVALID_DOCUMENT' }) }),
+    ]);
+  });
+
+  it('emits a directed extraction error only after its tab is physically closed', async () => {
+    const tabs = new InMemoryTabs();
+    tabs.response = { ok: false, error: { code: 'AUTH_REQUIRED', message: '请登录后重试' } };
+    const bridge = new InMemoryBridge();
+    const sent: typeof bridge.sent = [];
+    bridge.send = (type, requestId, payload) => {
+      if (type === 'job.error') expect(tabs.removed).toEqual([42]);
+      sent.push({ type, requestId, payload });
+    };
+    const runner = new JobRunner({ tabs, bridge, waitForTabComplete: async () => undefined });
+    await runner.runRemoteJob('directed-auth-terminal', URL, false, {
+      directedRunId: 'directed-auth', directedRunAttempt: PLAN_ATTEMPT,
+    });
+    expect(sent).toContainEqual(expect.objectContaining({ type: 'job.error',
+      requestId: 'directed-auth-terminal', payload: expect.objectContaining({ code: 'AUTH_REQUIRED' }) }));
+    expect(tabs.created).toHaveLength(1);
+    expect(tabs.removed).toEqual([42]);
+  });
+
   it('caches cancel-before-collect and replays the exact terminal without opening a tab', async () => {
     const tabs = new InMemoryTabs();
     const bridge = new InMemoryBridge();

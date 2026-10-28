@@ -161,6 +161,9 @@ const createJobSchema = z.object({
   }
 });
 const progressSchema = z.object({ stage: z.enum(['collecting']) });
+// While cancelling, a terminal result proves remote cleanup; its document is never ingested.
+// Old workers can replay a closed result whose content fails the normal collection schema.
+const cancelledResultSchema = z.object({ document: z.record(z.string(), z.unknown()) });
 const SERVER_CLOSE_FAILED_MESSAGE = '本机服务未能安全关闭';
 const errorSchema = z.object({
   code: z.string().min(1).max(100),
@@ -1599,8 +1602,9 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
           ? 'cancelled_after_close'
           : 'remote_terminal_after_close';
       } else {
-        // Validate the terminal frame, but never interpret or persist its document while cancelling.
-        jobResultPayloadSchema.parse(parsedEnvelope.payload);
+        // The authenticated, owned terminal comes only after remote tabs close. Validate its
+        // shell without letting rejected content prevent cancellation; never persist this body.
+        cancelledResultSchema.parse(parsedEnvelope.payload);
         kind = 'remote_terminal_after_close';
       }
       if (await directedService.onCancellationTerminal(job, kind)) return;
