@@ -229,6 +229,19 @@ npm run collector -- collect 'https://mp.weixin.qq.com/s/...' --wait 60000
 npm run collector -- health
 ```
 
+### 牛客定向采集 CLI
+
+先预览，再用返回的搜索会话 ID 启动；可从该会话的候选中指定优先顺序：
+
+```bash
+npm run collector -- nowcoder preview --query '腾讯 Agent 面经' --target 3 --latest
+npm run collector -- nowcoder run --session SEARCH_SESSION_ID \
+  --candidate CANDIDATE_ID_1 --candidate CANDIDATE_ID_2 \
+  --latest --deliver --idempotency-key UNIQUE_KEY --wait 1800000
+```
+
+`--candidate ID` 仅适用于 `nowcoder run --session`，可以重复传入，最多 24 个，按输入顺序优先采集，其余候选仍可后续补位；未指定时沿用会话默认顺序。ID 使用预览返回的原值，首尾空白按协议去除，空值、超过 200 字符或重复 ID 会被拒绝。不属于该冻结会话的候选由 Bridge 拒绝。此参数不能用于查询启动模式、preview、status、cancel 或 retry；优先顺序不改变采集、证据质量和完整批次交付门槛。
+
 ### fe-journey 固定候选采集
 
 常驻 Bridge 会自动检查周期；也可以手动触发或查看状态：

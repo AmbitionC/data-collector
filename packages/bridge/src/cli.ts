@@ -23,6 +23,7 @@ import {
   zsxqDateRangeSchema,
   nowcoderDirectedCancelResponseSchema,
   nowcoderDirectedRetryResponseSchema,
+  nowcoderDirectedStartRequestSchema,
   nowcoderDirectedStartResponseSchema,
   nowcoderSearchPreviewResponseSchema,
   type CollectionPlanId,
@@ -104,6 +105,7 @@ type NowcoderAction = 'preview' | 'run' | 'status' | 'cancel' | 'retry';
 export interface ParsedNowcoderCommand {
   action: NowcoderAction;
   queries: string[];
+  selectedCandidateIds: string[];
   target?: number;
   maxPagesPerQuery?: number;
   maxRequests?: number;
@@ -125,7 +127,8 @@ class NowcoderCliError extends Error {
 
 const NOWCODER_USAGE = [
   '用法：data-collector nowcoder preview --query Q... --target N --latest [--max-pages 1..4] [--max-requests 1..24]',
-  '或：data-collector nowcoder run (--session ID | --query Q... --target N) --latest --deliver --idempotency-key KEY [--wait MS]',
+  '或：data-collector nowcoder run (--session ID [--candidate ID...] | --query Q... --target N) --latest --deliver --idempotency-key KEY [--wait MS]',
+  '--candidate 可重复，按输入顺序优先处理，最多 24 个且不能重复，仅用于已有 session',
   '或：data-collector nowcoder status --run ID',
   '或：data-collector nowcoder cancel --run ID',
   '或：data-collector nowcoder retry --run ID --idempotency-key KEY [--wait MS]',
@@ -143,9 +146,10 @@ function parseNowcoderCommand(args: string[]): ParsedNowcoderCommand {
   const action = rawAction as NowcoderAction;
   const values = new Map<string, string>();
   const queries: string[] = [];
+  const candidateIds: string[] = [];
   const switches = new Set<string>();
   const valueFlags = new Set([
-    '--query', '--target', '--session', '--run', '--idempotency-key', '--wait',
+    '--query', '--candidate', '--target', '--session', '--run', '--idempotency-key', '--wait',
     '--port', '--library', '--config', '--max-pages', '--max-requests',
   ]);
   const switchFlags = new Set(['--latest', '--deliver']);
@@ -162,6 +166,8 @@ function parseNowcoderCommand(args: string[]): ParsedNowcoderCommand {
     index += 1;
     if (flag === '--query') {
       queries.push(value);
+    } else if (flag === '--candidate') {
+      candidateIds.push(value);
     } else {
       if (values.has(flag)) return nowcoderUsage();
       values.set(flag, value);
@@ -189,6 +195,9 @@ function parseNowcoderCommand(args: string[]): ParsedNowcoderCommand {
   const sessionId = nonempty('--session');
   const runId = nonempty('--run');
   const idempotencyKey = nonempty('--idempotency-key');
+  const candidates = nowcoderDirectedStartRequestSchema.shape.selectedCandidateIds.safeParse(candidateIds);
+  if (!candidates.success || new Set(candidates.data).size !== candidates.data.length
+    || (candidateIds.length > 0 && (action !== 'run' || sessionId === undefined || queries.length > 0))) return nowcoderUsage();
   const connectionFlags = new Set(['--port', '--library', '--config']);
   const actionFlags = new Set([...values.keys()].filter(flag => !connectionFlags.has(flag)));
   const onlyActionFlags = (...allowed: string[]): boolean => (
@@ -218,6 +227,7 @@ function parseNowcoderCommand(args: string[]): ParsedNowcoderCommand {
   return {
     action,
     queries,
+    selectedCandidateIds: candidates.data,
     ...(target === undefined ? {} : { target }),
     ...(maxPagesPerQuery === undefined ? {} : { maxPagesPerQuery }),
     ...(maxRequests === undefined ? {} : { maxRequests }),
@@ -447,7 +457,7 @@ export async function runNowcoderCli(
           method: 'POST',
           body: JSON.stringify({
             searchSessionId,
-            selectedCandidateIds: [],
+            selectedCandidateIds: command.selectedCandidateIds,
             idempotencyKey: command.idempotencyKey,
             deliveryAuthorized: true,
           }),

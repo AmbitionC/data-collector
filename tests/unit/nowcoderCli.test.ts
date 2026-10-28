@@ -109,6 +109,76 @@ function json(value: unknown, status = 200): Response {
 }
 
 describe('minimal Nowcoder CLI', () => {
+  const sessionRunArgs = ['run', '--session', session.id, '--latest', '--deliver', '--idempotency-key', 'key-1'];
+
+  it('preserves repeated candidate priority order using the opaque ID contract', () => {
+    expect(parseNowcoderCliArgs([
+      ...sessionRunArgs, '--candidate', 'opaque/候选:second', '--candidate', ' candidate-first ',
+    ])).toMatchObject({ sessionId: session.id, selectedCandidateIds: ['opaque/候选:second', 'candidate-first'] });
+    expect(parseNowcoderCliArgs(sessionRunArgs)).toMatchObject({ selectedCandidateIds: [] });
+    const ids = Array.from({ length: 24 }, (_, index) => `candidate-${index}`);
+    expect(parseNowcoderCliArgs([...sessionRunArgs, ...ids.flatMap(id => ['--candidate', id])]))
+      .toMatchObject({ selectedCandidateIds: ids });
+  });
+
+  it.each([
+    ['preview', ['preview', '--query', 'Agent', '--target', '1', '--latest']],
+    ['query run', ['run', '--query', 'Agent', '--target', '1', '--latest', '--deliver', '--idempotency-key', 'key-1']],
+    ['status', ['status', '--run', 'run-1']],
+    ['cancel', ['cancel', '--run', 'run-1']],
+    ['retry', ['retry', '--run', 'run-1', '--idempotency-key', 'key-2']],
+  ])('rejects candidate priority outside a frozen session run: %s', (_mode, args) => {
+    expect(() => parseNowcoderCliArgs([...args, '--candidate', 'candidate-1'])).toThrow();
+  });
+
+  it.each([
+    ['duplicate', ['--candidate', 'candidate-1', '--candidate', 'candidate-1']],
+    ['duplicate after trimming', ['--candidate', 'candidate-1', '--candidate', ' candidate-1 ']],
+    ['over 24', Array.from({ length: 25 }, (_, index) => ['--candidate', `candidate-${index}`]).flat()],
+    ['empty', ['--candidate', '']],
+    ['blank', ['--candidate', '   ']],
+    ['over 200 characters', ['--candidate', 'a'.repeat(201)]],
+    ['missing value', ['--candidate']],
+    ['next flag as value', ['--candidate', '--wait', '100']],
+  ])('rejects invalid candidate priority input: %s', (_reason, flags) => {
+    expect(() => parseNowcoderCliArgs([...sessionRunArgs, ...flags])).toThrow();
+  });
+
+  it.each([
+    ['explicit priority', ['opaque/候选:second', 'candidate-first']],
+    ['default priority', []],
+  ])('posts the exact frozen session and candidate order without a preview: %s', async (_mode, ids) => {
+    const calls: Array<{ url: string; method: string; body: unknown }> = [];
+    const output = io();
+    const code = await runNowcoderCli([...sessionRunArgs, ...ids.flatMap(id => ['--candidate', id])], output.target, {
+      authenticate: async () => ({ baseUrl: 'http://127.0.0.1:17321', token: 'secret' }),
+      fetch: async (input, init = {}) => {
+        calls.push({ url: String(input), method: init.method ?? 'GET', body: JSON.parse(String(init.body)) });
+        return json({ run: runningRun() }, 202);
+      },
+    });
+    expect(code).toBe(0);
+    expect(calls).toEqual([{
+      url: 'http://127.0.0.1:17321/v1/nowcoder/runs', method: 'POST',
+      body: { searchSessionId: session.id, selectedCandidateIds: ids, idempotencyKey: 'key-1', deliveryAuthorized: true },
+    }]);
+    expect(JSON.parse(output.stdout())).toEqual(runningRun());
+    expect(output.stderr()).toBe('');
+  });
+
+  it('preserves a Bridge rejection for a candidate outside the frozen session', async () => {
+    const output = io();
+    let requests = 0;
+    const error = { code: 'NOWCODER_CANDIDATE_NOT_OWNED', message: '所选候选不属于该牛客搜索会话' };
+    const code = await runNowcoderCli([...sessionRunArgs, '--candidate', 'unknown-candidate'], output.target, {
+      authenticate: async () => ({ baseUrl: 'http://127.0.0.1:17321', token: 'secret' }),
+      fetch: async () => { requests += 1; return json({ error }, 409); },
+    });
+    expect(code).toBe(1);
+    expect(requests).toBe(1);
+    expect(JSON.parse(output.stdout())).toEqual({ error });
+  });
+
   it('accepts bounded query paging and rejects oversized budgets or changes to a frozen session', () => {
     expect(parseNowcoderCliArgs(['preview','--query','字节 Agent','--target','1','--latest','--max-pages','4','--max-requests','8']))
       .toMatchObject({maxPagesPerQuery:4,maxRequests:8});
