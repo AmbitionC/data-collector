@@ -239,10 +239,15 @@ button { appearance: none; }
   display: flex;
   gap: 4px;
   margin-top: 12px;
+  overflow-x: auto;
 }
 
 .top-nav button {
-  padding: 5px 14px;
+  flex: 0 0 auto;
+  width: auto;
+  min-height: 36px;
+  padding: 5px 10px;
+  white-space: nowrap;
   border: 1px solid transparent;
   border-radius: 9999px;
   background: none;
@@ -1155,3 +1160,13 @@ select:focus {
 .hot-card[data-saved="true"] { opacity: .75; }
 #hot-status { white-space: pre-wrap; overflow-wrap: anywhere; }
 #hot-notice { margin-top: 16px; }
+/* The operations workspace follows the existing archive-slip typography and controls. */
+.ops-label { display: block; font-size: 12px; font-weight: 650; margin: 18px 0 7px; }
+.ops-input { box-sizing: border-box; width: 100%; padding: 10px; border: 1px solid #d8d8ce; border-radius: 7px; background: #fffef9; color: inherit; font: inherit; font-size: 13px; line-height: 1.65; }
+textarea.ops-input { resize: vertical; }
+.ops-list { list-style: none; padding: 0; margin: 18px 0; display: grid; gap: 7px; }
+.ops-list-item { width: 100%; text-align: left; white-space: normal; padding: 11px; font-size: 12px; line-height: 1.5; background: #f6f6ef; border: 1px solid #deded3; border-radius: 7px; }
+.ops-list-item[aria-pressed="true"] { border-color: #436b46; background: #edf3e8; }
+.ops-detail { border-top: 1px solid #deded3; padding-top: 18px; }
+.ops-detail h3 { font-size: 17px; line-height: 1.55; }
+.ops-source-link { color: #436b46; font-size: 12px; align-self: center; }

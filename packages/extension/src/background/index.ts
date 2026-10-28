@@ -1,4 +1,4 @@
-import { descriptorForHost, isListPage, nowcoderScheduleConfigSchema, parseSupportedUrl } from '@data-collector/shared';
+import { descriptorForHost, isListPage, nowcoderScheduleConfigSchema, parseSupportedUrl, operationIdSchema } from '@data-collector/shared';
 import {
   isCollecting,
   shouldAutoReload,
@@ -366,6 +366,16 @@ chrome.runtime.onMessage.addListener((message: unknown, _sender, sendResponse) =
   const action = async () => {
     if (request.type === 'status.get') {
       return status();
+    }
+    if (request.type === 'operations.list') return connection.operations();
+    if (request.type === 'operations.add') {
+      return connection.operations('', 'POST', { sourceId: (request as { sourceId?: unknown }).sourceId });
+    }
+    if (request.type === 'operations.get' || request.type === 'operations.update' || request.type === 'operations.brief') {
+      const input = request as { id?: unknown; patch?: unknown };
+      const id = operationIdSchema.parse(input.id);
+      if (request.type === 'operations.update') return connection.operations(`/${id}`, 'PUT', input.patch);
+      return connection.operations(`/${id}${request.type === 'operations.brief' ? '?brief=1' : ''}`);
     }
     if (request.type === 'hot.preview' || request.type === 'hot.save' || request.type === 'hot.export') {
       // Older Bridge schemas strip unknown fields, which would destroy the private-material boundary.

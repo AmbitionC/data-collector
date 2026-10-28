@@ -17,6 +17,7 @@ import {
   type SidePanelState,
 } from './state.js';
 import { bindHotMaterials } from './hotMaterials.js';
+import { bindOperations } from './operations.js';
 
 interface BackgroundResponse<T> {
   ok: boolean;
@@ -39,6 +40,7 @@ async function message<T>(payload: unknown): Promise<T> {
 
 let pollTimer: number | undefined;
 const hotPanel = bindHotMaterials(document, message);
+const operationsPanel = bindOperations(document, message);
 
 /**
  * 侧栏被关掉后就别再轮询了：页面已经不在，继续问后台纯属浪费，
@@ -253,6 +255,11 @@ async function capturePage(
 }
 
 async function refresh(): Promise<void> {
+  if (page === 'operations') {
+    renderTopNav(document, page, actions);
+    operationsPanel.show();
+    return;
+  }
   if (page === 'hot') {
     renderTopNav(document, page, actions);
     hotPanel.show();

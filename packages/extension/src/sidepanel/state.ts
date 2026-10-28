@@ -6,7 +6,7 @@ import type { BatchItem, BatchPhase } from '../background/jobs.js';
 
 export type { BatchItem, BatchPhase };
 
-export type TopPage = 'collect' | 'plans' | 'library' | 'hot';
+export type TopPage = 'collect' | 'plans' | 'library' | 'hot' | 'operations';
 
 export interface CollectionPlanStatus {
   id: CollectionPlanId;
@@ -918,6 +918,11 @@ export function renderTopNav(document: Document, page: TopPage, actions: SidePan
   if (hot) {
     hot.setAttribute('aria-pressed', String(page === 'hot'));
     hot.onclick = () => actions.openPage('hot');
+  }
+  const operations = document.querySelector<HTMLButtonElement>('#nav-operations');
+  if (operations) {
+    operations.setAttribute('aria-pressed', String(page === 'operations'));
+    operations.onclick = () => actions.openPage('operations');
   }
 }
 

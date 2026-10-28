@@ -99,6 +99,27 @@ afterEach(() => {
 });
 
 describe('side panel build stamp', () => {
+  it('keeps the operations workspace open when an older library read completes', async () => {
+    let finish!: (value: unknown) => void;
+    let libraryReads = 0;
+    handler = async message => {
+      if (message.type === 'operations.list') return { ok: true, value: { entries: [] } };
+      if (message.type === 'library.list') {
+        libraryReads++;
+        if (libraryReads === 1) return new Promise(resolve => { finish = resolve; });
+        return { ok: true, value: { entries: [] } };
+      }
+      return { ok: true, value: readyStatus() };
+    };
+    document.querySelector<HTMLElement>('#nav-library')!.click();
+    await vi.waitFor(() => expect(finish).toBeTypeOf('function'));
+    document.querySelector<HTMLElement>('#nav-operations')!.click();
+    expect(visible('#operations-panel')).toBe(true);
+    finish({ ok: true, value: { entries: [] } });
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect(visible('#operations-panel')).toBe(true);
+    expect(visible('#library-panel')).toBe(false);
+  });
   it('keeps the hot view when an older library read completes', async () => {
     let finish!: (value: unknown) => void;
     handler = async message => message.type === 'library.list'

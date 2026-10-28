@@ -10,6 +10,9 @@ import { WebSocket, type RawData } from 'ws';
 import {
   APP_VERSION,
   NOWCODER_HOT_MATERIAL_CAPABILITY,
+  NOWCODER_OPERATIONS_CAPABILITY,
+  operationAddSchema,
+  operationUpdateSchema,
   EXTENSION_REPLACED_CLOSE_CODE,
   EXTENSION_REPLACED_CLOSE_REASON,
   TRUSTED_EXTENSION_ID,
@@ -43,6 +46,7 @@ import {
 import { AccessTokenManager } from '../auth.js';
 import { loadConfig, type ConfigOverrides } from '../config.js';
 import { NowcoderScheduleStore } from '../plans/nowcoderSchedule.js';
+import { NowcoderOperationsStore } from '../operations/store.js';
 import { readCompanyInventory } from '../plans/nowcoderInventory.js';
 import { NowcoderCollectionStopError, NowcoderRequestPacer, detectNowcoderResponseStop, type NowcoderCollectionStopCode } from '../plans/nowcoderPacing.js';
 import { JobStore } from '../jobs/store.js';
@@ -410,6 +414,7 @@ async function verifiedRevealPath(roots: readonly string[], requestedPath: strin
 
 export async function startBridge(options: StartBridgeOptions = {}): Promise<BridgeHandle> {
   const config = loadConfig(options);
+  const operations = new NowcoderOperationsStore(join(config.configDir, 'nowcoder-operations'), config.libraryRoot);
   const activeOperations = new Set<Promise<unknown>>();
   let closing = false;
   const trackOperation = <T>(operation: Promise<T>): Promise<T> => {
@@ -1936,7 +1941,7 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
       return sendJson(response, 200, {
         ok: true,
         version: APP_VERSION,
-        bridgeCapabilities: [NOWCODER_HOT_MATERIAL_CAPABILITY],
+        bridgeCapabilities: [NOWCODER_HOT_MATERIAL_CAPABILITY, NOWCODER_OPERATIONS_CAPABILITY],
         trustedExtensionId: TRUSTED_EXTENSION_ID,
         extensionConnected: extensionReady && extensionSocket?.readyState === WebSocket.OPEN,
         directedRunActive: directedService?.hasActiveRun() ?? false,
@@ -1970,6 +1975,27 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
 
     const token = bearerToken(request) ?? '';
     if (!access.verify(token)) throw new HttpError(401, 'UNAUTHORIZED', '访问令牌无效');
+
+    if (requestUrl.pathname === '/v1/nowcoder/operations') {
+      if (request.method === 'GET') return sendJson(response, 200, { entries: await operations.list() });
+      if (request.method === 'POST') {
+        const input = operationAddSchema.parse(await readJson(request));
+        return sendJson(response, 200, { entry: await operations.add(input.sourceId) });
+      }
+    }
+    const operationMatch = requestUrl.pathname.match(/^\/v1\/nowcoder\/operations\/([^/]+)$/u);
+    if (operationMatch?.[1]) {
+      const id = operationMatch[1];
+      if (request.method === 'GET') {
+        if (requestUrl.searchParams.get('brief') === '1') return sendJson(response, 200, await operations.brief(id));
+        const entry = await operations.get(id);
+        if (!entry) throw new HttpError(404, 'OPERATIONS_NOT_FOUND', '运营记录不存在');
+        return sendJson(response, 200, { entry });
+      }
+      if (request.method === 'PUT') return sendJson(response, 200, {
+        entry: await operations.update(id, operationUpdateSchema.parse(await readJson(request))),
+      });
+    }
 
     const nowcoderSessionMatch = requestUrl.pathname.match(
       /^\/v1\/nowcoder\/search-sessions\/([^/]+)$/u,

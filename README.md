@@ -229,6 +229,19 @@ npm run collector -- collect 'https://mp.weixin.qq.com/s/...' --wait 60000
 npm run collector -- health
 ```
 
+### 牛客运营：先看草稿再回复
+
+侧栏「牛客运营」可以从已采集完整正文中建立私有回复队列，查看回复角度、编辑两版短回复、复制并记录处理状态。起草资料由 Codex 读取；新一轮会带上旧草稿和你填写的修改意见。默认贴题、口语化、共情或轻幽默，不要求每条引流；需要提网站时只写裸域名。
+
+```bash
+npm run collector -- nowcoder ops list
+npm run collector -- nowcoder ops add --source SOURCE_ID
+npm run collector -- nowcoder ops brief --id OPPORTUNITY_ID
+npm run collector -- nowcoder ops draft --file /absolute/draft.private.json
+```
+
+所有记录保存在本机配置目录，独立于面经投递；复制不会发布。草稿包、修订保护和完整使用说明见 [牛客运营助手](docs/nowcoder-operations.md)。
+
 ### 牛客定向采集 CLI
 
 先预览，再用返回的搜索会话 ID 启动；可从该会话的候选中指定优先顺序：

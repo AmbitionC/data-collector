@@ -18,6 +18,7 @@
           <button id="nav-plans" type="button" aria-pressed="false">任务</button>
           <button id="nav-library" type="button" aria-pressed="false">已入库</button>
           <button id="nav-hot" type="button" aria-pressed="false">热帖素材</button>
+          <button id="nav-operations" type="button" aria-pressed="false">牛客运营</button>
         </nav>
       </header>
 
@@ -27,6 +28,57 @@
       </div>
 
       <div class="panel-content">
+        <section id="operations-panel" class="state-panel" hidden>
+          <p class="section-kicker">牛客运营 · 私有草稿</p>
+          <h2>先接住一句话</h2>
+          <p class="support compact">贴着原帖聊，一两句就够。可共情、可轻松，不必每条引流。</p>
+          <label for="ops-source" class="ops-label">已采集的牛客原帖（最近200条）</label>
+          <select id="ops-source" class="ops-input"></select>
+          <div class="result-actions">
+            <button id="ops-add" type="button" class="primary-button">加入运营队列</button>
+            <button id="ops-refresh" type="button" class="secondary-button">刷新</button>
+          </div>
+          <p id="ops-status" class="support compact" role="status">先采集原帖正文，再选择需要回复的帖子。</p>
+          <ul id="ops-list" class="ops-list"></ul>
+          <section id="ops-detail" class="ops-detail" hidden>
+            <p id="ops-entry-status" class="section-kicker"></p>
+            <h3 id="ops-title"></h3>
+            <p id="ops-angle" class="support compact"></p>
+            <p id="ops-limitations" class="support compact"></p>
+            <div class="result-actions">
+              <a id="ops-open-source" class="ops-source-link" target="_blank" rel="noopener noreferrer">打开原帖 ↗</a>
+              <button id="ops-brief" type="button" class="secondary-button">复制起草资料给 Codex</button>
+            </div>
+            <p class="support compact">Codex 根据原帖起草后，点刷新即可查看。下面也可直接编辑保存。</p>
+            <label class="ops-label" for="ops-primary">首选回复</label>
+            <textarea id="ops-primary" class="ops-input" rows="3" placeholder="短一点，像平常聊天。"></textarea>
+            <button id="ops-copy-primary" class="secondary-button" type="button">复制这版</button>
+            <label class="ops-label" for="ops-alternative">换个说法</label>
+            <textarea id="ops-alternative" class="ops-input" rows="3" placeholder="另一种语气，也可以不引流。"></textarea>
+            <button id="ops-copy-alternative" class="secondary-button" type="button">复制另一版</button>
+            <p id="ops-reply-meter" class="support compact"></p>
+            <label class="ops-label" for="ops-tone">语气</label>
+            <select id="ops-tone" class="ops-input">
+              <option value="empathetic">有同理心</option><option value="light_humor">轻松一点</option><option value="practical">直接帮忙</option>
+            </select>
+            <label class="ops-label" for="ops-anchor">接住原帖哪句话</label>
+            <input id="ops-anchor" class="ops-input" type="text" maxlength="180" placeholder="引用原帖的一小段原话">
+            <label class="ops-label" for="ops-notes">起草说明（不会复制进回复）</label>
+            <textarea id="ops-notes" class="ops-input" rows="2" maxlength="2000"></textarea>
+            <label class="ops-label" for="ops-feedback">给下一轮的修改意见</label>
+            <textarea id="ops-feedback" class="ops-input" rows="2" maxlength="2000" placeholder="例如：再短一点，接住导师不放实习，不提网站。"></textarea>
+            <div class="result-actions">
+              <button id="ops-save" type="button" class="primary-button">保存草稿</button>
+              <button id="ops-reviewed" type="button" class="secondary-button">标记已核对</button>
+              <button id="ops-skip" type="button" class="secondary-button">暂不回复</button>
+              <button id="ops-discard" type="button" class="secondary-button">放弃修改并重读</button>
+            </div>
+            <label class="ops-label" for="ops-reply-url">已发布的评论链接（人工记录）</label>
+            <input id="ops-reply-url" class="ops-input" type="url" placeholder="在原帖手动回复后，填入评论链接">
+            <button id="ops-replied" type="button" class="secondary-button">记录已回复</button>
+            <p class="support compact">复制不会发布；本页只保存本机草稿和人工处理记录。</p>
+          </section>
+        </section>
         <section id="hot-panel" class="state-panel" hidden>
           <p class="section-kicker">私有运营素材 · 手动采集</p>
           <h2>从热帖情绪找选题灵感</h2>

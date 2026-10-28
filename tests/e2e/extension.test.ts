@@ -11,6 +11,10 @@ import puppeteer, {
 import { afterEach, describe, expect, it } from 'vitest';
 import { startBridge, type BridgeHandle } from '../../packages/bridge/src/index.js';
 import { TRUSTED_EXTENSION_ID } from '../../packages/shared/src/index.js';
+import { stableContentId, type CollectedDocument } from '@data-collector/shared';
+import { MarkdownLibrary } from '../../packages/bridge/src/library/index.js';
+import { organize } from '../../packages/bridge/src/organize/index.js';
+import { NowcoderOperationsStore } from '../../packages/bridge/src/operations/store.js';
 import { createTemporaryDirectoryTracker } from '../helpers/temp.js';
 
 const WORKSPACE = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
@@ -361,6 +365,45 @@ async function waitForText(
 }
 
 describe('built Chrome extension', () => {
+  it('edits private Nowcoder replies through the built panel without publishing', async () => {
+    const { libraryRoot } = await startStack();
+    const url = 'https://www.nowcoder.com/discuss/123456';
+    const document: CollectedDocument = { schemaVersion: 1, source: 'nowcoder', kind: 'post', url, canonicalUrl: url,
+      title: '学了LangGraph，下一步做什么？', text: '刚大二，学了Java和LangGraph，下一步做什么项目？',
+      html: '<p>刚大二，学了Java和LangGraph，下一步做什么项目？</p>', collectedAt: '2026-10-28T06:00:00.000Z', images: [] };
+    await new MarkdownLibrary({ root: libraryRoot }).save(organize(document));
+    const store = new NowcoderOperationsStore(join(libraryRoot, '.config', 'nowcoder-operations'), libraryRoot);
+    const entry = await store.add(stableContentId(url));
+    await store.update(entry.id, { revision: 1, contextHash: entry.contextHash, drafts: {
+      primary: '收藏夹先放个假，挑一个小问题做完就行😂', alternative: '不用现在就选终身方向，先把一个小项目做完整。',
+      tone: 'light_humor', anchor: '下一步做什么项目', notes: '先接住方向太多的困惑，不引流。',
+    } });
+    const sourcePage = await browser!.newPage();
+    await serveArticleFixture(sourcePage, '<html><head><title>Agent 项目求助</title></head><body><h1>Agent 项目求助</h1><article><p>刚大二，学了Java和LangGraph，下一步做什么项目？</p></article></body></html>', url);
+    await sourcePage.goto(url, { waitUntil: 'domcontentloaded' });
+    const { page: sidePanel } = await sidePanelFor(sourcePage);
+    await sidePanel.setViewport({ width: 390, height: 1100 });
+    await waitForVisiblePanel(sidePanel, '#ready-panel', 15_000);
+    await clickSidePanel(sidePanel, '#nav-operations');
+    await waitForVisiblePanel(sidePanel, '#operations-panel', 10_000);
+    await waitForVisiblePanel(sidePanel, '#ops-detail', 10_000);
+    await sidePanel.waitForFunction(() => document.querySelector<HTMLTextAreaElement>('#ops-primary')?.value.includes('收藏夹'));
+    await sidePanel.$eval('#ops-primary', element => {
+      const field = element as HTMLTextAreaElement;
+      field.value = '先别开第三条战线，做完一个小项目再看自己喜欢哪部分😂';
+      field.dispatchEvent(new Event('input'));
+    });
+    await clickSidePanel(sidePanel, '#ops-save');
+    await waitForText(sidePanel, '#ops-status', '草稿已保存到本机。', 10_000);
+    const saved = await store.get(entry.id);
+    expect(saved?.drafts?.primary).toContain('先别开第三条战线');
+    expect(saved?.status).toBe('drafted');
+    expect(saved?.replyUrl).toBeUndefined();
+    const directory = join(WORKSPACE, 'artifacts', 'screenshots');
+    await mkdir(directory, { recursive: true });
+    await sidePanel.bringToFront();
+    await sidePanel.screenshot({ path: join(directory, 'nowcoder-operations.png'), fullPage: true });
+  });
   it('keeps company scheduling disabled and saves selected companies through the real private Bridge', async () => {
     const { libraryRoot } = await startStack();
     const fixture = await readFile(join(WORKSPACE, 'tests', 'fixtures', 'wechat-article.html'), 'utf8');

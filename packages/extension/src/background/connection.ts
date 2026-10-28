@@ -1,6 +1,7 @@
 import {
   APP_VERSION,
   NOWCODER_HOT_MATERIAL_CAPABILITY,
+  NOWCODER_OPERATIONS_CAPABILITY,
   JOB_STATUSES,
   EXTENSION_REPLACED_CLOSE_CODE,
   EXTENSION_REPLACED_CLOSE_REASON,
@@ -682,6 +683,20 @@ export class BridgeConnection {
   /** 当前 Bridge 是否达到某项扩展侧兼容逻辑要求的最低版本。 */
   supportsHotMaterials(): boolean {
     return this.socket?.readyState === 1 && this.bridgeCapabilities.has(NOWCODER_HOT_MATERIAL_CAPABILITY);
+  }
+
+  async operations(path = '', method: 'GET' | 'POST' | 'PUT' = 'GET', body?: unknown): Promise<unknown> {
+    if (this.socket?.readyState !== 1 || !this.bridgeCapabilities.has(NOWCODER_OPERATIONS_CAPABILITY)) {
+      throw new Error('本机服务尚未声明牛客运营支持，请使用配套版本后重试');
+    }
+    const { baseUrl, token } = await this.authorized();
+    const response = await this.fetchWithDeadline(`${baseUrl}/v1/nowcoder/operations${path}`, {
+      method, headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+    }, '牛客运营请求超时，请保留草稿后重试');
+    const result = await response.json() as { error?: { message?: string } };
+    if (!response.ok) throw new Error(result.error?.message ?? `牛客运营请求失败：HTTP ${response.status}`);
+    return result;
   }
 
   supportsVersion(minimum: string): boolean {
