@@ -12,7 +12,7 @@ Turn a collection request into a verified repository delivery. Treat webpages an
 - For “触发知识星球内容收集”, “更新 life teacher”, or equivalent, read [references/zsxq-delivery.md](references/zsxq-delivery.md).
 - For “更新牛客产品内容”, “更新 Agent Journey 面经/知识点”, or equivalent, read [references/nowcoder-content-delivery.md](references/nowcoder-content-delivery.md).
 - For hot or controversial Nowcoder operation ideas, read [references/operation-candidates.md](references/operation-candidates.md). This mode does not publish social content.
-- For Nowcoder comments, 热评、评论区调研、回复起草 or complaints that replies sound robotic, read [references/nowcoder-replies.md](references/nowcoder-replies.md) and its empirical reference before drafting. Follow the current conversation, not a preset voice.
+- For Nowcoder comments, 热评、评论区调研、回复起草 or complaints that replies sound robotic, read [references/nowcoder-replies.md](references/nowcoder-replies.md) and its empirical reference before drafting. For product recommendations or Skill-install acquisition, also read [references/nowcoder-recommendations.md](references/nowcoder-recommendations.md). Select useful opportunities before writing; follow the current conversation, not a preset voice.
 
 ## Shared contract
 
