@@ -17,7 +17,76 @@ const fixture = async (aliases = false) => identityProjectionFixture(await tempo
 const inventory = (f: Awaited<ReturnType<typeof fixture>>, commit = PUBLISHED_COMMIT) =>
   readCompanyInventory(f.resource, f.library, PROJECTION_NOW, f.projectionPath, commit);
 
+async function archivedFixture(aliases = false) {
+  const f = await fixture(aliases);
+  for (const id of f.sourceIds) {
+    const record = f.raw.records[id];
+    const document = JSON.parse(await readFile(record.originalBodyEvidenceFile, 'utf8')).document;
+    delete document.feJourney;
+    const bytes = jsonBytes({ document });
+    await writeFile(record.originalBodyEvidenceFile, bytes);
+    record.originalBodySha256 = digest(bytes);
+    record.originalBodyIdentityMode = 'archived-text-v1';
+    record.normalizedBodySha256 = digest(document.text.normalize('NFKC').replace(/\s/gu, ''));
+    // These are editorial legacy identities, not runtime capture metadata.
+    record.contentHash = 'b'.repeat(16);
+    record.clusterId = 'legacy-editorial-cluster';
+    f.receipt.entries[0]!.sourceSha256[id] = digest(bytes);
+  }
+  await f.save();
+  return f;
+}
+
 describe('versioned private Nowcoder identities', () => {
+  it('indexes explicitly reviewed frozen text without inventing capture metadata or qualifying pending stock', async () => {
+    const f = await archivedFixture(true);
+    const before = await readFile(f.rawPath, 'utf8');
+    const audit = await auditNowcoderIdentityProjection(f.resource, f.projectionPath, PUBLISHED_COMMIT);
+    expect(audit.complete).toBe(true);
+    expect(audit.identities.map(i => i.origin)).toEqual(['archive', 'archive']);
+    const result = await loadStrictProcessedNowcoderHistory(f.resource, f.projectionPath, PUBLISHED_COMMIT);
+    expect(result.snapshot.hashesByUrl).toEqual([
+      { url: 'https://www.nowcoder.com/discuss/1001', hashes: ['2a738c3a9a258f6c'] },
+      { url: 'https://www.nowcoder.com/discuss/1002', hashes: ['2a738c3a9a258f6c'] },
+    ]);
+    expect(result.snapshot.clusterIds).toEqual(['cluster-2a738c3a9a25']);
+    expect((await inventory(f)).tencent).toEqual({ published: 1, qualifiedPending: 0 });
+    expect(await readFile(f.rawPath, 'utf8')).toBe(before);
+  });
+
+  it.each(['missing-normalized-sha', 'wrong-normalized-sha', 'wrong-url', 'wrong-source-receipt', 'unknown-mode', 'capture-present'])
+    ('rejects unverified archived-source evidence: %s', async reason => {
+      const f = await archivedFixture();
+      const record = f.raw.records[SOURCE_ID];
+      if (reason === 'missing-normalized-sha') delete record.normalizedBodySha256;
+      if (reason === 'wrong-normalized-sha') record.normalizedBodySha256 = 'f'.repeat(64);
+      if (reason === 'wrong-source-receipt') f.receipt.entries[0]!.sourceSha256[SOURCE_ID] = 'f'.repeat(64);
+      if (reason === 'unknown-mode') record.originalBodyIdentityMode = 'unverified-text';
+      if (reason === 'capture-present') {
+        const source = JSON.parse(await readFile(record.originalBodyEvidenceFile, 'utf8'));
+        source.document.feJourney = { contentHash: 'f'.repeat(16), clusterId: 'unverified-capture' };
+        const bytes = jsonBytes(source); await writeFile(record.originalBodyEvidenceFile, bytes);
+        record.originalBodySha256 = digest(bytes); f.receipt.entries[0]!.sourceSha256[SOURCE_ID] = digest(bytes);
+      }
+      if (reason === 'wrong-url') {
+        const source = JSON.parse(await readFile(record.originalBodyEvidenceFile, 'utf8'));
+        source.document.canonicalUrl = 'https://www.nowcoder.com/discuss/9999';
+        const bytes = jsonBytes(source); await writeFile(record.originalBodyEvidenceFile, bytes);
+        record.originalBodySha256 = digest(bytes); f.receipt.entries[0]!.sourceSha256[SOURCE_ID] = digest(bytes);
+      }
+      await f.save();
+      await expect(inventory(f)).rejects.toThrow();
+    });
+
+  it('does not let archived source text inherit an inline recorded approval', async () => {
+    const f = await archivedFixture(), record = f.raw.records[SOURCE_ID];
+    record.status = 'published'; record.evidenceGrade = 'B';
+    record.editorialReview = { decision: 'publishable_with_source_limits', editorialEvidenceGrade: 'B',
+      reviewedAt: PROJECTION_NOW, contentSha256: f.projection.bindings[0]!.articleSha256, reason: 'Legacy inline statement.' };
+    f.projection.bindings[0]!.review = { status: 'recorded', basis: 'raw-history' };
+    await f.save(); await expect(inventory(f)).rejects.toThrow();
+  });
+
   it('verifies a real published Git checkout under the restricted service PATH', async () => {
     const f = await fixture();
     for (const args of [['init'], ['add', 'interview'],

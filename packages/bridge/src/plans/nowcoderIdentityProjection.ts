@@ -17,7 +17,7 @@ type RecordValue = Record<string, unknown>;
 export interface IdentityProjectionIssue { code: string; articleKey?: string; sourceId?: string; recovery: string }
 export interface ProjectedNowcoderIdentity {
   id: string; url: string; contentHash: string; clusterId: string;
-  status: string; evidenceGrade: string; origin: 'capture' | 'recorded';
+  status: string; evidenceGrade: string; origin: 'capture' | 'archive' | 'recorded';
   originalSha256?: string; normalizedBodySha256?: string; rawRecord: RecordValue;
 }
 export interface IdentityProjectionAudit {
@@ -129,19 +129,35 @@ export async function auditNowcoderIdentityProjection(resourceRoot: string, proj
     const status = string(item.status), evidenceGrade = string(item.evidenceGrade);
     if (item.source !== 'nowcoder' || !STATUSES.has(status) || !GRADES.has(evidenceGrade)) invalid('raw status/grade/source is invalid');
     timestamp(item.processedAt);
-    let contentHash: string, clusterId: string, origin: 'capture' | 'recorded' = 'recorded', originalSha256: string | undefined, normalizedBodySha256: string | undefined;
+    let contentHash: string, clusterId: string, origin: 'capture' | 'archive' | 'recorded' = 'recorded', originalSha256: string | undefined, normalizedBodySha256: string | undefined;
+    const identityMode = item.originalBodyIdentityMode;
+    if (identityMode !== undefined && (identityMode !== 'archived-text-v1' || item.originalBodyEvidenceFile === undefined)) {
+      invalid('unsupported frozen source identity mode');
+    }
     if (item.originalBodyEvidenceFile !== undefined) {
       originalSha256 = hash(item.originalBodySha256);
       const evidence = object(await privateJson(string(item.originalBodyEvidenceFile), originalSha256));
       if (item.originalBodyDocumentJson !== true) invalid('capture evidence format is unsupported');
-      const document = object(evidence.document), capture = object(document.feJourney);
+      const document = object(evidence.document);
       if (document.source !== 'nowcoder' || url(document.canonicalUrl ?? document.url) !== canonical) invalid('capture source URL mismatch');
-      const text = string(document.text); contentHash = hash(capture.contentHash, HEX16); clusterId = string(capture.clusterId);
-      if (contentFingerprint(text) !== contentHash) invalid('captured runtime fingerprint does not match original text');
-      if ((item.contentHash !== undefined && item.contentHash !== contentHash) || (item.clusterId !== undefined && item.clusterId !== clusterId)) invalid('recorded identity disagrees with capture');
+      const text = string(document.text);
       normalizedBodySha256 = createHash('sha256').update(normalizedBody(text)).digest('hex');
-      if (item.normalizedBodySha256 !== undefined && normalizedBodySha256 !== hash(item.normalizedBodySha256)) invalid('normalized source body SHA256 mismatch');
-      origin = 'capture';
+      if (identityMode === 'archived-text-v1') {
+        if (document.feJourney !== undefined) invalid('archived identity mode cannot override capture metadata');
+        // A reviewed archive is real frozen text, not an extension capture. Derive only
+        // the exclusion identity; never reuse editorial hashes as runtime metadata.
+        if (normalizedBodySha256 !== hash(item.normalizedBodySha256)) invalid('archived source body SHA256 mismatch');
+        contentHash = contentFingerprint(text);
+        clusterId = `cluster-${contentHash.slice(0, 12)}`;
+        origin = 'archive';
+      } else {
+        const capture = object(document.feJourney);
+        contentHash = hash(capture.contentHash, HEX16); clusterId = string(capture.clusterId);
+        if (contentFingerprint(text) !== contentHash) invalid('captured runtime fingerprint does not match original text');
+        if ((item.contentHash !== undefined && item.contentHash !== contentHash) || (item.clusterId !== undefined && item.clusterId !== clusterId)) invalid('recorded identity disagrees with capture');
+        if (item.normalizedBodySha256 !== undefined && normalizedBodySha256 !== hash(item.normalizedBodySha256)) invalid('normalized source body SHA256 mismatch');
+        origin = 'capture';
+      }
     } else {
       contentHash = hash(item.contentHash, HEX16); clusterId = string(item.clusterId);
     }
@@ -203,12 +219,16 @@ export async function auditNowcoderIdentityProjection(resourceRoot: string, proj
     if (path(binding.path) !== file || hash(binding.articleSha256) !== publicFile.sha256) stale(`current article path/body changed: ${key}`);
     const ids = sourceIds(binding.sourceIds);
     if (!same(ids, actualIds)) { issue('SOURCE_ALIAS_MISMATCH', 'Restore every source alias recorded for this article; do not drop or invent one.'); continue; }
-    if (ids.some(id => identityById.get(id)?.origin !== 'capture')) { issue('MISSING_FROZEN_CAPTURE', 'Recover each bound source original and its real capture identity before binding review.'); continue; }
+    if (ids.some(id => !['capture', 'archive'].includes(identityById.get(id)?.origin ?? ''))) { issue('MISSING_FROZEN_CAPTURE', 'Recover each bound frozen source original and its verified identity before binding review.'); continue; }
     const review = object(binding.review);
     if (review.status === 'pending') { fields(review, ['status', 'reason']); issue('PENDING_BINDING_REVIEW', string(review.reason)); continue; }
     if (review.status === 'recorded') {
       fields(review, ['status', 'basis']);
       if (review.basis !== 'raw-history') invalid('unsupported recorded review basis');
+      if (ids.some(id => identityById.get(id)?.origin === 'archive')) {
+        issue('ARCHIVED_SOURCE_REQUIRES_BINDING_REVIEW', 'Review the current article against every pinned archived original in a fresh verified binding receipt.');
+        continue;
+      }
       let verified = true;
       for (const id of ids) {
         try { if (!await recordedReviewMatches(identityById.get(id)!, key, publicFile.sha256)) verified = false; }

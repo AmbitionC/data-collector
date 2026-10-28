@@ -33,6 +33,12 @@ checkout必须有自身`.git`且HEAD匹配。非Git快照必须有`.collector-pu
 
 原始台账逐条保留状态、等级、publication、editorialLimits、bodySha256与processUnitId。runtime contentHash必须来自真实原件中的16位指纹，并重新计算正文验证；clusterId必须来自原件。64位编辑正文SHA和编辑单元ID不能代替它们。原件不足的历史非公开记录仅标为recorded；绑定公开文章的每个来源别名都必须有验证过的冻结原件。
 
+### 无采集器增强字段的既有原文档案
+
+0.4.52支持显式 `originalBodyIdentityMode: "archived-text-v1"`。仅用于有真实冻结JSON原件、但 `document.feJourney` 不存在的历史原文；不能给既有采集器元数据换一个模式来跳过核验。仍必须核对文件SHA、牛客规范URL、非空正文，且必须提供并复算完整的 `normalizedBodySha256`。运行时指纹由实际原文按既有 `contentFingerprint` 算法计算，cluster按该指纹前12位生成；原台账中的编辑指纹、状态、等级与过程记录保持原值，不作为伪造的采集器字段。
+
+该类型的实际origin为 `archive`，与 `capture`、无原件的 `recorded` 分开。它只提供去重排除身份，不增加qualifiedPending，也不是公开许可。绑定公开叶子时必须有真实、当前版本的 `verified` 关联回执，绑定全部来源别名与原件SHA；不能继承台账内的 `recorded` 审核声明。未显式标记的缺失增强字段、未知模式、原件/正文SHA不符或回执缺失仍然失败关闭。
+
 prepared/B-partial只有去重身份；它们不直接变成published、A/B或qualifiedPending。公开篇数来自当前树，合格待审数来自本地真实源快照的既有质量/日期门禁，并排除历史URL/hash/cluster。台账异常时整个库存读取失败，不能返回假0。
 
 ## 三种绑定状态
