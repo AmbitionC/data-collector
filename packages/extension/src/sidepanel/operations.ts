@@ -1,4 +1,4 @@
-import { operationDraftsSchema, reviewNowcoderReply, type NowcoderOperation, type NowcoderOperationSummary, type OperationUpdate } from '@data-collector/shared';
+import { MAX_REPLY_CHARACTERS, operationDraftsSchema, reviewNowcoderReply, type NowcoderOperation, type NowcoderOperationSummary, type OperationUpdate } from '@data-collector/shared';
 
 type Message = <T>(request: unknown) => Promise<T>;
 const STATUS = { queued: '待起草', drafted: '待核对', reviewed: '已核对', replied: '已回复（人工记录）', skipped: '暂不回复' };
@@ -10,7 +10,7 @@ export function bindOperations(document: Document, message: Message): { show(): 
   const primary = get<HTMLTextAreaElement>('ops-primary'), alternative = get<HTMLTextAreaElement>('ops-alternative');
   const notes = get<HTMLTextAreaElement>('ops-notes'), anchor = get<HTMLInputElement>('ops-anchor');
   const feedback = get<HTMLTextAreaElement>('ops-feedback');
-  const tone = get<HTMLSelectElement>('ops-tone'), replyUrl = get<HTMLInputElement>('ops-reply-url');
+  const replyUrl = get<HTMLInputElement>('ops-reply-url');
   let loaded = false, busy = false, dirty = false, selection = 0, editRevision = 0;
   let entries: NowcoderOperationSummary[] = [], current: NowcoderOperation | undefined;
 
@@ -22,13 +22,12 @@ export function bindOperations(document: Document, message: Message): { show(): 
     }
     primary.readOnly = alternative.readOnly = anchor.readOnly = busy || current?.status === 'replied';
     notes.readOnly = feedback.readOnly = replyUrl.readOnly = busy || current?.status === 'replied';
-    tone.disabled = busy || current?.status === 'replied';
   }
   function meter(): void {
     const a = reviewNowcoderReply(primary.value), b = reviewNowcoderReply(alternative.value);
-    get('ops-reply-meter').textContent = `首选 ${a.characters}/160 字 · 另一版 ${b.characters}/160 字。${[...new Set([...a.warnings, ...b.warnings])].join(' ')}`;
+    get('ops-reply-meter').textContent = `首选 ${a.characters} 字 · 另一版 ${b.characters} 字。${[...new Set([...a.warnings, ...b.warnings])].join(' ')}`;
   }
-  for (const input of [primary, alternative, notes, feedback, anchor, tone, replyUrl]) {
+  for (const input of [primary, alternative, notes, feedback, anchor, replyUrl]) {
     input.addEventListener('input', () => { dirty = true; editRevision++; meter(); });
     input.addEventListener('change', () => { dirty = true; editRevision++; });
   }
@@ -48,12 +47,12 @@ export function bindOperations(document: Document, message: Message): { show(): 
     get('ops-detail').hidden = false;
     get('ops-title').textContent = entry.title;
     get('ops-entry-status').textContent = `${STATUS[entry.status]} · ${entry.assessment.fit === 'high' ? '话题相关' : entry.assessment.fit === 'medium' ? '相邻话题' : '先观察'}`;
-    get('ops-angle').textContent = entry.assessment.angle;
+    get('ops-angle').textContent = entry.assessment.reason;
     get('ops-limitations').textContent = entry.assessment.limitations.join(' ');
     get<HTMLAnchorElement>('ops-open-source').href = entry.canonicalUrl;
     primary.value = entry.drafts?.primary ?? ''; alternative.value = entry.drafts?.alternative ?? '';
     anchor.value = entry.drafts?.anchor ?? ''; notes.value = entry.drafts?.notes ?? '';
-    tone.value = entry.drafts?.tone ?? 'empathetic'; replyUrl.value = entry.replyUrl ?? '';
+    replyUrl.value = entry.replyUrl ?? '';
     feedback.value = entry.note;
     meter(); drawList(); controls();
   }
@@ -103,8 +102,8 @@ export function bindOperations(document: Document, message: Message): { show(): 
       const hasDraft = Boolean(primary.value.trim() || alternative.value.trim());
       if (!hasDraft && !nextStatus) throw new Error('还没有回复，请先起草后保存。');
       const checked = hasDraft ? operationDraftsSchema.safeParse({ primary: primary.value, alternative: alternative.value,
-        tone: tone.value, anchor: anchor.value, notes: notes.value }) : undefined;
-      if (checked && !checked.success) throw new Error('请填写两版短回复与原帖锚点；回复最多160字，链接使用裸域名。');
+        tone: 'contextual', anchor: anchor.value, notes: notes.value }) : undefined;
+      if (checked && !checked.success) throw new Error(`请填写两版回复与原帖锚点；存储上限${MAX_REPLY_CHARACTERS}字，链接使用裸域名。`);
       const drafts = checked?.success ? checked.data : undefined;
       const patch: OperationUpdate = { revision: current.revision, contextHash: current.contextHash,
         note: feedback.value,
@@ -118,8 +117,8 @@ export function bindOperations(document: Document, message: Message): { show(): 
   }
   async function copy(value: string, brief = false): Promise<void> {
     if (!value.trim()) { status.textContent = '还没有可复制的回复，请先起草。'; return; }
-    if (!brief && ([...value].length > 160 || /https?:\/\//iu.test(value))) {
-      status.textContent = '回复最多160字，链接使用裸域名；请调整后再复制。'; return;
+    if (!brief && /https?:\/\//iu.test(value)) {
+      status.textContent = '链接使用裸域名，请调整后再复制。'; return;
     }
     try { await navigator.clipboard.writeText(value); status.textContent = brief
       ? '起草资料已复制，请交给 Codex；生成后刷新查看。'

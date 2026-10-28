@@ -30,8 +30,8 @@
       <div class="panel-content">
         <section id="operations-panel" class="state-panel" hidden>
           <p class="section-kicker">牛客运营 · 私有草稿</p>
-          <h2>先接住一句话</h2>
-          <p class="support compact">贴着原帖聊，一两句就够。可共情、可轻松，不必每条引流。</p>
+          <h2>先看大家在聊什么</h2>
+          <p class="support compact">读完原帖、评论和后续，再决定有什么值得接着说。</p>
           <label for="ops-source" class="ops-label">已采集的牛客原帖（最近200条）</label>
           <select id="ops-source" class="ops-input"></select>
           <div class="result-actions">
@@ -49,18 +49,14 @@
               <a id="ops-open-source" class="ops-source-link" target="_blank" rel="noopener noreferrer">打开原帖 ↗</a>
               <button id="ops-brief" type="button" class="secondary-button">复制起草资料给 Codex</button>
             </div>
-            <p class="support compact">Codex 根据原帖起草后，点刷新即可查看。下面也可直接编辑保存。</p>
+            <p class="support compact">先读原帖和评论区。Codex 起草后点刷新查看，也可直接编辑保存。</p>
             <label class="ops-label" for="ops-primary">首选回复</label>
-            <textarea id="ops-primary" class="ops-input" rows="3" placeholder="短一点，像平常聊天。"></textarea>
+            <textarea id="ops-primary" class="ops-input" rows="3" placeholder="接住这篇讨论里值得说的一件事"></textarea>
             <button id="ops-copy-primary" class="secondary-button" type="button">复制这版</button>
             <label class="ops-label" for="ops-alternative">换个说法</label>
-            <textarea id="ops-alternative" class="ops-input" rows="3" placeholder="另一种语气，也可以不引流。"></textarea>
+            <textarea id="ops-alternative" class="ops-input" rows="3" placeholder="也可以换个切入点"></textarea>
             <button id="ops-copy-alternative" class="secondary-button" type="button">复制另一版</button>
             <p id="ops-reply-meter" class="support compact"></p>
-            <label class="ops-label" for="ops-tone">语气</label>
-            <select id="ops-tone" class="ops-input">
-              <option value="empathetic">有同理心</option><option value="light_humor">轻松一点</option><option value="practical">直接帮忙</option>
-            </select>
             <label class="ops-label" for="ops-anchor">接住原帖哪句话</label>
             <input id="ops-anchor" class="ops-input" type="text" maxlength="180" placeholder="引用原帖的一小段原话">
             <label class="ops-label" for="ops-notes">起草说明（不会复制进回复）</label>

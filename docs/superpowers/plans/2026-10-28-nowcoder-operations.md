@@ -1,5 +1,7 @@
 # Nowcoder Operations Assistant Implementation Plan
 
+**2026-10-29 revision:** The user rejected the preset reply voice and requested learning from actual popular comments. The current spec and the comment references supersede the original short-reply guidance below. This iteration freezes and observes 20 hot-list posts, supplements 14 posts, records 813 visible comments and 67 comments with at least 5 displayed likes in private evidence, updates the canonical Skill/reference, removes editorial length/voice presets, and validates new drafts against actual comment context. No publishing is authorized by the preview request.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [x]`) syntax for tracking.
 
 **Goal:** Add a private Nowcoder opportunity and reply-draft workspace, then preview three source-grounded replies without publishing.

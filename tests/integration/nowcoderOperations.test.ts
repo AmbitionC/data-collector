@@ -100,6 +100,9 @@ describe('private Nowcoder operations workflow', () => {
     const brief = JSON.parse(output); output = '';
     expect(brief.sourceUntrusted.body).toBe(c.document.text);
     expect(brief.commentsStatus).toBe('not-collected');
+    expect(brief.commentContextRequired).toBe(true);
+    expect(brief.assessment).not.toHaveProperty('angle');
+    expect(brief.references).toContain('.codex/skills/data-collector-delivery/references/nowcoder-replies.md');
     const path = join(c.root, 'draft.private.json');
     await writeFile(path, JSON.stringify({ schemaVersion: 1, opportunityId: entry.id, revision: entry.revision,
       contextHash: entry.contextHash, drafts: { primary: '先补一个可检验的小场景。', alternative: '已有项目可以先记录任务状态，模拟中断后确认恢复过程和重复任务的处理。', tone: 'practical', anchor: 'LangGraph', notes: '' } }));

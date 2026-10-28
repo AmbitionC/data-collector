@@ -11,13 +11,13 @@ export const operationSourceUrlSchema = z.string().url().max(4096).refine(value 
     && !url.port && /^(?:\/discuss\/\d+|\/feed\/main\/detail\/[a-z0-9]+)$/iu.test(url.pathname)
     && !url.search && !url.hash;
 }, '需要规范的牛客帖子链接');
-const replySchema = z.string().trim().min(1).max(1000)
-  .refine(value => [...value].length <= MAX_REPLY_CHARACTERS, '回复最多160字，请缩短')
+const replySchema = z.string().trim().min(1).max(MAX_REPLY_CHARACTERS * 2)
+  .refine(value => [...value].length <= MAX_REPLY_CHARACTERS, `回复超过存储上限${MAX_REPLY_CHARACTERS}字`)
   .refine(value => !/https?:\/\//iu.test(value), '回复只使用裸域名，不带http或https前缀');
 export const operationDraftsSchema = z.object({
   primary: replySchema,
   alternative: replySchema,
-  tone: z.enum(['empathetic', 'light_humor', 'practical']),
+  tone: z.enum(['contextual', 'empathetic', 'light_humor', 'practical']),
   anchor: z.string().trim().min(2).max(180),
   notes: z.string().trim().max(2000).default(''),
 }).strict();

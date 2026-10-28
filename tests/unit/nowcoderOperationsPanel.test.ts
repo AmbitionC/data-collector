@@ -15,10 +15,11 @@ const entry = {
 const settle = async () => { for (let index = 0; index < 25; index++) await Promise.resolve(); };
 beforeEach(async () => { document.body.innerHTML = await readFile('packages/extension/src/sidepanel/index.html', 'utf8'); });
 
-function setup(failSave = false, failGet = false, options: { delayReload?: boolean; replied?: boolean } = {}) {
+function setup(failSave = false, failGet = false, options: { delayReload?: boolean; replied?: boolean; queued?: boolean } = {}) {
   const requests: any[] = [];
   let reads = 0, resolveReload: ((value: unknown) => void) | undefined, rejectReload: ((reason: Error) => void) | undefined;
-  const fixtureEntry = options.replied ? { ...entry, status: 'replied', replyUrl: 'https://www.nowcoder.com/discuss/comment/22846505' } : entry;
+  const fixtureEntry = options.replied ? { ...entry, status: 'replied', replyUrl: 'https://www.nowcoder.com/discuss/comment/22846505' }
+    : options.queued ? { ...entry, status: 'queued', drafts: undefined } : entry;
   const clipboard = vi.fn(async (_value: string) => undefined);
   Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText: clipboard } });
   const message = async <T>(request: any): Promise<T> => {
@@ -47,6 +48,35 @@ function setup(failSave = false, failGet = false, options: { delayReload?: boole
 }
 
 describe('private operations panel', () => {
+  it('starts new drafts from the current discussion without a preset voice', async () => {
+    const { panel } = setup(false, false, { queued: true }); panel.show(); await settle();
+    expect(document.querySelector('#ops-tone')).toBeNull();
+  });
+
+  it('copies and saves a longer paragraph exactly as edited', async () => {
+    const { panel, clipboard, requests } = setup(); panel.show(); await settle();
+    const value = '最难受的就是前几天还说没问题，突然又说不留了，半年的安排都被打乱了。'.repeat(6);
+    const field = document.querySelector<HTMLTextAreaElement>('#ops-primary')!;
+    field.value = value; field.dispatchEvent(new Event('input'));
+    document.querySelector<HTMLButtonElement>('#ops-copy-primary')!.click(); await settle();
+    expect(clipboard).toHaveBeenCalledWith(value);
+    document.querySelector<HTMLButtonElement>('#ops-save')!.click(); await settle();
+    expect(requests.find(request => request.type === 'operations.update')?.patch.drafts.primary).toBe(value);
+    expect(requests.find(request => request.type === 'operations.update')?.patch.drafts.tone).toBe('contextual');
+  });
+
+  it('allows copying beyond the storage boundary while preserving save protection', async () => {
+    const { panel, clipboard, requests } = setup(); panel.show(); await settle();
+    const value = '字'.repeat(1001);
+    const field = document.querySelector<HTMLTextAreaElement>('#ops-primary')!;
+    field.value = value; field.dispatchEvent(new Event('input'));
+    document.querySelector<HTMLButtonElement>('#ops-copy-primary')!.click(); await settle();
+    expect(clipboard).toHaveBeenCalledWith(value);
+    document.querySelector<HTMLButtonElement>('#ops-save')!.click(); await settle();
+    expect(requests.some(request => request.type === 'operations.update')).toBe(false);
+    expect(field.value).toBe(value);
+    expect(document.querySelector('#ops-status')?.textContent).toContain('1000');
+  });
   it('preserves edits made after discard starts and before the delayed response arrives', async () => {
     const { panel, finishReload } = setup(false, false, { delayReload: true }); panel.show(); await settle();
     const field = document.querySelector<HTMLTextAreaElement>('#ops-primary')!;
@@ -78,11 +108,11 @@ describe('private operations panel', () => {
     const { panel } = setup(false, true); panel.show(); await settle();
     expect(document.querySelector('#ops-status')?.textContent).toContain('记录读取失败');
   });
-  it('shows full-post candidates, source-specific angle and two short editable replies', async () => {
+  it('shows full-post candidates, source relevance and editable replies', async () => {
     const { panel } = setup(); panel.show(); await settle();
     expect(document.querySelectorAll('#ops-source option')).toHaveLength(1);
     expect(document.querySelector('#ops-title')?.textContent).toBe(entry.title);
-    expect(document.querySelector('#ops-angle')?.textContent).toContain('框架越学越多');
+    expect(document.querySelector('#ops-angle')?.textContent).toBe(entry.assessment.reason);
     expect(document.querySelector<HTMLTextAreaElement>('#ops-primary')?.value).toBe(entry.drafts.primary);
     expect(document.querySelector('#ops-limitations')?.textContent).toContain('未读取评论');
   });

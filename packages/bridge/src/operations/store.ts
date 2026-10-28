@@ -102,8 +102,7 @@ export class NowcoderOperationsStore {
       const assessment: NowcoderOperation['assessment'] = {
         fit: agent ? 'high' : /前端|后端|项目|面试/u.test(text) ? 'medium' : 'low',
         intent: interview ? 'interview' : learning ? 'learning' : 'general',
-        angle: interview ? '接住面经里一个具体追问，补一句工程视角。'
-          : learning ? '先回应对方卡住的那一步，给一个小建议或贴切共鸣。' : '先确认自己确有可补充的内容，也可以只共情或跳过。',
+        angle: '尚未读取评论，补读当前讨论和楼主后续后再确定切入点。',
         reason: agent ? '正文包含与 Agent 学习或工程实践相关的具体内容。' : '仅属相邻或一般话题，需人工判断与产品的关联。',
         limitations: ['未读取评论，发布前请检查已有回答；初步匹配不代表平台合规认证。',
           ...(body.length < 80 || document.images.length > 0 ? ['正文较短或包含图片，本版未做图片识别。'] : [])],
@@ -148,14 +147,17 @@ export class NowcoderOperationsStore {
     if (!entry) throw new HttpError(404, 'OPERATIONS_NOT_FOUND', '运营记录不存在');
     return {
       type: 'nowcoder-reply-brief', visibility: 'private', styleVersion: NOWCODER_REPLY_STYLE_VERSION,
-      task: '为这个帖子起草两版短回复，供用户审阅；不要发布。',
-      guidance: NOWCODER_REPLY_GUIDANCE, commentsStatus: 'not-collected',
+      task: '补读原帖评论和后续，参考真实热评为当前讨论起草两版回复，供用户审阅；不要发布。',
+      guidance: NOWCODER_REPLY_GUIDANCE, commentsStatus: 'not-collected', commentContextRequired: true,
+      references: ['.codex/skills/data-collector-delivery/references/nowcoder-replies.md',
+        '.codex/skills/data-collector-delivery/references/nowcoder-comment-evidence.md'],
       previousDrafts: entry.drafts ?? null, feedback: entry.note,
       sourceUntrusted: { title: entry.title, body: entry.body, canonicalUrl: entry.canonicalUrl, collectedAt: entry.collectedAt },
-      assessment: entry.assessment,
+      assessment: { fit: entry.assessment.fit, intent: entry.assessment.intent,
+        reason: entry.assessment.reason, limitations: entry.assessment.limitations },
       draftEnvelope: { schemaVersion: 1, opportunityId: entry.id, revision: entry.revision,
         contextHash: entry.contextHash,
-        drafts: { primary: '第一版短回复', alternative: '另一版短回复', tone: 'empathetic | light_humor | practical', anchor: '原帖中的一段原话', notes: '内部说明，不发布' } },
+        drafts: { primary: '第一版回复', alternative: '另一种切入点', tone: 'contextual', anchor: '原帖中的一段原话', notes: '评论证据与接话依据，内部记录，不发布' } },
     };
   }
 }
