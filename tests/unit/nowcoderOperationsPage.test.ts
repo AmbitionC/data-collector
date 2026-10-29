@@ -113,6 +113,58 @@ describe('Nowcoder plugin page operations', () => {
     expect(await runNowcoderOperationPage({ kind: 'publish', url, text: reply, expected })).toMatchObject({ kind: 'published', receipt: { text: reply } });
   });
 
+  it('uses a cancelled beforeinput to update the Slate model without a second DOM insertion', async () => {
+    const expected = await snapshot(), reply = '先把这个小项目做完整呗';
+    const editor = document.querySelector<HTMLElement>('#nc-e-textarea-1')!, button = document.querySelector('button')!;
+    editor.innerHTML = '<p data-slate-node="element"><span data-slate-leaf="true"><span data-slate-zero-width="n">\ufeff<br></span></span></p>';
+    button.disabled = true;
+    let model = '';
+    editor.addEventListener('beforeinput', event => {
+      const input = event as InputEvent;
+      if (input.inputType !== 'insertText') return;
+      event.preventDefault(); model = input.data ?? ''; editor.textContent = model; button.disabled = false;
+    });
+    button.addEventListener('click', () => { document.body.insertAdjacentHTML('beforeend', comment(102, model)); editor.textContent = ''; });
+    expect(await runNowcoderOperationPage({ kind: 'publish', url, text: reply, expected })).toMatchObject({ kind: 'published', receipt: { text: reply } });
+    expect(document.execCommand).not.toHaveBeenCalled();
+  });
+
+  it('waits for lazy gallery references and explicitly reports unresolved images', async () => {
+    const gallery = document.querySelector('.feed-img')!;
+    gallery.innerHTML = '<div class="el-image"><div class="el-image__placeholder"></div></div>';
+    vi.useFakeTimers();
+    const pending = snapshot();
+    await vi.advanceTimersByTimeAsync(5000);
+    expect((await pending).coverage.limitations.join(' ')).toMatch(/配图.*加载/u);
+  });
+
+  it('does not label an empty gallery container as an unloaded post image', async () => {
+    document.querySelector('.feed-img')!.replaceChildren();
+    expect((await snapshot()).coverage.limitations).not.toContain('原帖配图尚未加载；需单独查看，不能据此判断没有配图');
+  });
+
+  it('rechecks the source and forwarding after the asynchronous editor model update', async () => {
+    vi.useFakeTimers();
+    for (const change of ['source', 'forward']) {
+      fixture(); vi.stubGlobal('location', new URL(url));
+      const expected = await snapshot(), editor = document.querySelector<HTMLElement>('#nc-e-textarea-1')!, button = document.querySelector('button')!;
+      button.disabled = true;
+      const click = vi.fn(); button.addEventListener('click', click);
+      editor.addEventListener('beforeinput', event => {
+        event.preventDefault(); editor.textContent = (event as InputEvent).data;
+        setTimeout(() => {
+          button.disabled = false;
+          if (change === 'source') vi.stubGlobal('location', new URL('https://www.nowcoder.com/discuss/999999'));
+          else (document.querySelector('input') as HTMLInputElement).checked = true;
+        }, 150);
+      });
+      const pending = runNowcoderOperationPage({ kind: 'publish', url, text: '这条还没发送', expected });
+      await vi.advanceTimersByTimeAsync(400);
+      expect(await pending).toMatchObject({ kind: 'attention', code: change === 'source' ? 'SOURCE_MISMATCH' : 'FORWARDING_ENABLED', submission: 'not_attempted' });
+      expect(click).not.toHaveBeenCalled();
+    }
+  });
+
   it('returns uncertain after a click without an observed new comment, never clicks again', async () => {
     vi.useFakeTimers();
     const expected = await snapshot(), click = vi.fn();

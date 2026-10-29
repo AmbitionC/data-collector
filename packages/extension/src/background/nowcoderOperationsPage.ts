@@ -69,11 +69,19 @@ export async function runNowcoderOperationPage(action: NowcoderOperationAction):
     if (text(body).length > 24_000 || title.length > 500) return attention('CONTEXT_LIMIT', '原帖超过有界读取范围，未截断冒充全文');
     const header = text(document.querySelector('.comment-title'));
     const totalMatch = header.match(/\d+/u), total = totalMatch ? Number(totalMatch[0]) : null;
+    const gallery = document.querySelector('.feed-img,.feed-content-imgs');
+    const galleryHasSlots = Boolean(gallery?.querySelector('.el-image,img'));
+    if (gallery && galleryHasSlots && !images(gallery, 30).length) {
+      gallery.scrollIntoView?.({ block: 'center' });
+      const deadline = Date.now() + 2000;
+      while (!images(gallery, 30).length && Date.now() < deadline) await pause(100);
+    }
     const post = { title: title.slice(0, 500), body: text(body).slice(0, 24_000), images: [...new Set([...images(body, 30), ...images(document.querySelector('.feed-img,.feed-content-imgs'), 30)])].slice(0, 30) };
     const comments = new Map<string, NowcoderConversationSnapshot['comments'][number]>();
     const maxPages = action.kind === 'context' ? action.maxPages : action.expected.coverage.pagesRead;
     let pagesRead = 0, hasMore = false, textIncomplete = false;
     const limitations: string[] = [];
+    if (gallery && galleryHasSlots && !images(gallery, 30).length) limitations.push('原帖配图尚未加载；需单独查看，不能据此判断没有配图');
     for (let page = 0; page < maxPages; page++) {
       if (page === 0 && (total ?? 0) > 0) {
         for (let i = 0; i < 20 && readComments().length === 0; i++) await pause(250);
@@ -132,15 +140,28 @@ export async function runNowcoderOperationPage(action: NowcoderOperationAction):
     if (!button || !scope) return attention('COMPOSER_UNAVAILABLE', '无法唯一确认主评论提交按钮');
     if ([...scope.querySelectorAll<HTMLInputElement>('input[type="checkbox"]')].some(input => input.checked && /同时转发/u.test(text(input.closest('label') ?? input.parentElement)))) return attention('FORWARDING_ENABLED', '同时转发已开启，未发送');
     editor.focus();
-    // Use Chromium's editing operation so Slate receives its native beforeinput/input lifecycle.
-    // Replacing textContent would detach Slate's managed nodes and may submit an empty model.
+    // Slate handles beforeinput by cancelling the browser edit and updating its own model.
+    // execCommand alone can change its zero-width DOM leaf while leaving that model empty.
     const selection = window.getSelection(), range = document.createRange();
-    range.selectNodeContents(editor); range.collapse(false);
+    const leaf = editor.querySelector('[data-slate-zero-width]') ?? editor.querySelector('[data-slate-leaf]');
+    const point = leaf?.firstChild;
+    if (point?.nodeType === Node.TEXT_NODE) range.setStart(point, point.textContent?.length ?? 0);
+    else range.selectNodeContents(editor);
+    range.collapse(false);
     selection?.removeAllRanges(); selection?.addRange(range);
-    if (!document.execCommand('insertText', false, action.text)) return attention('COMPOSER_REJECTED', '编辑器未接受文本输入，未点击发送');
-    await pause(100);
+    const targetRanges = typeof StaticRange === 'function' ? [new StaticRange(range)] : [];
+    const beforeInput = new InputEvent('beforeinput', { bubbles: true, composed: true, cancelable: true, inputType: 'insertText', data: action.text, targetRanges });
+    const browserEdit = editor.dispatchEvent(beforeInput);
+    if (browserEdit && !document.execCommand('insertText', false, action.text)) return attention('COMPOSER_REJECTED', '编辑器未接受文本输入，未点击发送');
+    const ready = () => normalized(text(editor)) === normalized(action.text) && button!.getAttribute('aria-disabled') !== 'true'
+      && !(button as HTMLButtonElement).disabled && !button!.classList.contains('disabled') && !button!.classList.contains('is-disabled');
+    const deadline = Date.now() + 3000;
+    while (!ready() && Date.now() < deadline) await pause(100);
     blocked = challenge(); if (blocked) return blocked;
-    if (normalized(text(editor)) !== normalized(action.text) || button.getAttribute('aria-disabled') === 'true' || (button as HTMLButtonElement).disabled || button.classList.contains('disabled') || button.classList.contains('is-disabled')) return attention('COMPOSER_REJECTED', '编辑器未接受草稿，未点击发送');
+    if (!ready()) return attention('COMPOSER_REJECTED', '编辑器未接受草稿，未点击发送');
+    if (canonical(location.href) !== action.url) return attention('SOURCE_MISMATCH', '输入期间页面离开原帖，未点击发送');
+    if (!editor.isConnected || !button.isConnected) return attention('COMPOSER_UNAVAILABLE', '输入期间编辑器已被替换，未点击发送');
+    if ([...scope.querySelectorAll<HTMLInputElement>('input[type="checkbox"]')].some(input => input.checked && /同时转发/u.test(text(input.closest('label') ?? input.parentElement)))) return attention('FORWARDING_ENABLED', '输入期间同时转发被开启，未点击发送');
     const before = new Set(snapshot.comments.map(comment => comment.url));
     clicked = true; button.click();
     for (let i = 0; i < 60; i++) {

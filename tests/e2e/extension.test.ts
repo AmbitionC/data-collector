@@ -376,7 +376,7 @@ describe('built Chrome extension', () => {
     await new MarkdownLibrary({ root: libraryRoot }).save(organize(document));
     const store = new NowcoderOperationsStore(join(libraryRoot, '.config', 'nowcoder-operations'), libraryRoot);
     const entry = await store.add(stableContentId(url));
-    const fixture = '<html><body><h1>求 Agent 学习方向</h1><div class="feed-content-text">学过 LangGraph，想做一个能用的项目</div><div class="comment-title">全部评论(0)</div><div class="composer"><div id="nc-e-textarea-1" contenteditable="true"><p><br></p></div><button disabled>评论</button></div><script>const editor=document.querySelector("#nc-e-textarea-1"),button=document.querySelector("button");editor.addEventListener("input",()=>button.disabled=!editor.innerText.trim());button.onclick=()=>{const box=document.createElement("div");box.className="comment-box";const body=document.createElement("div");body.className="comment-content-box";body.textContent=editor.innerText;const link=document.createElement("a");link.href="/discuss/comment/987654321";link.textContent="刚刚";box.append(body,link);document.body.append(box);editor.innerHTML="<p><br></p>";document.querySelector(".comment-title").textContent="全部评论(1)";};</script></body></html>';
+    const fixture = '<html><body><h1>求 Agent 学习方向</h1><div class="feed-content-text">学过 LangGraph，想做一个能用的项目</div><div class="comment-title">全部评论(0)</div><div class="composer"><div id="nc-e-textarea-1" contenteditable="true"><p><br></p></div><button disabled>评论</button></div><script>const editor=document.querySelector("#nc-e-textarea-1"),button=document.querySelector("button");let model="";editor.addEventListener("beforeinput",event=>{if(event.inputType!=="insertText")return;event.preventDefault();model=event.data||"";editor.textContent=model;button.disabled=!model.trim();});button.onclick=()=>{const box=document.createElement("div");box.className="comment-box";const body=document.createElement("div");body.className="comment-content-box";body.textContent=model;const link=document.createElement("a");link.href="/discuss/comment/987654321";link.textContent="刚刚";box.append(body,link);document.body.append(box);editor.innerHTML="<p><br></p>";document.querySelector(".comment-title").textContent="全部评论(1)";};</script></body></html>';
     const pages: Page[] = [];
     for (let i = 0; i < 3; i++) {
       const page = await browser!.newPage();
@@ -404,6 +404,7 @@ describe('built Chrome extension', () => {
       const result = await response.json(); expect(response.status, JSON.stringify(result)).toBe(200); return result;
     };
     const context = await request('context', { maxPages: 1 });
+    expect(context.sourceUntrusted, JSON.stringify(context)).toBeDefined();
     expect(context.sourceUntrusted.coverage).toMatchObject({ complete: true, total: 0 });
     const saved = await store.update(entry.id, { revision: context.revision, contextHash: entry.contextHash, conversationHash: context.conversationHash,
       drafts: { primary: '先做个同事能用的文档问答呗', alternative: '拿自己的资料试试', anchor: 'LangGraph', tone: 'practical', notes: '' } });
