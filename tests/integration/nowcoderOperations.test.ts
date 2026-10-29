@@ -1,7 +1,8 @@
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
-import { stableContentId, type CollectedDocument } from '@data-collector/shared';
+import WebSocket from 'ws';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { APP_VERSION, NOWCODER_BROWSER_OPERATIONS_CAPABILITY, TRUSTED_EXTENSION_ID, stableContentId, type CollectedDocument } from '@data-collector/shared';
 import { startBridge, type BridgeHandle } from '../../packages/bridge/src/server/index.js';
 import { MarkdownLibrary, listLibrary } from '../../packages/bridge/src/library/index.js';
 import { organize } from '../../packages/bridge/src/organize/index.js';
@@ -10,9 +11,11 @@ import { createTemporaryDirectoryTracker } from '../helpers/temp.js';
 
 const temporaryDirectories = createTemporaryDirectoryTracker();
 const bridges: BridgeHandle[] = [];
+const sockets: WebSocket[] = [];
 const token = 'operations-test-token-00000000000000000000';
 const url = 'https://www.nowcoder.com/discuss/123456';
 afterEach(async () => {
+  sockets.splice(0).forEach(socket => socket.terminate());
   await Promise.all(bridges.splice(0).map(bridge => bridge.close()));
   await temporaryDirectories.cleanup();
 });
@@ -43,6 +46,51 @@ async function fixture(overrides: Partial<CollectedDocument> = {}) {
 }
 
 describe('private Nowcoder operations workflow', () => {
+  it('reads comments and publishes the stored draft through authenticated plugin RPC and compact CLI JSON', async () => {
+    const c = await fixture(), base = '/v1/nowcoder/operations';
+    const { entry } = (await c.request('POST', base, { sourceId: c.sourceId })).body;
+    const socket = new WebSocket(`${c.bridge.wsUrl}?token=${token}`, { origin: `chrome-extension://${TRUSTED_EXTENSION_ID}` });
+    sockets.push(socket);
+    await new Promise<void>((resolve, reject) => { socket.once('open', resolve); socket.once('error', reject); });
+    const envelope = (type: string, requestId: string, payload: unknown) => JSON.stringify({ protocolVersion: 1, type, requestId, timestamp: new Date().toISOString(), payload });
+    socket.send(envelope('extension.hello', 'hello', { version: APP_VERSION, capabilities: [NOWCODER_BROWSER_OPERATIONS_CAPABILITY] }));
+    await vi.waitFor(async () => { expect((await c.request('GET', '/health')).body.extensionConnected).toBe(true); });
+    const sent: string[] = [];
+    socket.on('message', raw => {
+      const message = JSON.parse(raw.toString());
+      if (message.type !== 'operations.execute') return;
+      sent.push(message.payload.kind);
+      socket.send(envelope('operations.result', message.requestId, message.payload.kind === 'context' ? { kind: 'context', snapshot: {
+        sourceUrl: url, readAt: new Date().toISOString(), post: { title: c.document.title, body: c.document.text, images: [] },
+        comments: [{ url: 'https://www.nowcoder.com/discuss/comment/100001', parentUrl: null, text: '先从自己的需求做起', images: [], isAuthor: false, likes: null }],
+        coverage: { total: 1, observed: 1, pagesRead: 1, hasMore: false, complete: true, limitations: [] },
+      } } : { kind: 'published', receipt: { sourceUrl: url, url: 'https://www.nowcoder.com/discuss/comment/100002', text: message.payload.text, observedAt: new Date().toISOString() } }));
+    });
+    const options = ['--port', String(new URL(c.bridge.url).port), '--config', c.configDir];
+    let output = '', error = '';
+    const io = { stdout: (v: string) => { output += v; }, stderr: (v: string) => { error += v; } };
+    expect(await runCli(['nowcoder', 'ops', 'context', '--id', entry.id, ...options], io)).toBe(0);
+    const context = JSON.parse(output); output = '';
+    expect(context.sourceUntrusted.comments[0]).toMatchObject({ likes: null, text: '先从自己的需求做起' });
+    const path = join(c.root, 'plugin-draft.private.json');
+    await writeFile(path, JSON.stringify({ schemaVersion: 1, opportunityId: entry.id, revision: context.revision, contextHash: context.contextHash, conversationHash: context.conversationHash,
+      drafts: { primary: '先做个同事能用的文档问答呗', alternative: '拿自己的资料先做个小工具', tone: 'practical', anchor: 'LangGraph', notes: '已读取插件评论上下文' } }));
+    expect(await runCli(['nowcoder', 'ops', 'draft', '--file', path, ...options], io)).toBe(0);
+    const saved = JSON.parse(output).entry; output = '';
+    const publishArgs = ['nowcoder', 'ops', 'publish', '--id', entry.id, '--revision', String(saved.revision), '--key', 'authorized-integration-001', ...options];
+    expect(await runCli(publishArgs, io)).toBe(1);
+    expect(sent).toEqual(['context']); error = '';
+    expect(await runCli([...publishArgs, '--send'], io)).toBe(0);
+    expect(JSON.parse(output).publication).toMatchObject({ state: 'published', replyUrl: 'https://www.nowcoder.com/discuss/comment/100002' });
+    output = '';
+    expect(await runCli([...publishArgs, '--send'], io)).toBe(0);
+    expect(sent).toEqual(['context', 'publish']);
+    output = '';
+    expect(await runCli(['nowcoder', 'ops', 'verify', '--id', entry.id, '--key', 'authorized-integration-001', ...options], io)).toBe(0);
+    expect(JSON.parse(output).publication).toMatchObject({ state: 'published', evidence: 'observed' });
+    expect(sent).toEqual(['context', 'publish']);
+    expect(error).toBe('');
+  });
   it('persists one frozen source per URL without delivering or adding another library entry', async () => {
     const c = await fixture(), path = '/v1/nowcoder/operations';
     expect((await c.request('GET', path, undefined, false)).status).toBe(401);

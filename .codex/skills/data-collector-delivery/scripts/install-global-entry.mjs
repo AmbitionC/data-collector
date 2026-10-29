@@ -20,7 +20,7 @@ const targetDirectory = join(targetRoot, 'data-collector-delivery');
 const target = join(targetDirectory, 'SKILL.md');
 const contents = `---
 name: data-collector-delivery
-description: Use when the user asks to collect or deliver Chen Teacher ZSXQ content, update Agent Journey from Nowcoder interview posts, study Nowcoder popular comments, or prepare operation topics and reply drafts.
+description: Use when the user asks to collect or deliver Chen Teacher ZSXQ content, update Agent Journey from Nowcoder interview posts, study Nowcoder comments, prepare replies, or publish explicitly authorized Nowcoder comments through the plugin CLI.
 ---
 
 # Data Collector Delivery

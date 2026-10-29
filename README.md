@@ -231,16 +231,19 @@ npm run collector -- health
 
 ### 牛客运营：先看草稿再回复
 
-侧栏「牛客运营」可以从已采集完整正文中建立私有回复队列，查看回复角度、编辑两版短回复、复制并记录处理状态。起草资料由 Codex 读取；新一轮会带上旧草稿和你填写的修改意见。默认贴题、口语化、共情或轻幽默，不要求每条引流；需要提网站时只写裸域名。
+侧栏「牛客运营」可以建立私有回复队列、编辑两版草稿并记录状态。日常由插件 CLI 完成找帖、读评论和单条发送，Agent 只读取结构化结果并起草。表达参考当前讨论和真实热门评论，不预设语气或句数；需要提网站时只写裸域名。
 
 ```bash
 npm run collector -- nowcoder ops list
+npm run collector -- nowcoder ops search --query 'Agent 学习' --limit 5
 npm run collector -- nowcoder ops add --source SOURCE_ID
+npm run collector -- nowcoder ops context --id OPPORTUNITY_ID
 npm run collector -- nowcoder ops brief --id OPPORTUNITY_ID
 npm run collector -- nowcoder ops draft --file /absolute/draft.private.json
+npm run collector -- nowcoder ops publish --id OPPORTUNITY_ID --revision N --key UNIQUE_KEY --send
 ```
 
-所有记录保存在本机配置目录，独立于面经投递；复制不会发布。草稿包、修订保护和完整使用说明见 [牛客运营助手](docs/nowcoder-operations.md)。
+所有记录保存在本机配置目录，独立于面经投递；复制不会发布。实际发送需要用户授权和显式 `--send`，只发送已保存的主草稿；重复键不会再发，结果不确定时停止等待核验。草稿包、修订保护和完整使用说明见 [牛客运营助手](docs/nowcoder-operations.md)。
 
 ### 牛客定向采集 CLI
 

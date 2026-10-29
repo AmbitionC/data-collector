@@ -2,6 +2,11 @@ import {
   APP_VERSION,
   NOWCODER_HOT_MATERIAL_CAPABILITY,
   NOWCODER_OPERATIONS_CAPABILITY,
+  NOWCODER_BROWSER_OPERATIONS_CAPABILITY,
+  nowcoderOperationActionSchema,
+  nowcoderOperationResultSchema,
+  type NowcoderOperationAction,
+  type NowcoderOperationResult,
   JOB_STATUSES,
   EXTENSION_REPLACED_CLOSE_CODE,
   EXTENSION_REPLACED_CLOSE_REASON,
@@ -148,6 +153,8 @@ export class BridgeConnection {
   private cancelHandler: CancelHandler | undefined;
   private jobAcknowledgedHandler: JobAcknowledgedHandler | undefined;
   private planCollectHandler: PlanCollectHandler | undefined;
+  private operationsHandler: ((action: NowcoderOperationAction) => Promise<NowcoderOperationResult>) | undefined;
+  private readonly operationsRequests = new Map<string, Promise<NowcoderOperationResult>>();
   private stopped = false;
   private startPromise: Promise<void> | undefined;
   private generation = 0;
@@ -179,6 +186,10 @@ export class BridgeConnection {
 
   onPlanCollect(handler: PlanCollectHandler): void {
     this.planCollectHandler = handler;
+  }
+
+  onOperations(handler: (action: NowcoderOperationAction) => Promise<NowcoderOperationResult>): void {
+    this.operationsHandler = handler;
   }
 
   async start(options: { force?: boolean } = {}): Promise<void> {
@@ -349,7 +360,7 @@ export class BridgeConnection {
         version: APP_VERSION,
         ...(runningBuildId ? { buildId: runningBuildId } : {}),
         runtimeId: this.runtimeId,
-        capabilities: [NOWCODER_DETAIL_CAPABILITY, ZSXQ_COMPLETE_CONTENT_CAPABILITY]
+        capabilities: [NOWCODER_DETAIL_CAPABILITY, ZSXQ_COMPLETE_CONTENT_CAPABILITY, NOWCODER_BROWSER_OPERATIONS_CAPABILITY]
           .sort((left, right) => left.localeCompare(right)),
       });
       this.startKeepalive();
@@ -916,6 +927,28 @@ export class BridgeConnection {
       return;
     }
     if (!isCurrent()) return;
+
+    if (message.type === 'operations.execute') {
+      const parsed = nowcoderOperationActionSchema.safeParse(message.payload);
+      if (!parsed.success || !this.operationsHandler) return;
+      let flight = this.operationsRequests.get(message.requestId);
+      if (!flight) {
+        if (this.operationsRequests.size >= 100) {
+          this.send('operations.result', message.requestId, { kind: 'attention', code: 'OPERATIONS_REQUEST_LIMIT', message: '本次插件会话的发送记录已满，请先核验已有记录', submission: 'not_attempted' });
+          return;
+        }
+        flight = this.operationsHandler(parsed.data);
+        this.operationsRequests.set(message.requestId, flight);
+      }
+      try {
+        const result = nowcoderOperationResultSchema.parse(await flight);
+        if (isCurrent()) this.send('operations.result', message.requestId, result);
+      } catch {
+        if (isCurrent()) this.send('operations.result', message.requestId, { kind: 'attention', code: 'OPERATIONS_FAILED', message: '插件操作失败，请核验', submission: parsed.data.kind === 'publish' ? 'uncertain' : 'not_attempted' });
+      }
+      if (parsed.data.kind === 'context') this.operationsRequests.delete(message.requestId);
+      return;
+    }
 
     if (message.type === 'bridge.authorized') {
       let payload;

@@ -2,7 +2,7 @@ import type { BrowserTab } from './jobs.js';
 
 export const OWNED_TABS_STORAGE_KEY = 'dataCollectorOwnedTabs';
 
-export type OwnedTabPurpose = 'remote-job' | 'zsxq-plan' | 'linked-article';
+export type OwnedTabPurpose = 'remote-job' | 'zsxq-plan' | 'linked-article' | 'nowcoder-operations';
 
 interface OwnedTab {
   id: number;
@@ -15,6 +15,7 @@ interface AttentionTab {
   id: number;
   url: string;
   handedOffAt: number;
+  preserve?: boolean;
 }
 
 interface OwnedTabsState {
@@ -44,7 +45,7 @@ function validTab(value: unknown): value is OwnedTab {
   if (typeof value !== 'object' || value === null) return false;
   const tab = value as Partial<OwnedTab>;
   return Number.isInteger(tab.id) && typeof tab.url === 'string' &&
-    (tab.purpose === 'remote-job' || tab.purpose === 'zsxq-plan' || tab.purpose === 'linked-article') &&
+    (tab.purpose === 'remote-job' || tab.purpose === 'zsxq-plan' || tab.purpose === 'linked-article' || tab.purpose === 'nowcoder-operations') &&
     typeof tab.createdAt === 'number';
 }
 
@@ -52,7 +53,7 @@ function readAttention(value: unknown): AttentionTab | undefined {
   if (typeof value !== 'object' || value === null) return undefined;
   const tab = value as Partial<AttentionTab>;
   return Number.isInteger(tab.id) && typeof tab.url === 'string' && typeof tab.handedOffAt === 'number'
-    ? tab as AttentionTab
+    ? { id: tab.id!, url: tab.url, handedOffAt: tab.handedOffAt, ...(tab.preserve === true ? { preserve: true } : {}) }
     : undefined;
 }
 
@@ -107,10 +108,10 @@ export class OwnedTabRegistry {
     });
   }
 
-  handoff(tabId: number, url: string): Promise<void> {
+  handoff(tabId: number, url: string, options: { preservePrevious?: boolean } = {}): Promise<void> {
     return this.mutate(async state => {
       const previous = state.attention;
-      if (previous && previous.id !== tabId) {
+      if (previous && previous.id !== tabId && !previous.preserve && !options.preservePrevious) {
         try {
           await this.tabs.remove(previous.id);
         } catch (error) {
@@ -118,7 +119,7 @@ export class OwnedTabRegistry {
         }
       }
       state.owned = state.owned.filter(item => item.id !== tabId);
-      state.attention = { id: tabId, url, handedOffAt: this.now() };
+      state.attention = { id: tabId, url, handedOffAt: this.now(), ...(options.preservePrevious ? { preserve: true } : {}) };
     });
   }
 

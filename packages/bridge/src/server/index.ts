@@ -11,6 +11,7 @@ import {
   APP_VERSION,
   NOWCODER_HOT_MATERIAL_CAPABILITY,
   NOWCODER_OPERATIONS_CAPABILITY,
+  NOWCODER_BROWSER_OPERATIONS_CAPABILITY,
   operationAddSchema,
   operationUpdateSchema,
   EXTENSION_REPLACED_CLOSE_CODE,
@@ -47,6 +48,8 @@ import { AccessTokenManager } from '../auth.js';
 import { loadConfig, type ConfigOverrides } from '../config.js';
 import { NowcoderScheduleStore } from '../plans/nowcoderSchedule.js';
 import { NowcoderOperationsStore } from '../operations/store.js';
+import { NowcoderOperationsTransport } from '../operations/transport.js';
+import { NowcoderOperationsActivity } from '../operations/activity.js';
 import { readCompanyInventory } from '../plans/nowcoderInventory.js';
 import { NowcoderCollectionStopError, NowcoderRequestPacer, detectNowcoderResponseStop, type NowcoderCollectionStopCode } from '../plans/nowcoderPacing.js';
 import { JobStore } from '../jobs/store.js';
@@ -682,6 +685,13 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
   let restartHandoffReady = false;
   let restartIntent: ArtifactUpdateIntent | undefined;
   let updateCheckInFlight = false;
+  const operationsTransport = new NowcoderOperationsTransport(() => ({
+    socket: extensionSocket,
+    ready: !closing && !updateCheckInFlight && !restartPending && extensionReady && !(directedService?.hasActiveRun() ?? false)
+      && extensionMatchesArtifact(),
+    capabilities: extensionSocket ? extensionRuntime.get(extensionSocket)?.capabilities ?? [] : [],
+  }));
+  const operationsActivity = new NowcoderOperationsActivity(operations, operationsTransport, options.fetch ?? fetch);
   let updateCheckDeferred = false;
   const updateDrainWaiters = new Set<() => void>();
   const waitForUpdateDrain = (): Promise<void> => {
@@ -711,6 +721,7 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
    */
   const maybeRestart = (): void => {
     if (closing || !restartPending) return;
+    if (operationsActivity.busy || operationsTransport.busy) return;
     // 新 build-id 可能已经落盘，但打包子进程还在收尾。先记住交接，
     // 等 runUpdate 真正返回后再退出，避免杀掉尚未完成的更新。
     if (updateCheckInFlight) return;
@@ -744,6 +755,7 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
     const readerState = artifactReaders.snapshot();
     if (
       zsxqPersistingJobIds.size > 0
+      || operationsActivity.busy || operationsTransport.busy
       || hasActiveZsxqAttempt()
       || shouldDeferArtifactUpdate(readerState, directedService?.hasActiveRun() ?? false)
     ) {
@@ -1453,6 +1465,10 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
   const handleSocketMessage = async (socket: WebSocket, data: RawData): Promise<void> => {
     if (socket !== extensionSocket) throw new Error('扩展连接已被替换');
     const parsedEnvelope = wsEnvelopeSchema.parse(JSON.parse(messageText(data)));
+    if (parsedEnvelope.type === 'operations.result') {
+      operationsTransport.receive(socket, parsedEnvelope.requestId, parsedEnvelope.payload);
+      return;
+    }
     if (parsedEnvelope.type === 'extension.hello') {
       const hello = extensionHelloPayloadSchema.parse(parsedEnvelope.payload);
       const sameRuntimeReconnect = hello.runtimeId !== undefined
@@ -1941,7 +1957,8 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
       return sendJson(response, 200, {
         ok: true,
         version: APP_VERSION,
-        bridgeCapabilities: [NOWCODER_HOT_MATERIAL_CAPABILITY, NOWCODER_OPERATIONS_CAPABILITY],
+        bridgeCapabilities: [NOWCODER_HOT_MATERIAL_CAPABILITY, NOWCODER_OPERATIONS_CAPABILITY, NOWCODER_BROWSER_OPERATIONS_CAPABILITY],
+        nowcoderOperationsActive: operationsActivity.busy || operationsTransport.busy,
         trustedExtensionId: TRUSTED_EXTENSION_ID,
         extensionConnected: extensionReady && extensionSocket?.readyState === WebSocket.OPEN,
         directedRunActive: directedService?.hasActiveRun() ?? false,
@@ -1983,6 +2000,22 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
         return sendJson(response, 200, { entry: await operations.add(input.sourceId) });
       }
     }
+    if (requestUrl.pathname === '/v1/nowcoder/operations/search' && request.method === 'POST') {
+      const input = z.object({ query: z.string().trim().min(1).max(100), limit: z.number().int().min(1).max(20).default(10) }).strict().parse(await readJson(request));
+      return sendJson(response, 200, await operationsActivity.search(input.query, input.limit));
+    }
+    const operationAction = requestUrl.pathname.match(/^\/v1\/nowcoder\/operations\/(ops-[a-f0-9]{12})\/(context|publish|verify)$/u);
+    if (operationAction && request.method === 'POST') {
+      const input = await readJson(request);
+      const result = operationAction[2] === 'context'
+        ? operationsActivity.context(operationAction[1]!, z.object({ maxPages: z.number().int().min(1).max(3).default(1) }).strict().parse(input).maxPages)
+        : operationAction[2] === 'verify' ? (() => {
+          const value = z.object({ key: z.string().regex(/^[a-zA-Z0-9_-]{12,100}$/u), maxPages: z.number().int().min(1).max(3).default(1) }).strict().parse(input);
+          return operationsActivity.verify(operationAction[1]!, value.key, value.maxPages);
+        })()
+        : operationsActivity.publish(operationAction[1]!, input);
+      return sendJson(response, 200, await result);
+    }
     const operationMatch = requestUrl.pathname.match(/^\/v1\/nowcoder\/operations\/([^/]+)$/u);
     if (operationMatch?.[1]) {
       const id = operationMatch[1];
@@ -1992,9 +2025,11 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
         if (!entry) throw new HttpError(404, 'OPERATIONS_NOT_FOUND', '运营记录不存在');
         return sendJson(response, 200, { entry });
       }
-      if (request.method === 'PUT') return sendJson(response, 200, {
-        entry: await operations.update(id, operationUpdateSchema.parse(await readJson(request))),
-      });
+      if (request.method === 'PUT') {
+        const input = operationUpdateSchema.parse(await readJson(request));
+        if (operationsActivity.isPublishing(id)) throw new HttpError(409, 'OPERATIONS_BUSY', '该帖发送仍在执行，请等待回执');
+        return sendJson(response, 200, { entry: await operations.update(id, input) });
+      }
     }
 
     const nowcoderSessionMatch = requestUrl.pathname.match(
@@ -2328,6 +2363,7 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
         );
       }
       if (extensionSocket && extensionSocket.readyState === WebSocket.OPEN) {
+        operationsTransport.disconnect(extensionSocket);
         extensionSocket.close(
           EXTENSION_REPLACED_CLOSE_CODE,
           EXTENSION_REPLACED_CLOSE_REASON,
@@ -2375,6 +2411,7 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
           .catch(rejectInvalidMessage));
       });
       socket.once('close', () => {
+        operationsTransport.disconnect(socket);
         if (extensionSocket === socket) {
           extensionSocket = undefined;
           if (restartHandoffSocket === socket) restartHandoffSocket = undefined;
@@ -2428,6 +2465,7 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
     close() {
       closePromise ??= (async () => {
         closing = true;
+        operationsTransport.disconnect();
         if (updateTimer) clearInterval(updateTimer);
         // 服务已经明确进入关闭流程，不再等待外部更新命令优雅退出；立即收掉整棵树，
         // 否则忽略 TERM 的 git/npm 孙进程会反过来卡住 Node 的自然退出。

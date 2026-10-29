@@ -2,8 +2,10 @@ import { describe, expect, it, vi } from 'vitest';
 import {
   APP_VERSION,
   NOWCODER_DETAIL_CAPABILITY,
+  NOWCODER_BROWSER_OPERATIONS_CAPABILITY,
   TRUSTED_EXTENSION_ID,
   ZSXQ_COMPLETE_CONTENT_CAPABILITY,
+  type NowcoderOperationResult,
 } from '@data-collector/shared';
 import {
   BridgeConnection,
@@ -176,6 +178,27 @@ async function flushPromises(): Promise<void> {
 const PLAN_ATTEMPT = 'a1b2c3d4e5f60718';
 
 describe('extension Bridge connection', () => {
+  it('executes duplicate operation requests once and drops deferred results after socket replacement', async () => {
+    const storage = new MemoryStorage({ bridgeToken: 'x'.repeat(43) });
+    const first = new MemorySocket(), second = new MemorySocket();
+    let selected = first, release!: (value: NowcoderOperationResult) => void;
+    const pending = new Promise<NowcoderOperationResult>(resolve => { release = resolve; });
+    const handler = vi.fn(() => pending);
+    const connection = new BridgeConnection(dependencies(storage, () => selected, async () => healthResponse()));
+    connection.onOperations(handler);
+    await connection.start(); first.emit('open');
+    await vi.waitFor(() => expect(first.sent).toHaveLength(1));
+    const request = JSON.stringify({ protocolVersion: 1, type: 'operations.execute', requestId: 'operation-duplicate-test', timestamp: new Date().toISOString(), payload: { kind: 'context', url: 'https://www.nowcoder.com/discuss/123456', maxPages: 1 } });
+    first.emit('message', request); first.emit('message', request);
+    await vi.waitFor(() => expect(handler).toHaveBeenCalledTimes(1));
+    await connection.stop(); selected = second;
+    await connection.start(); second.emit('open');
+    await vi.waitFor(() => expect(second.sent).toHaveLength(1));
+    release({ kind: 'attention', code: 'TEST_FINISHED', message: '读取结束', submission: 'not_attempted' });
+    await flushPromises(); await flushPromises();
+    expect([...first.sent, ...second.sent].map(s => JSON.parse(s).type)).not.toContain('operations.result');
+    await connection.stop();
+  });
   it('bootstraps an empty installation and saves the authorized token without pairing', async () => {
     const storage = new MemoryStorage();
     const socket = new MemorySocket();
@@ -216,7 +239,7 @@ describe('extension Bridge connection', () => {
       payload: {
         version: APP_VERSION,
         runtimeId: expect.stringMatching(/^[0-9a-f-]{36}$/),
-        capabilities: [NOWCODER_DETAIL_CAPABILITY, ZSXQ_COMPLETE_CONTENT_CAPABILITY],
+        capabilities: [NOWCODER_BROWSER_OPERATIONS_CAPABILITY, NOWCODER_DETAIL_CAPABILITY, ZSXQ_COMPLETE_CONTENT_CAPABILITY],
       },
     });
   });
@@ -286,7 +309,7 @@ describe('extension Bridge connection', () => {
       type: 'extension.hello',
       payload: {
         version: APP_VERSION,
-        capabilities: [NOWCODER_DETAIL_CAPABILITY, ZSXQ_COMPLETE_CONTENT_CAPABILITY],
+        capabilities: [NOWCODER_BROWSER_OPERATIONS_CAPABILITY, NOWCODER_DETAIL_CAPABILITY, ZSXQ_COMPLETE_CONTENT_CAPABILITY],
       },
     });
     expect(storage.values.bridgeStatus).toBe('connected');

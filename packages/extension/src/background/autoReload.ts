@@ -76,6 +76,25 @@ export function shouldAutoReload(signal: UpdateSignal): boolean {
   return signal.triedBuildId !== signal.builtBuildId;
 }
 
+/** Recheck after persistence: an incoming operation can start while storage.set is pending. */
+export async function commitAutoReload(signal: UpdateSignal, deps: {
+  remember(buildId: string): Promise<void>;
+  restore(buildId: string | undefined): Promise<void>;
+  latest(): Promise<UpdateSignal>;
+  reload(): void;
+}): Promise<boolean> {
+  if (!shouldAutoReload(signal) || !signal.builtBuildId) return false;
+  await deps.remember(signal.builtBuildId);
+  const latest = await deps.latest();
+  if (latest.builtBuildId !== signal.builtBuildId || !shouldAutoReload({ ...latest, triedBuildId: signal.triedBuildId })) {
+    await deps.restore(signal.triedBuildId);
+    return false;
+  }
+  // No await between the final busy check and reload; incoming handlers cannot interleave here.
+  deps.reload();
+  return true;
+}
+
 export const STUCK_NOTE =
   '新版本已经构建好了，但自动重新加载没让它生效——'
   + '你在浏览器里加载的多半不是 artifacts/data-collector-extension 这个目录。';

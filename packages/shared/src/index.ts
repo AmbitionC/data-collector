@@ -2,6 +2,7 @@ export * from './identity.js';
 export * from './model.js';
 export * from './nowcoderHot.js';
 export * from './nowcoderOperations.js';
+export * from './nowcoderConversation.js';
 export * from './nowcoderReplyStyle.js';
 export * from './nowcoderDirected.js';
 export * from './plans.js';

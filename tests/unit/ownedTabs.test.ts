@@ -18,6 +18,18 @@ class MemorySessionStorage implements OwnedTabsStorage {
 }
 
 describe('owned browser tabs', () => {
+  it('preserves operation handoffs and earlier user work when another attention tab is handed off', async () => {
+    const storage = new MemorySessionStorage(), remove = vi.fn(async () => undefined);
+    const registry = new OwnedTabRegistry(storage, { remove });
+    await registry.track({ id: 60, url: 'https://www.nowcoder.com/discuss/60' }, 'nowcoder-operations');
+    await registry.handoff(60, 'https://www.nowcoder.com/discuss/60', { preservePrevious: true });
+    await registry.track({ id: 61, url: 'https://www.nowcoder.com/discuss/61' }, 'nowcoder-operations');
+    await registry.handoff(61, 'https://www.nowcoder.com/discuss/61', { preservePrevious: true });
+    await registry.track({ id: 62, url: 'https://wx.zsxq.com/login' }, 'zsxq-plan');
+    await registry.handoff(62, 'https://wx.zsxq.com/login');
+    await registry.cleanupStale();
+    expect(remove).not.toHaveBeenCalled();
+  });
   it('persists created tabs and closes every stale owned tab after worker recovery', async () => {
     const storage = new MemorySessionStorage();
     const remove = vi.fn(async () => undefined);

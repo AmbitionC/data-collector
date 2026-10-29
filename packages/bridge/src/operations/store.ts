@@ -5,7 +5,9 @@ import {
   NOWCODER_REPLY_GUIDANCE, NOWCODER_REPLY_STYLE_VERSION,
   nowcoderOperationSchema, operationAddSchema, operationIdSchema, operationSourceUrlSchema,
   operationUpdateSchema, stableContentId,
-  type NowcoderOperation, type NowcoderOperationSummary, type OperationUpdate,
+  nowcoderConversationSchema, operationPublishSchema,
+  type NowcoderOperation, type NowcoderOperationSummary, type OperationUpdate, type NowcoderConversationSnapshot,
+  type OperationPublication, type NowcoderOperationResult,
 } from '@data-collector/shared';
 import { listLibrary } from '../library/manage.js';
 import { projectOrganized } from '../library/storedDocument.js';
@@ -30,7 +32,7 @@ export class NowcoderOperationsStore {
     const id = operationIdSchema.parse(rawId), path = join(this.root, `${id}.json`);
     try {
       const info = await lstat(path);
-      if (!info.isFile() || info.size > 200_000) throw new Error('invalid file');
+      if (!info.isFile() || info.size > 2_000_000) throw new Error('invalid file');
       const value = nowcoderOperationSchema.parse(JSON.parse(await readFile(path, 'utf8')));
       if (value.id !== id || id !== `ops-${stableContentId(value.canonicalUrl)}`
         || value.contextHash !== hash(value.title, value.body)) throw new Error('identity mismatch');
@@ -52,7 +54,7 @@ export class NowcoderOperationsStore {
       if (!operationIdSchema.safeParse(id).success) throw new HttpError(409, 'OPERATIONS_CORRUPT', '运营记录文件名损坏，请核对本机目录');
       const entry = await this.get(id);
       if (!entry) throw new HttpError(409, 'OPERATIONS_CORRUPT', '运营记录读取时发生变化，请重试');
-      const { body, ...summary } = entry; void body;
+      const { body, conversation, ...summary } = entry; void body; void conversation;
       entries.push(summary);
     }
     return entries.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt) || a.id.localeCompare(b.id));
@@ -119,6 +121,11 @@ export class NowcoderOperationsStore {
     return this.serialize(async () => {
       const entry = await this.get(id);
       if (!entry) throw new HttpError(404, 'OPERATIONS_NOT_FOUND', '运营记录不存在，请刷新列表');
+      const unresolved = entry.publicationAttempts?.some(attempt => attempt.state === 'dispatching' || attempt.state === 'uncertain');
+      const manualReceipt = patch.status === 'replied' && patch.replyUrl && !patch.drafts;
+      if (unresolved && !manualReceipt) {
+        throw new HttpError(409, 'OPERATIONS_PUBLICATION_UNRESOLVED', '发送中或结果不确定，请先核验评论，保留当前草稿');
+      }
       if (patch.revision !== entry.revision) throw new HttpError(409, 'OPERATIONS_STALE', '草稿已被修改，请保留当前编辑并重新读取最新记录');
       if (patch.contextHash !== undefined && patch.contextHash !== entry.contextHash) {
         throw new HttpError(409, 'OPERATIONS_CONTEXT_CHANGED', '正文身份不匹配，已保留原草稿');
@@ -129,6 +136,9 @@ export class NowcoderOperationsStore {
       if (patch.drafts && !normalize(`${entry.title}\n${entry.body}`).includes(normalize(patch.drafts.anchor))) {
         throw new HttpError(400, 'OPERATIONS_ANCHOR_MISMATCH', '草稿锚点不在原帖中，请重新读原帖后起草');
       }
+      if (patch.conversationHash !== undefined && patch.conversationHash !== entry.conversation?.hash) {
+        throw new HttpError(409, 'OPERATIONS_CONVERSATION_CHANGED', '评论上下文已变化，请重新读取后起草');
+      }
       const drafts = patch.drafts ?? entry.drafts;
       const status = patch.status ?? (patch.drafts ? 'drafted' : entry.status);
       const replyUrl = patch.replyUrl ?? entry.replyUrl;
@@ -136,9 +146,86 @@ export class NowcoderOperationsStore {
         throw new HttpError(400, 'OPERATIONS_DRAFT_REQUIRED', '请先准备回复草稿');
       }
       if (status === 'replied' && !replyUrl) throw new HttpError(400, 'OPERATIONS_REPLY_URL_REQUIRED', '标记已回复前请填写真实牛客评论链接');
-      return this.save({ ...entry, status, note: patch.note ?? entry.note,
+      const { draftConversationHash: previousConversationHash, ...base } = entry;
+      const draftConversationHash = patch.drafts ? patch.conversationHash : previousConversationHash;
+      return this.save({ ...base, status, note: patch.note ?? entry.note,
         revision: entry.revision + 1, updatedAt: new Date().toISOString(),
+        ...(draftConversationHash ? { draftConversationHash } : {}),
+        ...(unresolved && manualReceipt ? { publicationAttempts: entry.publicationAttempts!.map(a => a.state === 'dispatching' || a.state === 'uncertain'
+          ? { ...a, state: 'published' as const, evidence: 'manual' as const, replyUrl: patch.replyUrl!, message: '人工记录评论链接，插件未验证发布', updatedAt: new Date().toISOString() } : a) } : {}),
         ...(drafts ? { drafts } : {}), ...(replyUrl ? { replyUrl } : {}) });
+    });
+  }
+
+  async saveConversation(id: string, raw: NowcoderConversationSnapshot): Promise<NowcoderOperation> {
+    const snapshot = nowcoderConversationSchema.parse(raw);
+    return this.serialize(async () => {
+      const entry = await this.get(id);
+      if (!entry) throw new HttpError(404, 'OPERATIONS_NOT_FOUND', '运营记录不存在');
+      if (snapshot.sourceUrl !== entry.canonicalUrl) throw new HttpError(409, 'OPERATIONS_SOURCE_MISMATCH', '插件上下文不属于指定原帖');
+      if (entry.publicationAttempts?.some(a => a.state === 'dispatching' || a.state === 'uncertain')) throw new HttpError(409, 'OPERATIONS_UNRESOLVED', '发送结果待核验，不能覆盖上下文');
+      const { draftConversationHash, ...rest } = entry; void draftConversationHash;
+      return this.save({ ...rest, conversation: { hash: createHash('sha256').update(JSON.stringify(snapshot)).digest('hex'), snapshot }, revision: entry.revision + 1, updatedAt: new Date().toISOString() });
+    });
+  }
+
+  async beginPublication(id: string, raw: unknown, requestId: string): Promise<{ entry: NowcoderOperation; publication: OperationPublication; dispatch: boolean }> {
+    const input = operationPublishSchema.parse(raw);
+    return this.serialize(async () => {
+      const entry = await this.get(id);
+      if (!entry) throw new HttpError(404, 'OPERATIONS_NOT_FOUND', '运营记录不存在');
+      const attempts = entry.publicationAttempts ?? [];
+      const draftHash = createHash('sha256').update(entry.drafts?.primary ?? '').digest('hex');
+      const prior = attempts.find(a => a.key === input.key);
+      if (prior) {
+        if (prior.draftHash !== draftHash || input.contextHash !== entry.contextHash || prior.requestedRevision !== input.revision) throw new HttpError(409, 'OPERATIONS_KEY_CONFLICT', '发送键已用于其他草稿或版本');
+        return { entry, publication: prior, dispatch: false };
+      }
+      if (attempts.some(a => a.state !== 'rejected') || entry.status === 'replied') throw new HttpError(409, 'OPERATIONS_UNRESOLVED', '已有发送记录，请先核验，禁止重复评论');
+      if (input.revision !== entry.revision || input.contextHash !== entry.contextHash) throw new HttpError(409, 'OPERATIONS_STALE', '草稿已被修改，请重新读取');
+      if (!entry.drafts || !entry.conversation || entry.draftConversationHash !== entry.conversation.hash) throw new HttpError(409, 'OPERATIONS_CONTEXT_REQUIRED', '请先读取插件评论上下文并保存与该上下文绑定的草稿');
+      if (Date.now() - Date.parse(entry.conversation.snapshot.readAt) > 30 * 60_000) throw new HttpError(409, 'OPERATIONS_CONTEXT_EXPIRED', '评论上下文超过30分钟，请重新读取和审阅');
+      if (attempts.length >= 20) throw new HttpError(409, 'OPERATIONS_ATTEMPT_LIMIT', '发送尝试达到上限，请核对记录');
+      const now = new Date().toISOString();
+      const publication: OperationPublication = { key: input.key, requestId, draftHash, requestedRevision: input.revision, state: 'dispatching', createdAt: now, updatedAt: now };
+      const saved = await this.save({ ...entry, publicationAttempts: [...attempts, publication], revision: entry.revision + 1, updatedAt: now });
+      return { entry: saved, publication, dispatch: true };
+    });
+  }
+
+  async finishPublication(id: string, key: string, result: NowcoderOperationResult): Promise<OperationPublication> {
+    return this.serialize(async () => {
+      const entry = await this.get(id);
+      const attempt = entry?.publicationAttempts?.find(a => a.key === key);
+      if (!entry || !attempt || attempt.state !== 'dispatching') throw new HttpError(409, 'OPERATIONS_ATTEMPT_CHANGED', '发送记录已变化，请核验');
+      const valid = result.kind === 'published' && result.receipt.sourceUrl === entry.canonicalUrl && result.receipt.text === entry.drafts?.primary
+        && !entry.conversation?.snapshot.comments.some(c => c.url === result.receipt.url);
+      const publication: OperationPublication = { ...attempt, updatedAt: new Date().toISOString(),
+        state: valid ? 'published' : result.kind === 'attention' && result.submission === 'not_attempted' ? 'rejected' : 'uncertain',
+        ...(valid && result.kind === 'published' ? { replyUrl: result.receipt.url, evidence: 'observed' } : { message: result.kind === 'attention' ? result.message : '评论回执与原帖或草稿不符，请核验，禁止重发' }) };
+      await this.save({ ...entry, publicationAttempts: entry.publicationAttempts!.map(a => a.key === key ? publication : a),
+        ...(valid && result.kind === 'published' ? { status: 'replied', replyUrl: result.receipt.url } : {}), revision: entry.revision + 1, updatedAt: publication.updatedAt });
+      return publication;
+    });
+  }
+
+  async reconcilePublication(id: string, key: string, raw: NowcoderConversationSnapshot): Promise<OperationPublication> {
+    const snapshot = nowcoderConversationSchema.parse(raw);
+    return this.serialize(async () => {
+      const entry = await this.get(id), attempt = entry?.publicationAttempts?.find(a => a.key === key);
+      if (!entry || !attempt || !entry.drafts || !entry.conversation) throw new HttpError(409, 'OPERATIONS_ATTEMPT_REQUIRED', '未找到需要核验的发送记录');
+      if (snapshot.sourceUrl !== entry.canonicalUrl) throw new HttpError(409, 'OPERATIONS_SOURCE_MISMATCH', '核验页面不是原帖');
+      if (attempt.state === 'published' || attempt.state === 'rejected') return attempt;
+      const before = new Set(entry.conversation.snapshot.comments.map(c => c.url));
+      const matches = snapshot.comments.filter(c => !before.has(c.url) && normalize(c.text) === normalize(entry.drafts!.primary));
+      const match = entry.conversation.snapshot.coverage.complete && matches.length === 1 ? matches[0] : undefined;
+      const publication: OperationPublication = { ...attempt, updatedAt: new Date().toISOString(),
+        state: match ? 'published' : attempt.state,
+        ...(match ? { replyUrl: match.url, evidence: 'observed', message: '只读核验观察到唯一新增匹配评论' }
+          : { message: entry.conversation.snapshot.coverage.complete ? '只读核验未见唯一新增匹配评论，仍禁止自动重发' : '发送前评论覆盖不完整，请人工核验；仍禁止自动重发' }) };
+      await this.save({ ...entry, publicationAttempts: entry.publicationAttempts!.map(a => a.key === key ? publication : a),
+        ...(match ? { status: 'replied', replyUrl: match.url } : {}), revision: entry.revision + 1, updatedAt: publication.updatedAt });
+      return publication;
     });
   }
 
@@ -148,7 +235,8 @@ export class NowcoderOperationsStore {
     return {
       type: 'nowcoder-reply-brief', visibility: 'private', styleVersion: NOWCODER_REPLY_STYLE_VERSION,
       task: '补读原帖评论和后续，参考真实热评为当前讨论起草两版回复，供用户审阅；不要发布。',
-      guidance: NOWCODER_REPLY_GUIDANCE, commentsStatus: 'not-collected', commentContextRequired: true,
+      guidance: NOWCODER_REPLY_GUIDANCE, commentsStatus: entry.conversation ? 'plugin-collected' : 'not-collected', commentContextRequired: !entry.conversation,
+      ...(entry.conversation ? { conversationUntrusted: entry.conversation.snapshot } : {}),
       references: ['.codex/skills/data-collector-delivery/references/nowcoder-replies.md',
         '.codex/skills/data-collector-delivery/references/nowcoder-comment-evidence.md'],
       previousDrafts: entry.drafts ?? null, feedback: entry.note,
@@ -157,6 +245,7 @@ export class NowcoderOperationsStore {
         reason: entry.assessment.reason, limitations: entry.assessment.limitations },
       draftEnvelope: { schemaVersion: 1, opportunityId: entry.id, revision: entry.revision,
         contextHash: entry.contextHash,
+        ...(entry.conversation ? { conversationHash: entry.conversation.hash } : {}),
         drafts: { primary: '第一版回复', alternative: '另一种切入点', tone: 'contextual', anchor: '原帖中的一段原话', notes: '评论证据与接话依据，内部记录，不发布' } },
     };
   }

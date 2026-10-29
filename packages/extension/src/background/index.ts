@@ -1,7 +1,7 @@
 import { descriptorForHost, isListPage, nowcoderScheduleConfigSchema, parseSupportedUrl, operationIdSchema } from '@data-collector/shared';
 import {
   isCollecting,
-  shouldAutoReload,
+  commitAutoReload,
   updateBanner,
   type UpdateSignal,
 } from './autoReload.js';
@@ -21,6 +21,8 @@ import {
 import { OwnedTabRegistry, type OwnedTabsStorage } from './ownedTabs.js';
 import { planErrorNeedsAttention } from './planAttention.js';
 import { HotMaterialSession } from './hotMaterials.js';
+import { NowcoderOperationsRunner } from './nowcoderOperations.js';
+import { runNowcoderOperationPage } from './nowcoderOperationsPage.js';
 import { collectedDocumentSchema, type CollectedDocument } from '@data-collector/shared';
 
 const storage: ExtensionStorage = {
@@ -178,6 +180,17 @@ const runner = new JobRunner({
   },
 });
 let activePlanCollections = 0;
+const operationsRunner = new NowcoderOperationsRunner({
+  create: url => tabs.create({ url, active: false, purpose: 'nowcoder-operations' }),
+  close: id => ownedTabs.close(id),
+  handoff: (id, url) => ownedTabs.handoff(id, url, { preservePrevious: true }),
+  wait: id => waitForTabComplete(id),
+  execute: async (tabId, action) => {
+    const results = await chrome.scripting.executeScript({ target: { tabId }, func: runNowcoderOperationPage, args: [action] });
+    return results[0]?.result;
+  },
+});
+connection.onOperations(action => operationsRunner.run(action));
 const hotMaterials = new HotMaterialSession({
   storage: sessionStorage,
   readList: () => runner.previewHotList(),
@@ -275,7 +288,7 @@ function updateSignal(values: Record<string, unknown>): UpdateSignal {
     buildFailed: update?.buildFailed === true,
     updateMessage: update?.message,
     directedRunActive: values.directedRunActive === true,
-    busy: hotMaterials.processing || isCollecting({
+    busy: hotMaterials.processing || operationsRunner.busy || isCollecting({
       batch: values.batch as { phase?: string; updatedAt?: number } | undefined,
       lastJobStatus: values.lastJobStatus as string | undefined,
       lastJobUpdatedAt: values.lastJobUpdatedAt as number | undefined,
@@ -562,8 +575,10 @@ chrome.runtime.onMessage.addListener((message: unknown, _sender, sendResponse) =
  * 就不再运行了，写在后面等于没写。加载的目录要是根本不是这份产物（用户从别处加载的），
  * 重载完版本还是没变，这条记录就是唯一能挡住无限重载的东西。
  */
+let autoReloadFlight: Promise<void> | undefined;
 async function maybeAutoReload(): Promise<void> {
-  const values = await chrome.storage.local.get([
+  if (autoReloadFlight) return autoReloadFlight;
+  const keys = [
     'update',
     'buildId',
     'autoReloadTried',
@@ -571,13 +586,17 @@ async function maybeAutoReload(): Promise<void> {
     'lastJobStatus',
     'lastJobUpdatedAt',
     'directedRunActive',
-  ]);
-  const signal: UpdateSignal = {
-    ...updateSignal(values),
-  };
-  if (!shouldAutoReload(signal)) return;
-  await chrome.storage.local.set({ autoReloadTried: signal.builtBuildId });
-  chrome.runtime.reload();
+  ];
+  autoReloadFlight = (async () => {
+    const signal = updateSignal(await chrome.storage.local.get(keys));
+    await commitAutoReload(signal, {
+      remember: buildId => chrome.storage.local.set({ autoReloadTried: buildId }),
+      restore: previous => previous === undefined ? chrome.storage.local.remove('autoReloadTried') : chrome.storage.local.set({ autoReloadTried: previous }),
+      latest: async () => updateSignal(await chrome.storage.local.get(keys)),
+      reload: () => chrome.runtime.reload(),
+    });
+  })();
+  try { await autoReloadFlight; } finally { autoReloadFlight = undefined; }
 }
 
 chrome.runtime.onInstalled.addListener(() => {

@@ -23,7 +23,9 @@
 
 ## 证据与工具边界
 
-正文收集继续遵守现有 `nowcoder research` 或 `nowcoder run` 的确切 run 合同。扩展当前不采集评论，`ops brief` 中 `commentsStatus: not-collected` 只表示正文资料，起草前仍需通过配置好的同一已登录浏览器读取评论。不得声称插件已采过评论。
+日常找帖和操作优先用插件 CLI：`ops search --query QUERY --limit N` → 已有 `collect` 保存正文 → `ops add --source SOURCE_ID` → `ops context --id ID`。`context` 返回精简结构化语境及覆盖信息；读取更多页显式传 `--pages 2` 或 `3`。不要用反复页面快照承担常规找帖、读评论。图片、登录/验证接手和开发检查才按需要使用配置好的浏览器。
+
+正文 research/run 继续遵守各自精确合同。只有 `ops context` 成功持久化后，`ops brief` 才标为 `plugin-collected`；没读过仍是 `not-collected`。评论观察不是正文交付批次，也不能把旧版 Browser Use study 改称扩展批次。
 
 可见评论观察独立保存为私有 study：列表快照、规范帖 URL、正文/图片语境、排序、翻过的页、每条评论原文/链接/父评论/显示赞数、观察时间、未展开或不可见内容。校验 URL 去重和覆盖计数，明确与页面总数的差额；遇登录、验证码或限制就保留进度并停，不换引擎绕过。
 
@@ -34,3 +36,5 @@
 目标是让匹配的人实际使用产品，网站注册只是可选承接方式。用户正在考虑通过对外 Skill 安装和首次完成任务承接；按推荐参考中的可用性登记选择 `site / skill / none`。Skill 还在构想时，内部可写明确标为「上线后预演」的话术，实际可用稿只承诺已验证能力。推荐文案的表达按推荐参考中的当前反馈；域名只用 `agent-journey.cn` 裸域名，安装引用取真实已验证的分发信息。
 
 起草、保存、复制均是本机准备。用户要求「拿几个帖子试试、看看生成效果」只做私有试稿；不发布、不回填虚假的评论链接、不把草稿标成已回复。
+
+用户明确要求去评论时，可用已授权范围内的 `ops publish --id ID --revision N --key KEY --send`。先保存带 `conversationHash` 的主草稿；一条命令只发送该条。检查 `publication.state` 和真实评论链接。重复键只读原回执；`uncertain`/`dispatching` 禁止换键重发，用 `ops verify --id ID --key KEY` 只读找回新增评论回执，没找到仍停在待核验。插件读图仍只提供引用；不得编造图中内容或发布能力。完整接口见 [牛客运营助手](../../../../docs/nowcoder-operations.md)。

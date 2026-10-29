@@ -299,6 +299,9 @@ async function startStack(): Promise<{ libraryRoot: string }> {
     port: 0,
     libraryRoot,
     configDir,
+    // The test loads dist in an isolated profile; the user's installed archive can be another build.
+    // Report the exact fixture build so auto-reload never swaps the worker underneath the test.
+    readArtifactBuildId: async () => (await readFile(join(EXTENSION_PATH, 'build-id.txt'), 'utf8')).trim(),
     fetch: async () => {
       await new Promise(resolveDelay => setTimeout(resolveDelay, 1_200));
       return new Response(null, { status: 404 });
@@ -365,6 +368,53 @@ async function waitForText(
 }
 
 describe('built Chrome extension', () => {
+  it('executes context and a single publication through built extension scripting and durable RPC', async () => {
+    const { libraryRoot } = await startStack();
+    const url = 'https://www.nowcoder.com/discuss/123456';
+    const document: CollectedDocument = { schemaVersion: 1, source: 'nowcoder', kind: 'post', url, canonicalUrl: url,
+      title: '求 Agent 学习方向', text: '学过 LangGraph，想做一个能用的项目', html: '<p>学过 LangGraph，想做一个能用的项目</p>', collectedAt: new Date().toISOString(), images: [] };
+    await new MarkdownLibrary({ root: libraryRoot }).save(organize(document));
+    const store = new NowcoderOperationsStore(join(libraryRoot, '.config', 'nowcoder-operations'), libraryRoot);
+    const entry = await store.add(stableContentId(url));
+    const fixture = '<html><body><h1>求 Agent 学习方向</h1><div class="feed-content-text">学过 LangGraph，想做一个能用的项目</div><div class="comment-title">全部评论(0)</div><div class="composer"><div id="nc-e-textarea-1" contenteditable="true"><p><br></p></div><button disabled>评论</button></div><script>const editor=document.querySelector("#nc-e-textarea-1"),button=document.querySelector("button");editor.addEventListener("input",()=>button.disabled=!editor.innerText.trim());button.onclick=()=>{const box=document.createElement("div");box.className="comment-box";const body=document.createElement("div");body.className="comment-content-box";body.textContent=editor.innerText;const link=document.createElement("a");link.href="/discuss/comment/987654321";link.textContent="刚刚";box.append(body,link);document.body.append(box);editor.innerHTML="<p><br></p>";document.querySelector(".comment-title").textContent="全部评论(1)";};</script></body></html>';
+    const pages: Page[] = [];
+    for (let i = 0; i < 3; i++) {
+      const page = await browser!.newPage();
+      await serveArticleFixture(page, fixture, url);
+      await page.goto(url, { waitUntil: 'domcontentloaded' }); pages.push(page);
+    }
+    const { worker } = await sidePanelFor(pages[0]!);
+    // Preloaded fixture pages stand in for the two owned navigations. Everything after tab creation
+    // uses the packaged runner, real isolated-world serialization, editor events, WS and private store.
+    await worker.evaluate(async targetUrl => {
+      const matches = (await chrome.tabs.query({ url: targetUrl })).sort((a, b) => a.id! - b.id!);
+      const queue = matches.slice(1).map(tab => tab.id!);
+      chrome.tabs.create = (async input => {
+        if (input.url !== targetUrl || input.active !== false || !queue.length) throw new Error('Unexpected E2E owned tab');
+        return chrome.tabs.update(queue.shift()!, { active: false });
+      }) as typeof chrome.tabs.create;
+    }, url);
+    let token = '';
+    for (let i = 0; i < 50 && !token; i++) {
+      token = await worker.evaluate(async () => String((await chrome.storage.local.get('bridgeToken')).bridgeToken ?? ''));
+      if (!token) await new Promise(resolveToken => setTimeout(resolveToken, 100));
+    }
+    const request = async (path: string, body: unknown) => {
+      const response = await fetch(`${bridge!.url}/v1/nowcoder/operations/${entry.id}/${path}`, { method: 'POST', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' }, body: JSON.stringify(body) });
+      const result = await response.json(); expect(response.status, JSON.stringify(result)).toBe(200); return result;
+    };
+    const context = await request('context', { maxPages: 1 });
+    expect(context.sourceUntrusted.coverage).toMatchObject({ complete: true, total: 0 });
+    const saved = await store.update(entry.id, { revision: context.revision, contextHash: entry.contextHash, conversationHash: context.conversationHash,
+      drafts: { primary: '先做个同事能用的文档问答呗', alternative: '拿自己的资料试试', anchor: 'LangGraph', tone: 'practical', notes: '' } });
+    const input = { revision: saved.revision, contextHash: entry.contextHash, key: 'authorized-e2e-single-01', send: true };
+    const published = await request('publish', input);
+    expect(published.publication, JSON.stringify(published)).toMatchObject({ state: 'published', replyUrl: 'https://www.nowcoder.com/discuss/comment/987654321' });
+    expect((await request('publish', input)).publication.state).toBe('published');
+    expect((await store.get(entry.id))?.status).toBe('replied');
+    expect(pages[0]!.isClosed()).toBe(false);
+    expect(pages[1]!.isClosed()).toBe(true); expect(pages[2]!.isClosed()).toBe(true);
+  });
   it('edits private Nowcoder replies through the built panel without publishing', async () => {
     const { libraryRoot } = await startStack();
     const url = 'https://www.nowcoder.com/discuss/123456';
