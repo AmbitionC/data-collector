@@ -37,6 +37,12 @@ const COMPANIES: readonly CompanyDefinition[] = [
   { id: 'other', label: '快手', aliases: [/快手|Kuaishou/i] },
   { id: 'other', label: '美团', aliases: [/美团|\bMeituan\b/i] },
   { id: 'other', label: '京东', aliases: [/京东|\bJingdong\b|\bJD\.com\b/i] },
+  { id: 'other', label: '网易', aliases: [/网易/u] },
+  { id: 'other', label: '科大讯飞', aliases: [/科大讯飞/u] },
+  { id: 'other', label: '金山', aliases: [/金山/u] },
+  { id: 'other', label: '顺丰', aliases: [/顺丰/u] },
+  { id: 'other', label: '携程', aliases: [/携程/u] },
+  { id: 'other', label: '小米', aliases: [/小米/u] },
   { id: 'other', label: '哔哩哔哩', aliases: [/哔哩哔哩|B\s*站|bilibili|阿\s*b/i] },
   { id: 'other', label: '深信服', aliases: [/深信服|信服|Sangfor/i] },
   { id: 'other', label: '影石创新', aliases: [/影石创新|影石|Insta360/i] },
@@ -161,7 +167,8 @@ export function analyzeNowcoderEvidence(document: CollectedDocument): NowcoderEv
   const title = document.title.trim();
   const combined = `${title}\n${document.text}`;
   const titleCompany = matchCompany(title);
-  const openingCompany = matchCompany(document.text.slice(0, 320));
+  // Mask the meeting tool at its original width so the opening boundary stays unchanged.
+  const openingCompany = matchCompany(document.text.replace(/腾讯(?=\s*会议)/gu, '  ').slice(0, 320));
   const company = titleCompany ?? openingCompany;
   const identityText = `${title}\n${document.text.slice(0, 360)}`;
   const businessUnit = company?.id === 'other' ? undefined : matchBusinessUnit(identityText);
