@@ -10,9 +10,10 @@ export async function runNowcoderOperationPage(action: NowcoderOperationAction):
   const visible = (node: Element) => {
     if (node.closest('[hidden],[aria-hidden="true"],.tw-hidden')) return false;
     for (let parent: Element | null = node; parent; parent = parent.parentElement) {
-      if ((parent as HTMLElement).style?.display === 'none' || (parent as HTMLElement).style?.visibility === 'hidden') return false;
+      const style = getComputedStyle(parent);
+      if (style.display === 'none' || style.visibility === 'hidden') return false;
     }
-    return getComputedStyle(node).display !== 'none' && getComputedStyle(node).visibility !== 'hidden';
+    return true;
   };
   const canonical = (value: string) => { const u = new URL(value, location.href); return `${u.origin}${u.pathname.replace(/\/$/u, '')}`; };
   const challenge = () => {
@@ -78,9 +79,10 @@ export async function runNowcoderOperationPage(action: NowcoderOperationAction):
     }
     if (!body || !title || !text(body)) return attention('POST_NOT_READY', '正文未完整加载，未进行操作');
     if (text(body).length > 24_000 || title.length > 500) return attention('CONTEXT_LIMIT', '原帖超过有界读取范围，未截断冒充全文');
-    const readiness = () => JSON.stringify([text(document.querySelector('h1,.post-title,.discuss-title')), text(document.querySelector('.feed-content-text,.nc-slate-editor-content,.post-topic-des,.nc-post-content')), text(document.querySelector('.comment-title')), fingerprint(readComments()), Boolean(document.querySelector('.comment-list .loading,.comment-list [aria-busy="true"],.comment-list[aria-busy="true"]'))]);
+    const initialLoading = () => [...document.querySelectorAll('.comment-list .loading,.comment-list [aria-busy="true"],.comment-list[aria-busy="true"]')].some(visible);
+    const readiness = () => JSON.stringify([text(document.querySelector('h1,.post-title,.discuss-title')), text(document.querySelector('.feed-content-text,.nc-slate-editor-content,.post-topic-des,.nc-post-content')), text(document.querySelector('.comment-title')), fingerprint(readComments()), initialLoading()]);
     const initialTotal = text(document.querySelector('.comment-title')).match(/\d+/u);
-    if (!await settle(readiness, initialTotal ? (Number(initialTotal[0]) === 0 ? 1000 : 500) : 2000, 5000, undefined, () => !document.querySelector('.comment-list .loading,.comment-list [aria-busy="true"],.comment-list[aria-busy="true"]'))) {
+    if (!await settle(readiness, initialTotal ? (Number(initialTotal[0]) === 0 ? 1000 : 500) : 2000, 5000, undefined, () => !initialLoading())) {
       blocked = challenge(); if (blocked) return blocked;
       return attention('CONTEXT_NOT_STABLE', '原帖或评论仍在变化，未读取稳定语境，请稍后重试');
     }

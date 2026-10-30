@@ -250,3 +250,28 @@ it('does not use an unrelated collapsed control as completion proof for the requ
  const pending = runNowcoderOperationPage({ kind: 'context', url, maxPages: 1 }); await vi.runAllTimersAsync();
  expect(await pending).toMatchObject({ kind: 'context', snapshot: { comments: [{}, { text: '目标展开的后续' }], coverage: { total: 2, complete: true } } });
 });
+
+it.each([
+ '<div class="loading" style="display:none">加载中</div>',
+ '<section style="display:none"><div class="loading">加载中</div></section>',
+ '<style>.hidden-spinner-shell { display:none }</style><section class="hidden-spinner-shell"><div class="loading">加载中</div></section>',
+ '<section hidden><div aria-busy="true">加载中</div></section>',
+])('ignores persistent hidden initial loading markers without weakening semantic stability: %s', async marker => {
+ vi.useFakeTimers(); document.body.insertAdjacentHTML('beforeend', `<div class="comment-list">${marker}</div>`);
+ const pending = runNowcoderOperationPage({ kind: 'context', url, maxPages: 1 }); await vi.runAllTimersAsync();
+ expect(await pending).toMatchObject({ kind: 'context', snapshot: { comments: [{ text: '先做点东西' }, { text: '做过文档问答了' }], coverage: { total: 2, observed: 2, complete: true } } });
+});
+it('waits while initial loading is visible and proceeds only after real content stabilizes', async () => {
+ vi.useFakeTimers(); document.querySelector('.comment-box')!.remove(); document.querySelector('.comment-title')!.textContent = '全部评论 0';
+ document.body.insertAdjacentHTML('beforeend', '<div class="comment-list"><div class="loading">加载中</div></div>');
+ setTimeout(() => { (document.querySelector('.loading') as HTMLElement).style.display = 'none'; document.querySelector('.comment-title')!.textContent = '全部评论 1'; document.body.insertAdjacentHTML('beforeend', comment(970, '加载完成才可见的真实评论')); }, 900);
+ let settled = false; const pending = runNowcoderOperationPage({ kind: 'context', url, maxPages: 1 }); void pending.then(() => { settled = true; });
+ await vi.advanceTimersByTimeAsync(700); expect(settled).toBe(false); await vi.runAllTimersAsync();
+ expect(await pending).toMatchObject({ kind: 'context', snapshot: { comments: [{ text: '加载完成才可见的真实评论' }], coverage: { total: 1, observed: 1, complete: true } } });
+});
+it('still refuses continuously changing semantic content even when loading placeholders are hidden', async () => {
+ vi.useFakeTimers(); document.body.insertAdjacentHTML('beforeend', '<div class="comment-list"><div class="loading" style="display:none"></div></div>');
+ for (let index = 1; index <= 70; index++) setTimeout(() => { document.querySelector('.feed-content-text')!.textContent = `正文仍在改变 ${index}`; }, index * 100);
+ const pending = runNowcoderOperationPage({ kind: 'context', url, maxPages: 1 }); await vi.runAllTimersAsync();
+ expect(await pending).toMatchObject({ kind: 'attention', code: 'CONTEXT_NOT_STABLE', submission: 'not_attempted' });
+});
