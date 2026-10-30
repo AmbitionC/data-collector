@@ -1,4 +1,7 @@
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { request as httpRequest } from 'node:http';
+import { once } from 'node:events';
+import { JobStore } from '../../packages/bridge/src/jobs/store.js';
+import { mkdir, readFile, writeFile, readdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import WebSocket from 'ws';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -17,10 +20,11 @@ const url = 'https://www.nowcoder.com/discuss/123456';
 afterEach(async () => {
   sockets.splice(0).forEach(socket => socket.terminate());
   await Promise.all(bridges.splice(0).map(bridge => bridge.close()));
+  vi.useRealTimers();
   await temporaryDirectories.cleanup();
 });
 
-async function fixture(overrides: Partial<CollectedDocument> = {}) {
+async function fixture(overrides: Partial<CollectedDocument> = {}, bridgeOptions: Partial<Parameters<typeof startBridge>[0]> = {}) {
   const root = await temporaryDirectories.create('nowcoder-operations-');
   const configDir = join(root, 'config'), libraryRoot = join(root, 'library');
   await mkdir(configDir, { recursive: true });
@@ -34,7 +38,7 @@ async function fixture(overrides: Partial<CollectedDocument> = {}) {
   };
   await new MarkdownLibrary({ root: libraryRoot }).save(organize(document));
   const bridge = await startBridge({ port: 0, configDir, libraryRoot,
-    fetch: async () => { throw new Error('Operations must not make network requests'); } });
+    fetch: async () => { throw new Error('Operations must not make network requests'); }, ...bridgeOptions });
   bridges.push(bridge);
   const request = async (method: string, path: string, body?: unknown, authorized = true) => {
     const response = await fetch(`${bridge.url}${path}`, { method,
@@ -158,4 +162,85 @@ describe('private Nowcoder operations workflow', () => {
     expect(JSON.parse(output).entry.status).toBe('drafted');
     expect(error).toBe('');
   });
+});
+it('authenticates durable workflow routes and returns compact failed preparation with exact job evidence', async () => {
+ const c = await fixture(), base = '/v1/nowcoder/operations/workflow';
+ const body = { schemaVersion: 1, kind: 'search', key: 'authenticated-search-01', queries: ['Agent'] };
+ expect((await c.request('POST', base, body, false)).status).toBe(401);
+ const started = await c.request('POST', base, body); expect(started.status).toBe(202);
+ await vi.waitFor(async () => expect((await c.request('GET', `${base}/${started.body.runId}`)).body.status).toBe('needs_attention'), { timeout: 10000 });
+ expect((await c.request('GET', `${base}/${started.body.runId}/stats`)).body).toMatchObject({ counts: { failed: 1 }, resultPath: expect.stringContaining('.private.json') });
+ const replay = await c.request('POST', base, body); expect(replay.body.runId).toBe(started.body.runId);
+ expect((await c.request('POST', base, { ...body, queries: ['changed'] })).status).toBe(409);
+});
+it('prepares through the ordinary job queue and fences external writes while preserving exact collection proof', async () => {
+ const c = await fixture({ sourceMetadata: { contentAccess: 'full' } }), base = '/v1/nowcoder/operations/workflow';
+ const socket = new WebSocket(`${c.bridge.wsUrl}?token=${token}`, { origin: `chrome-extension://${TRUSTED_EXTENSION_ID}` }); sockets.push(socket);
+ await new Promise<void>((resolve, reject) => { socket.once('open', resolve); socket.once('error', reject); });
+ const envelope = (type: string, requestId: string, payload: unknown) => JSON.stringify({ protocolVersion: 1, type, requestId, timestamp: new Date().toISOString(), payload });
+ socket.send(envelope('extension.hello', 'hello', { version: APP_VERSION, capabilities: [NOWCODER_BROWSER_OPERATIONS_CAPABILITY] }));
+ await vi.waitFor(async () => expect((await c.request('GET', '/health')).body.extensionConnected).toBe(true));
+ let jobId = '', contextId = '';
+ socket.on('message', raw => { const msg = JSON.parse(raw.toString()); if (msg.type === 'job.collect') { jobId = msg.requestId; socket.send(envelope('job.result', msg.requestId, { document: c.document })); } if (msg.type === 'operations.execute') contextId = msg.requestId; });
+ const request = { schemaVersion: 1, kind: 'prepare', key: 'prepare-integration-01', candidates: [{ sourceId: c.sourceId, url }] };
+ const started = await c.request('POST', base, request); expect(started.status).toBe(202);
+ await vi.waitFor(() => expect(contextId).not.toBe(''), { timeout: 10000 });
+ expect((await c.request('POST', base, request)).body.runId).toBe(started.body.runId);
+ expect((await c.request('POST', '/v1/jobs', { url, requestedBy: 'codex' })).status).toBe(409);
+ expect((await c.request('POST', '/v1/nowcoder/operations', { sourceId: c.sourceId })).status).toBe(409);
+ socket.send(envelope('operations.result', contextId, { kind: 'context', snapshot: { sourceUrl: url, readAt: new Date().toISOString(), post: { title: c.document.title, body: c.document.text, images: [] }, comments: [], coverage: { total: null, observed: 0, pagesRead: 1, hasMore: false, complete: false, limitations: ['评论总数未知'] } } }));
+ await vi.waitFor(async () => expect((await c.request('GET', `${base}/${started.body.runId}`)).body.status).toBe('completed'), { timeout: 10000 });
+ const status = (await c.request('GET', `${base}/${started.body.runId}`)).body;
+ const packet = JSON.parse(await readFile(status.resultPath, 'utf8'));
+ expect(packet.items[0].result).toMatchObject({ jobId, status: 'saved' });
+ expect(packet.prepared[0]).toMatchObject({ currentPost: { body: c.document.text }, conversation: { coverage: { total: null, complete: false } }, draftEnvelope: { opportunityId: `ops-${c.sourceId}` } });
+ expect((await c.request('GET', '/v1/plans/batches')).body.batches).toEqual([]);
+ // A saved job alone is not full-body evidence: the current extractor must attest full access.
+ delete c.document.sourceMetadata;
+ socket.on('message', raw => { const msg = JSON.parse(raw.toString()); if (msg.type === 'operations.execute') socket.send(envelope('operations.result', msg.requestId, { kind: 'context', snapshot: { sourceUrl: url, readAt: new Date().toISOString(), post: { title: c.document.title, body: c.document.text, images: [] }, comments: [], coverage: { total: 0, observed: 0, pagesRead: 1, hasMore: false, complete: true, limitations: [] } } })); });
+ const unproven = await c.request('POST', base, { ...request, key: 'prepare-unproven-01' });
+ await vi.waitFor(async () => expect((await c.request('GET', `${base}/${unproven.body.runId}`)).body.status).toBe('needs_attention'), { timeout: 10000 });
+ const stopped = (await c.request('GET', `${base}/${unproven.body.runId}`)).body;
+ expect(JSON.parse(await readFile(stopped.resultPath, 'utf8')).items[0].result).toMatchObject({ jobId: expect.any(String), status: 'needs_attention', errorCode: 'OPERATIONS_SOURCE_INCOMPLETE' });
+});
+
+it('fences automatic due-plan ticks across the whole asynchronous workflow', async () => {
+ vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
+ let release!: (value: Response) => void;
+ const blocked = new Promise<Response>(resolve => { release = resolve; });
+ const c = await fixture({}, { enableCollectionPlanScheduler: true, collectionPlanCheckIntervalMs: 10000, fetch: async () => blocked });
+ const base = '/v1/nowcoder/operations/workflow';
+ const started = await c.request('POST', base, { schemaVersion: 1, kind: 'search', key: 'scheduler-fence-key', queries: ['Agent'] });
+ expect(started.status).toBe(202);
+ try {
+   await vi.advanceTimersByTimeAsync(10000);
+   await new Promise(resolve => setTimeout(resolve, 300));
+   expect((await c.request('GET', '/v1/plans/batches')).body.batches).toEqual([]);
+ } finally { release(Response.json({ success: true, code: 0, data: { totalPage: 1, records: [] } })); }
+ await vi.waitFor(async () => expect((await c.request('GET', `${base}/${started.body.runId}`)).body.status).toBe('completed'), { timeout: 10000 });
+});
+
+it('reserves an external streaming-body operation before workflow admission and releases on completion', async () => {
+ const c = await fixture(), base = '/v1/nowcoder/operations', entry = (await c.request('POST', base, { sourceId: c.sourceId })).body.entry;
+ const pending = httpRequest(`${c.bridge.url}${base}/${entry.id}/context`, { method: 'POST', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json', expect: '100-continue' } });
+ const response = new Promise<{ status: number; body: any }>((resolve, reject) => { pending.on('response', res => { let raw = ''; res.on('data', chunk => { raw += chunk; }); res.on('end', () => resolve({ status: res.statusCode!, body: JSON.parse(raw) })); }); pending.on('error', reject); });
+ pending.flushHeaders(); await once(pending, 'continue'); pending.write('{"maxPages":');
+ const workflowRequest = { schemaVersion: 1, kind: 'search', key: 'streaming-admission-key', queries: ['Agent'] };
+ try {
+   const blocked = await c.request('POST', `${base}/workflow`, workflowRequest);
+   expect(blocked).toMatchObject({ status: 409, body: { error: { code: 'WORKFLOW_BUSY' } } });
+   expect(await readdir(join(c.configDir, 'nowcoder-workflows')).catch(() => [])).toEqual([]);
+ } finally { pending.end('1}'); await response; }
+ expect((await c.request('POST', `${base}/workflow`, workflowRequest)).status).toBe(202);
+});
+it('reserves external job creation through asynchronous insertion before a job is visible', async () => {
+ const c = await fixture(); let release!: () => void, entered!: () => void;
+ const insertion = new Promise<void>(resolve => { entered = resolve; }), gate = new Promise<void>(resolve => { release = resolve; });
+ const original = JobStore.prototype.create;
+ const spy = vi.spyOn(JobStore.prototype, 'create').mockImplementation(async function(input) { entered(); await gate; return original.call(this, input); });
+ const creation = c.request('POST', '/v1/jobs', { url, requestedBy: 'codex' }); await insertion;
+ try {
+   expect(await c.request('POST', '/v1/nowcoder/operations/workflow', { schemaVersion: 1, kind: 'search', key: 'insertion-admission-key', queries: ['Agent'] })).toMatchObject({ status: 409, body: { error: { code: 'WORKFLOW_BUSY' } } });
+   expect(await readdir(join(c.configDir, 'nowcoder-workflows')).catch(() => [])).toEqual([]);
+ } finally { release(); await creation; spy.mockRestore(); }
 });

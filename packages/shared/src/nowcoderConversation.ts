@@ -29,11 +29,16 @@ export type NowcoderOperationAction = z.infer<typeof nowcoderOperationActionSche
 export const nowcoderPublishReceiptSchema = z.object({
   sourceUrl, url: commentUrl, text: z.string().min(1).max(2000), observedAt: z.iso.datetime(),
 }).strict();
+export const nowcoderContextChangesSchema = z.object({
+  fields: z.array(z.enum(['title', 'body', 'images', 'comments', 'total'])).max(5),
+  comments: z.object({ added: z.array(commentUrl).max(30), removed: z.array(commentUrl).max(30), changed: z.array(commentUrl).max(30), truncated: z.boolean() }).strict(),
+  total: z.object({ before: z.number().int().nonnegative().nullable(), after: z.number().int().nonnegative().nullable() }).strict(),
+}).strict();
 export const nowcoderOperationResultSchema = z.discriminatedUnion('kind', [
   z.object({ kind: z.literal('context'), snapshot: nowcoderConversationSchema }).strict(),
   z.object({ kind: z.literal('published'), receipt: nowcoderPublishReceiptSchema }).strict(),
   z.object({ kind: z.literal('attention'), code: z.string().min(1).max(100), message: z.string().min(1).max(1000),
-    submission: z.enum(['not_attempted', 'uncertain']), tabUrl: z.string().url().max(4096).optional() }).strict(),
+    submission: z.enum(['not_attempted', 'uncertain']), tabUrl: z.string().url().max(4096).optional(), contextChanges: nowcoderContextChangesSchema.optional() }).strict(),
 ]);
 export type NowcoderOperationResult = z.infer<typeof nowcoderOperationResultSchema>;
 export const operationPublishSchema = z.object({

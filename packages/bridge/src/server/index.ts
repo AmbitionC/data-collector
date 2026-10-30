@@ -49,6 +49,7 @@ import { loadConfig, type ConfigOverrides } from '../config.js';
 import { NowcoderScheduleStore } from '../plans/nowcoderSchedule.js';
 import { NowcoderOperationsStore } from '../operations/store.js';
 import { NowcoderOperationsTransport } from '../operations/transport.js';
+import { NowcoderOperationsWorkflow, workflowRequestSchema } from '../operations/workflow.js';
 import { NowcoderOperationsActivity } from '../operations/activity.js';
 import { readCompanyInventory } from '../plans/nowcoderInventory.js';
 import { NowcoderCollectionStopError, NowcoderRequestPacer, detectNowcoderResponseStop, type NowcoderCollectionStopCode } from '../plans/nowcoderPacing.js';
@@ -685,6 +686,7 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
   let restartHandoffReady = false;
   let restartIntent: ArtifactUpdateIntent | undefined;
   let updateCheckInFlight = false;
+  let externalOperations = 0;
   const operationsTransport = new NowcoderOperationsTransport(() => ({
     socket: extensionSocket,
     ready: !closing && !updateCheckInFlight && !restartPending && extensionReady && !(directedService?.hasActiveRun() ?? false)
@@ -692,6 +694,31 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
     capabilities: extensionSocket ? extensionRuntime.get(extensionSocket)?.capabilities ?? [] : [],
   }));
   const operationsActivity = new NowcoderOperationsActivity(operations, operationsTransport, options.fetch ?? fetch);
+  const workflowCollectionJobs = new Set<string>();
+  const operationsWorkflow = new NowcoderOperationsWorkflow(join(config.configDir, 'nowcoder-workflows'), operations, operationsActivity, async (candidate, observe) => {
+    operationsTransport.assertAvailable();
+    const job = await jobs.create({ url: candidate.url, requestedBy: 'codex' });
+    workflowCollectionJobs.add(job.id);
+    try {
+    await observe({ jobId: job.id, status: job.status });
+    await dispatch(job);
+    const deadline = Date.now() + 60_000;
+    for (;;) {
+      const current = jobs.get(job.id);
+      if (closing) return { jobId: job.id, status: 'needs_attention', message: 'Bridge关闭，保留job并停止批次，未重跑' };
+      if (!current) return { jobId: job.id, status: 'failed', message: '精确job记录缺失，未使用其他来源替代' };
+      if (current.status === 'saved') {
+        const document = await storedDocumentFor(current);
+        if (!document || document.source !== 'nowcoder' || document.canonicalUrl !== candidate.url || document.truncated || document.sourceMetadata?.contentAccess !== 'full' || document.sourceMetadata?.operationsCollectionJobId !== current.id || document.sourceMetadata?.operationsExtractorContentAccess !== 'full') return { jobId: current.id, status: 'needs_attention', errorCode: 'OPERATIONS_SOURCE_INCOMPLETE', message: '当前精确job缺少完整正文与来源证明，未使用搜索短摘或旧采集替代' };
+        return { jobId: current.id, status: 'saved', contentAccess: 'full' };
+      }
+      if (['failed', 'needs_attention'].includes(current.status)) return { jobId: current.id, status: current.status, ...(current.errorCode ? { errorCode: current.errorCode } : {}), ...(current.errorMessage ? { message: current.errorMessage } : {}) };
+      if (Date.now() >= deadline) return { jobId: job.id, status: 'timeout', message: '60秒采集等待到期，job未取消；批次停止，请核对原job' };
+      await new Promise(resolve => setTimeout(resolve, 250));
+    }
+    } finally { workflowCollectionJobs.delete(job.id); }
+  });
+  await operationsWorkflow.recover();
   let updateCheckDeferred = false;
   const updateDrainWaiters = new Set<() => void>();
   const waitForUpdateDrain = (): Promise<void> => {
@@ -721,7 +748,7 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
    */
   const maybeRestart = (): void => {
     if (closing || !restartPending) return;
-    if (operationsActivity.busy || operationsTransport.busy) return;
+    if (operationsWorkflow.busy || operationsActivity.busy || operationsTransport.busy) return;
     // 新 build-id 可能已经落盘，但打包子进程还在收尾。先记住交接，
     // 等 runUpdate 真正返回后再退出，避免杀掉尚未完成的更新。
     if (updateCheckInFlight) return;
@@ -755,7 +782,7 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
     const readerState = artifactReaders.snapshot();
     if (
       zsxqPersistingJobIds.size > 0
-      || operationsActivity.busy || operationsTransport.busy
+      || operationsWorkflow.busy || operationsActivity.busy || operationsTransport.busy
       || hasActiveZsxqAttempt()
       || shouldDeferArtifactUpdate(readerState, directedService?.hasActiveRun() ?? false)
     ) {
@@ -1246,9 +1273,9 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
           if (!resourceRoot) throw new Error('请先配置面经资源仓库；库存不可核验，待审核收集未开始');
           return await readCompanyInventory(resourceRoot, config.libraryRoot, new Date().toISOString(), config.interviewHistoryPath, config.interviewInventoryCommit);
         },
-        extensionConnected: () => extensionReady && extensionSocket?.readyState === WebSocket.OPEN,
+        extensionConnected: () => !operationsWorkflow.busy && extensionReady && extensionSocket?.readyState === WebSocket.OPEN,
         canCollectZsxq: extensionCanCollectZsxq,
-        canStartZsxqAttempt: () => persistingJobIds.size === 0
+        canStartZsxqAttempt: () => !operationsWorkflow.busy && persistingJobIds.size === 0
           && !updateCheckInFlight
           && artifactReaders.snapshot().updateState === 'idle',
         discoverNowcoder: async (knownUrls, batch) => {
@@ -1803,6 +1830,12 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
               },
             }
           : result.document as CollectedDocument;
+        if (workflowCollectionJobs.has(job.id)) {
+          // Preserve the extractor's actual proof before generic Nowcoder enrichment reclassifies access.
+          document = { ...document, sourceMetadata: { ...document.sourceMetadata,
+            operationsCollectionJobId: job.id,
+            operationsExtractorContentAccess: result.document.sourceMetadata?.contentAccess === 'full' ? 'full' : 'unconfirmed' } };
+        }
         if (job.requestedBy === 'cli' && job.id.startsWith('nowcoder-research-') && document.source === 'nowcoder') {
           document = { ...document, sourceMetadata: { ...document.sourceMetadata, collectionJobId: job.id } };
         }
@@ -1958,7 +1991,7 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
         ok: true,
         version: APP_VERSION,
         bridgeCapabilities: [NOWCODER_HOT_MATERIAL_CAPABILITY, NOWCODER_OPERATIONS_CAPABILITY, NOWCODER_BROWSER_OPERATIONS_CAPABILITY],
-        nowcoderOperationsActive: operationsActivity.busy || operationsTransport.busy,
+        nowcoderOperationsActive: operationsWorkflow.busy || operationsActivity.busy || operationsTransport.busy,
         trustedExtensionId: TRUSTED_EXTENSION_ID,
         extensionConnected: extensionReady && extensionSocket?.readyState === WebSocket.OPEN,
         directedRunActive: directedService?.hasActiveRun() ?? false,
@@ -1993,6 +2026,26 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
     const token = bearerToken(request) ?? '';
     if (!access.verify(token)) throw new HttpError(401, 'UNAUTHORIZED', '访问令牌无效');
 
+    // Admission is synchronous after auth and before reading any request body. Keep the
+    // reservation through every handler await, including job insertion and persistence.
+    // Workflow-owned calls use the injected store/activity/collector directly, never this lease.
+    const externalConflict = request.method !== 'GET'
+      && requestUrl.pathname !== '/v1/nowcoder/operations/workflow'
+      && (requestUrl.pathname.startsWith('/v1/nowcoder/') || requestUrl.pathname.startsWith('/v1/jobs')
+        || requestUrl.pathname === '/v1/fe-journey/collect' || requestUrl.pathname.startsWith('/v1/plans'));
+    if (externalConflict && operationsWorkflow.busy) throw new HttpError(409, 'WORKFLOW_BUSY', '运营批次正在执行，外部修改已暂停');
+    if (externalConflict) externalOperations++;
+    try {
+    if (requestUrl.pathname === '/v1/nowcoder/operations/workflow' && request.method === 'POST') {
+      const raw = z.record(z.string(), z.unknown()).parse(await readJson(request));
+      const { send, ...manifest } = raw;
+      const input = { request: workflowRequestSchema.parse(manifest), send: z.literal(true).optional().parse(send) };
+      if (externalOperations > 0 || (!operationsWorkflow.busy && (operationsActivity.busy || operationsTransport.busy || updateCheckInFlight || restartPending || closing || (directedService?.hasActiveRun() ?? false) || (planStore?.active().length ?? 0) > 0 || jobs.list().some(job => ['queued', 'dispatched', 'collecting'].includes(job.status))))) throw new HttpError(409, 'WORKFLOW_BUSY', '采集、更新或牛客操作正在执行');
+      return sendJson(response, 202, await operationsWorkflow.start(input.request, input.send === true));
+    }
+    const workflowMatch = requestUrl.pathname.match(/^\/v1\/nowcoder\/operations\/workflow\/([a-zA-Z0-9_-]{12,100})(\/stats)?$/u);
+    if (workflowMatch && request.method === 'GET') return sendJson(response, 200, await operationsWorkflow.get(workflowMatch[1]!));
+    if (operationsWorkflow.busy && request.method !== 'GET' && (requestUrl.pathname.startsWith('/v1/nowcoder/') || requestUrl.pathname.startsWith('/v1/jobs') || requestUrl.pathname === '/v1/fe-journey/collect' || requestUrl.pathname.startsWith('/v1/plans'))) throw new HttpError(409, 'WORKFLOW_BUSY', '运营批次正在执行，外部修改已暂停');
     if (requestUrl.pathname === '/v1/nowcoder/operations') {
       if (request.method === 'GET') return sendJson(response, 200, { entries: await operations.list() });
       if (request.method === 'POST') {
@@ -2336,6 +2389,7 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
       return sendJson(response, 200, job);
     }
     throw new HttpError(404, 'NOT_FOUND', '接口不存在');
+    } finally { if (externalConflict) externalOperations--; }
   };
 
   const server = createServer((request, response) => {
@@ -2448,7 +2502,7 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
   let collectionPlanTimer: NodeJS.Timeout | undefined;
   if (options.enableCollectionPlanScheduler && collectionPlans) {
     collectionPlanTimer = setInterval(() => {
-      if (closing) return;
+      if (closing || operationsWorkflow.busy) return;
       void trackOperation(collectionPlans.runDuePlans().catch(error => {
         console.warn(`[plans] 到期检查失败：${error instanceof Error ? error.message : error}`);
       }));
@@ -2484,6 +2538,7 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
         if (endpointResults.some(result => result.status === 'rejected')) cleanupFailed = true;
         try {
           await drainActiveOperations();
+          await operationsWorkflow.drain();
         } catch {
           cleanupFailed = true;
         }

@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import { MAX_REPLY_CHARACTERS } from './nowcoderReplyStyle.js';
-import { nowcoderConversationSchema } from './nowcoderConversation.js';
+import { nowcoderConversationSchema, nowcoderContextChangesSchema } from './nowcoderConversation.js';
 
 export const NOWCODER_OPERATIONS_CAPABILITY = 'nowcoder-operations-v1';
 export const operationIdSchema = z.string().regex(/^ops-[a-f0-9]{12}$/u);
@@ -40,7 +40,7 @@ export const operationPublicationSchema = z.object({
   state: z.enum(['dispatching', 'published', 'uncertain', 'rejected']),
   evidence: z.enum(['observed', 'manual']).optional(),
   createdAt: z.iso.datetime(), updatedAt: z.iso.datetime(),
-  message: z.string().max(1000).optional(), replyUrl: replyUrlSchema.optional(),
+  contextChanges: nowcoderContextChangesSchema.optional(), message: z.string().max(1000).optional(), replyUrl: replyUrlSchema.optional(),
 }).strict();
 export const nowcoderOperationSchema = z.object({
   schemaVersion: z.literal(1), visibility: z.literal('private'),

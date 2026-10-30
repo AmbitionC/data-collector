@@ -23,7 +23,7 @@
 
 ## 证据与工具边界
 
-日常找帖和操作优先用插件 CLI：`ops search --query QUERY --limit N` → 已有 `collect` 保存正文 → `ops add --source SOURCE_ID` → `ops context --id ID`。`context` 返回精简结构化语境及覆盖信息；读取更多页显式传 `--pages 2` 或 `3`。不要用反复页面快照承担常规找帖、读评论。图片、登录/验证接手和开发检查才按需要使用配置好的浏览器。
+多条任务优先用 [批次执行速查](nowcoder-workflow-runbook.md) 的 `ops workflow`，由Bridge执行搜索/准备/顺序发布，CLI内部等待，只读一次私有结果包。旧单条接口继续兼容。日常找帖和操作优先用插件 CLI：`ops search --query QUERY --limit N` → 已有 `collect` 保存正文 → `ops add --source SOURCE_ID` → `ops context --id ID`。`context` 返回精简结构化语境及覆盖信息；读取更多页显式传 `--pages 2` 或 `3`。不要用反复页面快照承担常规找帖、读评论。图片、登录/验证接手和开发检查才按需要使用配置好的浏览器。
 
 正文 research/run 继续遵守各自精确合同。只有 `ops context` 成功持久化后，`ops brief` 才标为 `plugin-collected`；没读过仍是 `not-collected`。评论观察不是正文交付批次，也不能把旧版 Browser Use study 改称扩展批次。
 

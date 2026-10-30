@@ -202,6 +202,7 @@ export class NowcoderOperationsStore {
         && !entry.conversation?.snapshot.comments.some(c => c.url === result.receipt.url);
       const publication: OperationPublication = { ...attempt, updatedAt: new Date().toISOString(),
         state: valid ? 'published' : result.kind === 'attention' && result.submission === 'not_attempted' ? 'rejected' : 'uncertain',
+        ...(result.kind === 'attention' && result.contextChanges ? { contextChanges: result.contextChanges } : {}),
         ...(valid && result.kind === 'published' ? { replyUrl: result.receipt.url, evidence: 'observed' } : { message: result.kind === 'attention' ? result.message : '评论回执与原帖或草稿不符，请核验，禁止重发' }) };
       await this.save({ ...entry, publicationAttempts: entry.publicationAttempts!.map(a => a.key === key ? publication : a),
         ...(valid && result.kind === 'published' ? { status: 'replied', replyUrl: result.receipt.url } : {}), revision: entry.revision + 1, updatedAt: publication.updatedAt });
@@ -227,6 +228,19 @@ export class NowcoderOperationsStore {
         ...(match ? { status: 'replied', replyUrl: match.url } : {}), revision: entry.revision + 1, updatedAt: publication.updatedAt });
       return publication;
     });
+  }
+
+  async preparationPacket(id: string): Promise<unknown> {
+    const entry = await this.get(id);
+    if (!entry?.conversation) throw new HttpError(409, 'OPERATIONS_CONTEXT_REQUIRED', '准备包需要插件当前评论上下文');
+    const { post, ...conversation } = entry.conversation.snapshot;
+    const sourceConflict = normalize(post.title) !== normalize(entry.title) || normalize(post.body) !== normalize(entry.body);
+    const anchorOptions = entry.body.split(/[。！？\n]+/u).map(value => value.trim()).filter(value => value.length >= 2)
+      .flatMap(value => { const parts: string[] = []; for (let offset = 0; offset < value.length && parts.length < 8; offset += 150) { const part = value.slice(offset, offset + 150); if (part.length >= 2) parts.push(part); } return parts; }).slice(0, 8);
+    return { schemaVersion: 1, visibility: 'private', id: entry.id, sourceId: entry.sourceId, canonicalUrl: entry.canonicalUrl,
+      currentPost: post, sourceConflict, ...(sourceConflict ? { frozenPost: { title: entry.title, body: entry.body } } : {}),
+      conversation, anchorOptions, assessment: entry.assessment, references: ['.codex/skills/data-collector-delivery/references/nowcoder-replies.md', '.codex/skills/data-collector-delivery/references/nowcoder-comment-evidence.md'],
+      draftEnvelope: { schemaVersion: 1, opportunityId: entry.id, revision: entry.revision, contextHash: entry.contextHash, conversationHash: entry.conversation.hash } };
   }
 
   async brief(id: string): Promise<unknown> {

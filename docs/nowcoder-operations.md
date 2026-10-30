@@ -2,6 +2,16 @@
 
 目标是让有实际需要的牛客读者发现并使用 Agent Journey。用户已在 2026-10-28 确认先实现机会列表、回复角度、可编辑草稿、处理台账，并用真实帖子预览回复。2026-10-29 补充：不为水评论而参与；匹配的场景应正常推荐产品，未来也可能以对外 Skill 安装承接，网站注册不是唯一入口。
 
+## 固定批次
+
+批次命令为 `nowcoder ops workflow --file /absolute/request.private.json [--send] [--wait 600000]`、`workflow --id RUN_ID [--wait ...]` 和 `stats --id RUN_ID`。完整请求示例、准备包字段、阶段停止规则和离线用量计量见 [批次执行速查](../.codex/skills/data-collector-delivery/references/nowcoder-workflow-runbook.md)。单条命令继续兼容。
+
+认证HTTP：`POST /v1/nowcoder/operations/workflow` 接收严格请求清单，publish另需同级 `send:true`；`GET .../workflow/RUN_ID` 和 `GET .../workflow/RUN_ID/stats` 返回短状态、逐项阶段时间、计数、耗时与私有 `resultPath`。完整请求摘要、阶段和结果持久化在配置目录的 `nowcoder-workflows/`（目录0700、文件0600），准备包保留完整正文/实际评论/图片引用/覆盖与版本绑定，不输出到普通status。
+
+同key同清单返回原运行，不重放；改清单复用key拒绝。busy从首次落盘前覆盖整批并纳入更新/重启栅栏，外部冲突写入被拒绝。Bridge重启将running/queued置待核验；已有单条dispatching/uncertain台账始终是最终去重依据。等待期限只约束CLI，不取消服务端批次；超时返回原ID与查询方法，退出非零，后台继续原授权运行。prepare每项job等待60秒，超时保存准确jobID并停止。
+
+页面读取采用有界语义稳定等待；未知评论总数保留null、不称完整覆盖。展开子回复观察内容/完成状态变化；不稳定明确attention或覆盖限制。发布前真实变化继续拒绝，`CONTEXT_CHANGED.contextChanges` 传递变化字段、评论URL增删改（各最多30）与前后总数，并保存在单条发送证据中。点赞等非语义字段不参与正文指纹。
+
 ## 使用链路
 
 1. 用 `nowcoder ops search --query 'Agent 学习' --limit 5` 找帖。复用结构化最新搜索接口，默认只请求一页、返回标题/链接/短摘，排除已经回复的帖子。无日期的命中不冒充最新结果。

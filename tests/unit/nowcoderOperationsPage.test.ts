@@ -20,7 +20,9 @@ beforeEach(() => {
 afterEach(() => { vi.unstubAllGlobals(); vi.useRealTimers(); });
 
 async function snapshot() {
-  const result = await runNowcoderOperationPage({ kind: 'context', url, maxPages: 1 });
+  const pending = runNowcoderOperationPage({ kind: 'context', url, maxPages: 1 });
+  if (vi.isFakeTimers()) await vi.runAllTimersAsync();
+  const result = await pending;
   if (result.kind !== 'context') throw new Error(JSON.stringify(result));
   return result.snapshot;
 }
@@ -159,7 +161,7 @@ describe('Nowcoder plugin page operations', () => {
         }, 150);
       });
       const pending = runNowcoderOperationPage({ kind: 'publish', url, text: '这条还没发送', expected });
-      await vi.advanceTimersByTimeAsync(400);
+      await vi.runAllTimersAsync();
       expect(await pending).toMatchObject({ kind: 'attention', code: change === 'source' ? 'SOURCE_MISMATCH' : 'FORWARDING_ENABLED', submission: 'not_attempted' });
       expect(click).not.toHaveBeenCalled();
     }
@@ -174,4 +176,77 @@ describe('Nowcoder plugin page operations', () => {
     expect(await pending).toMatchObject({ kind: 'attention', submission: 'uncertain' });
     expect(click).toHaveBeenCalledTimes(1);
   });
+});
+
+it('waits for delayed comment totals and visible comments instead of treating an existing title as ready', async () => {
+ vi.useFakeTimers(); document.querySelector('.comment-title')!.textContent = '全部评论';
+ document.querySelector('.comment-box')!.remove();
+ setTimeout(() => { document.querySelector('.comment-title')!.textContent = '全部评论 1'; document.body.insertAdjacentHTML('beforeend', comment(900, '稍晚加载的真实评论')); }, 700);
+ const pending = runNowcoderOperationPage({ kind: 'context', url, maxPages: 1 });
+ await vi.runAllTimersAsync();
+ expect(await pending).toMatchObject({ kind: 'context', snapshot: { comments: [{ text: '稍晚加载的真实评论' }], coverage: { total: 1, observed: 1 } } });
+});
+it('waits for child expansion content beyond the old 300ms delay', async () => {
+ vi.useFakeTimers(); document.querySelector('.subcomment-box')!.remove();
+ const more = document.createElement('button'); more.className = 'subcomment-more'; more.textContent = '查看1条回复';
+ more.onclick = () => { setTimeout(() => { document.querySelector('.comment-box')!.insertAdjacentHTML('beforeend', '<div class="subcomment-box"><div class="comment-content-box">迟到的楼主后续</div><a href="/discuss/comment/901">今天</a><span class="author-tag">楼主</span></div>'); more.textContent = '收起'; }, 900); };
+ document.body.append(more);
+ const pending = runNowcoderOperationPage({ kind: 'context', url, maxPages: 1 }); await vi.runAllTimersAsync();
+ expect(await pending).toMatchObject({ kind: 'context', snapshot: { comments: [{}, { text: '迟到的楼主后续', isAuthor: true }], coverage: { observed: 2 } } });
+});
+it('returns bounded structured semantic changes while ignoring likes and expansion labels', async () => {
+ vi.useFakeTimers();
+ const expected = await snapshot();
+ document.querySelector('.feed-content-text')!.textContent = '原帖正文已修改';
+ document.querySelector('.comment-box .comment-content-box')!.textContent = '评论也改变了';
+ document.querySelector('.subcomment-box')!.remove();
+ document.body.insertAdjacentHTML('beforeend', comment(902, '新增评论'));
+ document.querySelector('.comment-title')!.textContent = '全部评论 3';
+ const pending = runNowcoderOperationPage({ kind: 'publish', url, text: '先做个项目', expected }); await vi.runAllTimersAsync();
+ expect(await pending).toMatchObject({ kind: 'attention', code: 'CONTEXT_CHANGED', submission: 'not_attempted', contextChanges: { fields: ['body', 'comments', 'total'], comments: { added: ['https://www.nowcoder.com/discuss/comment/902'], removed: ['https://www.nowcoder.com/discuss/comment/101'], changed: ['https://www.nowcoder.com/discuss/comment/100'] }, total: { before: 2, after: 3 } } });
+ expect(JSON.stringify(await pending)).not.toContain(expected.post.body);
+});
+it('preserves unknown total on a legitimate empty page and never claims complete coverage', async () => {
+ vi.useFakeTimers(); document.querySelector('.comment-title')!.textContent = '全部评论'; document.querySelector('.comment-box')!.remove();
+ const pending = runNowcoderOperationPage({ kind: 'context', url, maxPages: 1 }); await vi.runAllTimersAsync();
+ expect(await pending).toMatchObject({ kind: 'context', snapshot: { comments: [], coverage: { total: null, complete: false } } });
+});
+it('does not silently truncate a body that grows during readiness and does not accept a persistent loading marker', async () => {
+ vi.useFakeTimers();
+ setTimeout(() => { document.querySelector('.feed-content-text')!.textContent = '正文'.repeat(13000); }, 100);
+ let pending = runNowcoderOperationPage({ kind: 'context', url, maxPages: 1 }); await vi.runAllTimersAsync();
+ expect(await pending).toMatchObject({ kind: 'attention', code: 'CONTEXT_LIMIT' });
+ fixture(); document.body.insertAdjacentHTML('beforeend', '<div class="comment-list" aria-busy="true">加载中</div>');
+ pending = runNowcoderOperationPage({ kind: 'context', url, maxPages: 1 }); await vi.runAllTimersAsync();
+ expect(await pending).toMatchObject({ kind: 'attention', code: 'CONTEXT_NOT_STABLE' });
+});
+
+it.each(['busy-control', 'replacement-placeholder'])('waits for delayed children and updated totals after an immediate control transition: %s', async mode => {
+ vi.useFakeTimers(); document.querySelector('.subcomment-box')!.remove(); document.querySelector('.comment-title')!.textContent = '全部评论 1';
+ const parent = document.querySelector('.comment-box')!, control = document.createElement('button'); control.className = 'subcomment-more'; control.textContent = '查看1条回复'; parent.append(control);
+ control.onclick = () => {
+   let live: HTMLElement = control;
+   if (mode === 'replacement-placeholder') { live = document.createElement('div'); live.className = 'subcomment-more loading'; control.replaceWith(live); }
+   live.textContent = mode === 'busy-control' ? '收起' : '加载中'; live.setAttribute('aria-expanded', 'true'); live.setAttribute('aria-busy', 'true');
+   setTimeout(() => { parent.insertAdjacentHTML('beforeend', '<div class="subcomment-box"><div class="comment-content-box">延迟出现的楼主后续</div><a href="/discuss/comment/950">今天</a><span class="author-tag">楼主</span></div>'); live.textContent = '收起'; live.setAttribute('aria-busy', 'false'); live.classList.remove('loading'); document.querySelector('.comment-title')!.textContent = '全部评论 2'; }, 900);
+ };
+ const pending = runNowcoderOperationPage({ kind: 'context', url, maxPages: 1 }); await vi.runAllTimersAsync();
+ expect(await pending).toMatchObject({ kind: 'context', snapshot: { comments: [{}, { text: '延迟出现的楼主后续', isAuthor: true }], coverage: { total: 2, observed: 2, complete: true } } });
+});
+it('does not claim complete coverage when the child control stays busy after flipping to collapse', async () => {
+ vi.useFakeTimers(); document.querySelector('.subcomment-box')!.remove(); document.querySelector('.comment-title')!.textContent = '全部评论 1';
+ const control = document.createElement('button'); control.className = 'subcomment-more'; control.textContent = '查看回复';
+ control.onclick = () => { control.textContent = '收起'; control.setAttribute('aria-busy', 'true'); control.setAttribute('aria-expanded', 'true'); };
+ document.querySelector('.comment-box')!.append(control);
+ const pending = runNowcoderOperationPage({ kind: 'context', url, maxPages: 1 }); await vi.runAllTimersAsync();
+ expect(await pending).toMatchObject({ kind: 'context', snapshot: { coverage: { complete: false, total: 1 } } });
+});
+it('does not use an unrelated collapsed control as completion proof for the requested expansion', async () => {
+ vi.useFakeTimers(); document.querySelector('.subcomment-box')!.remove(); document.querySelector('.comment-title')!.textContent = '全部评论 1';
+ const parent = document.querySelector('.comment-box')!;
+ parent.insertAdjacentHTML('beforeend', '<button class="subcomment-more" aria-expanded="true" aria-busy="false">收起</button>');
+ const control = document.createElement('button'); control.className = 'subcomment-more'; control.textContent = '查看回复'; parent.append(control);
+ control.onclick = () => { control.textContent = '收起'; setTimeout(() => { parent.insertAdjacentHTML('beforeend', '<div class="subcomment-box"><div class="comment-content-box">目标展开的后续</div><a href="/discuss/comment/960">今天</a></div>'); document.querySelector('.comment-title')!.textContent = '全部评论 2'; }, 900); };
+ const pending = runNowcoderOperationPage({ kind: 'context', url, maxPages: 1 }); await vi.runAllTimersAsync();
+ expect(await pending).toMatchObject({ kind: 'context', snapshot: { comments: [{}, { text: '目标展开的后续' }], coverage: { total: 2, complete: true } } });
 });

@@ -144,3 +144,10 @@ describe('durable plugin publication workflow', () => {
     await expect(c.store.beginPublication(c.id, { ...input, revision: saved.revision, key: 'authorized-manual-test-02' }, '12345678-1234-4234-8234-123456789013')).rejects.toThrow('核验');
   });
 });
+it('persists structured context-change evidence and passes it through publication receipts', async () => {
+ const c = await fixture(), contextChanges = { fields: ['body' as const], comments: { added: [], removed: [], changed: [], truncated: false }, total: { before: 0, after: 0 } };
+ const activity = new NowcoderOperationsActivity(c.store, { assertAvailable() {}, async execute(action) { return action.kind === 'context' ? { kind: 'context', snapshot } : { kind: 'attention', code: 'CONTEXT_CHANGED', message: '原帖已变', submission: 'not_attempted', contextChanges }; } }, fetch);
+ await activity.context(c.id); const entry = await drafted(c.store, c.id);
+ expect(await activity.publish(c.id, { key: 'structured-changes-01', revision: entry.revision, contextHash: entry.contextHash, send: true })).toMatchObject({ attention: { contextChanges }, publication: { contextChanges } });
+ expect((await c.store.get(c.id))?.publicationAttempts?.[0]).toMatchObject({ contextChanges });
+});

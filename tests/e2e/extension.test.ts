@@ -12,7 +12,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { startBridge, type BridgeHandle } from '../../packages/bridge/src/index.js';
 import { TRUSTED_EXTENSION_ID } from '../../packages/shared/src/index.js';
 import { stableContentId, type CollectedDocument } from '@data-collector/shared';
-import { MarkdownLibrary } from '../../packages/bridge/src/library/index.js';
+import { MarkdownLibrary, listLibrary } from '../../packages/bridge/src/library/index.js';
 import { organize } from '../../packages/bridge/src/organize/index.js';
 import { NowcoderOperationsStore } from '../../packages/bridge/src/operations/store.js';
 import { createTemporaryDirectoryTracker } from '../helpers/temp.js';
@@ -368,24 +368,21 @@ async function waitForText(
 }
 
 describe('built Chrome extension', () => {
-  it('executes context and a single publication through built extension scripting and durable RPC', async () => {
+  it('executes workflow prepare through ordinary collection, then publishes and replays with owned tabs closed', async () => {
     const { libraryRoot } = await startStack();
-    const url = 'https://www.nowcoder.com/discuss/123456';
-    const document: CollectedDocument = { schemaVersion: 1, source: 'nowcoder', kind: 'post', url, canonicalUrl: url,
-      title: '求 Agent 学习方向', text: '学过 LangGraph，想做一个能用的项目', html: '<p>学过 LangGraph，想做一个能用的项目</p>', collectedAt: new Date().toISOString(), images: [] };
-    await new MarkdownLibrary({ root: libraryRoot }).save(organize(document));
+    const url = 'https://www.nowcoder.com/discuss/123456', sourceId = stableContentId(url);
     const store = new NowcoderOperationsStore(join(libraryRoot, '.config', 'nowcoder-operations'), libraryRoot);
-    const entry = await store.add(stableContentId(url));
     const fixture = '<html><body><h1>求 Agent 学习方向</h1><div class="feed-content-text">学过 LangGraph，想做一个能用的项目</div><div class="comment-title">全部评论(0)</div><div class="composer"><div id="nc-e-textarea-1" contenteditable="true"><p><br></p></div><button disabled>评论</button></div><script>const editor=document.querySelector("#nc-e-textarea-1"),button=document.querySelector("button");let model="";editor.addEventListener("beforeinput",event=>{if(event.inputType!=="insertText")return;event.preventDefault();model=event.data||"";editor.textContent=model;button.disabled=!model.trim();});button.onclick=()=>{const box=document.createElement("div");box.className="comment-box";const body=document.createElement("div");body.className="comment-content-box";body.textContent=model;const link=document.createElement("a");link.href="/discuss/comment/987654321";link.textContent="刚刚";box.append(body,link);document.body.append(box);editor.innerHTML="<p><br></p>";document.querySelector(".comment-title").textContent="全部评论(1)";};</script></body></html>';
     const pages: Page[] = [];
-    for (let i = 0; i < 3; i++) {
+    for (let i = 0; i < 4; i++) {
       const page = await browser!.newPage();
       await serveArticleFixture(page, fixture, url);
       await page.goto(url, { waitUntil: 'domcontentloaded' }); pages.push(page);
     }
     const { worker } = await sidePanelFor(pages[0]!);
-    // Preloaded fixture pages stand in for the two owned navigations. Everything after tab creation
-    // uses the packaged runner, real isolated-world serialization, editor events, WS and private store.
+    // Only tab creation is substituted: three preloaded fixture pages represent collection,
+    // context and publication. The packaged ordinary extractor/job protocol/raw proof,
+    // isolated-world page runner/editor, authenticated RPC and owned-tab cleanup remain real.
     await worker.evaluate(async targetUrl => {
       const matches = (await chrome.tabs.query({ url: targetUrl })).sort((a, b) => a.id! - b.id!);
       const queue = matches.slice(1).map(tab => tab.id!);
@@ -399,22 +396,44 @@ describe('built Chrome extension', () => {
       token = await worker.evaluate(async () => String((await chrome.storage.local.get('bridgeToken')).bridgeToken ?? ''));
       if (!token) await new Promise(resolveToken => setTimeout(resolveToken, 100));
     }
-    const request = async (path: string, body: unknown) => {
-      const response = await fetch(`${bridge!.url}/v1/nowcoder/operations/${entry.id}/${path}`, { method: 'POST', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' }, body: JSON.stringify(body) });
-      const result = await response.json(); expect(response.status, JSON.stringify(result)).toBe(200); return result;
+    const base = '/v1/nowcoder/operations/workflow';
+    const request = async (method: string, path: string, body?: unknown) => {
+      const response = await fetch(`${bridge!.url}${path}`, { method, headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
+      const result = await response.json(); expect(response.status, JSON.stringify(result)).toBe(method === 'POST' ? 202 : 200); return result;
     };
-    const context = await request('context', { maxPages: 1 });
-    expect(context.sourceUntrusted, JSON.stringify(context)).toBeDefined();
-    expect(context.sourceUntrusted.coverage).toMatchObject({ complete: true, total: 0 });
-    const saved = await store.update(entry.id, { revision: context.revision, contextHash: entry.contextHash, conversationHash: context.conversationHash,
-      drafts: { primary: '先做个同事能用的文档问答呗', alternative: '拿自己的资料试试', anchor: 'LangGraph', tone: 'practical', notes: '' } });
-    const input = { revision: saved.revision, contextHash: entry.contextHash, key: 'authorized-e2e-single-01', send: true };
-    const published = await request('publish', input);
-    expect(published.publication, JSON.stringify(published)).toMatchObject({ state: 'published', replyUrl: 'https://www.nowcoder.com/discuss/comment/987654321' });
-    expect((await request('publish', input)).publication.state).toBe('published');
-    expect((await store.get(entry.id))?.status).toBe('replied');
+    const waitForWorkflow = async (id: string) => {
+      const deadline = Date.now() + 25000;
+      for (;;) {
+        const run = await request('GET', `${base}/${id}`);
+        if (!['running', 'queued'].includes(run.status)) { expect(run.status, JSON.stringify(run)).toBe('completed'); return run; }
+        if (Date.now() >= deadline) throw new Error(`Fixture workflow did not finish: ${JSON.stringify(run)}`);
+        await new Promise(resolvePoll => setTimeout(resolvePoll, 200));
+      }
+    };
+    expect(await store.get(`ops-${sourceId}`)).toBeUndefined();
+    expect(await listLibrary(libraryRoot)).toEqual([]);
+    const prepareRequest = { schemaVersion: 1, kind: 'prepare', key: 'authorized-e2e-prepare-01', candidates: [{ sourceId, url }], maxPages: 1 };
+    const preparing = await request('POST', base, prepareRequest), preparedRun = await waitForWorkflow(preparing.runId);
+    const prepared = JSON.parse(await readFile(preparedRun.resultPath, 'utf8'));
+    expect(preparedRun.counts).toMatchObject({ succeeded: 1, failed: 0 });
+    expect(prepared.items[0].result).toMatchObject({ jobId: expect.any(String), status: 'saved', contentAccess: 'full' });
+    expect(prepared.prepared[0]).toMatchObject({ sourceConflict: false, currentPost: { body: '学过 LangGraph，想做一个能用的项目' }, conversation: { coverage: { complete: true, total: 0 } } });
+    const collected = (await listLibrary(libraryRoot)).find(entry => entry.id === sourceId)!;
+    const storedSource = JSON.parse(await readFile(join(libraryRoot, dirname(collected.relativePath), 'source.json'), 'utf8'));
+    expect(storedSource.document.sourceMetadata).toMatchObject({ operationsCollectionJobId: prepared.items[0].result.jobId, operationsExtractorContentAccess: 'full' });
+    expect((await request('POST', base, prepareRequest)).runId).toBe(preparing.runId);
+    const publishRequest = { schemaVersion: 1, kind: 'publish', key: 'authorized-e2e-batch-01', send: true, items: [{ key: 'authorized-e2e-comment-01', draft: { ...prepared.prepared[0].draftEnvelope,
+      drafts: { primary: '先做个同事能用的文档问答呗', alternative: '拿自己的资料试试', anchor: 'LangGraph', tone: 'practical', notes: '' } } }] };
+    const publishing = await request('POST', base, publishRequest), publishedRun = await waitForWorkflow(publishing.runId);
+    const published = JSON.parse(await readFile(publishedRun.resultPath, 'utf8'));
+    expect(publishedRun.counts).toMatchObject({ succeeded: 1, failed: 0, notExecuted: 0 });
+    expect(published.items[0].result.publication).toMatchObject({ state: 'published', evidence: 'observed', replyUrl: 'https://www.nowcoder.com/discuss/comment/987654321' });
+    expect((await request('POST', base, publishRequest)).runId).toBe(publishing.runId);
+    const entry = (await store.get(`ops-${sourceId}`))!;
+    expect(entry.status).toBe('replied'); expect(entry.publicationAttempts).toHaveLength(1);
     expect(pages[0]!.isClosed()).toBe(false);
-    expect(pages[1]!.isClosed()).toBe(true); expect(pages[2]!.isClosed()).toBe(true);
+    expect(await pages[0]!.evaluate(() => document.querySelector('.feed-content-text')!.textContent)).toBe('学过 LangGraph，想做一个能用的项目');
+    expect(pages.slice(1).every(page => page.isClosed())).toBe(true);
   });
   it('edits private Nowcoder replies through the built panel without publishing', async () => {
     const { libraryRoot } = await startStack();
