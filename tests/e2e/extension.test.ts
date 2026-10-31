@@ -368,6 +368,51 @@ async function waitForText(
 }
 
 describe('built Chrome extension', () => {
+  it('publishes a compiled article through the articles role once and observes its full receipt', async () => {
+    await startStack();
+    const profileUrl = 'https://www.nowcoder.com/users/544222414', editorUrl = 'https://www.nowcoder.com/creation/write/article', postUrl = 'https://www.nowcoder.com/discuss/995551';
+    const title = '字节 Agent 全栈一面｜备考题单（整理版）', body = '按不同记录整理的备考题单，非本人面试实录\n\n1. SSE断线后怎么恢复？\n\n更多整理在 agent-journey.cn';
+    const profileHtml = '<html><head><title>测试创作者 - 个人主页动态 - 牛客网</title></head><body><a href="/profile/544222414/account">账号设置</a><div>发布(0)</div><div>暂无内容</div></body></html>';
+    const source = await browser!.newPage(); await serveArticleFixture(source, profileHtml, profileUrl); await source.goto(profileUrl);
+    const profiles: Page[] = [];
+    for (let i = 0; i < 4; i++) { const p = await browser!.newPage(); await serveArticleFixture(p, profileHtml, profileUrl); await p.goto(profileUrl); profiles.push(p); }
+    const editor = await browser!.newPage(); let clicks = 0;
+    editor.on('console', message => { if (message.text() === 'article-fixture-publish-click') clicks++; });
+    const detail = `<section class="main-user-top"><div class="user-nickname"><a href="/users/544222414">测试创作者</a></div></section><h1>${title}</h1><div class="feed-content-text" style="white-space:pre-wrap">${body}</div><div class="user-nickname"><a href="/users/1111">推荐卡片</a></div>`;
+    const editorHtml = `<html><body><header><a role="button">发布</a></header><div class="nc-nav-header-profile" hidden><div class="name"><a href="/users/544222414">本人</a></div></div><input maxlength="50" placeholder="标题"><div id="nc-e-textarea-1" contenteditable="true"><p><br></p></div><button disabled>发布</button><script>const box=document.querySelector('[contenteditable]'),button=document.querySelector('button');box.addEventListener('beforeinput',e=>{e.preventDefault();box.innerText=e.data;button.disabled=false;});button.onclick=()=>{console.log('article-fixture-publish-click');history.replaceState(null,'',${JSON.stringify(postUrl)});document.body.innerHTML=${JSON.stringify(detail)};};</script></body></html>`;
+    await serveArticleFixture(editor, editorHtml, editorUrl); await editor.goto(editorUrl);
+    const { page: panel, worker } = await sidePanelFor(source);
+    const savedRole = await panel.evaluate(async () => chrome.runtime.sendMessage({ type: 'connection.role.set', role: 'articles' }));
+    expect(savedRole).toMatchObject({ ok: true, value: { role: 'articles' } });
+    await worker.evaluate(async ({ profileUrl, editorUrl }) => {
+      const all = await chrome.tabs.query({});
+      const ownProfiles = all.filter(t => t.url === profileUrl).sort((a, b) => a.id! - b.id!).slice(1).map(t => t.id!);
+      const editor = all.find(t => t.url === editorUrl)!.id!;
+      chrome.tabs.create = (async input => {
+        const id = input.url === profileUrl ? ownProfiles.shift() : input.url === editorUrl ? editor : undefined;
+        if (id === undefined || input.active !== false) throw new Error('Unexpected article fixture tab');
+        return chrome.tabs.update(id, { active: false });
+      }) as typeof chrome.tabs.create;
+    }, { profileUrl, editorUrl });
+    const token = await worker.evaluate(async () => String((await chrome.storage.local.get('bridgeToken')).bridgeToken));
+    const request = async (path: string, method = 'GET', input?: unknown) => {
+      const response = await fetch(`${bridge!.url}/v1/nowcoder/articles${path}`, { method, headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' }, ...(input === undefined ? {} : { body: JSON.stringify(input) }) });
+      const result = await response.json(); expect(response.status, JSON.stringify(result)).toBe(200); return result;
+    };
+    let runtime = await request('/runtime');
+    for (let i = 0; !runtime.connected && i < 40; i++) { await new Promise(r => setTimeout(r, 100)); runtime = await request('/runtime'); }
+    expect(runtime.connected).toBe(true);
+    const created = await request('', 'POST', { schemaVersion: 1, title, body, browser: runtime.browserFamily, accountId: '544222414', provenance: 'compiled', sourceUrls: [] });
+    const id = created.entry.id, preview = await request(`/${id}/preview`, 'POST', {});
+    expect(preview.entry.preview.identity.userId).toBe('544222414');
+    const input = { revision: preview.entry.revision, contentHash: preview.entry.contentHash, key: 'article-packaged-e2e-key', browser: runtime.browserFamily, accountId: '544222414', send: true };
+    const published = await request(`/${id}/publish`, 'POST', input);
+    expect(published).toMatchObject({ publication: { state: 'published', evidence: 'observed' }, receipt: { url: postUrl, title, accountId: '544222414' } });
+    expect(published.receipt.body.replace(/\s+/gu, ' ').trim()).toBe(body.replace(/\s+/gu, ' ').trim());
+    expect(await request(`/${id}/publish`, 'POST', input)).toMatchObject({ publication: { state: 'published' } });
+    expect(clicks).toBe(1); expect(source.isClosed()).toBe(false);
+    expect(profiles.every(p => p.isClosed())).toBe(true); expect(editor.isClosed()).toBe(true);
+  });
   it('executes workflow prepare through ordinary collection, then publishes and replays with owned tabs closed', async () => {
     const { libraryRoot } = await startStack();
     const url = 'https://www.nowcoder.com/discuss/123456', sourceId = stableContentId(url);

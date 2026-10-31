@@ -4,14 +4,18 @@ import { dirname } from 'node:path';
 import { z } from 'zod';
 import {
   DEFAULT_NOWCODER_PUBLISHING_POLICY, nowcoderPublishingPolicySchema, nowcoderVerificationPauseSchema,
-  operationIdSchema, operationSourceUrlSchema, operationPublicationSchema,
-  type NowcoderPublishingPolicy, type NowcoderPublishingStatus, type NowcoderVerificationPause,
+  operationIdSchema, articleIdSchema, publishingReferenceUrlSchema, operationPublicationSchema, browserFamilySchema, nowcoderAccountIdSchema,
+  type NowcoderPublishingPolicy, type NowcoderPublishingStatus, type NowcoderVerificationPause, type ArticlePublishingStatus,
 } from '@data-collector/shared';
 import { atomicWriteText } from '../library/writer.js';
 import { HttpError } from '../server/http.js';
 
-const historyEntry = z.object({ opportunityId: operationIdSchema, sourceUrl: operationSourceUrlSchema, publication: operationPublicationSchema });
-export type PublishingHistoryEntry = z.infer<typeof historyEntry>;
+const historyEntry = z.object({ opportunityId: z.union([operationIdSchema, articleIdSchema]), sourceUrl: publishingReferenceUrlSchema,
+  publication: operationPublicationSchema, channel: z.enum(['comment', 'article']).default('comment'),
+  browser: browserFamilySchema.optional(), accountId: nowcoderAccountIdSchema.optional(),
+}).refine(e => e.channel === 'article' ? e.opportunityId.startsWith('article-') && !!e.browser && !!e.accountId : e.opportunityId.startsWith('ops-'), '历史所属渠道不符');
+export type PublishingHistoryEntry = z.input<typeof historyEntry>;
+type HistoryEvent = z.output<typeof historyEntry>;
 const stateSchema = z.object({
   schemaVersion: z.literal(1), policy: nowcoderPublishingPolicySchema,
   verification: nowcoderVerificationPauseSchema.nullable(),
@@ -25,7 +29,9 @@ export class NowcoderPublishingControl {
   private pending: Promise<unknown> = Promise.resolve();
   private seenFile = false;
   private memoryPause: NowcoderVerificationPause | undefined;
-  get verificationPending(): boolean { return this.memoryPause !== undefined; }
+  private observedPauseEpoch = 0;
+  private clearedPauseEpoch = 0;
+  get verificationPending(): boolean { return this.memoryPause !== undefined || this.observedPauseEpoch > this.clearedPauseEpoch; }
   readonly now: () => number;
   private readonly sleep: (ms: number) => Promise<void>;
   constructor(private readonly path: string, private readonly history: () => Promise<PublishingHistoryEntry[]>,
@@ -42,8 +48,8 @@ export class NowcoderPublishingControl {
     await atomicWriteText(dirname(this.path), this.path, `${JSON.stringify(checked, null, 2)}\n`);
     this.seenFile = true;
   }
-  private async read(): Promise<{ state: State; events: PublishingHistoryEntry[] }> {
-    let events: PublishingHistoryEntry[];
+  private async read(): Promise<{ state: State; events: HistoryEvent[] }> {
+    let events: HistoryEvent[];
     try { events = z.array(historyEntry).parse(await this.history()); }
     catch { throw new HttpError(409, 'PUBLISH_HISTORY_UNAVAILABLE', '发布历史记录不可用，请核对本机运营记录；已停止发布'); }
     let state: State, fresh = false;
@@ -68,7 +74,8 @@ export class NowcoderPublishingControl {
         .sort((a, b) => b.publication.updatedAt.localeCompare(a.publication.updatedAt))[0];
       if (unresolved) {
         state.verification = { id: randomUUID(), detectedAt: unresolved.publication.updatedAt, sourceUrl: unresolved.sourceUrl,
-          opportunityId: unresolved.opportunityId, key: unresolved.publication.key, requestId: unresolved.publication.requestId };
+          ...(unresolved.channel === 'article' ? { channel: 'article', articleId: unresolved.opportunityId, browser: unresolved.browser!, accountId: unresolved.accountId! } : { opportunityId: unresolved.opportunityId }),
+          key: unresolved.publication.key, requestId: unresolved.publication.requestId };
         this.memoryPause = state.verification; fresh = true;
       }
     }
@@ -76,20 +83,36 @@ export class NowcoderPublishingControl {
     if (fresh) await this.write(state);
     return { state, events };
   }
-  private availableAt(state: State, events: PublishingHistoryEntry[], count = 1): number {
+  private availableAt(state: State, events: HistoryEvent[], count = 1, channel: 'comment' | 'article' = 'comment'): number {
     const now = this.now(), times = events.map(e => Date.parse(e.publication.createdAt)).sort((a, b) => a - b);
-    const hour = times.filter(t => t > now - HOUR), day = times.filter(t => t > now - DAY);
+    const channelTimes = events.filter(e => e.channel === channel).map(e => Date.parse(e.publication.createdAt)).sort((a, b) => a - b);
+    const hour = channelTimes.filter(t => t > now - HOUR), day = channelTimes.filter(t => t > now - DAY);
+    const maxHour = channel === 'article' ? 1 : state.policy.maxPerHour, maxDay = channel === 'article' ? 1 : state.policy.maxPer24Hours;
     return Math.max(now, times.length ? times[times.length - 1]! + state.policy.minIntervalMs : now,
-      hour.length + count > state.policy.maxPerHour ? hour[hour.length + count - state.policy.maxPerHour - 1]! + HOUR : now,
-      day.length + count > state.policy.maxPer24Hours ? day[day.length + count - state.policy.maxPer24Hours - 1]! + DAY : now);
+      hour.length + count > maxHour ? hour[hour.length + count - maxHour - 1]! + HOUR : now,
+      day.length + count > maxDay ? day[day.length + count - maxDay - 1]! + DAY : now);
   }
-  private summarize(state: State, events: PublishingHistoryEntry[]): NowcoderPublishingStatus {
-    const now = this.now(), times = events.map(e => Date.parse(e.publication.createdAt)), earliest = this.availableAt(state, events);
+  private summarize(state: State, events: HistoryEvent[]): NowcoderPublishingStatus {
+    const now = this.now(), times = events.filter(e => e.channel === 'comment').map(e => Date.parse(e.publication.createdAt)), earliest = this.availableAt(state, events);
     return { schemaVersion: 1, policy: state.policy, usage: { lastHour: times.filter(t => t > now - HOUR).length, last24Hours: times.filter(t => t > now - DAY).length },
       nextAllowedAt: earliest > now ? new Date(earliest).toISOString() : null, verification: state.verification };
   }
   async status(): Promise<NowcoderPublishingStatus> {
     return this.serialize(async () => { const { state, events } = await this.read(); return this.summarize(state, events); });
+  }
+  async articleStatus(): Promise<ArticlePublishingStatus> {
+    return this.serialize(async () => {
+      const { state, events } = await this.read(), earliest = this.availableAt(state, events, 1, 'article');
+      return { schemaVersion: 1, policy: { minIntervalMs: state.policy.minIntervalMs, maxPer24Hours: 1 },
+        usage: { last24Hours: events.filter(e => e.channel === 'article' && Date.parse(e.publication.createdAt) > this.now() - DAY).length },
+        nextAllowedAt: earliest > this.now() ? new Date(earliest).toISOString() : null, verification: state.verification };
+    });
+  }
+  async assertArticleCapacity(): Promise<void> {
+    const status = await this.articleStatus();
+    if (status.verification) throw new HttpError(409, 'PUBLISH_VERIFICATION_PAUSED', '牛客验证尚待处理，两个渠道均已暂停；请完成原页验证后核验恢复');
+    if (status.usage.last24Hours >= 1) throw new HttpError(429, 'ARTICLE_BUDGET_EXHAUSTED', `文章发布尝试已达24小时上限，下次最早 ${status.nextAllowedAt}；未发送`);
+    if (status.nextAllowedAt) throw new HttpError(429, 'PUBLISH_INTERVAL_REQUIRED', `两个渠道共用发布间隔，请在 ${status.nextAllowedAt} 后重试；未发送`);
   }
   async assertCapacity(count = 1, ignoreInterval = false): Promise<void> {
     if (!Number.isSafeInteger(count) || count < 1) throw new Error('发布数量无效');
@@ -119,21 +142,27 @@ export class NowcoderPublishingControl {
     return this.serialize(async () => { const { state, events } = await this.read(); state.policy = policy; await this.write(state); return this.summarize(state, events); });
   }
   async pause(input: Omit<NowcoderVerificationPause, 'id' | 'detectedAt'>): Promise<NowcoderVerificationPause> {
+    const verification = nowcoderVerificationPauseSchema.parse({ ...input, id: randomUUID(), detectedAt: new Date(this.now()).toISOString() });
+    // Observation fences both channels synchronously, before queued history or
+    // filesystem reads. A failed persistence keeps this latch closed.
+    this.observedPauseEpoch++;
     return this.serialize(async () => {
       const { state } = await this.read();
       if (state.verification?.requestId === input.requestId) return state.verification;
-      const verification = nowcoderVerificationPauseSchema.parse({ ...input, id: randomUUID(), detectedAt: new Date(this.now()).toISOString() });
       this.memoryPause = verification; state.verification = verification; await this.write(state); return verification;
     });
   }
   async clearVerification(id: string): Promise<void> {
+    const epoch = this.observedPauseEpoch;
     await this.serialize(async () => {
       const { state, events } = await this.read();
       if (state.verification?.id !== id) throw new HttpError(409, 'PUBLISH_VERIFICATION_CHANGED', '待处理验证已变化，请重读发布状态；未恢复');
       const pause = state.verification;
-      const linkedRequests = pause.opportunityId && pause.key ? events.filter(e => e.opportunityId === pause.opportunityId && e.publication.key === pause.key).map(e => e.publication.requestId) : [];
+      const owner = pause.articleId ?? pause.opportunityId;
+      const linkedRequests = owner && pause.key ? events.filter(e => e.opportunityId === owner && e.publication.key === pause.key).map(e => e.publication.requestId) : [];
       state.clearedRequestIds = [...new Set([...state.clearedRequestIds, pause.requestId, ...linkedRequests])];
       state.verification = null; await this.write(state); this.memoryPause = undefined;
+      this.clearedPauseEpoch = epoch;
     });
   }
 }

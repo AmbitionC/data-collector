@@ -1,7 +1,7 @@
 import type { Server as HttpServer } from 'node:http';
 import type { Duplex } from 'node:stream';
 import { WebSocketServer, type WebSocket } from 'ws';
-import { TRUSTED_EXTENSION_ORIGINS } from '@data-collector/shared';
+import { TRUSTED_EXTENSION_ORIGINS, type ConnectionRole } from '@data-collector/shared';
 import type { AccessTokenManager } from '../auth.js';
 
 function reject(socket: Duplex, status: number, message: string): void {
@@ -12,7 +12,7 @@ function reject(socket: Duplex, status: number, message: string): void {
 export function attachExtensionWebSocket(options: {
   server: HttpServer;
   access: AccessTokenManager;
-  onConnection: (socket: WebSocket, authorization: { bootstrapToken?: string }) => void;
+  onConnection: (socket: WebSocket, authorization: { bootstrapToken?: string; channel: ConnectionRole }) => void;
 }): WebSocketServer {
   const websocketServer = new WebSocketServer({ noServer: true, maxPayload: 12 * 1024 * 1024 });
   options.server.on('upgrade', (request, socket, head) => {
@@ -22,6 +22,11 @@ export function attachExtensionWebSocket(options: {
       if (url.pathname !== '/v1/extension') return reject(socket, 404, 'Not Found');
       const origin = request.headers.origin ?? '';
       if (!TRUSTED_EXTENSION_ORIGINS.has(origin)) return reject(socket, 401, 'Unauthorized');
+      const channels = url.searchParams.getAll('channel');
+      const channel = channels[0] ?? 'collector';
+      if (channels.length > 1 || (channel !== 'collector' && channel !== 'articles')) {
+        return reject(socket, 400, 'Bad Request');
+      }
 
       const token = url.searchParams.get('token') ?? '';
       let bootstrapToken: string | undefined;
@@ -32,7 +37,7 @@ export function attachExtensionWebSocket(options: {
 
       websocketServer.handleUpgrade(request, socket, head, websocket => {
         websocketServer.emit('connection', websocket, request);
-        options.onConnection(websocket, { ...(bootstrapToken ? { bootstrapToken } : {}) });
+        options.onConnection(websocket, { channel, ...(bootstrapToken ? { bootstrapToken } : {}) });
       });
     })().catch(() => {
       if (!socket.destroyed) reject(socket, 500, 'Internal Server Error');

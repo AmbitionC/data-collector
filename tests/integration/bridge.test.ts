@@ -10,6 +10,7 @@ import {
   NOWCODER_HOT_MATERIAL_CAPABILITY,
   NOWCODER_OPERATIONS_CAPABILITY,
   NOWCODER_BROWSER_OPERATIONS_CAPABILITY,
+  NOWCODER_ARTICLE_CAPABILITY,
   NOWCODER_DETAIL_CAPABILITY,
   EXTENSION_REPLACED_CLOSE_CODE,
   EXTENSION_REPLACED_CLOSE_REASON,
@@ -2843,11 +2844,13 @@ describe('local Bridge', () => {
       body: {
         ok: true,
         version: APP_VERSION,
-        bridgeCapabilities: [NOWCODER_HOT_MATERIAL_CAPABILITY, NOWCODER_OPERATIONS_CAPABILITY, NOWCODER_BROWSER_OPERATIONS_CAPABILITY],
+        bridgeCapabilities: [NOWCODER_HOT_MATERIAL_CAPABILITY, NOWCODER_OPERATIONS_CAPABILITY, NOWCODER_BROWSER_OPERATIONS_CAPABILITY, NOWCODER_ARTICLE_CAPABILITY],
         trustedExtensionId: TRUSTED_EXTENSION_ID,
         extensionConnected: false,
         directedRunActive: false,
         nowcoderOperationsActive: false,
+        nowcoderArticlesActive: false,
+        articleRuntime: { connected: false, channel: 'articles', active: false },
         // 没有配置任何仓库去向时同步无处可去，如实给空表——绝不假装能同步。
         syncTargets: {},
         // 默认无 sinks.json：只有本机库，所有来源都回退到它；分类清单供侧栏下拉。

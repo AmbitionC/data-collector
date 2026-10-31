@@ -6,6 +6,8 @@ import { stableContentId, type NowcoderConversationSnapshot } from '@data-collec
 import { NowcoderOperationsStore } from '../../packages/bridge/src/operations/store.js';
 import { NowcoderOperationsActivity } from '../../packages/bridge/src/operations/activity.js';
 import { NowcoderPublishingControl } from '../../packages/bridge/src/operations/publishingControl.js';
+import { PublicationAdmissionQueue } from '../../packages/bridge/src/operations/admission.js';
+import { NowcoderArticlesStore } from '../../packages/bridge/src/articles/store.js';
 import { createTemporaryDirectoryTracker } from '../helpers/temp.js';
 const dirs = createTemporaryDirectoryTracker();
 afterEach(() => dirs.cleanup());
@@ -35,6 +37,24 @@ it('admits only one of concurrent different-post attempts before either transpor
   expect(results.filter(r => r.status === 'fulfilled')).toHaveLength(1);
   expect((await c.store.list()).flatMap(e => e.publicationAttempts ?? [])).toHaveLength(1);
   expect((await c.control.status()).usage.lastHour).toBe(1);
+});
+it.each(['comment', 'article'])('shares durable admission between two stores when %s enters first', async first => {
+  const c = await fixture(), seeded = await c.seed(123456), admission = new PublicationAdmissionQueue();
+  const control = new NowcoderPublishingControl(join(c.root, 'shared-control.json'), async () => [
+    ...(await comments.list()).flatMap(e => (e.publicationAttempts ?? []).map(publication => ({ opportunityId: e.id, sourceUrl: e.canonicalUrl, publication }))),
+    ...(await articles.list()).flatMap(e => e.publicationAttempts.map(publication => ({ opportunityId: e.id, sourceUrl: 'https://www.nowcoder.com/creation/write/article', channel: 'article' as const, browser: e.browser, accountId: e.accountId, publication }))),
+  ]);
+  const comments = new NowcoderOperationsStore(join(c.root, 'ops'), c.root, { admission, beforePublication: () => control.assertCapacity(), afterPublication: async () => { await control.status(); } });
+  const articles = new NowcoderArticlesStore(join(c.root, 'articles'), { admission, beforePublication: () => control.assertArticleCapacity(), afterPublication: async () => { await control.articleStatus(); } });
+  let a = await articles.import({ schemaVersion: 1, title: '字节 Agent 备考整理', body: '整理题单，非亲历\nSSE和工具调用', browser: 'chrome', accountId: '544222414', provenance: 'compiled', sourceUrls: [] });
+  a = await articles.savePreview(a.id, { userId: a.accountId, nickname: '测试', profileUrl: `https://www.nowcoder.com/users/${a.accountId}`, observedAt: new Date().toISOString() });
+  const sendComment = () => comments.beginPublication(seeded.id, seeded.input, '12345678-1234-4234-8234-123456789012');
+  const sendArticle = () => articles.beginPublication(a.id, { revision: a.revision, contentHash: a.contentHash, browser: a.browser, accountId: a.accountId, key: 'cross-store-article-key', send: true }, '12345678-1234-4234-8234-123456789013');
+  const results = await Promise.allSettled(first === 'comment' ? [sendComment(), sendArticle()] : [sendArticle(), sendComment()]);
+  expect(results.map(r => r.status)).toEqual(['fulfilled', 'rejected']);
+  expect((await comments.list()).flatMap(e => e.publicationAttempts ?? []).length + (await articles.list()).flatMap(e => e.publicationAttempts).length).toBe(1);
+  expect((await control.status()).usage.lastHour).toBe(first === 'comment' ? 1 : 0);
+  expect((await control.articleStatus()).usage.last24Hours).toBe(first === 'article' ? 1 : 0);
 });
 it('allows readonly original-key replay while paused but no new source or key', async () => {
   const c = await fixture(), a = await c.seed(123456), b = await c.seed(234567);

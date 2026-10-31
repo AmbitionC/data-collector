@@ -12,6 +12,11 @@ import {
   NOWCODER_HOT_MATERIAL_CAPABILITY,
   NOWCODER_OPERATIONS_CAPABILITY,
   NOWCODER_BROWSER_OPERATIONS_CAPABILITY,
+  NOWCODER_ARTICLE_CAPABILITY,
+  NOWCODER_ARTICLE_EDITOR_URL,
+  articleImportSchema,
+  browserFamilySchema,
+  nowcoderAccountIdSchema,
   operationAddSchema,
   operationUpdateSchema,
   EXTENSION_REPLACED_CLOSE_CODE,
@@ -52,6 +57,10 @@ import { NowcoderPublishingControl } from '../operations/publishingControl.js';
 import { NowcoderOperationsTransport } from '../operations/transport.js';
 import { NowcoderOperationsWorkflow, workflowRequestSchema } from '../operations/workflow.js';
 import { NowcoderOperationsActivity } from '../operations/activity.js';
+import { PublicationAdmissionQueue } from '../operations/admission.js';
+import { NowcoderArticlesStore } from '../articles/store.js';
+import { NowcoderArticlesActivity } from '../articles/activity.js';
+import { ArticleTransport } from '../articles/transport.js';
 import { readCompanyInventory } from '../plans/nowcoderInventory.js';
 import { NowcoderCollectionStopError, NowcoderRequestPacer, detectNowcoderResponseStop, type NowcoderCollectionStopCode } from '../plans/nowcoderPacing.js';
 import { JobStore } from '../jobs/store.js';
@@ -419,10 +428,18 @@ async function verifiedRevealPath(roots: readonly string[], requestedPath: strin
 
 export async function startBridge(options: StartBridgeOptions = {}): Promise<BridgeHandle> {
   const config = loadConfig(options);
-  const publishingControl = new NowcoderPublishingControl(join(config.configDir, 'nowcoder-publishing.json'), async () =>
-    (await operations.list()).flatMap(entry => (entry.publicationAttempts ?? []).map(publication => ({ opportunityId: entry.id, sourceUrl: entry.canonicalUrl, publication }))));
+  const publicationAdmission = new PublicationAdmissionQueue();
+  const publishingControl = new NowcoderPublishingControl(join(config.configDir, 'nowcoder-publishing.json'), async () => [
+    ...(await operations.list()).flatMap(entry => (entry.publicationAttempts ?? []).map(publication => ({ opportunityId: entry.id, sourceUrl: entry.canonicalUrl, publication }))),
+    ...(await articles.list()).flatMap(entry => entry.publicationAttempts.map(publication => ({ opportunityId: entry.id,
+      sourceUrl: NOWCODER_ARTICLE_EDITOR_URL, publication, channel: 'article' as const, browser: entry.browser, accountId: entry.accountId }))),
+  ]);
   const operations = new NowcoderOperationsStore(join(config.configDir, 'nowcoder-operations'), config.libraryRoot,
-    { beforePublication: () => publishingControl.assertCapacity(), afterPublication: async () => { await publishingControl.status(); } });
+    { admission: publicationAdmission, beforePublication: () => publishingControl.assertCapacity(), afterPublication: async () => { await publishingControl.status(); } });
+  const articles = new NowcoderArticlesStore(join(config.configDir, 'nowcoder-articles'), {
+    admission: publicationAdmission, beforePublication: () => publishingControl.assertArticleCapacity(),
+    afterPublication: async () => { await publishingControl.articleStatus(); },
+  });
   const activeOperations = new Set<Promise<unknown>>();
   let closing = false;
   const trackOperation = <T>(operation: Promise<T>): Promise<T> => {
@@ -564,12 +581,15 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
   let extensionReady = false;
   let extensionVersion: string | undefined;
   let extensionBuildId: string | undefined;
+  let articleSocket: WebSocket | undefined;
+  let articleReady = false;
   /** Retained across a socket replacement so a living Service Worker is not recovered as a crash. */
   let lastExtensionRuntimeId: string | undefined;
   const extensionRuntime = new WeakMap<WebSocket, {
     version: string;
     buildId?: string;
     runtimeId?: string;
+    browserFamily?: 'chrome' | 'edge';
     capabilities: string[];
   }>();
   const extensionHasZsxqProtocol = (socket = extensionSocket): boolean => {
@@ -698,6 +718,19 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
     capabilities: extensionSocket ? extensionRuntime.get(extensionSocket)?.capabilities ?? [] : [],
   }));
   const operationsActivity = new NowcoderOperationsActivity(operations, operationsTransport, options.fetch ?? fetch, publishingControl);
+  const articleTransport = new ArticleTransport(() => ({
+    socket: articleSocket,
+    ready: !closing && !updateCheckInFlight && !restartPending && articleReady && extensionMatchesArtifact(articleSocket),
+    capabilities: articleSocket ? extensionRuntime.get(articleSocket)?.capabilities ?? [] : [],
+    browserFamily: articleSocket ? extensionRuntime.get(articleSocket)?.browserFamily : undefined,
+    runtimeId: articleSocket ? extensionRuntime.get(articleSocket)?.runtimeId : undefined,
+  }));
+  const articlesActivity = new NowcoderArticlesActivity(articles, articleTransport, publishingControl);
+  const articleRuntime = () => {
+    const runtime = articleSocket ? extensionRuntime.get(articleSocket) : undefined;
+    return { connected: articleReady && articleSocket?.readyState === WebSocket.OPEN, channel: 'articles',
+      ...(runtime ? { ...runtime } : {}), active: articlesActivity.busy || articleTransport.busy };
+  };
   const workflowCollectionJobs = new Set<string>();
   const operationsWorkflow = new NowcoderOperationsWorkflow(join(config.configDir, 'nowcoder-workflows'), operations, operationsActivity, async (candidate, observe) => {
     operationsTransport.assertAvailable();
@@ -752,7 +785,7 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
    */
   const maybeRestart = (): void => {
     if (closing || !restartPending) return;
-    if (operationsWorkflow.busy || operationsActivity.busy || operationsTransport.busy) return;
+    if (operationsWorkflow.busy || operationsActivity.busy || operationsTransport.busy || articlesActivity.busy || articleTransport.busy) return;
     // 新 build-id 可能已经落盘，但打包子进程还在收尾。先记住交接，
     // 等 runUpdate 真正返回后再退出，避免杀掉尚未完成的更新。
     if (updateCheckInFlight) return;
@@ -786,7 +819,7 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
     const readerState = artifactReaders.snapshot();
     if (
       zsxqPersistingJobIds.size > 0
-      || operationsWorkflow.busy || operationsActivity.busy || operationsTransport.busy
+      || operationsWorkflow.busy || operationsActivity.busy || operationsTransport.busy || articlesActivity.busy || articleTransport.busy
       || hasActiveZsxqAttempt()
       || shouldDeferArtifactUpdate(readerState, directedService?.hasActiveRun() ?? false)
     ) {
@@ -1494,6 +1527,30 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
   };
 
   const handleSocketMessage = async (socket: WebSocket, data: RawData): Promise<void> => {
+    if (socket === articleSocket) {
+      const message = wsEnvelopeSchema.parse(JSON.parse(messageText(data)));
+      if (message.type === 'extension.hello') {
+        const hello = extensionHelloPayloadSchema.parse(message.payload);
+        if (!hello.browserFamily || !hello.capabilities?.includes(NOWCODER_ARTICLE_CAPABILITY)) throw new Error('发文连接缺少浏览器身份或发文能力');
+        await refreshArtifactBuildId();
+        if (socket !== articleSocket) return;
+        extensionRuntime.set(socket, { version: hello.version, browserFamily: hello.browserFamily,
+          capabilities: [...hello.capabilities], ...(hello.buildId ? { buildId: hello.buildId } : {}),
+          ...(hello.runtimeId ? { runtimeId: hello.runtimeId } : {}) });
+        articleReady = true;
+        return;
+      }
+      if (message.type === 'article.result' && articleReady) {
+        articleTransport.receive(socket, message.requestId, message.payload);
+        setImmediate(maybeRestart);
+        return;
+      }
+      if (message.type === 'bridge.ping') {
+        socket.send(JSON.stringify(envelope('bridge.pong', message.requestId, {})));
+        return;
+      }
+      throw new Error('发文连接不接受采集或评论消息');
+    }
     if (socket !== extensionSocket) throw new Error('扩展连接已被替换');
     const parsedEnvelope = wsEnvelopeSchema.parse(JSON.parse(messageText(data)));
     if (parsedEnvelope.type === 'operations.result') {
@@ -1512,6 +1569,7 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
         version: hello.version,
         ...(hello.buildId ? { buildId: hello.buildId } : {}),
         ...(hello.runtimeId ? { runtimeId: hello.runtimeId } : {}),
+        ...(hello.browserFamily ? { browserFamily: hello.browserFamily } : {}),
         capabilities: [...(hello.capabilities ?? [])],
       });
       lastExtensionRuntimeId = hello.runtimeId;
@@ -1994,8 +2052,11 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
       return sendJson(response, 200, {
         ok: true,
         version: APP_VERSION,
-        bridgeCapabilities: [NOWCODER_HOT_MATERIAL_CAPABILITY, NOWCODER_OPERATIONS_CAPABILITY, NOWCODER_BROWSER_OPERATIONS_CAPABILITY],
+        bridgeCapabilities: [NOWCODER_HOT_MATERIAL_CAPABILITY, NOWCODER_OPERATIONS_CAPABILITY, NOWCODER_BROWSER_OPERATIONS_CAPABILITY, NOWCODER_ARTICLE_CAPABILITY],
         nowcoderOperationsActive: operationsWorkflow.busy || operationsActivity.busy || operationsTransport.busy,
+        nowcoderArticlesActive: articlesActivity.busy || articleTransport.busy,
+        articleRuntime: articleRuntime(),
+        ...(extensionReady && extensionSocket && extensionRuntime.get(extensionSocket)?.browserFamily ? { primaryBrowser: extensionRuntime.get(extensionSocket)!.browserFamily } : {}),
         trustedExtensionId: TRUSTED_EXTENSION_ID,
         extensionConnected: extensionReady && extensionSocket?.readyState === WebSocket.OPEN,
         directedRunActive: directedService?.hasActiveRun() ?? false,
@@ -2035,6 +2096,7 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
     // Workflow-owned calls use the injected store/activity/collector directly, never this lease.
     const externalConflict = request.method !== 'GET'
       && requestUrl.pathname !== '/v1/nowcoder/operations/workflow'
+      && !requestUrl.pathname.startsWith('/v1/nowcoder/articles')
       && (requestUrl.pathname.startsWith('/v1/nowcoder/') || requestUrl.pathname.startsWith('/v1/jobs')
         || requestUrl.pathname === '/v1/fe-journey/collect' || requestUrl.pathname.startsWith('/v1/plans'));
     if (externalConflict && operationsWorkflow.busy) throw new HttpError(409, 'WORKFLOW_BUSY', '运营批次正在执行，外部修改已暂停');
@@ -2049,7 +2111,33 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
     }
     const workflowMatch = requestUrl.pathname.match(/^\/v1\/nowcoder\/operations\/workflow\/([a-zA-Z0-9_-]{12,100})(\/stats)?$/u);
     if (workflowMatch && request.method === 'GET') return sendJson(response, 200, await operationsWorkflow.get(workflowMatch[1]!));
-    if (operationsWorkflow.busy && request.method !== 'GET' && (requestUrl.pathname.startsWith('/v1/nowcoder/') || requestUrl.pathname.startsWith('/v1/jobs') || requestUrl.pathname === '/v1/fe-journey/collect' || requestUrl.pathname.startsWith('/v1/plans'))) throw new HttpError(409, 'WORKFLOW_BUSY', '运营批次正在执行，外部修改已暂停');
+    if (operationsWorkflow.busy && request.method !== 'GET' && !requestUrl.pathname.startsWith('/v1/nowcoder/articles') && (requestUrl.pathname.startsWith('/v1/nowcoder/') || requestUrl.pathname.startsWith('/v1/jobs') || requestUrl.pathname === '/v1/fe-journey/collect' || requestUrl.pathname.startsWith('/v1/plans'))) throw new HttpError(409, 'WORKFLOW_BUSY', '运营批次正在执行，外部修改已暂停');
+    if (requestUrl.pathname === '/v1/nowcoder/articles') {
+      if (request.method === 'GET') return sendJson(response, 200, { entries: (await articles.list()).map(({ body: _body, ...entry }) => entry) });
+      if (request.method === 'POST') return sendJson(response, 200, { entry: await articles.import(articleImportSchema.parse(await readJson(request))) });
+    }
+    if (requestUrl.pathname === '/v1/nowcoder/articles/runtime' && request.method === 'GET') return sendJson(response, 200, articleRuntime());
+    if (requestUrl.pathname === '/v1/nowcoder/articles/limits' && request.method === 'GET') return sendJson(response, 200, await publishingControl.articleStatus());
+    if (requestUrl.pathname === '/v1/nowcoder/articles/account' && request.method === 'POST') {
+      const input = z.object({ browser: browserFamilySchema, accountId: nowcoderAccountIdSchema }).strict().parse(await readJson(request));
+      return sendJson(response, 200, await articlesActivity.account(input.browser, input.accountId));
+    }
+    const articleMatch = requestUrl.pathname.match(/^\/v1\/nowcoder\/articles\/(article-[a-f0-9]{12})(?:\/(preview|publish|verify))?$/u);
+    if (articleMatch) {
+      const id = articleMatch[1]!, action = articleMatch[2];
+      if (!action && request.method === 'GET') {
+        const entry = await articles.get(id);
+        if (!entry) throw new HttpError(404, 'ARTICLE_NOT_FOUND', '文章记录不存在');
+        return sendJson(response, 200, { entry });
+      }
+      if (action && request.method === 'POST') {
+        const input = await readJson(request);
+        if (action === 'preview') { z.object({}).strict().parse(input); return sendJson(response, 200, await articlesActivity.preview(id)); }
+        if (action === 'publish') return sendJson(response, 200, await articlesActivity.publish(id, input));
+        const value = z.object({ key: z.string().regex(/^[a-zA-Z0-9_-]{12,100}$/u) }).strict().parse(input);
+        return sendJson(response, 200, await articlesActivity.verify(id, value.key));
+      }
+    }
     if (requestUrl.pathname === '/v1/nowcoder/operations') {
       if (request.method === 'GET') return sendJson(response, 200, { entries: await operations.list() });
       if (request.method === 'POST') {
@@ -2078,8 +2166,10 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
       if (request.method === 'PUT') return sendJson(response, 200, await publishingControl.configure(await readJson(request)));
     }
     if (requestUrl.pathname === '/v1/nowcoder/operations/publishing/resume' && request.method === 'POST') {
-      if (operationsActivity.busy || operationsTransport.busy) throw new HttpError(409, 'OPERATIONS_BUSY', '牛客操作仍在执行，请等待回执');
-      return sendJson(response, 200, await operationsActivity.resumeVerification(await readJson(request)));
+      if (operationsActivity.busy || operationsTransport.busy || articlesActivity.busy || articleTransport.busy) throw new HttpError(409, 'OPERATIONS_BUSY', '牛客操作仍在执行，请等待回执');
+      const input = await readJson(request);
+      return sendJson(response, 200, await ((await publishingControl.status()).verification?.channel === 'article'
+        ? articlesActivity.resumeVerification(input) : operationsActivity.resumeVerification(input)));
     }
     const operationMatch = requestUrl.pathname.match(/^\/v1\/nowcoder\/operations\/([^/]+)$/u);
     if (operationMatch?.[1]) {
@@ -2428,6 +2518,14 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
           ),
         );
       }
+      if (authorization.channel === 'articles') {
+        if (articleSocket && articleSocket.readyState === WebSocket.OPEN) {
+          articleTransport.disconnect(articleSocket);
+          articleSocket.close(EXTENSION_REPLACED_CLOSE_CODE, EXTENSION_REPLACED_CLOSE_REASON);
+        }
+        articleSocket = socket;
+        articleReady = false;
+      } else {
       if (extensionSocket && extensionSocket.readyState === WebSocket.OPEN) {
         operationsTransport.disconnect(extensionSocket);
         extensionSocket.close(
@@ -2441,6 +2539,7 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
       extensionReady = false;
       extensionVersion = undefined;
       extensionBuildId = undefined;
+      }
       let messageQueue: Promise<void> = Promise.resolve();
       let policyViolated = false;
       const rejectInvalidMessage = (error: unknown): void => {
@@ -2478,6 +2577,8 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
       });
       socket.once('close', () => {
         operationsTransport.disconnect(socket);
+        articleTransport.disconnect(socket);
+        if (articleSocket === socket) { articleSocket = undefined; articleReady = false; setImmediate(maybeRestart); }
         if (extensionSocket === socket) {
           extensionSocket = undefined;
           if (restartHandoffSocket === socket) restartHandoffSocket = undefined;
@@ -2532,6 +2633,7 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
       closePromise ??= (async () => {
         closing = true;
         operationsTransport.disconnect();
+        articleTransport.disconnect();
         if (updateTimer) clearInterval(updateTimer);
         // 服务已经明确进入关闭流程，不再等待外部更新命令优雅退出；立即收掉整棵树，
         // 否则忽略 TERM 的 git/npm 孙进程会反过来卡住 Node 的自然退出。

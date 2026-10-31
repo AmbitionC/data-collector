@@ -1,4 +1,4 @@
-import { nowcoderScheduleConfigSchema, type NowcoderScheduleConfig } from '@data-collector/shared';
+import { connectionRoleSchema, nowcoderScheduleConfigSchema, type ConnectionRole, type NowcoderScheduleConfig } from '@data-collector/shared';
 import {
   sidePanelStateFromStatus,
   renderSidePanel,
@@ -37,6 +37,51 @@ async function message<T>(payload: unknown): Promise<T> {
   if (!response.ok) throw new Error(response.error ?? '扩展操作失败');
   return response.value as T;
 }
+
+interface ConnectionRoleStatus {
+  role: ConnectionRole;
+  browserFamily?: 'chrome' | 'edge';
+  bridgeStatus?: string;
+}
+
+// Settings have their own draft/error state; normal rendering never rewrites the selection.
+const roleSelect = document.querySelector<HTMLSelectElement>('#connection-role');
+const roleSave = document.querySelector<HTMLButtonElement>('#connection-role-save');
+const roleStatus = document.querySelector<HTMLElement>('#connection-role-status');
+const roleError = document.querySelector<HTMLElement>('#connection-role-error');
+let roleDraftChanged = false;
+let roleSettingsRevision = 0;
+function showConnectionRole(status: ConnectionRoleStatus): void {
+  const browser = status.browserFamily === 'edge' ? 'Edge' : status.browserFamily === 'chrome' ? 'Chrome' : '浏览器未识别';
+  if (roleStatus) roleStatus.textContent = `${browser} · 当前角色：${status.role === 'articles' ? '牛客发文' : '采集与评论'}${status.bridgeStatus === 'protocol_error' ? '；需要配套 Bridge 与可识别浏览器才能连接' : ''}`;
+}
+function showRoleError(error: unknown): void {
+  if (!roleError) return;
+  roleError.textContent = error instanceof Error && !isTransportError(error) ? error.message : '连接角色设置暂不可用，请稍后重试。';
+  roleError.hidden = false;
+}
+roleSelect?.addEventListener('change', () => { roleDraftChanged = true; roleSettingsRevision += 1; });
+roleSave?.addEventListener('click', () => {
+  if (!roleSelect || roleSave.disabled) return;
+  const parsed = connectionRoleSchema.safeParse(roleSelect.value);
+  if (!parsed.success) return;
+  roleSettingsRevision += 1;
+  roleSave.disabled = true;
+  roleSelect.disabled = true;
+  if (roleError) roleError.hidden = true;
+  void message<ConnectionRoleStatus>({ type: 'connection.role.set', role: parsed.data })
+    .then(status => { roleDraftChanged = false; roleSelect.value = status.role; showConnectionRole(status); })
+    .catch(showRoleError)
+    .finally(() => { roleSave.disabled = false; roleSelect.disabled = false; });
+});
+const roleReadRevision = roleSettingsRevision;
+void message<ConnectionRoleStatus>({ type: 'connection.role.get' })
+  .then(status => {
+    if (roleReadRevision !== roleSettingsRevision) return;
+    if (roleSelect && !roleDraftChanged) roleSelect.value = status.role;
+    showConnectionRole(status);
+  })
+  .catch(error => { if (roleReadRevision === roleSettingsRevision) showRoleError(error); });
 
 let pollTimer: number | undefined;
 const hotPanel = bindHotMaterials(document, message);

@@ -3,6 +3,7 @@ import { CONTENT_KINDS, FE_JOURNEY_CANDIDATE_KINDS, SOURCES } from './model.js';
 import { descriptorForHost } from './sources.js';
 import { canonicalizeUrl, parseSupportedUrl } from './url.js';
 import { nowcoderHotMaterialSchema, renderHotMaterial } from './nowcoderHot.js';
+import { browserFamilySchema } from './nowcoderArticles.js';
 import {
   collectionBatchSchema,
   collectionPlanAttemptSchema,
@@ -132,6 +133,7 @@ export const extensionHelloPayloadSchema = z.object({
   buildId: z.string().trim().min(1).max(200).optional(),
   /** 同一 Service Worker 的网络重连保持不变；worker 重启后换新。 */
   runtimeId: z.string().uuid().optional(),
+  browserFamily: browserFamilySchema.optional(),
   capabilities: z.array(z.string().trim().min(1).max(100)).max(20).optional(),
 }).strict();
 

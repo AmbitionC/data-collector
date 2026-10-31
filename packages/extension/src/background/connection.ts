@@ -1,5 +1,13 @@
 import {
   APP_VERSION,
+  NOWCODER_ARTICLE_CAPABILITY,
+  articleActionSchema,
+  articleResultSchema,
+  connectionRoleSchema,
+  type ArticleAction,
+  type ArticleResult,
+  type BrowserFamily,
+  type ConnectionRole,
   NOWCODER_HOT_MATERIAL_CAPABILITY,
   NOWCODER_OPERATIONS_CAPABILITY,
   NOWCODER_BROWSER_OPERATIONS_CAPABILITY,
@@ -51,6 +59,7 @@ export interface SocketLike {
 interface ConnectionDependencies {
   storage: ExtensionStorage;
   extensionId: string;
+  browserFamily?: BrowserFamily;
   socketFactory: (url: string) => SocketLike;
   fetch: typeof fetch;
   setInterval: (callback: () => void, milliseconds: number) => unknown;
@@ -155,6 +164,12 @@ export class BridgeConnection {
   private planCollectHandler: PlanCollectHandler | undefined;
   private operationsHandler: ((action: NowcoderOperationAction) => Promise<NowcoderOperationResult>) | undefined;
   private readonly operationsRequests = new Map<string, Promise<NowcoderOperationResult>>();
+  private articleHandler: ((action: ArticleAction) => Promise<ArticleResult>) | undefined;
+  private readonly articleRequests = new Map<string, { signature: string; kind: ArticleAction['kind']; result: Promise<ArticleResult> }>();
+  private activeOperations = 0;
+  private activeArticles = 0;
+  private connectionRole: ConnectionRole = 'collector';
+  private roleChanging = false;
   private stopped = false;
   private startPromise: Promise<void> | undefined;
   private generation = 0;
@@ -192,7 +207,42 @@ export class BridgeConnection {
     this.operationsHandler = handler;
   }
 
+  setArticleHandler(handler: (action: ArticleAction) => Promise<ArticleResult>): void {
+    this.articleHandler = handler;
+  }
+
+  get busy(): boolean {
+    return this.roleChanging || this.activeCollects.size > 0 || this.activeOperations > 0 || this.activeArticles > 0;
+  }
+
+  async setConnectionRole(raw: ConnectionRole): Promise<void> {
+    const role = connectionRoleSchema.parse(raw);
+    if (this.roleChanging || this.busy) throw new Error('浏览器操作进行中，请完成后再保存连接角色');
+    this.roleChanging = true;
+    try {
+      // Fence incoming work before the asynchronous settings write. Request caches survive roles.
+      this.stop();
+      await this.startPromise;
+      try {
+        await this.dependencies.storage.set({ connectionRole: role });
+      } catch (error) {
+        // A failed save retains the old stored role and restores its connection.
+        await this.startConnection({ force: true });
+        throw error;
+      }
+      this.connectionRole = role;
+      await this.startConnection({ force: true });
+    } finally {
+      this.roleChanging = false;
+    }
+  }
+
   async start(options: { force?: boolean } = {}): Promise<void> {
+    if (this.roleChanging) return;
+    await this.startConnection(options);
+  }
+
+  private async startConnection(options: { force?: boolean }): Promise<void> {
     const force = options.force === true;
     if (force) this.reconnectSuppressed = false;
     if (this.reconnectSuppressed) return;
@@ -201,7 +251,7 @@ export class BridgeConnection {
       await this.startPromise;
       if (force && this.reconnectSuppressed) {
         this.reconnectSuppressed = false;
-        await this.start({ force: true });
+        await this.startConnection({ force: true });
       }
       return;
     }
@@ -257,6 +307,7 @@ export class BridgeConnection {
   private async startOnce(force: boolean): Promise<void> {
     await this.tokenInvalidation;
     const settings = await this.settings();
+    this.connectionRole = settings.role;
     // 每次建连都重新验证；health 失败时必须保守按旧 Bridge 发送。
     this.bridgeVersion = undefined;
     this.bridgeCapabilities.clear();
@@ -314,14 +365,21 @@ export class BridgeConnection {
     }
     if (!this.isCurrent(generation)) return;
 
+    // An old Bridge ignores unknown query parameters and would steal the collector channel.
+    if (settings.role === 'articles' && (!this.bridgeCapabilities.has(NOWCODER_ARTICLE_CAPABILITY)
+      || !this.dependencies.browserFamily)) {
+      this.cancelReconnect();
+      await this.transition(generation, { bridgeStatus: 'protocol_error' });
+      return;
+    }
+
     if (!(await this.transition(generation, { bridgeStatus: 'connecting' }))) return;
     let socket: SocketLike;
     try {
-      socket = this.dependencies.socketFactory(
-        bootstrap
+      const url = bootstrap
           ? `ws://127.0.0.1:${settings.port}/v1/extension?bootstrap=1`
-          : `ws://127.0.0.1:${settings.port}/v1/extension?token=${encodeURIComponent(settings.token!)}`,
-      );
+          : `ws://127.0.0.1:${settings.port}/v1/extension?token=${encodeURIComponent(settings.token!)}`;
+      socket = this.dependencies.socketFactory(`${url}${settings.role === 'articles' ? '&channel=articles' : ''}`);
     } catch {
       await this.markDisconnected(generation);
       return;
@@ -356,11 +414,14 @@ export class BridgeConnection {
       this.reconnectAttempt = 0;
       this.cancelReconnect();
       const runningBuildId = typeof __BUILD_ID__ === 'string' ? __BUILD_ID__ : undefined;
+      const articleCompatible = this.bridgeCapabilities.has(NOWCODER_ARTICLE_CAPABILITY);
       this.send('extension.hello', 'extension', {
         version: APP_VERSION,
         ...(runningBuildId ? { buildId: runningBuildId } : {}),
         runtimeId: this.runtimeId,
-        capabilities: [NOWCODER_DETAIL_CAPABILITY, ZSXQ_COMPLETE_CONTENT_CAPABILITY, NOWCODER_BROWSER_OPERATIONS_CAPABILITY]
+        ...(articleCompatible && this.dependencies.browserFamily ? { browserFamily: this.dependencies.browserFamily } : {}),
+        capabilities: (settings.role === 'articles' ? [NOWCODER_ARTICLE_CAPABILITY]
+          : [NOWCODER_DETAIL_CAPABILITY, ZSXQ_COMPLETE_CONTENT_CAPABILITY, NOWCODER_BROWSER_OPERATIONS_CAPABILITY])
           .sort((left, right) => left.localeCompare(right)),
       });
       this.startKeepalive();
@@ -432,6 +493,9 @@ export class BridgeConnection {
   }
 
   send(type: string, requestId: string, payload: unknown): void {
+    if (this.connectionRole === 'articles' && !['extension.hello', 'bridge.ping', 'article.result'].includes(type)) {
+      throw new Error('发文连接不能发送采集或评论消息');
+    }
     const socket = this.socket;
     if (socket?.readyState !== 1) throw new Error('Bridge WebSocket 未连接');
     let compatiblePayload = payload;
@@ -884,17 +948,19 @@ export class BridgeConnection {
     if (!response.ok) throw new Error(`打开知识库文件失败：HTTP ${response.status}`);
   }
 
-  private async settings(): Promise<{ token?: string; port: number; status?: string }> {
+  private async settings(): Promise<{ token?: string; port: number; status?: string; role: ConnectionRole }> {
     const values = await this.dependencies.storage.get([
       'bridgeToken',
       'bridgePort',
       'bridgeStatus',
+      'connectionRole',
     ]);
     return {
       ...(!this.ignoreStoredToken && typeof values.bridgeToken === 'string'
         ? { token: values.bridgeToken }
         : {}),
       port: typeof values.bridgePort === 'number' ? values.bridgePort : DEFAULT_PORT,
+      role: connectionRoleSchema.parse(values.connectionRole ?? 'collector'),
       ...(typeof values.bridgeStatus === 'string' ? { status: values.bridgeStatus } : {}),
     };
   }
@@ -928,6 +994,35 @@ export class BridgeConnection {
     }
     if (!isCurrent()) return;
 
+    if (this.connectionRole === 'articles' && message.type !== 'bridge.authorized' && message.type !== 'article.execute') return;
+    if (message.type === 'article.execute') {
+      if (this.connectionRole !== 'articles' || !this.articleHandler) return;
+      const parsed = articleActionSchema.safeParse(message.payload);
+      if (!parsed.success) return;
+      const action = parsed.data, signature = JSON.stringify(action);
+      let cached = this.articleRequests.get(message.requestId);
+      if (cached && cached.signature !== signature) {
+        this.send('article.result', message.requestId, { kind: 'attention', code: 'ARTICLE_REQUEST_CONFLICT', message: '发文请求编号已绑定其他内容，请先核验原记录', submission: action.kind === 'article-publish' || cached.kind === 'article-publish' ? 'uncertain' : 'not_attempted' });
+        return;
+      }
+      if (!cached) {
+        if (this.articleRequests.size >= 100) {
+          this.send('article.result', message.requestId, { kind: 'attention', code: 'ARTICLE_REQUEST_LIMIT', message: '本次插件会话的发文记录已满，请先核验已有记录', submission: 'not_attempted' });
+          return;
+        }
+        this.activeArticles += 1;
+        const result = Promise.resolve().then(() => this.articleHandler!(action))
+          .then(rawResult => articleResultSchema.parse(rawResult))
+          .catch((): ArticleResult => ({ kind: 'attention', code: 'ARTICLE_FAILED', message: '发文插件操作失败，请核验原记录', submission: action.kind === 'article-publish' ? 'uncertain' : 'not_attempted' }))
+          .finally(() => { this.activeArticles -= 1; });
+        cached = { signature, kind: action.kind, result };
+        this.articleRequests.set(message.requestId, cached);
+      }
+      const result = await cached.result;
+      if (isCurrent()) this.send('article.result', message.requestId, result);
+      return;
+    }
+
     if (message.type === 'operations.execute') {
       const parsed = nowcoderOperationActionSchema.safeParse(message.payload);
       if (!parsed.success || !this.operationsHandler) return;
@@ -937,7 +1032,9 @@ export class BridgeConnection {
           this.send('operations.result', message.requestId, { kind: 'attention', code: 'OPERATIONS_REQUEST_LIMIT', message: '本次插件会话的发送记录已满，请先核验已有记录', submission: 'not_attempted' });
           return;
         }
-        flight = this.operationsHandler(parsed.data);
+        this.activeOperations += 1;
+        flight = Promise.resolve().then(() => this.operationsHandler!(parsed.data))
+          .finally(() => { this.activeOperations -= 1; });
         this.operationsRequests.set(message.requestId, flight);
       }
       try {

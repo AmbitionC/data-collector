@@ -12,6 +12,7 @@ import { rebuildFeJourneyCandidateIndex } from './feJourney/index.js';
 import { runTool } from './git.js';
 import { parseResearchArgs, runPrivateNowcoderResearch } from './nowcoderResearch.js';
 import { runOperationsCli } from './operations/cli.js';
+import { runArticlesCli } from './articles/cli.js';
 import { loadConfig, type ConfigOverrides } from './config.js';
 import {
   discoverRepoRoot,
@@ -909,6 +910,7 @@ export async function runCli(args: string[], io: CliIo = PROCESS_IO): Promise<nu
     if (command === 'fe-journey') return await feJourney(args, io);
     if (command === 'plans') return await plans(args, io);
     if (command === 'nowcoder' && args[1] === 'ops') return await runOperationsCli(args, await authenticatedToken(args), io);
+    if (command === 'nowcoder' && args[1] === 'articles') return await runArticlesCli(args, await authenticatedToken(args), io);
     if (command === 'nowcoder' && args[1] === 'research') {
       const spec = parseResearchArgs(args.slice(2));
       const credentials = await authenticatedToken(args);

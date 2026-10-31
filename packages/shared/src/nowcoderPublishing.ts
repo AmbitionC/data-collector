@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { operationIdSchema, operationSourceUrlSchema } from './nowcoderOperations.js';
+import { articleIdSchema, browserFamilySchema, nowcoderAccountIdSchema, NOWCODER_ARTICLE_EDITOR_URL } from './nowcoderArticles.js';
 
 export const nowcoderPublishingPolicySchema = z.object({
   minIntervalMs: z.number().int().min(1).max(3_600_000),
@@ -8,10 +9,14 @@ export const nowcoderPublishingPolicySchema = z.object({
 }).strict();
 export const DEFAULT_NOWCODER_PUBLISHING_POLICY = { minIntervalMs: 120_000, maxPerHour: 5, maxPer24Hours: 20 } as const;
 export type NowcoderPublishingPolicy = z.infer<typeof nowcoderPublishingPolicySchema>;
+export const publishingReferenceUrlSchema = z.union([operationSourceUrlSchema, z.literal(NOWCODER_ARTICLE_EDITOR_URL),
+  z.string().regex(/^https:\/\/www\.nowcoder\.com\/users\/\d{1,20}$/u)]);
 export const nowcoderVerificationPauseSchema = z.object({
-  id: z.string().uuid(), detectedAt: z.iso.datetime(), sourceUrl: operationSourceUrlSchema,
+  id: z.string().uuid(), detectedAt: z.iso.datetime(), sourceUrl: publishingReferenceUrlSchema,
   requestId: z.string().uuid(), opportunityId: operationIdSchema.optional(),
   key: z.string().regex(/^[a-zA-Z0-9_-]{12,100}$/u).optional(),
+  channel: z.enum(['comment', 'article']).optional(), articleId: articleIdSchema.optional(),
+  browser: browserFamilySchema.optional(), accountId: nowcoderAccountIdSchema.optional(),
 }).strict();
 export type NowcoderVerificationPause = z.infer<typeof nowcoderVerificationPauseSchema>;
 export const nowcoderPublishingStatusSchema = z.object({
@@ -20,6 +25,12 @@ export const nowcoderPublishingStatusSchema = z.object({
   nextAllowedAt: z.iso.datetime().nullable(), verification: nowcoderVerificationPauseSchema.nullable(),
 }).strict();
 export type NowcoderPublishingStatus = z.infer<typeof nowcoderPublishingStatusSchema>;
+export const articlePublishingStatusSchema = z.object({
+  schemaVersion: z.literal(1), policy: z.object({ minIntervalMs: z.number().int().positive(), maxPer24Hours: z.literal(1) }).strict(),
+  usage: z.object({ last24Hours: z.number().int().nonnegative() }).strict(), nextAllowedAt: z.iso.datetime().nullable(),
+  verification: nowcoderVerificationPauseSchema.nullable(),
+}).strict();
+export type ArticlePublishingStatus = z.infer<typeof articlePublishingStatusSchema>;
 export const nowcoderVerificationResumeSchema = z.object({
   id: z.string().uuid(), verificationCompleted: z.literal(true),
 }).strict();

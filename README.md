@@ -245,6 +245,21 @@ npm run collector -- nowcoder ops publish --id OPPORTUNITY_ID --revision N --key
 
 所有记录保存在本机配置目录，独立于面经投递；复制不会发布。实际发送需要用户授权和显式 `--send`，只发送已保存的主草稿；重复键不会再发，结果不确定时停止等待核验。草稿包、修订保护和完整使用说明见 [牛客运营助手](docs/nowcoder-operations.md)。
 
+### 牛客发文：两个浏览器分别绑定账号
+
+侧栏「连接角色」可把 Edge 设为「采集与评论」、Chrome 设为「牛客发文」，各保留一个连接。发文通过 `nowcoder articles` CLI 完成私有草稿导入、账号预览、单次发布和原始回执核验；按浏览器和牛客 UID 绑定，结果不确定时不会自动重发。整理题单须明确标注整理版，不能冒充亲历面经。
+
+```bash
+npm run collector -- nowcoder articles runtime
+npm run collector -- nowcoder articles account --browser chrome --account YOUR_UID
+npm run collector -- nowcoder articles draft --file /absolute/draft.private.json
+npm run collector -- nowcoder articles preview --id ARTICLE_ID
+npm run collector -- nowcoder articles publish --id ARTICLE_ID --revision N --key UNIQUE_KEY --browser chrome --account YOUR_UID --send
+npm run collector -- nowcoder articles verify --id ARTICLE_ID --key UNIQUE_KEY
+```
+
+文章每24小时最多一次尝试，与评论共用至少120秒间隔和验证暂停；具体草稿格式及恢复方法见 [牛客发文操作说明](.codex/skills/data-collector-delivery/references/nowcoder-articles.md)。
+
 ### 牛客定向采集 CLI
 
 先预览，再用返回的搜索会话 ID 启动；可从该会话的候选中指定优先顺序：

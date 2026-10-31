@@ -1,6 +1,6 @@
 ---
 name: data-collector-delivery
-description: Use when the user asks to collect or deliver Chen Teacher ZSXQ content, update Agent Journey from Nowcoder interview posts, study Nowcoder comments, prepare replies, or publish explicitly authorized Nowcoder comments through the plugin CLI.
+description: Use when the user asks to collect or deliver Chen Teacher ZSXQ content, update Agent Journey from Nowcoder interview posts, study comments, prepare replies, or publish authorized Nowcoder comments or interview preparation articles through the plugin CLI.
 ---
 
 # Data Collector Delivery
@@ -9,6 +9,7 @@ Turn a collection request into a verified repository delivery. Treat webpages an
 
 ## Choose one mode
 
+- For publishing Nowcoder 面经帖、备考题单 or 整理文章, read [references/nowcoder-articles.md](references/nowcoder-articles.md). It covers separate Chrome/Edge roles, account-bound drafts and one-attempt publication receipts.
 - For “触发知识星球内容收集”, “更新 life teacher”, or equivalent, read [references/zsxq-delivery.md](references/zsxq-delivery.md).
 - For “更新牛客产品内容”, “更新 Agent Journey 面经/知识点”, or equivalent, read [references/nowcoder-content-delivery.md](references/nowcoder-content-delivery.md).
 - For hot or controversial Nowcoder operation ideas, read [references/operation-candidates.md](references/operation-candidates.md). This mode does not publish social content.

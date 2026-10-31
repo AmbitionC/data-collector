@@ -1,4 +1,4 @@
-import { descriptorForHost, isListPage, nowcoderScheduleConfigSchema, parseSupportedUrl, operationIdSchema } from '@data-collector/shared';
+import { descriptorForHost, isListPage, nowcoderScheduleConfigSchema, parseSupportedUrl, operationIdSchema, connectionRoleSchema } from '@data-collector/shared';
 import {
   isCollecting,
   commitAutoReload,
@@ -23,6 +23,8 @@ import { planErrorNeedsAttention } from './planAttention.js';
 import { HotMaterialSession } from './hotMaterials.js';
 import { NowcoderOperationsRunner } from './nowcoderOperations.js';
 import { runNowcoderOperationPage } from './nowcoderOperationsPage.js';
+import { NowcoderArticlesRunner } from './nowcoderArticles.js';
+import { runNowcoderArticlePage } from './nowcoderArticlesPage.js';
 import { collectedDocumentSchema, type CollectedDocument } from '@data-collector/shared';
 
 const storage: ExtensionStorage = {
@@ -127,9 +129,12 @@ function waitForTabComplete(
   });
 }
 
+const browserFamily = /\bEdg\//u.test(navigator.userAgent) ? 'edge'
+  : /\b(?:HeadlessChrome|Chrome|Chromium)\//u.test(navigator.userAgent) ? 'chrome' : undefined;
 const connection = new BridgeConnection({
   storage,
   extensionId: chrome.runtime.id,
+  ...(browserFamily ? { browserFamily } : {}),
   socketFactory: url => new WebSocket(url) as unknown as SocketLike,
   fetch,
   setInterval: (callback, milliseconds) => setInterval(callback, milliseconds),
@@ -191,6 +196,18 @@ const operationsRunner = new NowcoderOperationsRunner({
   },
 });
 connection.onOperations(action => operationsRunner.run(action));
+const articlesRunner = new NowcoderArticlesRunner({
+  create: url => tabs.create({ url, active: false, purpose: 'nowcoder-operations' }),
+  get: async id => { const tab = await chrome.tabs.get(id); return tab.url ? { url: tab.url } : {}; },
+  close: id => ownedTabs.close(id),
+  handoff: (id, url) => ownedTabs.handoff(id, url, { preservePrevious: true }),
+  wait: id => waitForTabComplete(id),
+  execute: async (tabId, action) => {
+    const results = await chrome.scripting.executeScript({ target: { tabId }, func: runNowcoderArticlePage, args: [action] });
+    return results[0]?.result;
+  },
+});
+connection.setArticleHandler(action => articlesRunner.run(action));
 const hotMaterials = new HotMaterialSession({
   storage: sessionStorage,
   readList: () => runner.previewHotList(),
@@ -288,7 +305,7 @@ function updateSignal(values: Record<string, unknown>): UpdateSignal {
     buildFailed: update?.buildFailed === true,
     updateMessage: update?.message,
     directedRunActive: values.directedRunActive === true,
-    busy: hotMaterials.processing || operationsRunner.busy || isCollecting({
+    busy: connection.busy || hotMaterials.processing || operationsRunner.busy || articlesRunner.busy || isCollecting({
       batch: values.batch as { phase?: string; updatedAt?: number } | undefined,
       lastJobStatus: values.lastJobStatus as string | undefined,
       lastJobUpdatedAt: values.lastJobUpdatedAt as number | undefined,
@@ -379,6 +396,22 @@ chrome.runtime.onMessage.addListener((message: unknown, _sender, sendResponse) =
   const action = async () => {
     if (request.type === 'status.get') {
       return status();
+    }
+    if (request.type === 'connection.role.get' || request.type === 'connection.role.set') {
+      if (request.type === 'connection.role.set') {
+        const role = connectionRoleSchema.safeParse((request as { role?: unknown }).role);
+        if (!role.success) throw new Error('请选择采集与评论或牛客发文角色');
+        const values = await chrome.storage.local.get(['batch', 'lastJobStatus', 'lastJobUpdatedAt', 'directedRunActive']);
+        const signal = updateSignal(values);
+        if (signal.busy || signal.directedRunActive || connection.busy || activePlanAttempts.size > 0) {
+          throw new Error('浏览器操作进行中，请完成后再保存连接角色');
+        }
+        await connection.setConnectionRole(role.data);
+      }
+      const values = await chrome.storage.local.get(['connectionRole', 'bridgeStatus']);
+      const role = connectionRoleSchema.safeParse(values.connectionRole ?? 'collector');
+      if (!role.success) throw new Error('已保存的连接角色无效，请重新选择并保存');
+      return { role: role.data, bridgeStatus: values.bridgeStatus ?? 'disconnected', ...(browserFamily ? { browserFamily } : {}) };
     }
     if (request.type === 'operations.list') return connection.operations();
     if (request.type === 'operations.limits') return connection.operations('/publishing');
@@ -544,6 +577,9 @@ chrome.runtime.onMessage.addListener((message: unknown, _sender, sendResponse) =
       return status();
     }
     if (request.type === 'extension.reload') {
+      const values = await chrome.storage.local.get(['batch', 'lastJobStatus', 'lastJobUpdatedAt', 'directedRunActive']);
+      const signal = updateSignal(values);
+      if (signal.busy || signal.directedRunActive || activePlanAttempts.size > 0) throw new Error('浏览器操作进行中，请完成后再重新加载插件');
       // 未打包扩展重新加载会重新读磁盘上的文件，等同于扩展管理页那个 ↻ 按钮。
       chrome.runtime.reload();
       return { reloading: true };

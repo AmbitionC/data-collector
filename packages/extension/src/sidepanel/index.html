@@ -27,6 +27,18 @@
         <button id="update-reload-button" type="button">立即加载</button>
       </div>
 
+      <details id="connection-settings" class="plan-ticket">
+        <summary>连接角色</summary>
+        <label for="connection-role" class="ops-label">此浏览器负责</label>
+        <select id="connection-role" class="ops-input">
+          <option value="collector">采集与评论</option>
+          <option value="articles">牛客发文</option>
+        </select>
+        <button id="connection-role-save" type="button" class="secondary-button">保存连接角色</button>
+        <p id="connection-role-status" class="support compact" role="status">正在读取连接角色…</p>
+        <p id="connection-role-error" class="support compact" role="alert" hidden></p>
+      </details>
+
       <div class="panel-content">
         <section id="operations-panel" class="state-panel" hidden>
           <p class="section-kicker">牛客运营 · 私有草稿</p>

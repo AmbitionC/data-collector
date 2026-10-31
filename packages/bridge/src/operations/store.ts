@@ -13,6 +13,7 @@ import { listLibrary } from '../library/manage.js';
 import { projectOrganized } from '../library/storedDocument.js';
 import { atomicWriteText } from '../library/writer.js';
 import { HttpError } from '../server/http.js';
+import type { PublicationAdmissionQueue } from './admission.js';
 
 const hash = (title: string, body: string) => createHash('sha256').update(`${title}\n${body}`).digest('hex');
 const inside = (root: string, path: string) => { const part = relative(root, path); return part !== '..' && !part.startsWith(`..${process.platform === 'win32' ? '\\' : '/'}`) && !isAbsolute(part); };
@@ -21,7 +22,9 @@ const normalize = (value: string) => value.replace(/\s+/gu, '');
 export class NowcoderOperationsStore {
   private pending: Promise<unknown> = Promise.resolve();
   constructor(private readonly root: string, private readonly libraryRoot: string,
-    private readonly hooks: { beforePublication?: () => Promise<void>; afterPublication?: () => Promise<void> } = {}) {}
+    private readonly hooks: { beforePublication?: () => Promise<void>; afterPublication?: () => Promise<void>; admission?: PublicationAdmissionQueue } = {}) {}
+
+  private admit<T>(work: () => Promise<T>): Promise<T> { return this.hooks.admission ? this.hooks.admission.run(work) : work(); }
 
   private serialize<T>(operation: () => Promise<T>): Promise<T> {
     const result = this.pending.then(operation);
@@ -172,7 +175,7 @@ export class NowcoderOperationsStore {
 
   async beginPublication(id: string, raw: unknown, requestId: string): Promise<{ entry: NowcoderOperation; publication: OperationPublication; dispatch: boolean }> {
     const input = operationPublishSchema.parse(raw);
-    return this.serialize(async () => {
+    return this.serialize(() => this.admit(async () => {
       const entry = await this.get(id);
       if (!entry) throw new HttpError(404, 'OPERATIONS_NOT_FOUND', '运营记录不存在');
       const attempts = entry.publicationAttempts ?? [];
@@ -195,7 +198,7 @@ export class NowcoderOperationsStore {
       const saved = await this.save({ ...entry, publicationAttempts: [...attempts, publication], revision: entry.revision + 1, updatedAt: now });
       await this.hooks.afterPublication?.();
       return { entry: saved, publication, dispatch: true };
-    });
+    }));
   }
 
   async finishPublication(id: string, key: string, result: NowcoderOperationResult): Promise<OperationPublication> {
