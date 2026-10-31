@@ -48,6 +48,7 @@ import { AccessTokenManager } from '../auth.js';
 import { loadConfig, type ConfigOverrides } from '../config.js';
 import { NowcoderScheduleStore } from '../plans/nowcoderSchedule.js';
 import { NowcoderOperationsStore } from '../operations/store.js';
+import { NowcoderPublishingControl } from '../operations/publishingControl.js';
 import { NowcoderOperationsTransport } from '../operations/transport.js';
 import { NowcoderOperationsWorkflow, workflowRequestSchema } from '../operations/workflow.js';
 import { NowcoderOperationsActivity } from '../operations/activity.js';
@@ -418,7 +419,10 @@ async function verifiedRevealPath(roots: readonly string[], requestedPath: strin
 
 export async function startBridge(options: StartBridgeOptions = {}): Promise<BridgeHandle> {
   const config = loadConfig(options);
-  const operations = new NowcoderOperationsStore(join(config.configDir, 'nowcoder-operations'), config.libraryRoot);
+  const publishingControl = new NowcoderPublishingControl(join(config.configDir, 'nowcoder-publishing.json'), async () =>
+    (await operations.list()).flatMap(entry => (entry.publicationAttempts ?? []).map(publication => ({ opportunityId: entry.id, sourceUrl: entry.canonicalUrl, publication }))));
+  const operations = new NowcoderOperationsStore(join(config.configDir, 'nowcoder-operations'), config.libraryRoot,
+    { beforePublication: () => publishingControl.assertCapacity(), afterPublication: async () => { await publishingControl.status(); } });
   const activeOperations = new Set<Promise<unknown>>();
   let closing = false;
   const trackOperation = <T>(operation: Promise<T>): Promise<T> => {
@@ -693,7 +697,7 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
       && extensionMatchesArtifact(),
     capabilities: extensionSocket ? extensionRuntime.get(extensionSocket)?.capabilities ?? [] : [],
   }));
-  const operationsActivity = new NowcoderOperationsActivity(operations, operationsTransport, options.fetch ?? fetch);
+  const operationsActivity = new NowcoderOperationsActivity(operations, operationsTransport, options.fetch ?? fetch, publishingControl);
   const workflowCollectionJobs = new Set<string>();
   const operationsWorkflow = new NowcoderOperationsWorkflow(join(config.configDir, 'nowcoder-workflows'), operations, operationsActivity, async (candidate, observe) => {
     operationsTransport.assertAvailable();
@@ -2068,6 +2072,14 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
         })()
         : operationsActivity.publish(operationAction[1]!, input);
       return sendJson(response, 200, await result);
+    }
+    if (requestUrl.pathname === '/v1/nowcoder/operations/publishing') {
+      if (request.method === 'GET') return sendJson(response, 200, await publishingControl.status());
+      if (request.method === 'PUT') return sendJson(response, 200, await publishingControl.configure(await readJson(request)));
+    }
+    if (requestUrl.pathname === '/v1/nowcoder/operations/publishing/resume' && request.method === 'POST') {
+      if (operationsActivity.busy || operationsTransport.busy) throw new HttpError(409, 'OPERATIONS_BUSY', '牛客操作仍在执行，请等待回执');
+      return sendJson(response, 200, await operationsActivity.resumeVerification(await readJson(request)));
     }
     const operationMatch = requestUrl.pathname.match(/^\/v1\/nowcoder\/operations\/([^/]+)$/u);
     if (operationMatch?.[1]) {

@@ -381,6 +381,7 @@ chrome.runtime.onMessage.addListener((message: unknown, _sender, sendResponse) =
       return status();
     }
     if (request.type === 'operations.list') return connection.operations();
+    if (request.type === 'operations.limits') return connection.operations('/publishing');
     if (request.type === 'operations.add') {
       return connection.operations('', 'POST', { sourceId: (request as { sourceId?: unknown }).sourceId });
     }

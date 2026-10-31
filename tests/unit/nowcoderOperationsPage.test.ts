@@ -28,6 +28,127 @@ async function snapshot() {
 }
 
 describe('Nowcoder plugin page operations', () => {
+  it('refuses a context result if expansion navigates away from the original source', async () => {
+    vi.useFakeTimers();
+    const control = document.createElement('button'); control.className = 'subcomment-more'; control.textContent = '查看回复';
+    control.onclick = () => { vi.stubGlobal('location', new URL('https://www.nowcoder.com/discuss/234567')); control.textContent = '收起'; control.setAttribute('aria-busy', 'false'); };
+    document.querySelector('.comment-box')!.append(control);
+    const pending = runNowcoderOperationPage({ kind: 'context', url, maxPages: 1 }); await vi.runAllTimersAsync();
+    expect(await pending).toMatchObject({ kind: 'attention', code: 'SOURCE_MISMATCH', submission: 'not_attempted' });
+  });
+  it.each(['children', 'ellipsis', 'pagination'])('stops and retains the challenge if verification appears during %s loading', async mode => {
+    vi.useFakeTimers();
+    const challenge = () => document.body.insertAdjacentHTML('beforeend', '<div class="captcha-modal">请完成验证</div>');
+    if (mode === 'children') {
+      const control = document.createElement('button'); control.className = 'subcomment-more'; control.textContent = '查看回复'; control.onclick = challenge;
+      document.querySelector('.comment-box')!.append(control);
+    } else if (mode === 'ellipsis') {
+      document.querySelector('.comment-content-box')!.insertAdjacentHTML('beforeend', '<span class="vue-ellipsis-js-suffix"><span>展开</span></span>');
+      document.querySelector<HTMLElement>('.vue-ellipsis-js-suffix span')!.onclick = challenge;
+    } else {
+      document.body.insertAdjacentHTML('beforeend', '<div class="el-pagination"><button class="btn-next">下一页</button></div>');
+      document.querySelector<HTMLElement>('.btn-next')!.onclick = challenge;
+    }
+    const pending = runNowcoderOperationPage({ kind: 'context', url, maxPages: 2 }); await vi.runAllTimersAsync();
+    expect(await pending).toMatchObject({ kind: 'attention', code: 'VERIFICATION_REQUIRED', submission: 'not_attempted', diagnostics: { verificationObservedAt: expect.any(String) } });
+  });
+  it('records page start for a context read without inventing publication events', async () => {
+    vi.useFakeTimers(); vi.setSystemTime('2026-10-31T02:00:00.000Z');
+    const pending = runNowcoderOperationPage({ kind: 'context', url, maxPages: 1 });
+    await vi.runAllTimersAsync();
+    expect(await pending).toMatchObject({ kind: 'context', diagnostics: { pageStartedAt: '2026-10-31T02:00:00.000Z' } });
+    expect((await pending).diagnostics).toEqual({ pageStartedAt: '2026-10-31T02:00:00.000Z' });
+  });
+
+  it('timestamps a pre-existing visible verification challenge without editing or clicking', async () => {
+    vi.useFakeTimers();
+    const expected = await snapshot();
+    vi.setSystemTime('2026-10-31T02:05:00.000Z');
+    document.body.insertAdjacentHTML('beforeend', '<div class="captcha-modal">请完成验证</div>');
+    let clicks = 0; document.querySelector('button')!.addEventListener('click', () => { clicks++; });
+    const result = await runNowcoderOperationPage({ kind: 'publish', url, text: '先做一个项目', expected });
+    expect(result).toMatchObject({ kind: 'attention', code: 'VERIFICATION_REQUIRED', submission: 'not_attempted' });
+    expect(result.diagnostics).toEqual({ pageStartedAt: '2026-10-31T02:05:00.000Z', verificationObservedAt: '2026-10-31T02:05:00.000Z' });
+    expect(clicks).toBe(0);
+    expect(document.querySelector('#nc-e-textarea-1')!.textContent).toBe('');
+  });
+
+  it('retains only page start when changed context blocks publication before the composer', async () => {
+    vi.useFakeTimers();
+    const expected = await snapshot();
+    vi.setSystemTime('2026-10-31T02:10:00.000Z');
+    document.querySelector('.feed-content-text')!.textContent = '原帖已经改了，问题已解决';
+    const pending = runNowcoderOperationPage({ kind: 'publish', url, text: '先做一个项目', expected });
+    await vi.runAllTimersAsync();
+    expect(await pending).toMatchObject({ kind: 'attention', code: 'CONTEXT_CHANGED', submission: 'not_attempted' });
+    expect((await pending).diagnostics).toEqual({ pageStartedAt: '2026-10-31T02:10:00.000Z' });
+  });
+
+  it.each([false, true])('records a post-click verification observation and stops after exactly one click, even with a visible receipt: %s', async withReceipt => {
+    vi.useFakeTimers();
+    const expected = await snapshot();
+    vi.setSystemTime('2026-10-31T02:15:00.000Z');
+    let clicks = 0, clickTime: string | undefined;
+    document.querySelector('button')!.addEventListener('click', () => {
+      clicks++; clickTime = new Date().toISOString();
+      vi.setSystemTime('2026-10-31T02:15:10.000Z');
+      document.body.insertAdjacentHTML('beforeend', '<div class="captcha-modal">请完成验证</div>');
+      if (withReceipt) document.body.insertAdjacentHTML('beforeend', comment(102, '先做一个项目'));
+    });
+    const pending = runNowcoderOperationPage({ kind: 'publish', url, text: '先做一个项目', expected });
+    await vi.runAllTimersAsync();
+    const result = await pending;
+    expect(result).toMatchObject({ kind: 'attention', code: 'VERIFICATION_REQUIRED', submission: 'uncertain' });
+    expect(clicks).toBe(1);
+    expect(result.diagnostics).toEqual({
+      pageStartedAt: '2026-10-31T02:15:00.000Z', beforeSubmitAt: clickTime, submitClickedAt: clickTime,
+      verificationObservedAt: '2026-10-31T02:15:10.000Z',
+    });
+  });
+
+  it('records the actual receipt observation time independently from the click time', async () => {
+    vi.useFakeTimers();
+    const expected = await snapshot();
+    vi.setSystemTime('2026-10-31T02:20:00.000Z');
+    let clicks = 0, clickTime: string | undefined;
+    document.querySelector('button')!.addEventListener('click', () => {
+      clicks++; clickTime = new Date().toISOString();
+      vi.setSystemTime('2026-10-31T02:20:10.000Z');
+      document.body.insertAdjacentHTML('beforeend', comment(102, '先做一个项目'));
+      document.querySelector('#nc-e-textarea-1')!.textContent = '';
+    });
+    const pending = runNowcoderOperationPage({ kind: 'publish', url, text: '先做一个项目', expected });
+    await vi.runAllTimersAsync();
+    const result = await pending;
+    expect(result).toMatchObject({ kind: 'published', receipt: { observedAt: '2026-10-31T02:20:10.000Z', url: 'https://www.nowcoder.com/discuss/comment/102' } });
+    expect(clicks).toBe(1);
+    expect(result.diagnostics).toEqual({
+      pageStartedAt: '2026-10-31T02:20:00.000Z', beforeSubmitAt: clickTime, submitClickedAt: clickTime,
+      receiptObservedAt: '2026-10-31T02:20:10.000Z',
+    });
+  });
+
+  it.each([
+    '<div class="captcha-modal" style="display:none">请完成验证</div>',
+    '<section hidden><div class="captcha-modal">请完成验证</div></section>',
+    '<style>.hidden-captcha-shell { display:none }</style><section class="hidden-captcha-shell"><div class="captcha-modal">请完成验证</div></section>',
+  ])('ignores hidden verification markers when collecting publication timings: %s', async marker => {
+    vi.useFakeTimers();
+    const expected = await snapshot();
+    vi.setSystemTime('2026-10-31T02:25:00.000Z');
+    document.body.insertAdjacentHTML('beforeend', marker);
+    let clicks = 0;
+    document.querySelector('button')!.addEventListener('click', () => {
+      clicks++; document.body.insertAdjacentHTML('beforeend', comment(102, '先做一个项目'));
+    });
+    const pending = runNowcoderOperationPage({ kind: 'publish', url, text: '先做一个项目', expected });
+    await vi.runAllTimersAsync();
+    const result = await pending;
+    expect(result).toMatchObject({ kind: 'published', diagnostics: { pageStartedAt: '2026-10-31T02:25:00.000Z' } });
+    expect(result.diagnostics).not.toHaveProperty('verificationObservedAt');
+    expect(clicks).toBe(1);
+  });
+
   it('returns actual comment permalinks, nested authors, unknown likes and image references without quick replies', async () => {
     document.body.insertAdjacentHTML('beforeend', '<div>一键发评：加油！</div>');
     const context = await snapshot();

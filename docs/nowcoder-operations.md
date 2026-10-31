@@ -28,6 +28,20 @@ v0.4.59 修正真实 Slate 编辑器的输入：先向受控文本叶子发送�
 
 结果不确定时用 `nowcoder ops verify --id ID --key KEY [--pages 1]` 只读复核。发送前评论覆盖完整，且在原帖中观察到唯一匹配文字、不属于发送前快照的新增评论链接，才补回 `evidence: observed` 的回执。未找到、匹配不唯一或发送前覆盖不完整，仍保持待核验，不点击发送。此时 `context` 也可返回 `verificationOnly: true` 的只读语境，不覆盖发送前证据。用户核验后仍可在侧栏人工记录链接，此时证据明确标为 `manual`，不冒充插件验证；正在发送时不能手工改状态。插件接手页会保留，后续异常不会关闭已有的用户编辑或登录页面。
 
+## 跨批次发布保护（v0.4.62）
+
+默认最小间隔 120 秒，滚动一小时最多 5 次、滚动 24 小时最多 20 次。按同一 Bridge 的持久发送尝试计数，升级前记录、拒绝、结果不确定和中断尝试均计入；换批次、重启、修改配置不会清零。同一 key 仅查看原记录，不重复扣额度。本机预算不统计其他安装或网页手动评论，不代表牛客公开阈值，也不能保证免验证。
+
+- `nowcoder ops limits`：查看限制、累计用量、单条下次可尝试时间和待处理验证。
+- `nowcoder ops configure --file /absolute/policy.private.json`：严格读取完整 JSON，例如 `{"minIntervalMs":120000,"maxPerHour":5,"maxPer24Hours":20}`；不接受关闭保护的零值，不清除历史或验证。
+- 发布批次先检查整批剩余额度，额度不足时停止并保存未执行条目。整批超过配置上限须缩小清单；其余预算不足会给出按当前历史计算的最早时间。间隔等待由 Bridge 内部执行并记为 `publish_wait`，不会不断打开网页或要求模型轮询；预计超过语境有效期则停止，要求重读和审阅。
+
+出现 `VERIFICATION_REQUIRED` 时立即持久化全局暂停，保留原帖、请求 ID 和原 key。运营搜索、读评论、prepare 采集和所有新发布都停止；原 key 仍可只读查询。完成原页验证后，先运行 `ops limits` 取得当前验证 ID，再执行 `nowcoder ops resume --id VERIFICATION_ID --verification-completed`。恢复只读取保存的原帖，按原 key 核验可能已经发出的评论；仍见验证、登录失败、页面错误或验证 ID 变化均不解除暂停。不明确的原评论仍保持 uncertain，不会补发。恢复不会续跑已停止批次，也不重置额度。
+
+认证 API：`GET/PUT /v1/nowcoder/operations/publishing`，`POST .../publishing/resume`（严格要求 `id` 与 `verificationCompleted:true`）。发布保护私有状态保存在配置目录 `nowcoder-publishing.json`，记录损坏、本进程观察到保护文件丢失、已记录的发送台账部分或全部缺失时停止发布，不擅自覆盖。旧版未核销的验证记录也会迁移为暂停。
+
+页面诊断只保存实际观察到的 `pageStartedAt`、`beforeSubmitAt`、`submitClickedAt`、`verificationObservedAt`、`receiptObservedAt`。这些时间经插件回执进入单条发送记录、私有批次证据和短 `stats`；没有观察的字段和历史事件不补造，不能据此推断平台隐藏风控原因。侧栏仅在首次进入和显式刷新时读取保护状态，保留草稿，不新增发送按钮。
+
 ## 回复策略模块
 
 先按 [产品推荐与 Skill 承接](../.codex/skills/data-collector-delivery/references/nowcoder-recommendations.md) 判断 `recommend / reply_only / skip`，再起草。当前可将判断与依据保存在内部说明中，使用现有「暂不回复」状态；尚未新增专门的筛选字段或渠道配置 UI。对外 Skill 仍是方案阶段，预演话术与当前可发布的网站推荐分开保存，不把规划能力写成已经上线。

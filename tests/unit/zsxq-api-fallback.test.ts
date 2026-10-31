@@ -233,10 +233,12 @@ describe('ZSXQ API fallback', () => {
       });
       const rejected = expect(pending).rejects.toThrow(/已重试 3 次.*aborted/u);
 
-      await vi.advanceTimersByTimeAsync(0);
-      await vi.advanceTimersByTimeAsync(10_001);
-      await vi.advanceTimersByTimeAsync(10_001);
-      await vi.advanceTimersByTimeAsync(10_001);
+      for (let attempt = 1; attempt <= 3; attempt++) {
+        // WebCrypto signing uses real worker turns. Advance the transport clock
+        // only after that attempt has actually installed its abort listener.
+        await vi.waitFor(() => expect(fetcher).toHaveBeenCalledTimes(attempt));
+        await vi.advanceTimersByTimeAsync(10_001);
+      }
       await rejected;
       expect(fetcher).toHaveBeenCalledTimes(3);
     } finally {

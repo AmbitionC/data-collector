@@ -50,6 +50,51 @@ async function fixture(overrides: Partial<CollectedDocument> = {}, bridgeOptions
 }
 
 describe('private Nowcoder operations workflow', () => {
+  it('authenticates global limits, validates policy and retains historical attempts across configuration', async () => {
+    const c = await fixture(), path = '/v1/nowcoder/operations/publishing';
+    expect((await c.request('GET', path, undefined, false)).status).toBe(401);
+    expect((await c.request('GET', path)).body).toMatchObject({ policy: { minIntervalMs: 120000, maxPerHour: 5, maxPer24Hours: 20 }, usage: { lastHour: 0, last24Hours: 0 }, verification: null });
+    expect((await c.request('PUT', path, { minIntervalMs: 0, maxPerHour: 5, maxPer24Hours: 20 })).status).toBe(400);
+    const policy = { minIntervalMs: 240000, maxPerHour: 3, maxPer24Hours: 10 };
+    expect((await c.request('PUT', path, policy)).body.policy).toEqual(policy);
+    expect(JSON.parse(await readFile(join(c.configDir, 'nowcoder-publishing.json'), 'utf8')).policy).toEqual(policy);
+    expect((await c.request('POST', `${path}/resume`, { id: '12345678-1234-4234-8234-123456789012' })).status).toBe(400);
+    expect((await c.request('POST', `${path}/resume`, { id: '12345678-1234-4234-8234-123456789012', verificationCompleted: true })).status).toBe(409);
+  });
+  it('stops all operation reads after a challenge and reconciles the original attempt without another submit', async () => {
+    const c = await fixture(), base = '/v1/nowcoder/operations';
+    let entry = (await c.request('POST', base, { sourceId: c.sourceId })).body.entry;
+    const socket = new WebSocket(`${c.bridge.wsUrl}?token=${token}`, { origin: `chrome-extension://${TRUSTED_EXTENSION_ID}` }); sockets.push(socket);
+    await once(socket, 'open');
+    const envelope = (type: string, requestId: string, payload: unknown) => JSON.stringify({ protocolVersion: 1, type, requestId, timestamp: new Date().toISOString(), payload });
+    socket.send(envelope('extension.hello', 'hello', { version: APP_VERSION, capabilities: [NOWCODER_BROWSER_OPERATIONS_CAPABILITY] }));
+    await vi.waitFor(async () => expect((await c.request('GET', '/health')).body.extensionConnected).toBe(true));
+    const actions: string[] = []; let sentText = '';
+    socket.on('message', raw => {
+      const message = JSON.parse(raw.toString()); if (message.type !== 'operations.execute') return;
+      actions.push(message.payload.kind); const at = new Date().toISOString();
+      if (message.payload.kind === 'publish') {
+        sentText = message.payload.text;
+        socket.send(envelope('operations.result', message.requestId, { kind: 'attention', code: 'VERIFICATION_REQUIRED', message: '牛客要求验证，请在保留页面完成', submission: 'uncertain', diagnostics: { pageStartedAt: at, submitClickedAt: at, verificationObservedAt: at } }));
+      } else socket.send(envelope('operations.result', message.requestId, { kind: 'context', snapshot: { sourceUrl: url, readAt: at, post: { title: c.document.title, body: c.document.text, images: [] },
+        comments: sentText ? [{ url: 'https://www.nowcoder.com/discuss/comment/991001', parentUrl: null, text: sentText, images: [], isAuthor: false, likes: null }] : [],
+        coverage: { total: sentText ? 1 : 0, observed: sentText ? 1 : 0, pagesRead: 1, hasMore: false, complete: true, limitations: [] } } }));
+    });
+    const path = `${base}/${entry.id}`;
+    const context = (await c.request('POST', `${path}/context`, {})).body;
+    entry = (await c.request('PUT', path, { revision: context.revision, contextHash: context.contextHash, conversationHash: context.conversationHash, drafts: { primary: '拿自己的资料做个小工具呗', alternative: '先跑通一个场景', tone: 'contextual', anchor: 'LangGraph', notes: '' } })).body.entry;
+    const input = { revision: entry.revision, contextHash: entry.contextHash, key: 'verification-real-api-key', send: true };
+    const result = await c.request('POST', `${path}/publish`, input);
+    expect(result.body.publication).toMatchObject({ state: 'uncertain', attentionCode: 'VERIFICATION_REQUIRED', diagnostics: { submitClickedAt: expect.any(String) } });
+    const status = (await c.request('GET', `${base}/publishing`)).body;
+    expect(status).toMatchObject({ usage: { lastHour: 1 }, verification: { key: input.key, sourceUrl: url } });
+    expect((await c.request('POST', `${path}/context`, {})).status).toBe(409);
+    expect((await c.request('POST', `${base}/search`, { query: 'Agent' })).status).toBe(409);
+    expect((await c.request('POST', `${path}/publish`, input)).body.publication.state).toBe('uncertain');
+    const resumed = await c.request('POST', `${base}/publishing/resume`, { id: status.verification.id, verificationCompleted: true });
+    expect(resumed.body).toMatchObject({ status: { verification: null, usage: { lastHour: 1 } }, publication: { state: 'published', replyUrl: 'https://www.nowcoder.com/discuss/comment/991001' } });
+    expect(actions).toEqual(['context', 'publish', 'context']);
+  });
   it('reads comments and publishes the stored draft through authenticated plugin RPC and compact CLI JSON', async () => {
     const c = await fixture(), base = '/v1/nowcoder/operations';
     const { entry } = (await c.request('POST', base, { sourceId: c.sourceId })).body;

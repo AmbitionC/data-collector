@@ -1,4 +1,4 @@
-import { MAX_REPLY_CHARACTERS, operationDraftsSchema, reviewNowcoderReply, type NowcoderOperation, type NowcoderOperationSummary, type OperationUpdate } from '@data-collector/shared';
+import { MAX_REPLY_CHARACTERS, operationDraftsSchema, reviewNowcoderReply, nowcoderPublishingStatusSchema, type NowcoderOperation, type NowcoderOperationSummary, type OperationUpdate } from '@data-collector/shared';
 
 type Message = <T>(request: unknown) => Promise<T>;
 const STATUS = { queued: '待起草', drafted: '待核对', reviewed: '已核对', replied: '已回复（人工记录）', skipped: '暂不回复' };
@@ -12,6 +12,7 @@ export function bindOperations(document: Document, message: Message): { show(): 
   const feedback = get<HTMLTextAreaElement>('ops-feedback');
   const replyUrl = get<HTMLInputElement>('ops-reply-url');
   let loaded = false, busy = false, dirty = false, selection = 0, editRevision = 0;
+  let stickyFailure: string | undefined;
   let entries: NowcoderOperationSummary[] = [], current: NowcoderOperation | undefined;
 
   function controls(): void {
@@ -58,8 +59,9 @@ export function bindOperations(document: Document, message: Message): { show(): 
   }
   function failure(error: unknown): void {
     const value = error instanceof Error ? error.message : '';
-    status.textContent = /message port|receiving end|context invalidated|failed to fetch|networkerror/iu.test(value)
+    stickyFailure = /message port|receiving end|context invalidated|failed to fetch|networkerror/iu.test(value)
       ? '连接暂时中断，已保留当前草稿；请重试。' : value || '操作失败，已保留当前草稿，请重试。';
+    status.textContent = stickyFailure;
   }
   async function choose(id: string, discard = false): Promise<boolean> {
     if (dirty && !discard) { status.textContent = '当前修改未保存，请先保存，或放弃修改后重读。'; return false; }
@@ -67,7 +69,10 @@ export function bindOperations(document: Document, message: Message): { show(): 
     const observedEditRevision = editRevision;
     try {
       const result = await message<{ entry: NowcoderOperation }>({ type: 'operations.get', id });
-      if (token === selection && editRevision === observedEditRevision) { drawDetail(result.entry); return true; }
+      if (token === selection && editRevision === observedEditRevision) {
+        if (discard || (current && current.id !== result.entry.id)) stickyFailure = undefined;
+        drawDetail(result.entry); return true;
+      }
       if (token === selection) status.textContent = '保留了重读期间的新修改，请先保存后再切换。';
       return false;
     } catch (error) { if (token === selection) failure(error); return false; }
@@ -76,10 +81,17 @@ export function bindOperations(document: Document, message: Message): { show(): 
     if (busy) return;
     busy = true; controls();
     try {
-      const [queue, library] = await Promise.all([
+      const [queue, library, publishing] = await Promise.all([
         message<{ entries: NowcoderOperationSummary[] }>({ type: 'operations.list' }),
         message<{ entries: { id: string; source: string; title: string; materialKind?: string }[] }>({ type: 'library.list' }),
+        message({ type: 'operations.limits' }).then(value => nowcoderPublishingStatusSchema.parse(value)).catch(() => undefined),
       ]);
+      const protection = get('ops-publishing-status'), handoff = get<HTMLAnchorElement>('ops-verification-source');
+      handoff.hidden = !publishing?.verification;
+      if (publishing) {
+        protection.textContent = `本机发布保护：间隔 ${publishing.policy.minIntervalMs / 1000} 秒 · 近1小时 ${publishing.usage.lastHour}/${publishing.policy.maxPerHour} · 近24小时 ${publishing.usage.last24Hours}/${publishing.policy.maxPer24Hours}。${publishing.verification ? '验证待处理，已暂停；手动完成后请让 Agent 核验恢复。' : publishing.nextAllowedAt ? `下次可尝试：${new Date(publishing.nextAllowedAt).toLocaleString()}` : '当前预算可用。'}`;
+        if (publishing.verification) handoff.href = publishing.verification.sourceUrl;
+      } else { protection.textContent = '发布保护状态不可用，请重试刷新；已保留当前草稿。'; handoff.removeAttribute('href'); }
       entries = queue.entries;
       const candidates = library.entries.filter(item => item.source === 'nowcoder' && item.materialKind !== 'nowcoder-hot' && !item.id.startsWith('hot-')).slice(0, 200);
       source.replaceChildren();
@@ -91,7 +103,7 @@ export function bindOperations(document: Document, message: Message): { show(): 
         const id = current?.id ?? entries[0]?.id;
         if (id && !await choose(id)) return;
       }
-      status.textContent = dirty ? '列表已刷新，保留了未保存的编辑。' : entries.length ? `已读取 ${entries.length} 条私有运营记录。` : '还没有运营记录，选择原帖加入队列。';
+      status.textContent = stickyFailure ?? (dirty ? '列表已刷新，保留了未保存的编辑。' : entries.length ? `已读取 ${entries.length} 条私有运营记录。` : '还没有运营记录，选择原帖加入队列。');
     } catch (error) { failure(error); }
     finally { busy = false; controls(); }
   }
@@ -110,6 +122,7 @@ export function bindOperations(document: Document, message: Message): { show(): 
         ...(drafts ? { drafts } : {}), ...(nextStatus ? { status: nextStatus } : {}),
         ...(replyUrl.value.trim() ? { replyUrl: replyUrl.value.trim() } : {}) };
       const result = await message<{ entry: NowcoderOperation }>({ type: 'operations.update', id: current.id, patch });
+      stickyFailure = undefined;
       entries = entries.map(item => item.id === result.entry.id ? result.entry : item);
       drawDetail(result.entry); status.textContent = nextStatus === 'replied' ? '已记录评论链接；这是人工记录。' : '草稿已保存到本机。';
     } catch (error) { failure(error); }

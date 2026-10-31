@@ -20,7 +20,8 @@ const normalize = (value: string) => value.replace(/\s+/gu, '');
 
 export class NowcoderOperationsStore {
   private pending: Promise<unknown> = Promise.resolve();
-  constructor(private readonly root: string, private readonly libraryRoot: string) {}
+  constructor(private readonly root: string, private readonly libraryRoot: string,
+    private readonly hooks: { beforePublication?: () => Promise<void>; afterPublication?: () => Promise<void> } = {}) {}
 
   private serialize<T>(operation: () => Promise<T>): Promise<T> {
     const result = this.pending.then(operation);
@@ -186,9 +187,13 @@ export class NowcoderOperationsStore {
       if (!entry.drafts || !entry.conversation || entry.draftConversationHash !== entry.conversation.hash) throw new HttpError(409, 'OPERATIONS_CONTEXT_REQUIRED', '请先读取插件评论上下文并保存与该上下文绑定的草稿');
       if (Date.now() - Date.parse(entry.conversation.snapshot.readAt) > 30 * 60_000) throw new HttpError(409, 'OPERATIONS_CONTEXT_EXPIRED', '评论上下文超过30分钟，请重新读取和审阅');
       if (attempts.length >= 20) throw new HttpError(409, 'OPERATIONS_ATTEMPT_LIMIT', '发送尝试达到上限，请核对记录');
+      // Admission and the durable attempt share this store's global serialization.
+      // Existing-key inspection above never consumes another slot.
+      await this.hooks.beforePublication?.();
       const now = new Date().toISOString();
       const publication: OperationPublication = { key: input.key, requestId, draftHash, requestedRevision: input.revision, state: 'dispatching', createdAt: now, updatedAt: now };
       const saved = await this.save({ ...entry, publicationAttempts: [...attempts, publication], revision: entry.revision + 1, updatedAt: now });
+      await this.hooks.afterPublication?.();
       return { entry: saved, publication, dispatch: true };
     });
   }
@@ -202,6 +207,8 @@ export class NowcoderOperationsStore {
         && !entry.conversation?.snapshot.comments.some(c => c.url === result.receipt.url);
       const publication: OperationPublication = { ...attempt, updatedAt: new Date().toISOString(),
         state: valid ? 'published' : result.kind === 'attention' && result.submission === 'not_attempted' ? 'rejected' : 'uncertain',
+        ...(result.diagnostics ? { diagnostics: result.diagnostics } : {}),
+        ...(result.kind === 'attention' ? { attentionCode: result.code } : {}),
         ...(result.kind === 'attention' && result.contextChanges ? { contextChanges: result.contextChanges } : {}),
         ...(valid && result.kind === 'published' ? { replyUrl: result.receipt.url, evidence: 'observed' } : { message: result.kind === 'attention' ? result.message : '评论回执与原帖或草稿不符，请核验，禁止重发' }) };
       await this.save({ ...entry, publicationAttempts: entry.publicationAttempts!.map(a => a.key === key ? publication : a),

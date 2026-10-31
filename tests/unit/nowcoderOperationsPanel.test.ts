@@ -15,7 +15,7 @@ const entry = {
 const settle = async () => { for (let index = 0; index < 25; index++) await Promise.resolve(); };
 beforeEach(async () => { document.body.innerHTML = await readFile('packages/extension/src/sidepanel/index.html', 'utf8'); });
 
-function setup(failSave = false, failGet = false, options: { delayReload?: boolean; replied?: boolean; queued?: boolean } = {}) {
+function setup(failSave = false, failGet = false, options: { delayReload?: boolean; replied?: boolean; queued?: boolean; paused?: boolean; failLimits?: boolean } = {}) {
   const requests: any[] = [];
   let reads = 0, resolveReload: ((value: unknown) => void) | undefined, rejectReload: ((reason: Error) => void) | undefined;
   const fixtureEntry = options.replied ? { ...entry, status: 'replied', replyUrl: 'https://www.nowcoder.com/discuss/comment/22846505' }
@@ -24,6 +24,11 @@ function setup(failSave = false, failGet = false, options: { delayReload?: boole
   Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText: clipboard } });
   const message = async <T>(request: any): Promise<T> => {
     requests.push(request);
+    if (request.type === 'operations.limits') {
+      if (options.failLimits) throw new Error('状态不可用');
+      return { schemaVersion: 1, policy: { minIntervalMs: 120000, maxPerHour: 5, maxPer24Hours: 20 }, usage: { lastHour: 2, last24Hours: 8 },
+        nextAllowedAt: '2026-10-31T10:05:00.000Z', verification: options.paused ? { id: '12345678-1234-4234-8234-123456789012', detectedAt: '2026-10-31T10:03:00.000Z', sourceUrl: entry.canonicalUrl, requestId: '12345678-1234-4234-8234-123456789013' } : null } as T;
+    }
     if (request.type === 'library.list') return { entries: [
       { id: sourceId, source: 'nowcoder', title: entry.title, url: entry.canonicalUrl },
       { id: 'hot-111111111111', source: 'nowcoder', title: '只有短摘', materialKind: 'nowcoder-hot' },
@@ -48,6 +53,26 @@ function setup(failSave = false, failGet = false, options: { delayReload?: boole
 }
 
 describe('private operations panel', () => {
+  it('keeps a failed save visible when explicitly refreshing limits and the queue', async () => {
+    const { panel } = setup(true); panel.show(); await settle();
+    const input = document.querySelector<HTMLTextAreaElement>('#ops-primary')!; input.value = '这次修改保留'; input.dispatchEvent(new Event('input'));
+    document.querySelector<HTMLButtonElement>('#ops-save')!.click(); await settle();
+    const failure = document.querySelector('#ops-status')!.textContent; expect(failure).toContain('草稿已被修改');
+    document.querySelector<HTMLButtonElement>('#ops-refresh')!.click(); await settle();
+    expect(document.querySelector('#ops-status')!.textContent).toBe(failure); expect(input.value).toBe('这次修改保留');
+  });
+  it('shows cumulative local limits and links the exact pending verification without adding send controls', async () => {
+    const { panel } = setup(false, false, { paused: true }); panel.show(); await settle();
+    expect(document.querySelector('#ops-publishing-status')?.textContent).toMatch(/2\/5.*8\/20/u);
+    expect(document.querySelector('#ops-publishing-status')?.textContent).toContain('验证');
+    expect(document.querySelector<HTMLAnchorElement>('#ops-verification-source')?.href).toBe(entry.canonicalUrl);
+    expect(document.querySelector('#ops-publish')).toBeNull();
+  });
+  it('reports unavailable limits while preserving an editable draft', async () => {
+    const { panel } = setup(false, false, { failLimits: true }); panel.show(); await settle();
+    expect(document.querySelector('#ops-publishing-status')?.textContent).toContain('不可用');
+    expect(document.querySelector<HTMLTextAreaElement>('#ops-primary')?.value).toBe(entry.drafts.primary);
+  });
   it('starts new drafts from the current discussion without a preset voice', async () => {
     const { panel } = setup(false, false, { queued: true }); panel.show(); await settle();
     expect(document.querySelector('#ops-tone')).toBeNull();

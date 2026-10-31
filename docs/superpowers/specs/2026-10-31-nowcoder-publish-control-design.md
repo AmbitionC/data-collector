@@ -1,0 +1,31 @@
+# Nowcoder publishing controls
+
+The user approved implementing the three controls proposed in chat and publishing one release. This change reduces dense automated posting and makes verification interruptions recoverable. It does not bypass CAPTCHA, disguise automation, rotate accounts or promise CAPTCHA-free operation. Publishing recommendations remain subject to platform rules.
+
+## Behavior
+
+- All new comment publications through the same Bridge share a persisted policy: minimum interval 120000 ms, at most 5 publishing attempts in a rolling hour, at most 20 in rolling 24 hours. These are conservative local operating limits, not Nowcoder thresholds. CLI configuration may change positive limits; it cannot clear history or verification state.
+- Attempts already in private operations journals count, including dispatching, uncertain and rejected attempts. Invalid drafts and local policy refusals do not create publication attempts. Replaying an existing key is read-only, consumes no extra quota and works while globally paused.
+- Authoritative admission occurs inside the operations store's existing serialization immediately before a new dispatch journal is written. Derive rolling usage from durable journals, including pre-upgrade history; strict corrupt-history failure must block publishing. Concurrent callers cannot overspend. Clock rollback must not drop future attempts or admit a burst.
+- A publish workflow validates whole-list capacity before draft mutations. Minimum-interval waiting happens inside Bridge/CLI workflow, not repeated model calls. It rechecks verification, quota and draft/context validity before dispatch. Hour/day exhaustion stops with a clear next-eligible time and retains unexecuted entries; it never sleeps into the next day or silently resumes stopped workflows. Direct single publish returns a clear refusal and the status command exposes the next time.
+- A visible VERIFICATION_REQUIRED from an operations page creates a durable global publishing pause with an opaque generation ID, canonical source URL, operation ID and original key when available. Record it before finishing the individual attempt. Login/access restrictions remain stopped according to existing contracts. A later error or restart cannot erase the pause.
+- Existing stopped runs stay stopped. Uncertain individual publications never resend under another key.
+- Clearing a verification pause requires explicit user-completed confirmation and the current generation ID. The Bridge rereads that exact source through the existing extension, reconciles the original key when present, and only clears after a fresh context without a challenge. Reappearing/new challenges or concurrent generation changes prevent stale clearing. Unresolved receipts stay blocked per source even if the verified global pause clears. Clearing never publishes or resumes an old workflow.
+- Local status remains readable while paused. Context reads that detect a challenge also set the publishing pause. This release's global budget applies to comment publication on this Bridge; it does not claim to govern manual browser posts or other independent installations.
+
+## Interfaces and storage
+
+- Add shared publishing-control schemas/types in a dedicated module, exported by shared/index.ts. Policy, status and explicit resume input are strict and versioned. Add optional operation timing diagnostics to existing operation results and publication attempts, preserving old packets.
+- Add a small private control store under configDir, outside the operations-entry directory. Use atomic writes and fail closed on invalid state. It owns policy and verification generation, while operations journals remain the unique usage ledger. Inject clock/sleep for deterministic tests.
+- Wire admission into NowcoderOperationsStore via an optional production callback; wire the same control instance to NowcoderOperationsActivity and workflow. Production always supplies it; existing lower-level fixtures may omit it.
+- Authenticated endpoints and CLI: `ops limits` reads status; `ops configure --file ABSOLUTE_JSON` saves a fully validated policy; `ops resume --id GENERATION --verification-completed` performs the explicit readonly recovery. Existing `--send` rules remain intact. Never make a resume flag an alternate send path.
+- Side panel remains an editor with no new comment-send button. Show local limits, rolling usage, next eligible time and verification/source handoff on explicit refresh. Keep unsaved drafts and sticky failures. The Agent can execute the resume command after the user confirms completing the site verification.
+- Page timing contains real observed page-start, before-submit, submit-click, verification-observed and receipt-observed UTC timestamps where those events occurred. Attach only actual timestamps, do not fabricate missing legacy events or server reason codes. Record local detection codes distinctly from any real visible site reason. Preserve diagnostics in private per-item results/journals; compact CLI/stats may include them without full page bodies.
+
+## Boundaries and validation
+
+No new public comment is authorized for this development/release request. Test with local HTML fixtures and injected extension transports. Do not trigger verification by live probing. Keep the user's authenticated session, tabs and existing private attempt journals. Defaults and UI copy must not imply advertising permission or guaranteed avoidance.
+
+Read-only status/configuration must not leak tokens or full raw page content. Validate canonical Nowcoder URLs before any recovery navigation. Budget history and state must survive process restart; a broken state is not an empty state. A replay cannot reset limits. Configuring limits cannot clear a pause. A stale resume cannot clear a new pause.
+
+Follow repository master-only and version-bump rules. One cohesive code commit/release increments 0.4.61 to 0.4.62; review/fixes occur before that commit. Build/release artifacts must embed the final commit. Complete typecheck, full tests, packaging and packaged E2E, then push master and verify exact-commit CI and GitHub release. Verify installed Bridge/extension build identity through read-only health/status.

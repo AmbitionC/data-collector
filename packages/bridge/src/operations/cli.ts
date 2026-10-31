@@ -1,6 +1,6 @@
 import { readFile, stat } from 'node:fs/promises';
 import { isAbsolute } from 'node:path';
-import { operationDraftImportSchema, operationIdSchema, operationPublishSchema } from '@data-collector/shared';
+import { operationDraftImportSchema, operationIdSchema, operationPublishSchema, nowcoderPublishingPolicySchema, nowcoderVerificationResumeSchema } from '@data-collector/shared';
 
 import { workflowKey, workflowRequestSchema } from './workflowStore.js';
 
@@ -10,15 +10,17 @@ export async function runOperationsCli(args: string[], credentials: { baseUrl: s
   const action = args[2];
   const values = new Map<string, string>();
   const allowed = new Set(['--source', '--id', '--file', '--port', '--config', '--library', '--query', '--limit', '--pages', '--revision', '--key', '--wait']);
-  let send = false;
+  let send = false, verificationCompleted = false;
   for (let index = 3; index < args.length; index += 2) {
     const key = args[index], value = args[index + 1];
     if (key === '--send' && !send) { send = true; index--; continue; }
+    if (key === '--verification-completed' && !verificationCompleted) { verificationCompleted = true; index--; continue; }
     if (!key || !allowed.has(key) || !value || value.startsWith('--') || values.has(key)) throw new Error('牛客运营命令参数无效');
     values.set(key, value);
   }
-  const actionOptions: Record<string, string[]> = { list: [], add: ['--source'], brief: ['--id'], draft: ['--file'], search: ['--query', '--limit'], context: ['--id', '--pages'], publish: ['--id', '--revision', '--key'], verify: ['--id', '--key', '--pages'], workflow: ['--file', '--id', '--wait'], stats: ['--id'] };
-  if (!action || !actionOptions[action] || [...values.keys()].some(key => !['--port', '--config', '--library', ...actionOptions[action]!].includes(key)) || (send && action !== 'publish' && action !== 'workflow')) throw new Error('牛客运营命令参数无效');
+  const actionOptions: Record<string, string[]> = { list: [], add: ['--source'], brief: ['--id'], draft: ['--file'], search: ['--query', '--limit'], context: ['--id', '--pages'], publish: ['--id', '--revision', '--key'], verify: ['--id', '--key', '--pages'], workflow: ['--file', '--id', '--wait'], stats: ['--id'], limits: [], configure: ['--file'], resume: ['--id'] };
+  if (!action || !actionOptions[action] || [...values.keys()].some(key => !['--port', '--config', '--library', ...actionOptions[action]!].includes(key)) || (send && action !== 'publish' && action !== 'workflow') || (verificationCompleted && action !== 'resume')) throw new Error('牛客运营命令参数无效');
+  if (action === 'resume' && !verificationCompleted) throw new Error('恢复需要确认已手动完成验证：--verification-completed');
   const request = async (path: string, method = 'GET', body?: unknown) => {
     const response = await fetch(`${credentials.baseUrl}/v1/nowcoder/operations${path}`, {
       method, signal: AbortSignal.timeout(100_000),
@@ -30,7 +32,17 @@ export async function runOperationsCli(args: string[], credentials: { baseUrl: s
     return result;
   };
   let result: unknown;
-  if (action === 'workflow') {
+  if (action === 'limits') {
+    result = await request('/publishing');
+  } else if (action === 'configure' && values.has('--file')) {
+    const path = values.get('--file')!;
+    if (!isAbsolute(path) || (await stat(path)).size > 16_000) throw new Error('发布限制需要16KB以内的本机绝对路径JSON文件');
+    const policy = nowcoderPublishingPolicySchema.parse(JSON.parse(await readFile(path, 'utf8')));
+    result = await request('/publishing', 'PUT', policy);
+  } else if (action === 'resume') {
+    const input = nowcoderVerificationResumeSchema.parse({ id: values.get('--id'), verificationCompleted });
+    result = await request('/publishing/resume', 'POST', input);
+  } else if (action === 'workflow') {
     if (values.has('--file') === values.has('--id')) throw new Error('workflow需要且仅需要 --file 或 --id');
     const wait = Number(values.get('--wait') ?? 0);
     if (!Number.isInteger(wait) || wait < 0 || wait > 3_600_000) throw new Error('--wait须为0–3600000毫秒');
@@ -88,7 +100,7 @@ export async function runOperationsCli(args: string[], credentials: { baseUrl: s
     result = await request(`/${draft.opportunityId}`, 'PUT', { revision: draft.revision, contextHash: draft.contextHash, drafts: draft.drafts,
       ...(draft.conversationHash ? { conversationHash: draft.conversationHash } : {}) });
   } else {
-    throw new Error('用法：nowcoder ops workflow --file /absolute/request.private.json [--send] [--wait 600000] | workflow --id RUN_ID [--wait 600000] | stats --id RUN_ID | search --query 关键词 [--limit 10] | add --source ID | context --id ID [--pages 1] | brief --id ID | draft --file /absolute/draft.private.json | publish --id ID --revision N --key KEY --send | verify --id ID --key KEY [--pages 1] | list');
+    throw new Error('用法：nowcoder ops limits | configure --file /absolute/policy.private.json | resume --id VERIFICATION_ID --verification-completed | workflow --file /absolute/request.private.json [--send] [--wait 600000] | workflow --id RUN_ID [--wait 600000] | stats --id RUN_ID | search --query 关键词 [--limit 10] | add --source ID | context --id ID [--pages 1] | brief --id ID | draft --file /absolute/draft.private.json | publish --id ID --revision N --key KEY --send | verify --id ID --key KEY [--pages 1] | list');
   }
   if ((action === 'add' || action === 'draft') && result && typeof result === 'object' && 'entry' in result) {
     const { body, conversation, ...entry } = (result as { entry: Record<string, unknown> }).entry;

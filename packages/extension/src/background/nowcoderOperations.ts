@@ -24,7 +24,10 @@ export class NowcoderOperationsRunner {
       executing = true;
       const result = nowcoderOperationResultSchema.parse(await this.tabs.execute(id, action));
       if (result.kind === 'attention') {
-        await this.tabs.handoff(id, action.url); keep = true;
+        // Showing the tab is best effort; never erase an observed challenge or
+        // close its page merely because focusing the window failed.
+        keep = true;
+        await this.tabs.handoff(id, action.url).catch(() => undefined);
         return { ...result, tabUrl: action.url };
       }
       return result;

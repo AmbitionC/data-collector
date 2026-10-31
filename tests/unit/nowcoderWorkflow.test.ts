@@ -5,6 +5,7 @@ import { afterEach, expect, it } from 'vitest';
 import { stableContentId } from '@data-collector/shared';
 import { NowcoderOperationsStore } from '../../packages/bridge/src/operations/store.js';
 import { NowcoderOperationsActivity } from '../../packages/bridge/src/operations/activity.js';
+import { NowcoderPublishingControl } from '../../packages/bridge/src/operations/publishingControl.js';
 import { createTemporaryDirectoryTracker } from '../helpers/temp.js';
 const dirs = createTemporaryDirectoryTracker();
 afterEach(() => dirs.cleanup());
@@ -30,6 +31,55 @@ async function seed(c: Awaited<ReturnType<typeof fixture>>, number: number) {
   return { key: `single-key-${number}`, draft: { schemaVersion: 1, opportunityId: id, revision: entry.revision, contextHash: entry.contextHash, conversationHash: entry.conversation!.hash, drafts: { primary: '先做一个能用的工具', alternative: '从自己的资料做起', tone: 'contextual', anchor: 'LangGraph', notes: '' } } };
 }
 async function terminal(workflow: any, id: string) { for (let i = 0; i < 1500; i++) { const run = await workflow.get(id); if (!['running', 'queued'].includes(run.status)) return run; await new Promise(r => setTimeout(r, 5)); } throw new Error('not terminal'); }
+async function controlled(c: Awaited<ReturnType<typeof fixture>>, interrupt = false) {
+  let clock = Date.now(); const sentAt: number[] = [], sleeps: number[] = [];
+  const control = new NowcoderPublishingControl(join(c.root, 'policy', 'control.json'), async () =>
+    (await c.store.list()).flatMap(e => (e.publicationAttempts ?? []).map(publication => ({ opportunityId: e.id, sourceUrl: e.canonicalUrl, publication }))),
+    { now: () => clock, sleep: async ms => { sleeps.push(ms); clock += ms;
+      if (interrupt) await control.pause({ sourceUrl: 'https://www.nowcoder.com/discuss/123456', requestId: '12345678-1234-4234-8234-123456789012' }); } });
+  const activity = new NowcoderOperationsActivity(c.store, { assertAvailable() {}, async execute(action) {
+    if (action.kind !== 'publish') throw new Error('unexpected read'); sentAt.push(clock);
+    return { kind: 'published', diagnostics: { pageStartedAt: new Date(clock).toISOString(), submitClickedAt: new Date(clock).toISOString() },
+      receipt: { sourceUrl: action.url, url: `https://www.nowcoder.com/discuss/comment/${990 + sentAt.length}`, text: action.text, observedAt: new Date(clock).toISOString() } };
+  } }, fetch, control);
+  const workflow = new c.module.NowcoderOperationsWorkflow(join(c.root, 'controlled-runs'), c.store, activity, async () => { throw new Error('no collect'); });
+  return { control, workflow, sentAt, sleeps };
+}
+it('checks whole-list publishing capacity before saving any draft', async () => {
+  const c = await fixture(), a = await seed(c, 123456), b = await seed(c, 234567), x = await controlled(c);
+  await x.control.configure({ minIntervalMs: 120000, maxPerHour: 1, maxPer24Hours: 20 });
+  const run = await x.workflow.start({ schemaVersion: 1, kind: 'publish', key: 'budget-preflight-key', items: [a, b] }, true);
+  expect(await terminal(x.workflow, run.runId)).toMatchObject({ status: 'needs_attention', counts: { failed: 1, notExecuted: 1 } });
+  expect((await c.store.get(a.draft.opportunityId))!.revision).toBe(2);
+  expect((await c.store.get(b.draft.opportunityId))!.revision).toBe(2); expect(x.sentAt).toEqual([]);
+});
+it('waits internally for the shared interval and returns bounded actual diagnostics', async () => {
+  const c = await fixture(), a = await seed(c, 123456), b = await seed(c, 234567), x = await controlled(c);
+  const run = await x.workflow.start({ schemaVersion: 1, kind: 'publish', key: 'internal-wait-key', items: [a, b] }, true);
+  const done = await terminal(x.workflow, run.runId);
+  expect(done.status).toBe('completed'); expect(x.sleeps.length).toBeGreaterThan(0);
+  expect(x.sentAt[1]! - x.sentAt[0]!).toBeGreaterThanOrEqual(119000);
+  expect(done.items[0]).toMatchObject({ diagnostics: { submitClickedAt: expect.any(String) } });
+  expect(JSON.stringify(done)).not.toContain(a.draft.drafts.primary);
+});
+it('a challenge during cooldown stops before mutating or sending the next item', async () => {
+  const c = await fixture(), a = await seed(c, 123456), b = await seed(c, 234567), x = await controlled(c, true);
+  const run = await x.workflow.start({ schemaVersion: 1, kind: 'publish', key: 'cooldown-stop-key', items: [a, b] }, true);
+  expect(await terminal(x.workflow, run.runId)).toMatchObject({ status: 'needs_attention', counts: { succeeded: 1, failed: 1 } });
+  expect(x.sentAt).toHaveLength(1); expect((await c.store.get(b.draft.opportunityId))!.revision).toBe(2);
+  expect((await x.control.status()).verification).not.toBeNull();
+});
+it('does not collect a preparation candidate while a global verification pause is pending', async () => {
+  const c = await fixture(), x = await controlled(c);
+  await x.control.pause({ sourceUrl: 'https://www.nowcoder.com/discuss/123456', requestId: '12345678-1234-4234-8234-123456789012' });
+  let collected = 0;
+  const workflow = new c.module.NowcoderOperationsWorkflow(join(c.root, 'paused-prepare'), c.store,
+    new NowcoderOperationsActivity(c.store, { assertAvailable() {}, async execute() { throw new Error('no site access'); } }, fetch, x.control),
+    async () => { collected++; return { jobId: 'must-not-start', status: 'failed' }; });
+  const url = 'https://www.nowcoder.com/discuss/123456';
+  const run = await workflow.start({ schemaVersion: 1, kind: 'prepare', key: 'paused-prepare-key', candidates: [{ sourceId: stableContentId(url), url }] });
+  expect(await terminal(workflow, run.runId)).toMatchObject({ status: 'needs_attention' }); expect(collected).toBe(0);
+});
 it('deduplicates search URLs, persists private evidence, and binds keys to complete manifests', async () => {
   const c = await fixture(), request = { schemaVersion: 1, kind: 'search', key: 'search-batch-key-1', queries: ['Agent', '前端'] };
   const run = await c.workflow.start(request); const done = await terminal(c.workflow, run.runId);

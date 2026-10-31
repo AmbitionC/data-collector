@@ -3,6 +3,14 @@ import { NowcoderOperationsRunner } from '../../packages/extension/src/backgroun
 
 const action = { kind: 'context' as const, url: 'https://www.nowcoder.com/discuss/123456', maxPages: 1 };
 describe('plugin operation owned tabs', () => {
+  it('preserves a verification result and its owned page when showing the handoff fails', async () => {
+    const close = vi.fn(async () => undefined), handoff = vi.fn(async () => { throw new Error('window no longer focused'); });
+    const diagnostics = { pageStartedAt: '2026-10-31T10:00:00.000Z', verificationObservedAt: '2026-10-31T10:00:01.000Z' };
+    const runner = new NowcoderOperationsRunner({ create: async () => ({ id: 77 }), close, handoff, wait: async () => undefined,
+      execute: async () => ({ kind: 'attention', code: 'VERIFICATION_REQUIRED', message: '牛客要求验证', submission: 'not_attempted', diagnostics }) });
+    expect(await runner.run(action)).toMatchObject({ kind: 'attention', code: 'VERIFICATION_REQUIRED', diagnostics, tabUrl: action.url });
+    expect(close).not.toHaveBeenCalled(); expect(handoff).toHaveBeenCalledTimes(1);
+  });
   it('owns an inactive tab, waits for load, and hands verification to the user without closing it', async () => {
     const create = vi.fn(async () => ({ id: 77 })), close = vi.fn(async () => undefined), handoff = vi.fn(async () => undefined), wait = vi.fn(async () => undefined);
     const runner = new NowcoderOperationsRunner({ create, close, handoff, wait,

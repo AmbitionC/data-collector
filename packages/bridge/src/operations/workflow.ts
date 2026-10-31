@@ -83,7 +83,11 @@ export class NowcoderOperationsWorkflow {
     const counts = { rejected: run.items.filter(i => i.stages.some(s => s.stage === 'preflight' && s.status === 'failed') || (i.result as { publication?: { state: string } } | undefined)?.publication?.state === 'rejected').length, succeeded: run.items.filter(i => i.status === 'succeeded').length, failed: run.items.filter(i => i.status === 'failed').length, notExecuted: run.items.filter(i => i.status === 'not_executed').length, running: run.items.filter(i => i.status === 'running').length };
     return { runId: run.runId, kind: run.request.kind, status: run.status, counts, startedAt: run.startedAt, finishedAt: run.finishedAt,
       elapsedMs: Math.max(0, Date.parse(run.finishedAt ?? now()) - Date.parse(run.startedAt)), resultPath: run.resultPath, message: run.message,
-      items: run.items.map(({ result, recovery, ...item }) => { void result; return { ...item, ...(recovery ? { recovery: { publicationReconciled: recovery.publicationReconciled, message: recovery.message } } : {}) }; }) };
+      items: run.items.map(({ result, recovery, ...item }) => {
+        const publication = object(object(result)?.publication), diagnostics = publication?.diagnostics;
+        return { ...item, ...(diagnostics ? { diagnostics } : {}),
+          ...(recovery ? { recovery: { publicationReconciled: recovery.publicationReconciled, message: recovery.message } } : {}) };
+      }) };
   }
   async get(id: string) {
     const run = await this.disk.get(id);
@@ -147,6 +151,8 @@ export class NowcoderOperationsWorkflow {
     try {
       if (run.request.kind === 'publish') {
         const request = run.request;
+        try { await stage(run.items[0]!, 'preflight', async () => this.activity.publishingControl?.assertCapacity(request.items.length, true)); }
+        catch (error) { run.items[0]!.status = 'failed'; throw error; }
         for (let index = 0; index < request.items.length; index++) {
           const item = run.items[index]!;
           try { await stage(item, 'preflight', () => this.preflight({ ...request, items: [request.items[index]!] })); }
@@ -163,6 +169,7 @@ export class NowcoderOperationsWorkflow {
               candidates.set(c.url, { ...c, queries: [...(existing?.queries as string[] ?? []), query] }); }
           } else if (run.request.kind === 'prepare') {
             const candidate = run.request.candidates[index]!;
+            await this.activity.assertSiteAccess();
             const proof = await stage(item, 'collect', () => this.collect(candidate, async result => { item.result = result; await packet(); await this.disk.save(run); })) as WorkflowCollection;
             item.result = proof; if (proof.status !== 'saved') throw new Error(`采集${proof.status}，保留job ${proof.jobId}`);
             const entry = await stage(item, 'add', () => this.operations.add(candidate.sourceId)) as NowcoderOperation;
@@ -171,6 +178,12 @@ export class NowcoderOperationsWorkflow {
             prepared.push(await this.operations.preparationPacket(entry.id));
           } else {
             const input = run.request.items[index]!, { schemaVersion, opportunityId, ...draft } = input.draft; void schemaVersion;
+            if (this.activity.publishingControl) {
+              const entry = await this.operations.get(opportunityId);
+              if (!entry?.conversation) throw new Error('评论上下文缺失');
+              await stage(item, 'publish_wait', () => this.activity.publishingControl!.waitForSlot(entry.conversation!.snapshot.readAt));
+              await this.preflight({ ...run.request, items: [input] });
+            }
             const saved = await stage(item, 'draft', () => this.operations.update(opportunityId, draft)) as NowcoderOperation;
             item.result = await stage(item, 'publish', () => this.activity.publish(opportunityId, { key: input.key, revision: saved.revision, contextHash: saved.contextHash, send: true }));
             const published = item.result as { publication?: { state: string; evidence?: string } };

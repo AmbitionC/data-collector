@@ -1,12 +1,13 @@
-import type { NowcoderConversationSnapshot, NowcoderOperationAction, NowcoderOperationResult } from '@data-collector/shared';
+import type { NowcoderConversationSnapshot, NowcoderOperationAction, NowcoderOperationDiagnostics, NowcoderOperationResult } from '@data-collector/shared';
 
 /** Serialized by chrome.scripting: all runtime helpers must remain inside this function. */
 export async function runNowcoderOperationPage(action: NowcoderOperationAction): Promise<NowcoderOperationResult> {
+  const diagnostics: NowcoderOperationDiagnostics = { pageStartedAt: new Date().toISOString() };
   let clicked = false;
   const pause = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms));
   const normalized = (value: string) => value.replace(/[\s\u200b-\u200d\ufeff]+/gu, '').normalize('NFKC');
   const text = (node: Element | null) => ((node as HTMLElement | null)?.innerText ?? node?.textContent ?? '').trim();
-  const attention = (code: string, message: string): NowcoderOperationResult => ({ kind: 'attention', code, message, submission: clicked ? 'uncertain' : 'not_attempted' });
+  const attention = (code: string, message: string): NowcoderOperationResult => ({ kind: 'attention', code, message, submission: clicked ? 'uncertain' : 'not_attempted', diagnostics });
   const visible = (node: Element) => {
     if (node.closest('[hidden],[aria-hidden="true"],.tw-hidden')) return false;
     for (let parent: Element | null = node; parent; parent = parent.parentElement) {
@@ -17,8 +18,11 @@ export async function runNowcoderOperationPage(action: NowcoderOperationAction):
   };
   const canonical = (value: string) => { const u = new URL(value, location.href); return `${u.origin}${u.pathname.replace(/\/$/u, '')}`; };
   const challenge = () => {
-    if ([...document.querySelectorAll('.captcha-modal,.nc-captcha-modal,.captcha-container,#captcha,.geetest_panel,.geetest_widget,.yidun_panel,.verify-dialog')].some(visible)
-      || /^(安全验证|人机验证|访问验证|Access Verification|Security Verification)/iu.test(document.title)) return attention('VERIFICATION_REQUIRED', '牛客要求验证，请在保留的页面完成验证');
+    if (diagnostics.verificationObservedAt || [...document.querySelectorAll('.captcha-modal,.nc-captcha-modal,.captcha-container,#captcha,.geetest_panel,.geetest_widget,.yidun_panel,.verify-dialog')].some(visible)
+      || /^(安全验证|人机验证|访问验证|Access Verification|Security Verification)/iu.test(document.title)) {
+      diagnostics.verificationObservedAt ??= new Date().toISOString();
+      return attention('VERIFICATION_REQUIRED', '牛客要求验证，请在保留的页面完成验证');
+    }
     if ([...document.querySelectorAll('.login-modal,.nc-login-modal,[class*="login-container"],form[action*="login"]')].some(visible)) return attention('LOGIN_REQUIRED', '牛客登录已失效，请在保留的页面登录');
     if (/^(403|429|Forbidden|Access Denied|请求过于频繁|访问被拒绝)/iu.test(document.title)) return attention('ACCESS_RESTRICTED', '牛客限制了当前访问，操作已停止');
     return undefined;
@@ -97,7 +101,7 @@ export async function runNowcoderOperationPage(action: NowcoderOperationAction):
     if (gallery && galleryHasSlots && !images(gallery, 30).length) {
       gallery.scrollIntoView?.({ block: 'center' });
       const deadline = Date.now() + 2000;
-      while (!images(gallery, 30).length && Date.now() < deadline) await pause(100);
+      while (!images(gallery, 30).length && Date.now() < deadline) { blocked = challenge(); if (blocked) return blocked; await pause(100); }
     }
     const post = { title: title.slice(0, 500), body: text(body).slice(0, 24_000), images: [...new Set([...images(body, 30), ...images(document.querySelector('.feed-img,.feed-content-imgs'), 30)])].slice(0, 30) };
     const comments = new Map<string, NowcoderConversationSnapshot['comments'][number]>();
@@ -107,7 +111,7 @@ export async function runNowcoderOperationPage(action: NowcoderOperationAction):
     if (gallery && galleryHasSlots && !images(gallery, 30).length) limitations.push('原帖配图尚未加载；需单独查看，不能据此判断没有配图');
     for (let page = 0; page < maxPages; page++) {
       if (page === 0 && (total ?? 0) > 0) {
-        for (let i = 0; i < 20 && readComments().length === 0; i++) await pause(250);
+        for (let i = 0; i < 20 && readComments().length === 0; i++) { blocked = challenge(); if (blocked) return blocked; await pause(250); }
       }
       const childScopes = new Set<Element>();
       const loading = (scope: Element) => [scope, ...scope.querySelectorAll('[aria-busy="true"],.loading,.is-loading,.el-loading-mask,[role="progressbar"],.subcomment-more')]
@@ -128,19 +132,20 @@ export async function runNowcoderOperationPage(action: NowcoderOperationAction):
         const ready = () => !loading(scope) && (readComments().some(comment => !beforeUrls.has(comment.url) && (!ownerUrl || comment.parentUrl === ownerUrl))
           || controls().some(node => (node === more || !priorControls.has(node)) && node.getAttribute('aria-busy') === 'false' && (node.getAttribute('aria-expanded') === 'true' || /收起/u.test(text(node)))));
         const before = expansion(); expanded.add(more); more.click();
-        if (!await settle(expansion, 400, 3000, before, ready)) { textIncomplete = true; limitations.push('子回复展开仍在加载或未观察到真实内容/明确完成状态'); }
+        if (!await settle(expansion, 400, 3000, before, ready)) { blocked = challenge(); if (blocked) return blocked; textIncomplete = true; limitations.push('子回复展开仍在加载或未观察到真实内容/明确完成状态'); }
       }
       const ellipses = [...document.querySelectorAll<HTMLElement>('.comment-box .vue-ellipsis-js-suffix,.subcomment-box .vue-ellipsis-js-suffix')].filter(visible);
       for (const suffix of ellipses.slice(0, 20)) {
         if (!/展开/u.test(text(suffix))) continue;
         const control = suffix.querySelector<HTMLElement>('span'); const before = fingerprint(readComments()); control?.click();
-        if (control && !await settle(() => fingerprint(readComments()), 400, 2000, before)) textIncomplete = true;
+        if (control && !await settle(() => fingerprint(readComments()), 400, 2000, before)) { blocked = challenge(); if (blocked) return blocked; textIncomplete = true; }
       }
       if (ellipses.some(node => visible(node) && /展开/u.test(text(node)))) textIncomplete = true;
       // Expansion can replace its control and update the total after the first render.
       // Stabilize live comments + current total together, never reuse the pre-expansion count.
       const pageReady = () => [...childScopes].every(scope => !loading(scope));
       if (!await settle(() => JSON.stringify([fingerprint(readComments()), readTotal(), pageReady()]), 400, 3000, undefined, pageReady)) {
+        blocked = challenge(); if (blocked) return blocked;
         textIncomplete = true; limitations.push('评论或总数在展开后尚未稳定');
       }
       total = readTotal();
@@ -156,8 +161,8 @@ export async function runNowcoderOperationPage(action: NowcoderOperationAction):
       if (!nextEnabled || page + 1 >= maxPages || comments.size >= 200) break;
       const before = fingerprint(readComments()); next!.click();
       let changed = false;
-      for (let i = 0; i < 20; i++) { await pause(200); if (fingerprint(readComments()) !== before) { changed = true; break; } }
-      if (!changed || !await settle(() => fingerprint(readComments()), 400, 2000)) { limitations.push('下一页未完成加载'); textIncomplete = true; break; }
+      for (let i = 0; i < 20; i++) { await pause(200); blocked = challenge(); if (blocked) return blocked; if (fingerprint(readComments()) !== before) { changed = true; break; } }
+      if (!changed || !await settle(() => fingerprint(readComments()), 400, 2000)) { blocked = challenge(); if (blocked) return blocked; limitations.push('下一页未完成加载'); textIncomplete = true; break; }
     }
     if (post.images.length) limitations.push('图片仅返回引用，需单独查看后才能判断图片内容');
     if (textIncomplete) limitations.push('部分长评论仍未展开或达到文本截断上限');
@@ -166,8 +171,9 @@ export async function runNowcoderOperationPage(action: NowcoderOperationAction):
     const snapshot: NowcoderConversationSnapshot = { sourceUrl: action.url, readAt: new Date().toISOString(), post, comments: [...comments.values()],
       coverage: { total, observed: comments.size, pagesRead, hasMore, complete: !hasMore && !textIncomplete && total !== null && comments.size === total, limitations } };
     if (new TextEncoder().encode(JSON.stringify(snapshot)).length > 1_400_000) return attention('CONTEXT_LIMIT', '评论上下文超过私有载荷上限，请缩小读取范围');
-    if (action.kind === 'context') return { kind: 'context', snapshot };
-    if (canonical(location.href) !== action.url) return attention('SOURCE_MISMATCH', '页面已离开指定原帖，未发送');
+    blocked = challenge(); if (blocked) return blocked;
+    if (canonical(location.href) !== action.url) return attention('SOURCE_MISMATCH', '页面已离开指定原帖，未继续操作');
+    if (action.kind === 'context') return { kind: 'context', snapshot, diagnostics };
     if (normalized(post.title) !== normalized(action.expected.post.title) || normalized(post.body) !== normalized(action.expected.post.body)
       || JSON.stringify(post.images) !== JSON.stringify(action.expected.post.images)
       || fingerprint(snapshot.comments) !== fingerprint(action.expected.comments) || total !== action.expected.coverage.total) {
@@ -180,7 +186,7 @@ export async function runNowcoderOperationPage(action: NowcoderOperationAction):
       const oldComments = new Map(action.expected.comments.map(c => [c.url, c])), newComments = new Map(snapshot.comments.map(c => [c.url, c]));
       const added = [...newComments.keys()].filter(url => !oldComments.has(url)), removed = [...oldComments.keys()].filter(url => !newComments.has(url));
       const changed = [...newComments.keys()].filter(url => oldComments.has(url) && fingerprint([oldComments.get(url)!]) !== fingerprint([newComments.get(url)!]));
-      return { kind: 'attention', code: 'CONTEXT_CHANGED', message: '原帖或评论已有变化，请重新读取和审阅草稿', submission: 'not_attempted',
+      return { kind: 'attention', code: 'CONTEXT_CHANGED', message: '原帖或评论已有变化，请重新读取和审阅草稿', submission: 'not_attempted', diagnostics,
         contextChanges: { fields, comments: { added: added.slice(0, 30), removed: removed.slice(0, 30), changed: changed.slice(0, 30), truncated: [added, removed, changed].some(a => a.length > 30) }, total: { before: action.expected.coverage.total, after: total } } };
     }
     if (snapshot.comments.some(comment => normalized(comment.text) === normalized(action.text))) return attention('DUPLICATE_TEXT', '已有相同评论，未再次发送');
@@ -213,18 +219,22 @@ export async function runNowcoderOperationPage(action: NowcoderOperationAction):
       && !(button as HTMLButtonElement).disabled && !button!.classList.contains('disabled') && !button!.classList.contains('is-disabled');
     const deadline = Date.now() + 3000;
     while (!ready() && Date.now() < deadline) await pause(100);
+    diagnostics.beforeSubmitAt = new Date().toISOString();
     blocked = challenge(); if (blocked) return blocked;
     if (!ready()) return attention('COMPOSER_REJECTED', '编辑器未接受草稿，未点击发送');
     if (canonical(location.href) !== action.url) return attention('SOURCE_MISMATCH', '输入期间页面离开原帖，未点击发送');
     if (!editor.isConnected || !button.isConnected) return attention('COMPOSER_UNAVAILABLE', '输入期间编辑器已被替换，未点击发送');
     if ([...scope.querySelectorAll<HTMLInputElement>('input[type="checkbox"]')].some(input => input.checked && /同时转发/u.test(text(input.closest('label') ?? input.parentElement)))) return attention('FORWARDING_ENABLED', '输入期间同时转发被开启，未点击发送');
     const before = new Set(snapshot.comments.map(comment => comment.url));
-    clicked = true; button.click();
+    clicked = true; diagnostics.submitClickedAt = new Date().toISOString(); button.click();
     for (let i = 0; i < 60; i++) {
       if (canonical(location.href) !== action.url) return attention('SOURCE_MISMATCH', '点击后页面离开原帖，发送结果待核验');
-      const observed = readComments().find(comment => !before.has(comment.url) && normalized(comment.text) === normalized(action.text));
-      if (observed) return { kind: 'published', receipt: { sourceUrl: action.url, url: observed.url, text: action.text, observedAt: new Date().toISOString() } };
       blocked = challenge(); if (blocked) return blocked;
+      const observed = readComments().find(comment => !before.has(comment.url) && normalized(comment.text) === normalized(action.text));
+      if (observed) {
+        const observedAt = new Date().toISOString(); diagnostics.receiptObservedAt = observedAt;
+        return { kind: 'published', receipt: { sourceUrl: action.url, url: observed.url, text: action.text, observedAt }, diagnostics };
+      }
       await pause(200);
     }
     return attention('RECEIPT_NOT_OBSERVED', '已点击一次，但未观察到新评论链接；请核验，禁止自动重发');
