@@ -2,6 +2,7 @@ import { z } from 'zod';
 import { nowcoderOperationDiagnosticsSchema } from './nowcoderConversation.js';
 
 export const NOWCODER_ARTICLE_CAPABILITY = 'nowcoder-article-publishing-v1';
+export const COLLECTOR_CHANNEL_CLAIM_CAPABILITY = 'collector-channel-claim-v1';
 export const NOWCODER_ARTICLE_EDITOR_URL = 'https://www.nowcoder.com/creation/write/article';
 export const browserFamilySchema = z.enum(['chrome', 'edge']);
 export type BrowserFamily = z.infer<typeof browserFamilySchema>;

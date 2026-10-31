@@ -12,14 +12,15 @@ function reject(socket: Duplex, status: number, message: string): void {
 export function attachExtensionWebSocket(options: {
   server: HttpServer;
   access: AccessTokenManager;
-  onConnection: (socket: WebSocket, authorization: { bootstrapToken?: string; channel: ConnectionRole }) => void;
+  onConnection: (socket: WebSocket, authorization: { bootstrapToken?: string; channel: ConnectionRole; claimVacant?: true }) => void;
 }): WebSocketServer {
   const websocketServer = new WebSocketServer({ noServer: true, maxPayload: 12 * 1024 * 1024 });
   options.server.on('upgrade', (request, socket, head) => {
     void (async () => {
       const host = request.headers.host ?? '127.0.0.1';
       const url = new URL(request.url ?? '/', `http://${host}`);
-      if (url.pathname !== '/v1/extension') return reject(socket, 404, 'Not Found');
+      const vacancyPath = url.pathname === '/v1/extension/claim-collector';
+      if (url.pathname !== '/v1/extension' && !vacancyPath) return reject(socket, 404, 'Not Found');
       const origin = request.headers.origin ?? '';
       if (!TRUSTED_EXTENSION_ORIGINS.has(origin)) return reject(socket, 401, 'Unauthorized');
       const channels = url.searchParams.getAll('channel');
@@ -27,6 +28,9 @@ export function attachExtensionWebSocket(options: {
       if (channels.length > 1 || (channel !== 'collector' && channel !== 'articles')) {
         return reject(socket, 400, 'Bad Request');
       }
+      if (vacancyPath && channel !== 'collector') return reject(socket, 400, 'Bad Request');
+      const claims = url.searchParams.getAll('claim');
+      if (claims.length > 1 || (claims.length === 1 && (claims[0] !== 'vacant' || channel !== 'collector'))) return reject(socket, 400, 'Bad Request');
 
       const token = url.searchParams.get('token') ?? '';
       let bootstrapToken: string | undefined;
@@ -37,7 +41,7 @@ export function attachExtensionWebSocket(options: {
 
       websocketServer.handleUpgrade(request, socket, head, websocket => {
         websocketServer.emit('connection', websocket, request);
-        options.onConnection(websocket, { channel, ...(bootstrapToken ? { bootstrapToken } : {}) });
+        options.onConnection(websocket, { channel, ...(bootstrapToken ? { bootstrapToken } : {}), ...(vacancyPath || claims.length ? { claimVacant: true as const } : {}) });
       });
     })().catch(() => {
       if (!socket.destroyed) reject(socket, 500, 'Internal Server Error');

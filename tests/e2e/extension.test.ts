@@ -8,10 +8,12 @@ import puppeteer, {
   type Target,
   type WebWorker,
 } from 'puppeteer-core';
+import { once } from 'node:events';
+import WebSocket from 'ws';
 import { afterEach, describe, expect, it } from 'vitest';
 import { startBridge, type BridgeHandle } from '../../packages/bridge/src/index.js';
 import { TRUSTED_EXTENSION_ID } from '../../packages/shared/src/index.js';
-import { stableContentId, type CollectedDocument } from '@data-collector/shared';
+import { APP_VERSION, NOWCODER_ARTICLE_CAPABILITY, stableContentId, type CollectedDocument } from '@data-collector/shared';
 import { MarkdownLibrary, listLibrary } from '../../packages/bridge/src/library/index.js';
 import { organize } from '../../packages/bridge/src/organize/index.js';
 import { NowcoderOperationsStore } from '../../packages/bridge/src/operations/store.js';
@@ -368,11 +370,44 @@ async function waitForText(
 }
 
 describe('built Chrome extension', () => {
+  it('automatically restores a displaced collector on its next alarm after the other browser moves to articles', async () => {
+    await startStack();
+    const source = await browser!.newPage(); const { worker } = await sidePanelFor(source);
+    const health = async () => await (await fetch(`${bridge!.url}/health`)).json();
+    const waitFor = async (predicate: (h: any) => boolean) => {
+      const end = Date.now() + 15_000;
+      while (Date.now() < end) { const h = await health(); if (predicate(h)) return h; await new Promise(r => setTimeout(r, 100)); }
+      throw new Error('Fixture runtime did not reach expected channel state');
+    };
+    await waitFor(h => h.extensionConnected && h.primaryBrowser === 'chrome');
+    const token = await worker.evaluate(async () => String((await chrome.storage.local.get('bridgeToken')).bridgeToken));
+    const sockets: WebSocket[] = [];
+    const connect = async (channel: string) => {
+      const socket = new WebSocket(`${bridge!.wsUrl}?token=${encodeURIComponent(token)}${channel === 'articles' ? '&channel=articles' : ''}`, { origin: `chrome-extension://${TRUSTED_EXTENSION_ID}` }); sockets.push(socket); await once(socket, 'open');
+      socket.send(JSON.stringify({ protocolVersion: 1, type: 'extension.hello', requestId: `fixture-${channel}`, timestamp: new Date().toISOString(), payload: { version: APP_VERSION, browserFamily: 'edge', capabilities: channel === 'articles' ? [NOWCODER_ARTICLE_CAPABILITY] : [] } }));
+      return socket;
+    };
+    try {
+      const takeover = await connect('collector');
+      await waitFor(h => h.extensionConnected && h.primaryBrowser === 'edge');
+      await worker.evaluate(async () => {
+        const end = Date.now() + 5000;
+        while (Date.now() < end) { if ((await chrome.storage.local.get('bridgeStatus')).bridgeStatus === 'replaced') return; await new Promise(r => setTimeout(r, 50)); }
+        throw new Error('Collector did not enter displaced state');
+      });
+      await connect('articles'); await waitFor(h => h.articleRuntime.connected);
+      takeover.close(); await once(takeover, 'close'); await waitFor(h => h.collectorChannelOccupied === false);
+      await worker.evaluate(async () => chrome.alarms.create('bridge-reconnect', { when: Date.now() + 250 }));
+      const restored = await waitFor(h => h.extensionConnected && h.primaryBrowser === 'chrome');
+      expect(restored.articleRuntime).toMatchObject({ connected: true, browserFamily: 'edge' });
+      expect(await worker.evaluate(async () => chrome.storage.local.get(['bridgeStatus', 'collectorClaimOnly']))).toMatchObject({ bridgeStatus: 'connected', collectorClaimOnly: true });
+    } finally { sockets.forEach(s => s.terminate()); }
+  });
   it('publishes a compiled article through the articles role once and observes its full receipt', async () => {
     await startStack();
     const profileUrl = 'https://www.nowcoder.com/users/544222414', editorUrl = 'https://www.nowcoder.com/creation/write/article', postUrl = 'https://www.nowcoder.com/discuss/995551';
     const title = '字节 Agent 全栈一面｜备考题单（整理版）', body = '按不同记录整理的备考题单，非本人面试实录\n\n1. SSE断线后怎么恢复？\n\n更多整理在 agent-journey.cn';
-    const profileHtml = '<html><head><title>测试创作者 - 个人主页动态 - 牛客网</title></head><body><a href="/profile/544222414/account">账号设置</a><div>发布(0)</div><div>暂无内容</div></body></html>';
+    const profileHtml = '<html><head><title>牛客网 - 找工作神器</title></head><body><a href="/profile/544222414/account">账号设置</a><div class="profile-card"><div class="tw-text-3xl"><span>测试创作者</span></div></div><div>发布(0)</div><div>暂无内容</div></body></html>';
     const source = await browser!.newPage(); await serveArticleFixture(source, profileHtml, profileUrl); await source.goto(profileUrl);
     const profiles: Page[] = [];
     for (let i = 0; i < 4; i++) { const p = await browser!.newPage(); await serveArticleFixture(p, profileHtml, profileUrl); await p.goto(profileUrl); profiles.push(p); }

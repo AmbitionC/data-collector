@@ -1,6 +1,7 @@
 import {
   APP_VERSION,
   NOWCODER_ARTICLE_CAPABILITY,
+  COLLECTOR_CHANNEL_CLAIM_CAPABILITY,
   articleActionSchema,
   articleResultSchema,
   connectionRoleSchema,
@@ -227,7 +228,7 @@ export class BridgeConnection {
         await this.dependencies.storage.set({ connectionRole: role });
       } catch (error) {
         // A failed save retains the old stored role and restores its connection.
-        await this.startConnection({ force: true });
+        await this.startConnection({ force: true, preserveVacancyClaim: true });
         throw error;
       }
       this.connectionRole = role;
@@ -242,20 +243,19 @@ export class BridgeConnection {
     await this.startConnection(options);
   }
 
-  private async startConnection(options: { force?: boolean }): Promise<void> {
+  private async startConnection(options: { force?: boolean; preserveVacancyClaim?: boolean }): Promise<void> {
     const force = options.force === true;
-    if (force) this.reconnectSuppressed = false;
-    if (this.reconnectSuppressed) return;
+    if (force && !options.preserveVacancyClaim) this.reconnectSuppressed = false;
     this.stopped = false;
     if (this.startPromise) {
       await this.startPromise;
       if (force && this.reconnectSuppressed) {
-        this.reconnectSuppressed = false;
-        await this.startConnection({ force: true });
+        if (!options.preserveVacancyClaim) this.reconnectSuppressed = false;
+        await this.startConnection(options);
       }
       return;
     }
-    const startPromise = this.startOnce(force);
+    const startPromise = this.startOnce(force, options.preserveVacancyClaim === true);
     this.startPromise = startPromise;
     try {
       await startPromise;
@@ -269,7 +269,7 @@ export class BridgeConnection {
   }
 
   /** 尽力刷新「去向/分类」路由缓存；失败忽略（连接问题由 WebSocket 反映）。 */
-  private async refreshRouting(port: number): Promise<void> {
+  private async refreshRouting(port: number): Promise<{ trustedExtensionId?: unknown; collectorChannelOccupied?: unknown; articleRuntime?: unknown } | undefined> {
     try {
       // 必须先取成局部变量再调用：写成 this.dependencies.fetch(...) 会把 dependencies
       // 当作 fetch 的接收者，浏览器抛 Illegal invocation，又被下面的 catch 吞掉，
@@ -284,6 +284,9 @@ export class BridgeConnection {
         update?: unknown;
         buildId?: unknown;
         directedRunActive?: unknown;
+        trustedExtensionId?: unknown;
+        collectorChannelOccupied?: unknown;
+        articleRuntime?: unknown;
       };
       await this.dependencies.storage.set({
         ...(health.routing && typeof health.routing === 'object'
@@ -299,26 +302,48 @@ export class BridgeConnection {
       });
       if (typeof health.version === 'string') this.bridgeVersion = health.version;
       this.bridgeCapabilities = new Set(Array.isArray(health.bridgeCapabilities) && health.bridgeCapabilities.every(value => typeof value === 'string') ? health.bridgeCapabilities : []);
+      return health;
     } catch {
       // 忽略。
     }
   }
 
-  private async startOnce(force: boolean): Promise<void> {
+  private async startOnce(force: boolean, preserveVacancyClaim: boolean): Promise<void> {
+    const startGeneration = this.generation;
     await this.tokenInvalidation;
     const settings = await this.settings();
+    const takeover = force && !preserveVacancyClaim;
+    if (takeover && settings.claimOnly) {
+      await this.dependencies.storage.remove('collectorClaimOnly');
+      settings.claimOnly = false;
+    }
     this.connectionRole = settings.role;
     // 每次建连都重新验证；health 失败时必须保守按旧 Bridge 发送。
     this.bridgeVersion = undefined;
     this.bridgeCapabilities.clear();
-    if (!force && settings.status === 'replaced') {
+    // Even displaced clients must keep learning new builds. Otherwise their
+    // persisted replaced state also prevents the normal automatic update.
+    const recovery = !takeover && (this.reconnectSuppressed || settings.status === 'replaced' || (settings.role === 'collector' && settings.claimOnly));
+    const health = settings.token || recovery ? await this.refreshRouting(settings.port) : undefined;
+    if (this.socket?.readyState === 0 || this.socket?.readyState === 1) return;
+    let claimVacant = false;
+    if (recovery) {
       this.reconnectSuppressed = true;
-      return;
+      const article = health?.articleRuntime && typeof health.articleRuntime === 'object' ? health.articleRuntime as Record<string, unknown> : undefined;
+      const otherBrowser = article?.browserFamily === 'chrome' || article?.browserFamily === 'edge';
+      claimVacant = !this.busy && settings.role === 'collector' && Boolean(this.dependencies.browserFamily)
+        && health?.trustedExtensionId === this.dependencies.extensionId
+        && this.bridgeCapabilities.has(COLLECTOR_CHANNEL_CLAIM_CAPABILITY)
+        && health?.collectorChannelOccupied === false
+        && (settings.claimOnly || (article?.connected === true && otherBrowser && article?.browserFamily !== this.dependencies.browserFamily));
+      if (!claimVacant) { await this.transition(startGeneration, { bridgeStatus: 'replaced' }); return; }
+      // Persist intent before any transient status, bootstrap or socket can
+      // fail. A worker restart must never turn this into a normal takeover.
+      if (!settings.claimOnly) await this.dependencies.storage.set({ collectorClaimOnly: true });
+      if (this.stopped) return;
     }
     // 已授权时先尽力刷新一次路由：即使当前已连接（下面会提前 return），
     // Bridge 侧改了去向/分类也能生效，不需要重装扩展。
-    if (settings.token) await this.refreshRouting(settings.port);
-    if (this.socket?.readyState === 0 || this.socket?.readyState === 1) return;
     const generation = ++this.generation;
     const bootstrap = !settings.token;
     if (bootstrap) {
@@ -364,6 +389,10 @@ export class BridgeConnection {
       }
     }
     if (!this.isCurrent(generation)) return;
+    if (claimVacant && !this.bridgeCapabilities.has(COLLECTOR_CHANNEL_CLAIM_CAPABILITY)) {
+      await this.transition(generation, { bridgeStatus: 'protocol_error' });
+      return;
+    }
 
     // An old Bridge ignores unknown query parameters and would steal the collector channel.
     if (settings.role === 'articles' && (!this.bridgeCapabilities.has(NOWCODER_ARTICLE_CAPABILITY)
@@ -376,10 +405,13 @@ export class BridgeConnection {
     if (!(await this.transition(generation, { bridgeStatus: 'connecting' }))) return;
     let socket: SocketLike;
     try {
+      // Old Bridges ignore unknown query parameters. A distinct path makes a
+      // downgrade between health and upgrade fail with404 instead of taking over.
+      const path = claimVacant ? '/v1/extension/claim-collector' : '/v1/extension';
       const url = bootstrap
-          ? `ws://127.0.0.1:${settings.port}/v1/extension?bootstrap=1`
-          : `ws://127.0.0.1:${settings.port}/v1/extension?token=${encodeURIComponent(settings.token!)}`;
-      socket = this.dependencies.socketFactory(`${url}${settings.role === 'articles' ? '&channel=articles' : ''}`);
+          ? `ws://127.0.0.1:${settings.port}${path}?bootstrap=1`
+          : `ws://127.0.0.1:${settings.port}${path}?token=${encodeURIComponent(settings.token!)}`;
+      socket = this.dependencies.socketFactory(`${url}${settings.role === 'articles' ? '&channel=articles' : ''}${claimVacant ? '&claim=vacant' : ''}`);
     } catch {
       await this.markDisconnected(generation);
       return;
@@ -948,12 +980,13 @@ export class BridgeConnection {
     if (!response.ok) throw new Error(`打开知识库文件失败：HTTP ${response.status}`);
   }
 
-  private async settings(): Promise<{ token?: string; port: number; status?: string; role: ConnectionRole }> {
+  private async settings(): Promise<{ token?: string; port: number; status?: string; role: ConnectionRole; claimOnly: boolean }> {
     const values = await this.dependencies.storage.get([
       'bridgeToken',
       'bridgePort',
       'bridgeStatus',
       'connectionRole',
+      'collectorClaimOnly',
     ]);
     return {
       ...(!this.ignoreStoredToken && typeof values.bridgeToken === 'string'
@@ -961,6 +994,7 @@ export class BridgeConnection {
         : {}),
       port: typeof values.bridgePort === 'number' ? values.bridgePort : DEFAULT_PORT,
       role: connectionRoleSchema.parse(values.connectionRole ?? 'collector'),
+      claimOnly: values.collectorClaimOnly !== undefined && values.collectorClaimOnly !== false,
       ...(typeof values.bridgeStatus === 'string' ? { status: values.bridgeStatus } : {}),
     };
   }

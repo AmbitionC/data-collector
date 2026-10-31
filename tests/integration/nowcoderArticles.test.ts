@@ -48,6 +48,21 @@ it('authenticates article routes and keeps Chrome article connection separate fr
   expect((await c.request('POST', `${base}/account`, { browser: 'chrome', accountId: draft.accountId })).body).toMatchObject({ kind: 'account', identity: { userId: draft.accountId } });
   expect(c.primaryActions).toEqual([]); expect(c.secondaryActions).toEqual(['account']);
 });
+it('does not let a vacancy claim displace an occupied collector, including a new connection before hello', async () => {
+  const c = await setup();
+  const candidate = new WebSocket(`${c.bridge.wsUrl}?token=${token}&claim=vacant`, { origin: `chrome-extension://${TRUSTED_EXTENSION_ID}` }); sockets.push(candidate);
+  const rejected = once(candidate, 'close'); await once(candidate, 'open');
+  expect((await rejected)[0]).toBe(4009);
+  expect(c.primary.readyState).toBe(WebSocket.OPEN);
+  expect(c.secondary.readyState).toBe(WebSocket.OPEN);
+  c.primary.close(); await once(c.primary, 'close');
+  await vi.waitFor(async () => expect((await c.request('GET', '/health')).body.collectorChannelOccupied).toBe(false));
+  const winner = new WebSocket(`${c.bridge.wsUrl}?token=${token}&claim=vacant`, { origin: `chrome-extension://${TRUSTED_EXTENSION_ID}` }); sockets.push(winner); await once(winner, 'open');
+  expect((await c.request('GET', '/health')).body).toMatchObject({ collectorChannelOccupied: true, extensionConnected: false });
+  const loser = new WebSocket(`${c.bridge.wsUrl}?token=${token}&claim=vacant`, { origin: `chrome-extension://${TRUSTED_EXTENSION_ID}` }); sockets.push(loser);
+  const lost = once(loser, 'close'); await once(loser, 'open'); expect((await lost)[0]).toBe(4009);
+  expect(winner.readyState).toBe(WebSocket.OPEN); expect(c.secondary.readyState).toBe(WebSocket.OPEN);
+});
 it('imports, previews and publishes once with correct-account receipt, retaining readonly replay', async () => {
   const c = await setup(), base = '/v1/nowcoder/articles';
   const created = await c.request('POST', base, draft); expect(created.status).toBe(200); const id = created.body.entry.id;

@@ -26,8 +26,8 @@ async function setup() {
     await new Promise<void>(resolve => server.close(() => resolve()));
     await rm(root, { recursive: true, force: true });
   });
-  return { token, connections, connect: async (query: string, origin = `chrome-extension://${TRUSTED_EXTENSION_ID}`) => {
-    const socket = new WebSocket(`ws://127.0.0.1:${port}/v1/extension?${query}`, { origin });
+  return { token, connections, connect: async (query: string, origin = `chrome-extension://${TRUSTED_EXTENSION_ID}`, path = '/v1/extension') => {
+    const socket = new WebSocket(`ws://127.0.0.1:${port}${path}?${query}`, { origin });
     return await new Promise<{ socket?: WebSocket; status?: number }>((resolve, reject) => {
       socket.once('open', () => resolve({ socket }));
       socket.once('unexpected-response', (_request, response) => { response.resume(); resolve({ status: response.statusCode }); });
@@ -37,6 +37,16 @@ async function setup() {
 }
 
 describe('authenticated article WebSocket channel metadata', () => {
+  it('marks an authenticated collector vacancy claim without changing its role', async () => {
+    const r = await setup(); await r.connect(`token=${r.token}`, undefined, '/v1/extension/claim-collector');
+    expect(r.connections[0]!.authorization).toEqual({ channel: 'collector', claimVacant: true });
+  });
+  it('does not allow the collector-claim path to target the article role', async () => {
+    const r = await setup(); expect((await r.connect(`token=${r.token}&channel=articles`, undefined, '/v1/extension/claim-collector')).status).toBe(400);
+  });
+  it.each(['claim=other', 'claim=vacant&claim=vacant', 'channel=articles&claim=vacant'])('rejects an invalid or wrong-channel vacancy claim: %s', async query => {
+    const r = await setup(); expect((await r.connect(`token=${r.token}&${query}`)).status).toBe(400);
+  });
   it('defaults legacy clients to collector while keeping an article socket separate', async () => {
     const runtime = await setup();
     const primary = await runtime.connect(`token=${runtime.token}`);

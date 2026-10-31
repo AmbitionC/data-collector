@@ -70,7 +70,12 @@ export async function runNowcoderArticlePage(action: ArticlePageAction): Promise
     const ownerUrl = `https://www.nowcoder.com/profile/${action.expectedAccountId}/account`;
     const owner = [...document.querySelectorAll<HTMLAnchorElement>('a[href]')].some(link => visible(link) && canonical(link.getAttribute('href')!) === ownerUrl);
     if (!owner) return undefined;
-    const nickname = document.title.match(/^(.+?)\s*-\s*个人主页(?:动态|文章|帖子)?\s*-\s*牛客网$/u)?.[1]?.trim();
+    // Client-rendered profiles can retain the generic site title even after
+    // their owner controls and profile card are ready. Read the actual profile
+    // name first; never infer ownership from this public nickname alone.
+    const names = [...new Set([...document.querySelectorAll('.profile-card .tw-text-3xl > span')].filter(visible).map(text).filter(Boolean))];
+    if (names.length > 1) return undefined;
+    const nickname = names[0] ?? document.title.match(/^(.+?)\s*-\s*个人主页(?:动态|文章|帖子)?\s*-\s*牛客网$/u)?.[1]?.trim();
     if (!nickname || nickname.length > 200) return undefined;
     return { userId: action.expectedAccountId, nickname, profileUrl, observedAt: new Date().toISOString() };
   };

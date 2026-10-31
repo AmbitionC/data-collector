@@ -11,7 +11,7 @@ In each browser's Data Collector sidepanel, select and save its connection role:
 
 There is one connection per role. The articles connection does not replace the collector. Saving roles and reloads require all relevant work to be idle. Never rotate accounts to get around a limit or verification pause. Reuse each browser's existing login; do not export cookies.
 
-A first installation defaults to collector. If it temporarily replaces Edge, save Chrome as articles first, then use Edge's existing “重新连接” control once; confirm both runtimes before publishing.
+A first installation defaults to collector. Save Chrome as articles first. From v0.4.64, a displaced collector keeps checking health/build information once a minute and can first reclaim its empty channel when another browser's article connection is ready. This vacancy-only intent is persisted before connecting and survives worker restarts, failures and reauthorization; subsequent safe reconnects do not require the article browser to stay online. Admission rechecks vacancy so it cannot displace a newer collector, including one still sending its hello. It never replays a publication or clears a verification pause. Older displaced clients stopped their health checks and may require one reload to receive this correction; verify actual runtimes rather than claiming automatic recovery from the code alone. Explicit “重新连接” remains available for intentional manual takeover.
 
 From `/Users/chenhao/code/data-collector`, use the built CLI:
 

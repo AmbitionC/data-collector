@@ -37,6 +37,16 @@ describe('Nowcoder article DOM adapter', () => {
   it('proves own-account identity only from the expected profile and its visible owner-only settings link', async () => {
     expect(await run({ kind: 'account', expectedAccountId: '544222414' })).toMatchObject({ kind: 'account', identity: { userId: '544222414', nickname: '妙脆角猫正在思考中', profileUrl } });
   });
+  it('reads the observed profile-card nickname when a loaded own profile retains the generic site title', async () => {
+    document.title = '牛客网 - 找工作神器|笔试题库|面试经验|实习招聘内推，求职就业一站解决_牛客网';
+    document.body.insertAdjacentHTML('beforeend', '<div class="profile-card"><div class="tw-text-3xl"><span>妙脆角猫正在思考中</span></div></div>');
+    expect(await run({ kind: 'account', expectedAccountId: '544222414' })).toMatchObject({ kind: 'account', identity: { userId: '544222414', nickname: '妙脆角猫正在思考中' } });
+  });
+  it('does not use a public profile-card nickname as proof of owning the account', async () => {
+    profile(false); document.title = '牛客网';
+    document.body.insertAdjacentHTML('beforeend', '<div class="profile-card"><div class="tw-text-3xl"><span>妙脆角猫正在思考中</span></div></div>');
+    expect(await run({ kind: 'account', expectedAccountId: '544222414' })).toMatchObject({ kind: 'attention', code: 'ACCOUNT_NOT_OWNED', submission: 'not_attempted' });
+  });
   it('does not infer login from a public author or arbitrary own-avatar link', async () => {
     profile(false);
     expect(await run({ kind: 'account', expectedAccountId: '544222414' })).toMatchObject({ kind: 'attention', code: 'ACCOUNT_NOT_OWNED', submission: 'not_attempted' });

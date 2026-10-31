@@ -13,6 +13,7 @@ import {
   NOWCODER_OPERATIONS_CAPABILITY,
   NOWCODER_BROWSER_OPERATIONS_CAPABILITY,
   NOWCODER_ARTICLE_CAPABILITY,
+  COLLECTOR_CHANNEL_CLAIM_CAPABILITY,
   NOWCODER_ARTICLE_EDITOR_URL,
   articleImportSchema,
   browserFamilySchema,
@@ -2052,7 +2053,8 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
       return sendJson(response, 200, {
         ok: true,
         version: APP_VERSION,
-        bridgeCapabilities: [NOWCODER_HOT_MATERIAL_CAPABILITY, NOWCODER_OPERATIONS_CAPABILITY, NOWCODER_BROWSER_OPERATIONS_CAPABILITY, NOWCODER_ARTICLE_CAPABILITY],
+        bridgeCapabilities: [NOWCODER_HOT_MATERIAL_CAPABILITY, NOWCODER_OPERATIONS_CAPABILITY, NOWCODER_BROWSER_OPERATIONS_CAPABILITY, NOWCODER_ARTICLE_CAPABILITY, COLLECTOR_CHANNEL_CLAIM_CAPABILITY],
+        collectorChannelOccupied: extensionSocket?.readyState === WebSocket.OPEN,
         nowcoderOperationsActive: operationsWorkflow.busy || operationsActivity.busy || operationsTransport.busy,
         nowcoderArticlesActive: articlesActivity.busy || articleTransport.busy,
         articleRuntime: articleRuntime(),
@@ -2507,6 +2509,12 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
     server,
     access,
     onConnection: (socket, authorization) => {
+      // Health is only a hint. Recheck vacancy synchronously at connection
+      // admission so a delayed recovery cannot replace a newer live collector.
+      if (authorization.claimVacant && extensionSocket?.readyState === WebSocket.OPEN) {
+        socket.close(EXTENSION_REPLACED_CLOSE_CODE, EXTENSION_REPLACED_CLOSE_REASON);
+        return;
+      }
       if (authorization.bootstrapToken) {
         socket.send(
           JSON.stringify(
