@@ -85,10 +85,12 @@ export class NowcoderPublishingControl {
   }
   private availableAt(state: State, events: HistoryEvent[], count = 1, channel: 'comment' | 'article' = 'comment'): number {
     const now = this.now(), times = events.map(e => Date.parse(e.publication.createdAt)).sort((a, b) => a - b);
-    const channelTimes = events.filter(e => e.channel === channel).map(e => Date.parse(e.publication.createdAt)).sort((a, b) => a - b);
+    const intervalAt = Math.max(now, times.length ? times[times.length - 1]! + state.policy.minIntervalMs : now);
+    if (channel === 'article') return intervalAt;
+    const channelTimes = events.filter(e => e.channel === 'comment').map(e => Date.parse(e.publication.createdAt)).sort((a, b) => a - b);
     const hour = channelTimes.filter(t => t > now - HOUR), day = channelTimes.filter(t => t > now - DAY);
-    const maxHour = channel === 'article' ? 1 : state.policy.maxPerHour, maxDay = channel === 'article' ? 1 : state.policy.maxPer24Hours;
-    return Math.max(now, times.length ? times[times.length - 1]! + state.policy.minIntervalMs : now,
+    const maxHour = state.policy.maxPerHour, maxDay = state.policy.maxPer24Hours;
+    return Math.max(intervalAt,
       hour.length + count > maxHour ? hour[hour.length + count - maxHour - 1]! + HOUR : now,
       day.length + count > maxDay ? day[day.length + count - maxDay - 1]! + DAY : now);
   }
@@ -103,7 +105,7 @@ export class NowcoderPublishingControl {
   async articleStatus(): Promise<ArticlePublishingStatus> {
     return this.serialize(async () => {
       const { state, events } = await this.read(), earliest = this.availableAt(state, events, 1, 'article');
-      return { schemaVersion: 1, policy: { minIntervalMs: state.policy.minIntervalMs, maxPer24Hours: 1 },
+      return { schemaVersion: 1, policy: { minIntervalMs: state.policy.minIntervalMs, maxPer24Hours: null },
         usage: { last24Hours: events.filter(e => e.channel === 'article' && Date.parse(e.publication.createdAt) > this.now() - DAY).length },
         nextAllowedAt: earliest > this.now() ? new Date(earliest).toISOString() : null, verification: state.verification };
     });
@@ -111,7 +113,6 @@ export class NowcoderPublishingControl {
   async assertArticleCapacity(): Promise<void> {
     const status = await this.articleStatus();
     if (status.verification) throw new HttpError(409, 'PUBLISH_VERIFICATION_PAUSED', '牛客验证尚待处理，两个渠道均已暂停；请完成原页验证后核验恢复');
-    if (status.usage.last24Hours >= 1) throw new HttpError(429, 'ARTICLE_BUDGET_EXHAUSTED', `文章发布尝试已达24小时上限，下次最早 ${status.nextAllowedAt}；未发送`);
     if (status.nextAllowedAt) throw new HttpError(429, 'PUBLISH_INTERVAL_REQUIRED', `两个渠道共用发布间隔，请在 ${status.nextAllowedAt} 后重试；未发送`);
   }
   async assertCapacity(count = 1, ignoreInterval = false): Promise<void> {

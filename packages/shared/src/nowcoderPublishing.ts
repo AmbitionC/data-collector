@@ -26,7 +26,7 @@ export const nowcoderPublishingStatusSchema = z.object({
 }).strict();
 export type NowcoderPublishingStatus = z.infer<typeof nowcoderPublishingStatusSchema>;
 export const articlePublishingStatusSchema = z.object({
-  schemaVersion: z.literal(1), policy: z.object({ minIntervalMs: z.number().int().positive(), maxPer24Hours: z.literal(1) }).strict(),
+  schemaVersion: z.literal(1), policy: z.object({ minIntervalMs: z.number().int().positive(), maxPer24Hours: z.null() }).strict(),
   usage: z.object({ last24Hours: z.number().int().nonnegative() }).strict(), nextAllowedAt: z.iso.datetime().nullable(),
   verification: nowcoderVerificationPauseSchema.nullable(),
 }).strict();

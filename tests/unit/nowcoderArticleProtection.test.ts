@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 import { afterEach, expect, it, vi } from 'vitest';
 import { NowcoderPublishingControl } from '../../packages/bridge/src/operations/publishingControl.js';
+import { articlePublishingStatusSchema } from '@data-collector/shared';
 import { createTemporaryDirectoryTracker } from '../helpers/temp.js';
 const dirs = createTemporaryDirectoryTracker(); afterEach(() => dirs.cleanup());
 it('fences publication synchronously when a challenge is observed while status I/O is queued', async () => {
@@ -26,15 +27,19 @@ async function setup(history: any[] = []) {
   const control = new NowcoderPublishingControl(join(root, 'control.json'), async () => history, { now: () => clock });
   return { root, control, history, at: (value: number) => { clock = value; } };
 }
-it('keeps article and comment budgets separate while both share the minimum interval', async () => {
+it('allows requested articles without a daily maximum while retaining comment budgets and the shared interval', async () => {
   const c = await setup(Array.from({ length: 20 }, (_, i) => event(base - 2 * 3600000 - i * 1000)));
   expect(typeof (c.control as any).assertArticleCapacity).toBe('function');
   await (c.control as any).assertArticleCapacity();
   await expect(c.control.assertCapacity()).rejects.toThrow(/上限/u);
   c.history.push(event(base, true));
   expect((await c.control.status()).usage.last24Hours).toBe(20);
-  await expect((c.control as any).assertArticleCapacity()).rejects.toThrow(/24小时|上限/u);
-  c.at(base + 24 * 3600000); await (c.control as any).assertArticleCapacity();
+  await expect(c.control.assertArticleCapacity()).rejects.toThrow(/间隔/u);
+  c.at(base + 120000);
+  await expect(c.control.assertArticleCapacity()).resolves.toBeUndefined();
+  const status = articlePublishingStatusSchema.parse(await c.control.articleStatus());
+  expect(status).toMatchObject({ policy: { maxPer24Hours: null }, usage: { last24Hours: 1 }, nextAllowedAt: null });
+  await expect(c.control.assertCapacity()).rejects.toThrow(/上限/u);
 });
 it('an article attempt blocks a fresh comment until the common interval expires', async () => {
   const c = await setup([event(base, true)]);
@@ -48,6 +53,7 @@ it('restores an article challenge with its exact owner and prevents a stale or p
   const pause = (await c.control.status()).verification!;
   expect(pause).toMatchObject({ channel: 'article', articleId: e.opportunityId, browser: 'chrome', accountId: '544222414' });
   await expect(c.control.assertCapacity()).rejects.toThrow(/验证/u);
+  await expect(c.control.assertArticleCapacity()).rejects.toThrow(/验证/u);
   const newer = await c.control.pause({ channel: 'article', articleId: e.opportunityId, sourceUrl: e.sourceUrl, browser: 'chrome', accountId: '544222414', key: e.publication.key, requestId: randomUUID() } as any);
   await expect(c.control.clearVerification(pause.id)).rejects.toThrow(/变化/u);
   await c.control.clearVerification(newer.id); expect((await c.control.status()).verification).toBeNull();

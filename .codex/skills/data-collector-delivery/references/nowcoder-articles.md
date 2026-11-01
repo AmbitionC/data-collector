@@ -68,7 +68,9 @@ node packages/bridge/dist/cli.js nowcoder articles verify --id article-012345abc
 
 ## Shared protection
 
-Articles have at most one attempt per rolling24h across accounts. Comments retain their own limits; both channels share at least120s between attempts and one global verification pause. Query limits before new actions. No fixed timing guarantees avoidance of verification.
+Articles have no fixed daily maximum (`policy.maxPer24Hours: null`); the rolling24h count remains an audit metric. The user corrected this policy on 2026-11-01: “一天至少发一次” is an operating target, not a daily maximum. Publish when explicitly requested. Do not defer an immediate request into an automatic overnight post, or create a posting schedule without the user's timing instruction. Comments retain their own limits; both channels share at least120s between attempts and one global verification pause. Query limits before new actions. No fixed timing guarantees avoidance of verification.
+
+The company scope includes Alibaba, Tencent, ByteDance, Meituan, Kuaishou and Pinduoduo; choose verified relevant sources across companies. Use short section labels, an actual blank line between sections, and one question or point per paragraph. Check the rendered post's real line breaks after publishing, not only whitespace-normalized body equality. One or two closing sentences may convey a source author's recorded interview impression (attributed) or an editorial preparation reflection. Keep compiled notes identified as compiled; only confirmed firsthand material supports personal performance claims.
 
 If a challenge appears, preserve its exact browser/page and stop both publishing channels. The user completes it manually. Read the common status and only after explicit confirmation use its current generation:
 

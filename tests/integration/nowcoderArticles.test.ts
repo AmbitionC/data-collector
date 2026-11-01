@@ -75,7 +75,7 @@ it('imports, previews and publishes once with correct-account receipt, retaining
   expect((await c.request('POST', `${base}/${id}/publish`, input)).body.publication.state).toBe('published');
   expect((await c.request('POST', `${base}/${id}/verify`, { key: input.key })).body.publication.state).toBe('published');
   expect(c.secondaryActions).toEqual(sent); expect(c.primaryActions).toEqual([]);
-  expect((await c.request('GET', `${base}/limits`)).body).toMatchObject({ policy: { maxPer24Hours: 1 }, usage: { last24Hours: 1 } });
+  expect((await c.request('GET', `${base}/limits`)).body).toMatchObject({ policy: { maxPer24Hours: null }, usage: { last24Hours: 1 } });
   expect((await c.request('GET', '/v1/nowcoder/operations/publishing')).body.usage.last24Hours).toBe(0);
 });
 it('wrong live account refuses preview without recording a send', async () => {

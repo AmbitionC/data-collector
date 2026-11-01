@@ -55,14 +55,17 @@ it('draft edits invalidate preview and stale revisions or reused content keys ca
   await expect(c.store.import({ ...content, id: e.id, revision: e.revision })).rejects.toThrow(/修改|版本/u);
   await expect(c.store.beginPublication(changed.id, c.input(changed), randomUUID())).rejects.toThrow(/预览/u);
 });
-it('different article records share the daily budget and cannot evade it by changing account', async () => {
+it('different requested articles share the interval while unresolved originals stay protected', async () => {
   const c = await setup(), e = await c.draft(), first = c.input(e); await c.store.beginPublication(e.id, first, randomUUID());
   await c.store.finishPublication(e.id, first.key, { kind: 'attention', code: 'NO_RECEIPT', message: '待核验', submission: 'uncertain' });
   const other = await c.store.import({ ...content, title: '另一个题单', accountId: '12345' });
   await c.store.savePreview(other.id, { ...c.identity(), userId: '12345', profileUrl: 'https://www.nowcoder.com/users/12345' });
-  c.at(Date.now() + 121000);
-  await expect(c.store.beginPublication(other.id, c.input(other), randomUUID())).rejects.toThrow(/24小时|上限/u);
+  await expect(c.store.beginPublication(other.id, c.input(other), randomUUID())).rejects.toThrow(/间隔/u);
   expect((await c.store.get(other.id)).publicationAttempts).toHaveLength(0);
+  c.at(Date.now() + 121000);
+  expect(await c.store.beginPublication(other.id, c.input(other), randomUUID())).toMatchObject({ dispatch: true });
+  expect((await c.store.get(other.id)).publicationAttempts).toHaveLength(1);
+  await expect(c.store.beginPublication(e.id, c.input(e), randomUUID())).rejects.toThrow(/核验|重复/u);
 });
 it('rejects corrupted or tampered records and leaves them unchanged', async () => {
   const c = await setup(), e = await c.draft(), path = join(c.root, 'articles', `${e.id}.json`);
