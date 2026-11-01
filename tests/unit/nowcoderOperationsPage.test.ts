@@ -28,6 +28,20 @@ async function snapshot() {
 }
 
 describe('Nowcoder plugin page operations', () => {
+  it('rejects changed serialized context with an unknown total before writing or clicking', async () => {
+    vi.useFakeTimers();
+    document.querySelector('.comment-title')!.textContent = '全部评论';
+    const expected = await snapshot();
+    expect(expected.coverage.total).toBeNull();
+    document.querySelector('.feed-content-text')!.textContent = '原帖已更新，请按新问题讨论';
+    let clicks = 0; document.querySelector('button')!.addEventListener('click', () => { clicks++; });
+    const pending = runNowcoderOperationPage(JSON.stringify({ kind: 'publish', url, text: '先做一个项目', expected }));
+    await vi.runAllTimersAsync();
+    expect(await pending).toMatchObject({ kind: 'attention', code: 'CONTEXT_CHANGED', submission: 'not_attempted',
+      contextChanges: { fields: ['body'], total: { before: null, after: null } } });
+    expect(document.querySelector('#nc-e-textarea-1')!.textContent).toBe('');
+    expect(clicks).toBe(0);
+  });
   it('checkpoints a visible verification observation before returning to the runner', async () => {
     const executionId = '00000000-0000-4000-8000-000000000001';
     document.body.insertAdjacentHTML('beforeend', '<div class="captcha-modal">请完成验证</div>');

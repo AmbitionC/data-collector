@@ -448,7 +448,11 @@ describe('built Chrome extension', () => {
     expect(clicks).toBe(1); expect(source.isClosed()).toBe(false);
     expect(profiles.every(p => p.isClosed())).toBe(true); expect(editor.isClosed()).toBe(true);
   });
-  it.each([false, true])('executes packaged workflow once and preserves click evidence when its result is lost: %s', async loseResult => {
+  it.each([
+    { loseResult: false, unknownTotal: false },
+    { loseResult: true, unknownTotal: false },
+    { loseResult: false, unknownTotal: true },
+  ])('executes packaged workflow once with result loss=$loseResult and unknown total=$unknownTotal', async ({ loseResult, unknownTotal }) => {
     const { libraryRoot } = await startStack();
     const url = 'https://www.nowcoder.com/discuss/123456', sourceId = stableContentId(url);
     const store = new NowcoderOperationsStore(join(libraryRoot, '.config', 'nowcoder-operations'), libraryRoot);
@@ -456,7 +460,7 @@ describe('built Chrome extension', () => {
     const pages: Page[] = [];
     for (let i = 0; i < 4; i++) {
       const page = await browser!.newPage();
-      await serveArticleFixture(page, fixture, url);
+      await serveArticleFixture(page, unknownTotal ? fixture.replace('全部评论(0)', '全部评论') : fixture, url);
       await page.goto(url, { waitUntil: 'domcontentloaded' }); pages.push(page);
     }
     const { worker } = await sidePanelFor(pages[0]!);
@@ -475,7 +479,9 @@ describe('built Chrome extension', () => {
         let lost = false;
         chrome.scripting.executeScript = (async input => {
           const result = await execute(input);
-          if (!lost && (input.args?.[0] as { kind?: string } | undefined)?.kind === 'publish') { lost = true; throw new Error('E2E injected result lost'); }
+          const firstArg = input.args?.[0];
+          const action = typeof firstArg === 'string' && firstArg.startsWith('{') ? JSON.parse(firstArg) : firstArg;
+          if (!lost && (action as { kind?: string } | undefined)?.kind === 'publish') { lost = true; throw new Error('E2E injected result lost'); }
           return result;
         }) as typeof chrome.scripting.executeScript;
       }
@@ -506,7 +512,7 @@ describe('built Chrome extension', () => {
     const prepared = JSON.parse(await readFile(preparedRun.resultPath, 'utf8'));
     expect(preparedRun.counts).toMatchObject({ succeeded: 1, failed: 0 });
     expect(prepared.items[0].result).toMatchObject({ jobId: expect.any(String), status: 'saved', contentAccess: 'full' });
-    expect(prepared.prepared[0]).toMatchObject({ sourceConflict: false, currentPost: { body: '学过 LangGraph，想做一个能用的项目' }, conversation: { coverage: { complete: true, total: 0 } } });
+    expect(prepared.prepared[0]).toMatchObject({ sourceConflict: false, currentPost: { body: '学过 LangGraph，想做一个能用的项目' }, conversation: { coverage: { complete: !unknownTotal, total: unknownTotal ? null : 0 } } });
     const collected = (await listLibrary(libraryRoot)).find(entry => entry.id === sourceId)!;
     const storedSource = JSON.parse(await readFile(join(libraryRoot, dirname(collected.relativePath), 'source.json'), 'utf8'));
     expect(storedSource.document.sourceMetadata).toMatchObject({ operationsCollectionJobId: prepared.items[0].result.jobId, operationsExtractorContentAccess: 'full' });

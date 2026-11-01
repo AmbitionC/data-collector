@@ -191,7 +191,7 @@ const operationsRunner = new NowcoderOperationsRunner({
   handoff: (id, url) => ownedTabs.handoff(id, url, { preservePrevious: true }),
   wait: id => waitForTabComplete(id),
   execute: async (tabId, action, executionId) => {
-    const results = await chrome.scripting.executeScript({ target: { tabId }, func: runNowcoderOperationPage, args: [action, executionId] });
+    const results = await chrome.scripting.executeScript({ target: { tabId }, func: runNowcoderOperationPage, args: [JSON.stringify(action), executionId] });
     return results[0]?.result;
   },
   readProgress: async (tabId, executionId) => {

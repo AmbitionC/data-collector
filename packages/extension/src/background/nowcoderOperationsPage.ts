@@ -1,7 +1,10 @@
 import type { NowcoderConversationSnapshot, NowcoderOperationAction, NowcoderOperationDiagnostics, NowcoderOperationResult, NowcoderPageStage } from '@data-collector/shared';
 
 /** Serialized by chrome.scripting: all runtime helpers must remain inside this function. */
-export async function runNowcoderOperationPage(action: NowcoderOperationAction, executionId?: string): Promise<NowcoderOperationResult> {
+export async function runNowcoderOperationPage(input: NowcoderOperationAction | string, executionId?: string): Promise<NowcoderOperationResult> {
+  // The worker validates before serialization. JSON text preserves nullable fields
+  // that the browser can omit from nested scripting object arguments.
+  const action: NowcoderOperationAction = typeof input === 'string' ? JSON.parse(input) : input;
   const diagnostics: NowcoderOperationDiagnostics = { pageStartedAt: new Date().toISOString() };
   let clicked = false;
   let pageStage: NowcoderPageStage = 'read_context';
