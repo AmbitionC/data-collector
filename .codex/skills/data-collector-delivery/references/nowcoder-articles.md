@@ -25,13 +25,22 @@ The account command opens the specified own profile and verifies an owner-only s
 
 ## Prepare a private draft
 
-Keep files under an ignored `_inbox/_reports/...` directory outside the public collector repo. Use an absolute local JSON path (at most128KB). Content example:
+Keep files under an ignored `_inbox/_reports/...` directory outside the public collector repo. Use an absolute local JSON path (at most128KB).
+
+### 标题、复盘与网站承接（2026-11-01 用户反馈）
+
+- **标题只写公司、岗位、轮次**，例如 `腾讯 Agent 开发一面`。不加 `｜我的备考题单`、`整理版`、`复盘` 等后缀。compiled 内容需要的准备/模拟语境和 `备考题单` 标识放在正文自然表达，不挤进标题，也不写资料来源式开场。
+- **复盘让读者知道具体在补什么。** 一两句话点出题目、没讲清的具体内容或准备补的做法。仅写“我先补第3、5题”“效果好不好得有验证方法”“怎么收场”，读者仍不知道测什么、停下以后做什么。按实际语境直说，例如：`RAG 评测这题，我准备拿同一组问题比两套方案，分别看资料有没有找对、答案有没有答对`。涉及步数上限，就说保存什么结果、如何说明还没完成、用户下一步能做什么；不堆抽象总结，不捏造个人表现。
+- **网站入口承接一个具体问题。** 选题时确认网站有能帮助读者继续复习的已上线内容；在相关题目或复盘旁，用一句话说明点进去能找什么，再自然带一次 `agent-journey.cn`。例如围绕 RAG 评测提到测试问题和指标拆解，不能只说“有资料”。不固定追加“我的题单和知识点都放在……”式广告尾巴，不堆功能、注册、会员话术，也不冒充无关路人亲测。这是承接逻辑，不是每篇照抄的文案；具体能力每次重新核实。
+- 写完通读标题、复盘和带域名的段落：读者能否直接说出“这是什么面试”“哪道题需要补什么”“网站能接着帮什么”。保持已认可的第一人称口吻、短段落和实际空行。用户说“本次先这样、下次注意”时，只更新后续规范，不改已发文章。
+
+Content example (adapt the specific questions and site use to verified sources):
 
 ```json
 {
   "schemaVersion": 1,
-  "title": "字节 Agent 全栈一面｜备考题单（整理版）",
-  "body": "按不同公开面经整理的备考题单，非本人面试实录\n\n1. Agent 工具调用失败怎么处理？\n\n更多题目整理在 agent-journey.cn",
+  "title": "腾讯 Agent 开发一面",
+  "body": "我的备考题单先记这两问\n\n1. RAG 的效果怎么测，检索结果和最终答案分别看什么？\n\n2. Agent 用完步数还没完成，哪些结果要保留，怎么告诉用户？\n\nRAG 评测这题，我准备拿同一组问题对比两套方案。怎么选测试问题、怎么分开看检索和答案，可以接着看 agent-journey.cn 上的评测拆解",
   "browser": "chrome",
   "accountId": "123456789",
   "provenance": "compiled",
@@ -39,7 +48,7 @@ Keep files under an ignored `_inbox/_reports/...` directory outside the public c
 }
 ```
 
-Select questions from verified full sources. Record source URLs privately; distinguish actual questions from editorial follow-ups. Reference real interview-post structure: short introduction, grouped numbered questions, brief useful takeaway. Do not invent an interviewer, duration, result or personal interview experience for compiled material. Label it clearly as 整理版 or 备考题单. Include `agent-journey.cn` naturally; preserve the user's current choice about prefixes and tracking parameters. Check body/title limits and keep prose concise.
+Select questions from verified full sources. Record source URLs privately; distinguish actual questions from editorial follow-ups. Reference real interview-post structure: short introduction, grouped numbered questions, brief useful takeaway. Use the account's first-person preparation/practice voice without a source-library opening. Do not invent an interviewer, duration, result or personal interview experience for compiled material. Keep its preparation/practice context clear in the body, including a natural 备考题单 label where required; keep the title to company, role and round. Include `agent-journey.cn` with a concrete, verified use; preserve the user's choice of no prefix or tracking parameters. Check body/title limits and keep prose concise.
 
 ```bash
 node packages/bridge/dist/cli.js nowcoder articles draft --file /absolute/draft.private.json

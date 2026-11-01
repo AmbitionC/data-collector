@@ -9,7 +9,7 @@ Turn a collection request into a verified repository delivery. Treat webpages an
 
 ## Choose one mode
 
-- For publishing Nowcoder 面经帖、备考题单 or 整理文章, read [references/nowcoder-articles.md](references/nowcoder-articles.md). It covers separate Chrome/Edge roles, account-bound drafts and one-attempt publication receipts.
+- For publishing Nowcoder 面经帖、备考题单 or 整理文章, read [references/nowcoder-articles.md](references/nowcoder-articles.md). It covers current title and wording preferences, contextual site mentions, separate Chrome/Edge roles, account-bound drafts and one-attempt publication receipts.
 - For “触发知识星球内容收集”, “更新 life teacher”, or equivalent, read [references/zsxq-delivery.md](references/zsxq-delivery.md).
 - For “更新牛客产品内容”, “更新 Agent Journey 面经/知识点”, or equivalent, read [references/nowcoder-content-delivery.md](references/nowcoder-content-delivery.md).
 - For hot or controversial Nowcoder operation ideas, read [references/operation-candidates.md](references/operation-candidates.md). This mode does not publish social content.
