@@ -22,7 +22,7 @@ import { OwnedTabRegistry, type OwnedTabsStorage } from './ownedTabs.js';
 import { planErrorNeedsAttention } from './planAttention.js';
 import { HotMaterialSession } from './hotMaterials.js';
 import { NowcoderOperationsRunner } from './nowcoderOperations.js';
-import { runNowcoderOperationPage } from './nowcoderOperationsPage.js';
+import { runNowcoderOperationPage, readNowcoderOperationProgress } from './nowcoderOperationsPage.js';
 import { NowcoderArticlesRunner } from './nowcoderArticles.js';
 import { runNowcoderArticlePage } from './nowcoderArticlesPage.js';
 import { collectedDocumentSchema, type CollectedDocument } from '@data-collector/shared';
@@ -190,8 +190,12 @@ const operationsRunner = new NowcoderOperationsRunner({
   close: id => ownedTabs.close(id),
   handoff: (id, url) => ownedTabs.handoff(id, url, { preservePrevious: true }),
   wait: id => waitForTabComplete(id),
-  execute: async (tabId, action) => {
-    const results = await chrome.scripting.executeScript({ target: { tabId }, func: runNowcoderOperationPage, args: [action] });
+  execute: async (tabId, action, executionId) => {
+    const results = await chrome.scripting.executeScript({ target: { tabId }, func: runNowcoderOperationPage, args: [action, executionId] });
+    return results[0]?.result;
+  },
+  readProgress: async (tabId, executionId) => {
+    const results = await chrome.scripting.executeScript({ target: { tabId }, func: readNowcoderOperationProgress, args: [executionId] });
     return results[0]?.result;
   },
 });

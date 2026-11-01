@@ -1,13 +1,25 @@
-import type { NowcoderConversationSnapshot, NowcoderOperationAction, NowcoderOperationDiagnostics, NowcoderOperationResult } from '@data-collector/shared';
+import type { NowcoderConversationSnapshot, NowcoderOperationAction, NowcoderOperationDiagnostics, NowcoderOperationResult, NowcoderPageStage } from '@data-collector/shared';
 
 /** Serialized by chrome.scripting: all runtime helpers must remain inside this function. */
-export async function runNowcoderOperationPage(action: NowcoderOperationAction): Promise<NowcoderOperationResult> {
+export async function runNowcoderOperationPage(action: NowcoderOperationAction, executionId?: string): Promise<NowcoderOperationResult> {
   const diagnostics: NowcoderOperationDiagnostics = { pageStartedAt: new Date().toISOString() };
   let clicked = false;
+  let pageStage: NowcoderPageStage = 'read_context';
+  const checkpoint = (stage: NowcoderPageStage) => {
+    pageStage = stage;
+    // chrome.scripting uses our extension's isolated world. The site cannot read
+    // this slot; a subsequent isolated read can recover it if execution rejects.
+    if (executionId) (globalThis as unknown as Record<string, unknown>).__dataCollectorNowcoderProgress = {
+      executionId, actionKind: action.kind, url: action.url, pageStage, diagnostics: { ...diagnostics },
+    };
+  };
   const pause = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms));
   const normalized = (value: string) => value.replace(/[\s\u200b-\u200d\ufeff]+/gu, '').normalize('NFKC');
   const text = (node: Element | null) => ((node as HTMLElement | null)?.innerText ?? node?.textContent ?? '').trim();
-  const attention = (code: string, message: string): NowcoderOperationResult => ({ kind: 'attention', code, message, submission: clicked ? 'uncertain' : 'not_attempted', diagnostics });
+  const attention = (code: string, message: string): Extract<NowcoderOperationResult, { kind: 'attention' }> => {
+    checkpoint(pageStage);
+    return { kind: 'attention', code, message, submission: clicked ? 'uncertain' : 'not_attempted', diagnostics };
+  };
   const visible = (node: Element) => {
     if (node.closest('[hidden],[aria-hidden="true"],.tw-hidden')) return false;
     for (let parent: Element | null = node; parent; parent = parent.parentElement) {
@@ -71,6 +83,7 @@ export async function runNowcoderOperationPage(action: NowcoderOperationAction):
     return false;
   };
   try {
+    checkpoint('read_context');
     if (canonical(location.href) !== action.url) return attention('SOURCE_MISMATCH', '当前页不是指定原帖，未进行操作');
     let blocked = challenge(); if (blocked) return blocked;
     let body: Element | null = null, title = '';
@@ -174,6 +187,7 @@ export async function runNowcoderOperationPage(action: NowcoderOperationAction):
     blocked = challenge(); if (blocked) return blocked;
     if (canonical(location.href) !== action.url) return attention('SOURCE_MISMATCH', '页面已离开指定原帖，未继续操作');
     if (action.kind === 'context') return { kind: 'context', snapshot, diagnostics };
+    checkpoint('compare_context');
     if (normalized(post.title) !== normalized(action.expected.post.title) || normalized(post.body) !== normalized(action.expected.post.body)
       || JSON.stringify(post.images) !== JSON.stringify(action.expected.post.images)
       || fingerprint(snapshot.comments) !== fingerprint(action.expected.comments) || total !== action.expected.coverage.total) {
@@ -190,6 +204,7 @@ export async function runNowcoderOperationPage(action: NowcoderOperationAction):
         contextChanges: { fields, comments: { added: added.slice(0, 30), removed: removed.slice(0, 30), changed: changed.slice(0, 30), truncated: [added, removed, changed].some(a => a.length > 30) }, total: { before: action.expected.coverage.total, after: total } } };
     }
     if (snapshot.comments.some(comment => normalized(comment.text) === normalized(action.text))) return attention('DUPLICATE_TEXT', '已有相同评论，未再次发送');
+    checkpoint('find_composer');
     const editor = document.querySelector<HTMLElement>('#nc-e-textarea-1[contenteditable="true"]');
     if (!editor || !visible(editor)) return attention('COMPOSER_UNAVAILABLE', '未找到可用的主评论编辑器，请确认登录状态');
     if (text(editor)) return attention('EXISTING_DRAFT', '编辑器已有内容，未覆盖或发送');
@@ -201,6 +216,7 @@ export async function runNowcoderOperationPage(action: NowcoderOperationAction):
     }
     if (!button || !scope) return attention('COMPOSER_UNAVAILABLE', '无法唯一确认主评论提交按钮');
     if ([...scope.querySelectorAll<HTMLInputElement>('input[type="checkbox"]')].some(input => input.checked && /同时转发/u.test(text(input.closest('label') ?? input.parentElement)))) return attention('FORWARDING_ENABLED', '同时转发已开启，未发送');
+    checkpoint('write_editor');
     editor.focus();
     // Slate handles beforeinput by cancelling the browser edit and updating its own model.
     // execCommand alone can change its zero-width DOM leaf while leaving that model empty.
@@ -220,25 +236,41 @@ export async function runNowcoderOperationPage(action: NowcoderOperationAction):
     const deadline = Date.now() + 3000;
     while (!ready() && Date.now() < deadline) await pause(100);
     diagnostics.beforeSubmitAt = new Date().toISOString();
+    checkpoint('before_submit');
     blocked = challenge(); if (blocked) return blocked;
     if (!ready()) return attention('COMPOSER_REJECTED', '编辑器未接受草稿，未点击发送');
     if (canonical(location.href) !== action.url) return attention('SOURCE_MISMATCH', '输入期间页面离开原帖，未点击发送');
     if (!editor.isConnected || !button.isConnected) return attention('COMPOSER_UNAVAILABLE', '输入期间编辑器已被替换，未点击发送');
     if ([...scope.querySelectorAll<HTMLInputElement>('input[type="checkbox"]')].some(input => input.checked && /同时转发/u.test(text(input.closest('label') ?? input.parentElement)))) return attention('FORWARDING_ENABLED', '输入期间同时转发被开启，未点击发送');
     const before = new Set(snapshot.comments.map(comment => comment.url));
-    clicked = true; diagnostics.submitClickedAt = new Date().toISOString(); button.click();
+    clicked = true; diagnostics.submitClickedAt = new Date().toISOString(); checkpoint('click_submit'); button.click();
+    checkpoint('wait_receipt');
     for (let i = 0; i < 60; i++) {
       if (canonical(location.href) !== action.url) return attention('SOURCE_MISMATCH', '点击后页面离开原帖，发送结果待核验');
       blocked = challenge(); if (blocked) return blocked;
       const observed = readComments().find(comment => !before.has(comment.url) && normalized(comment.text) === normalized(action.text));
       if (observed) {
-        const observedAt = new Date().toISOString(); diagnostics.receiptObservedAt = observedAt;
+        const observedAt = new Date().toISOString(); diagnostics.receiptObservedAt = observedAt; checkpoint('wait_receipt');
         return { kind: 'published', receipt: { sourceUrl: action.url, url: observed.url, text: action.text, observedAt }, diagnostics };
       }
       await pause(200);
     }
     return attention('RECEIPT_NOT_OBSERVED', '已点击一次，但未观察到新评论链接；请核验，禁止自动重发');
-  } catch {
-    return attention('PAGE_OPERATION_FAILED', clicked ? '发送结果不确定，请核验，禁止自动重发' : '页面操作失败，未点击发送');
+  } catch (error) {
+    const field = (key: string, fallback: string, max: number) => {
+      try { const value = error && typeof error === 'object' ? (error as Record<string, unknown>)[key] : undefined; return (typeof value === 'string' && value ? value : fallback).slice(0, max); }
+      catch { return fallback; }
+    };
+    return { ...attention('PAGE_OPERATION_FAILED', clicked ? '发送结果不确定，请核验，禁止自动重发' : '页面操作失败，未点击发送'),
+      failure: { stage: 'page_operation', pageStage, occurredAt: new Date().toISOString(), ...(executionId ? { executionId } : {}),
+        clickState: clicked ? 'invoked' : 'not_attempted',
+        error: { name: field('name', 'Error', 120), message: field('message', typeof error === 'string' ? error.slice(0, 1000) || 'Unknown failure' : 'Unknown failure', 1000),
+          ...(field('stack', '', 4000) ? { stack: field('stack', '', 4000) } : {}) } } };
   }
+}
+
+/** Also serialized by chrome.scripting, in the same extension isolated world. */
+export function readNowcoderOperationProgress(executionId: string): unknown {
+  const progress = (globalThis as unknown as Record<string, unknown>).__dataCollectorNowcoderProgress;
+  return progress && typeof progress === 'object' && (progress as { executionId?: string }).executionId === executionId ? progress : undefined;
 }

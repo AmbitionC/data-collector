@@ -50,6 +50,39 @@ async function fixture(overrides: Partial<CollectedDocument> = {}, bridgeOptions
 }
 
 describe('private Nowcoder operations workflow', () => {
+  it('persists failure evidence in the private journal, omits stacks from stats and replays the original key read-only', async () => {
+    const c = await fixture(), base = '/v1/nowcoder/operations';
+    const entry = (await c.request('POST', base, { sourceId: c.sourceId })).body.entry;
+    const socket = new WebSocket(`${c.bridge.wsUrl}?token=${token}`, { origin: `chrome-extension://${TRUSTED_EXTENSION_ID}` }); sockets.push(socket);
+    await once(socket, 'open');
+    const envelope = (type: string, requestId: string, payload: unknown) => JSON.stringify({ protocolVersion: 1, type, requestId, timestamp: new Date().toISOString(), payload });
+    socket.send(envelope('extension.hello', 'hello', { version: APP_VERSION, capabilities: [NOWCODER_BROWSER_OPERATIONS_CAPABILITY] }));
+    await vi.waitFor(async () => expect((await c.request('GET', '/health')).body.extensionConnected).toBe(true));
+    const actions: string[] = [], at = '2026-11-01T10:00:00.000Z';
+    const failure = { stage: 'execute_script', pageStage: 'wait_receipt', occurredAt: at, clickState: 'invoked', error: { name: 'Error', message: 'execution context lost', stack: 'Error: execution context lost\n at private-script.js:10' } };
+    socket.on('message', raw => {
+      const message = JSON.parse(raw.toString()); if (message.type !== 'operations.execute') return;
+      actions.push(message.payload.kind);
+      socket.send(envelope('operations.result', message.requestId, message.payload.kind === 'context'
+        ? { kind: 'context', snapshot: { sourceUrl: url, readAt: new Date().toISOString(), post: { title: c.document.title, body: c.document.text, images: [] }, comments: [], coverage: { total: 0, observed: 0, pagesRead: 1, hasMore: false, complete: true, limitations: [] } } }
+        : { kind: 'attention', code: 'EXTENSION_OPERATION_FAILED', message: '插件页面操作中断，请核验', submission: 'uncertain', failure, diagnostics: { pageStartedAt: at, submitClickedAt: at } }));
+    });
+    const context = (await c.request('POST', `${base}/${entry.id}/context`, {})).body;
+    const input = { schemaVersion: 1, kind: 'publish', key: 'diagnostic-persist-workflow', send: true, items: [{ key: 'diagnostic-persist-comment', draft: {
+      schemaVersion: 1, opportunityId: entry.id, revision: context.revision, contextHash: context.contextHash, conversationHash: context.conversationHash,
+      drafts: { primary: '拿自己的资料做个小工具呗', alternative: '先跑通一个场景', tone: 'contextual', anchor: 'LangGraph', notes: '' },
+    } }] };
+    const started = (await c.request('POST', `${base}/workflow`, input)).body;
+    let summary: any;
+    await vi.waitFor(async () => { summary = (await c.request('GET', `${base}/workflow/${started.runId}`)).body; expect(summary.status).toBe('needs_attention'); }, { timeout: 5000 });
+    expect(summary.items[0]).toMatchObject({ failure: { stage: 'execute_script', clickState: 'invoked', error: { message: 'execution context lost' } }, diagnostics: { submitClickedAt: at } });
+    expect(summary.items[0].failure.error).not.toHaveProperty('stack');
+    const persisted = JSON.parse(await readFile(join(c.configDir, 'nowcoder-operations', `${entry.id}.json`), 'utf8'));
+    expect(persisted.publicationAttempts[0]).toMatchObject({ state: 'uncertain', failure, diagnostics: { submitClickedAt: at } });
+    expect((await c.request('POST', `${base}/workflow`, input)).body.runId).toBe(started.runId);
+    expect(actions).toEqual(['context', 'publish']);
+  });
+
   it('authenticates global limits, validates policy and retains historical attempts across configuration', async () => {
     const c = await fixture(), path = '/v1/nowcoder/operations/publishing';
     expect((await c.request('GET', path, undefined, false)).status).toBe(401);

@@ -1,9 +1,11 @@
-import { nowcoderOperationActionSchema, nowcoderOperationResultSchema, type NowcoderOperationAction, type NowcoderOperationResult } from '@data-collector/shared';
+import { nowcoderOperationActionSchema, nowcoderOperationResultSchema, nowcoderOperationProgressSchema, type NowcoderOperationAction, type NowcoderOperationResult, type NowcoderOperationFailure } from '@data-collector/shared';
+import { sanitizeOperationError } from './nowcoderOperationFailure.js';
 
 interface OperationsTabs {
   create(url: string): Promise<{ id?: number }>;
   wait(id: number): Promise<void>;
-  execute(id: number, action: NowcoderOperationAction): Promise<unknown>;
+  execute(id: number, action: NowcoderOperationAction, executionId: string): Promise<unknown>;
+  readProgress?(id: number, executionId: string): Promise<unknown>;
   close(id: number): Promise<unknown>;
   handoff(id: number, url: string): Promise<unknown>;
 }
@@ -17,24 +19,44 @@ export class NowcoderOperationsRunner {
     if (this.busy) return { kind: 'attention', code: 'OPERATIONS_BUSY', message: '另一个牛客页面操作正在执行', submission: 'not_attempted' };
     this.busy = true;
     let id: number | undefined, keep = false, executing = false;
+    const executionId = crypto.randomUUID();
+    let stage: NowcoderOperationFailure['stage'] = 'create_tab';
     try {
       id = (await this.tabs.create(action.url)).id;
       if (id === undefined) throw new Error('No owned tab');
-      await this.tabs.wait(id);
+      stage = 'wait_tab'; await this.tabs.wait(id);
       executing = true;
-      const result = nowcoderOperationResultSchema.parse(await this.tabs.execute(id, action));
+      stage = 'execute_script';
+      const rawResult = await this.tabs.execute(id, action, executionId);
+      stage = 'parse_result';
+      const result = nowcoderOperationResultSchema.parse(rawResult);
       if (result.kind === 'attention') {
         // Showing the tab is best effort; never erase an observed challenge or
         // close its page merely because focusing the window failed.
         keep = true;
         await this.tabs.handoff(id, action.url).catch(() => undefined);
-        return { ...result, tabUrl: action.url };
+        return { ...result, ...(result.failure ? { failure: { ...result.failure, error: sanitizeOperationError(result.failure.error) } } : {}), tabUrl: action.url };
       }
       return result;
-    } catch {
-      if (id !== undefined) { await this.tabs.handoff(id, action.url).then(() => { keep = true; }).catch(() => undefined); }
-      return { kind: 'attention', code: 'EXTENSION_OPERATION_FAILED', message: '插件页面操作中断，请核验保留的页面',
-        submission: executing && action.kind === 'publish' ? 'uncertain' : 'not_attempted', ...(id !== undefined ? { tabUrl: action.url } : {}) };
+    } catch (error) {
+      let checkpoint;
+      if (id !== undefined && executing && this.tabs.readProgress) {
+        try {
+          const parsed = nowcoderOperationProgressSchema.safeParse(await this.tabs.readProgress(id, executionId));
+          if (parsed.success && parsed.data.executionId === executionId && parsed.data.url === action.url && parsed.data.actionKind === action.kind
+            && (action.kind === 'publish' || !parsed.data.diagnostics.submitClickedAt)) checkpoint = parsed.data;
+        } catch { /* Missing progress is unknown; it never authorizes another send. */ }
+      }
+      if (id !== undefined) { keep = true; await this.tabs.handoff(id, action.url).catch(() => undefined); }
+      const failure: NowcoderOperationFailure = { stage, executionId, occurredAt: new Date().toISOString(),
+        ...(checkpoint ? { pageStage: checkpoint.pageStage } : {}),
+        clickState: action.kind !== 'publish' || !executing ? 'not_attempted' : checkpoint?.diagnostics.submitClickedAt ? 'invoked' : 'unknown',
+        error: sanitizeOperationError(error) };
+      const verificationObserved = Boolean(checkpoint?.diagnostics.verificationObservedAt);
+      return { kind: 'attention', code: verificationObserved ? 'VERIFICATION_REQUIRED' : 'EXTENSION_OPERATION_FAILED',
+        message: verificationObserved ? '牛客要求验证，请在保留的页面完成验证' : '插件页面操作中断，请核验保留的页面',
+        submission: executing && action.kind === 'publish' ? 'uncertain' : 'not_attempted', failure,
+        ...(checkpoint ? { diagnostics: checkpoint.diagnostics } : {}), ...(id !== undefined ? { tabUrl: action.url } : {}) };
     } finally {
       if (id !== undefined && !keep) await this.tabs.close(id).catch(() => undefined);
       this.busy = false;

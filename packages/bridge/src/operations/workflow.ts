@@ -85,7 +85,9 @@ export class NowcoderOperationsWorkflow {
       elapsedMs: Math.max(0, Date.parse(run.finishedAt ?? now()) - Date.parse(run.startedAt)), resultPath: run.resultPath, message: run.message,
       items: run.items.map(({ result, recovery, ...item }) => {
         const publication = object(object(result)?.publication), diagnostics = publication?.diagnostics;
+        const failure = object(publication?.failure), error = object(failure?.error);
         return { ...item, ...(diagnostics ? { diagnostics } : {}),
+          ...(failure ? { failure: { ...failure, ...(error ? { error: { name: error.name, message: error.message } } : {}) } } : {}),
           ...(recovery ? { recovery: { publicationReconciled: recovery.publicationReconciled, message: recovery.message } } : {}) };
       }) };
   }

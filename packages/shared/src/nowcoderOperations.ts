@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import { MAX_REPLY_CHARACTERS } from './nowcoderReplyStyle.js';
-import { nowcoderConversationSchema, nowcoderContextChangesSchema, nowcoderOperationDiagnosticsSchema } from './nowcoderConversation.js';
+import { nowcoderConversationSchema, nowcoderContextChangesSchema, nowcoderOperationDiagnosticsSchema, nowcoderOperationFailureSchema } from './nowcoderConversation.js';
 import { articlePostUrlSchema } from './nowcoderArticles.js';
 
 export const NOWCODER_OPERATIONS_CAPABILITY = 'nowcoder-operations-v1';
@@ -43,6 +43,7 @@ export const operationPublicationSchema = z.object({
   createdAt: z.iso.datetime(), updatedAt: z.iso.datetime(),
   contextChanges: nowcoderContextChangesSchema.optional(), message: z.string().max(1000).optional(), replyUrl: replyUrlSchema.optional(),
   diagnostics: nowcoderOperationDiagnosticsSchema.optional(), attentionCode: z.string().min(1).max(100).optional(),
+  failure: nowcoderOperationFailureSchema.optional(),
   postUrl: articlePostUrlSchema.optional(),
 }).strict();
 export const nowcoderOperationSchema = z.object({

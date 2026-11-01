@@ -212,6 +212,7 @@ export class NowcoderOperationsStore {
         state: valid ? 'published' : result.kind === 'attention' && result.submission === 'not_attempted' ? 'rejected' : 'uncertain',
         ...(result.diagnostics ? { diagnostics: result.diagnostics } : {}),
         ...(result.kind === 'attention' ? { attentionCode: result.code } : {}),
+        ...(result.kind === 'attention' && result.failure ? { failure: result.failure } : {}),
         ...(result.kind === 'attention' && result.contextChanges ? { contextChanges: result.contextChanges } : {}),
         ...(valid && result.kind === 'published' ? { replyUrl: result.receipt.url, evidence: 'observed' } : { message: result.kind === 'attention' ? result.message : '评论回执与原帖或草稿不符，请核验，禁止重发' }) };
       await this.save({ ...entry, publicationAttempts: entry.publicationAttempts!.map(a => a.key === key ? publication : a),

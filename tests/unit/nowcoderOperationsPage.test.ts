@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { runNowcoderOperationPage } from '../../packages/extension/src/background/nowcoderOperationsPage.js';
+import { runNowcoderOperationPage, readNowcoderOperationProgress } from '../../packages/extension/src/background/nowcoderOperationsPage.js';
 
 const url = 'https://www.nowcoder.com/discuss/123456';
 const comment = (id: number, text: string, author = false) => `<div class="comment-box"><div class="comment-content-box">${text}</div><section><div class="comment-action-box"><span class="comment-action-item">点赞</span></div></section><a class="comment-publish-time" href="/discuss/comment/${id}">今天</a>${author ? '<span class="sub-box">楼主</span>' : ''}</div>`;
@@ -28,6 +28,26 @@ async function snapshot() {
 }
 
 describe('Nowcoder plugin page operations', () => {
+  it('checkpoints a visible verification observation before returning to the runner', async () => {
+    const executionId = '00000000-0000-4000-8000-000000000001';
+    document.body.insertAdjacentHTML('beforeend', '<div class="captcha-modal">请完成验证</div>');
+    const result = await runNowcoderOperationPage({ kind: 'context', url, maxPages: 1 }, executionId);
+    expect(result).toMatchObject({ code: 'VERIFICATION_REQUIRED' });
+    expect(readNowcoderOperationProgress(executionId)).toMatchObject({ diagnostics: { verificationObservedAt: expect.any(String) } });
+    expect(readNowcoderOperationProgress('00000000-0000-4000-8000-000000000002')).toBeUndefined();
+  });
+  it('captures a composer exception at its actual phase without inventing a submit click', async () => {
+    vi.useFakeTimers();
+    const expected = await snapshot();
+    document.querySelector<HTMLElement>('#nc-e-textarea-1')!.focus = () => { throw new TypeError('composer focus failed'); };
+    const pending = runNowcoderOperationPage({ kind: 'publish', url, text: '先做一个项目', expected });
+    await vi.runAllTimersAsync();
+    const result = await pending;
+    expect(result).toMatchObject({ kind: 'attention', code: 'PAGE_OPERATION_FAILED', submission: 'not_attempted',
+      failure: { stage: 'page_operation', pageStage: 'write_editor', clickState: 'not_attempted', error: { name: 'TypeError', message: 'composer focus failed' } } });
+    expect(result.diagnostics).not.toHaveProperty('submitClickedAt');
+  });
+
   it('refuses a context result if expansion navigates away from the original source', async () => {
     vi.useFakeTimers();
     const control = document.createElement('button'); control.className = 'subcomment-more'; control.textContent = '查看回复';

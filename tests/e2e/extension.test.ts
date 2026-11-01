@@ -448,7 +448,7 @@ describe('built Chrome extension', () => {
     expect(clicks).toBe(1); expect(source.isClosed()).toBe(false);
     expect(profiles.every(p => p.isClosed())).toBe(true); expect(editor.isClosed()).toBe(true);
   });
-  it('executes workflow prepare through ordinary collection, then publishes and replays with owned tabs closed', async () => {
+  it.each([false, true])('executes packaged workflow once and preserves click evidence when its result is lost: %s', async loseResult => {
     const { libraryRoot } = await startStack();
     const url = 'https://www.nowcoder.com/discuss/123456', sourceId = stableContentId(url);
     const store = new NowcoderOperationsStore(join(libraryRoot, '.config', 'nowcoder-operations'), libraryRoot);
@@ -463,14 +463,23 @@ describe('built Chrome extension', () => {
     // Only tab creation is substituted: three preloaded fixture pages represent collection,
     // context and publication. The packaged ordinary extractor/job protocol/raw proof,
     // isolated-world page runner/editor, authenticated RPC and owned-tab cleanup remain real.
-    await worker.evaluate(async targetUrl => {
+    await worker.evaluate(async ({ targetUrl, loseResult }) => {
       const matches = (await chrome.tabs.query({ url: targetUrl })).sort((a, b) => a.id! - b.id!);
       const queue = matches.slice(1).map(tab => tab.id!);
       chrome.tabs.create = (async input => {
         if (input.url !== targetUrl || input.active !== false || !queue.length) throw new Error('Unexpected E2E owned tab');
         return chrome.tabs.update(queue.shift()!, { active: false });
       }) as typeof chrome.tabs.create;
-    }, url);
+      if (loseResult) {
+        const execute = chrome.scripting.executeScript.bind(chrome.scripting);
+        let lost = false;
+        chrome.scripting.executeScript = (async input => {
+          const result = await execute(input);
+          if (!lost && (input.args?.[0] as { kind?: string } | undefined)?.kind === 'publish') { lost = true; throw new Error('E2E injected result lost'); }
+          return result;
+        }) as typeof chrome.scripting.executeScript;
+      }
+    }, { targetUrl: url, loseResult });
     let token = '';
     for (let i = 0; i < 50 && !token; i++) {
       token = await worker.evaluate(async () => String((await chrome.storage.local.get('bridgeToken')).bridgeToken ?? ''));
@@ -481,11 +490,11 @@ describe('built Chrome extension', () => {
       const response = await fetch(`${bridge!.url}${path}`, { method, headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
       const result = await response.json(); expect(response.status, JSON.stringify(result)).toBe(method === 'POST' ? 202 : 200); return result;
     };
-    const waitForWorkflow = async (id: string) => {
+    const waitForWorkflow = async (id: string, expectedStatus = 'completed') => {
       const deadline = Date.now() + 25000;
       for (;;) {
         const run = await request('GET', `${base}/${id}`);
-        if (!['running', 'queued'].includes(run.status)) { expect(run.status, JSON.stringify(run)).toBe('completed'); return run; }
+        if (!['running', 'queued'].includes(run.status)) { expect(run.status, JSON.stringify(run)).toBe(expectedStatus); return run; }
         if (Date.now() >= deadline) throw new Error(`Fixture workflow did not finish: ${JSON.stringify(run)}`);
         await new Promise(resolvePoll => setTimeout(resolvePoll, 200));
       }
@@ -504,16 +513,23 @@ describe('built Chrome extension', () => {
     expect((await request('POST', base, prepareRequest)).runId).toBe(preparing.runId);
     const publishRequest = { schemaVersion: 1, kind: 'publish', key: 'authorized-e2e-batch-01', send: true, items: [{ key: 'authorized-e2e-comment-01', draft: { ...prepared.prepared[0].draftEnvelope,
       drafts: { primary: '先做个同事能用的文档问答呗', alternative: '拿自己的资料试试', anchor: 'LangGraph', tone: 'practical', notes: '' } } }] };
-    const publishing = await request('POST', base, publishRequest), publishedRun = await waitForWorkflow(publishing.runId);
+    const publishing = await request('POST', base, publishRequest), publishedRun = await waitForWorkflow(publishing.runId, loseResult ? 'needs_attention' : 'completed');
     const published = JSON.parse(await readFile(publishedRun.resultPath, 'utf8'));
-    expect(publishedRun.counts).toMatchObject({ succeeded: 1, failed: 0, notExecuted: 0 });
-    expect(published.items[0].result.publication).toMatchObject({ state: 'published', evidence: 'observed', replyUrl: 'https://www.nowcoder.com/discuss/comment/987654321' });
+    expect(publishedRun.counts).toMatchObject({ succeeded: loseResult ? 0 : 1, failed: loseResult ? 1 : 0, notExecuted: 0 });
+    if (loseResult) {
+      expect(published.items[0].result.publication).toMatchObject({ state: 'uncertain', diagnostics: { submitClickedAt: expect.any(String) },
+        failure: { stage: 'execute_script', pageStage: 'wait_receipt', clickState: 'invoked', error: { message: 'E2E injected result lost' } } });
+      expect(publishedRun.items[0].failure.error).not.toHaveProperty('stack');
+    } else expect(published.items[0].result.publication).toMatchObject({ state: 'published', evidence: 'observed', replyUrl: 'https://www.nowcoder.com/discuss/comment/987654321' });
     expect((await request('POST', base, publishRequest)).runId).toBe(publishing.runId);
     const entry = (await store.get(`ops-${sourceId}`))!;
-    expect(entry.status).toBe('replied'); expect(entry.publicationAttempts).toHaveLength(1);
+    if (!loseResult) expect(entry.status).toBe('replied');
+    expect(entry.publicationAttempts).toHaveLength(1);
     expect(pages[0]!.isClosed()).toBe(false);
     expect(await pages[0]!.evaluate(() => document.querySelector('.feed-content-text')!.textContent)).toBe('学过 LangGraph，想做一个能用的项目');
-    expect(pages.slice(1).every(page => page.isClosed())).toBe(true);
+    expect(pages.slice(1, 3).every(page => page.isClosed())).toBe(true);
+    expect(pages[3]!.isClosed()).toBe(!loseResult);
+    if (loseResult) expect(await pages[3]!.evaluate(() => document.querySelectorAll('.comment-box').length)).toBe(1);
   });
   it('edits private Nowcoder replies through the built panel without publishing', async () => {
     const { libraryRoot } = await startStack();

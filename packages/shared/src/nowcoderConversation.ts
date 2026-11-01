@@ -42,11 +42,24 @@ export const nowcoderOperationDiagnosticsSchema = z.object({
   receiptObservedAt: z.iso.datetime().optional(),
 }).strict();
 export type NowcoderOperationDiagnostics = z.infer<typeof nowcoderOperationDiagnosticsSchema>;
+export const nowcoderPageStageSchema = z.enum(['read_context', 'compare_context', 'find_composer', 'write_editor', 'before_submit', 'click_submit', 'wait_receipt']);
+export type NowcoderPageStage = z.infer<typeof nowcoderPageStageSchema>;
+export const nowcoderOperationFailureSchema = z.object({
+  stage: z.enum(['create_tab', 'wait_tab', 'execute_script', 'parse_result', 'page_operation']),
+  pageStage: nowcoderPageStageSchema.optional(), occurredAt: z.iso.datetime(),
+  executionId: z.string().uuid().optional(), clickState: z.enum(['not_attempted', 'invoked', 'unknown']),
+  error: z.object({ name: z.string().min(1).max(120), message: z.string().min(1).max(1000), stack: z.string().max(4000).optional() }).strict(),
+}).strict();
+export type NowcoderOperationFailure = z.infer<typeof nowcoderOperationFailureSchema>;
+export const nowcoderOperationProgressSchema = z.object({
+  executionId: z.string().uuid(), actionKind: z.enum(['context', 'publish']), url: sourceUrl,
+  pageStage: nowcoderPageStageSchema, diagnostics: nowcoderOperationDiagnosticsSchema,
+}).strict();
 export const nowcoderOperationResultSchema = z.discriminatedUnion('kind', [
   z.object({ kind: z.literal('context'), snapshot: nowcoderConversationSchema, diagnostics: nowcoderOperationDiagnosticsSchema.optional() }).strict(),
   z.object({ kind: z.literal('published'), receipt: nowcoderPublishReceiptSchema, diagnostics: nowcoderOperationDiagnosticsSchema.optional() }).strict(),
   z.object({ kind: z.literal('attention'), code: z.string().min(1).max(100), message: z.string().min(1).max(1000),
-    submission: z.enum(['not_attempted', 'uncertain']), tabUrl: z.string().url().max(4096).optional(), contextChanges: nowcoderContextChangesSchema.optional(), diagnostics: nowcoderOperationDiagnosticsSchema.optional() }).strict(),
+    submission: z.enum(['not_attempted', 'uncertain']), tabUrl: z.string().url().max(4096).optional(), contextChanges: nowcoderContextChangesSchema.optional(), diagnostics: nowcoderOperationDiagnosticsSchema.optional(), failure: nowcoderOperationFailureSchema.optional() }).strict(),
 ]);
 export type NowcoderOperationResult = z.infer<typeof nowcoderOperationResultSchema>;
 export const operationPublishSchema = z.object({
