@@ -10,6 +10,7 @@ import { startBridge, type BridgeHandle } from '../../packages/bridge/src/server
 import { MarkdownLibrary, listLibrary } from '../../packages/bridge/src/library/index.js';
 import { organize } from '../../packages/bridge/src/organize/index.js';
 import { runCli } from '../../packages/bridge/src/cli.js';
+import { NowcoderPublishingControl } from '../../packages/bridge/src/operations/publishingControl.js';
 import { createTemporaryDirectoryTracker } from '../helpers/temp.js';
 
 const temporaryDirectories = createTemporaryDirectoryTracker();
@@ -22,6 +23,7 @@ afterEach(async () => {
   await Promise.all(bridges.splice(0).map(bridge => bridge.close()));
   vi.useRealTimers();
   await temporaryDirectories.cleanup();
+  vi.restoreAllMocks();
 });
 
 async function fixture(overrides: Partial<CollectedDocument> = {}, bridgeOptions: Partial<Parameters<typeof startBridge>[0]> = {}) {
@@ -50,6 +52,45 @@ async function fixture(overrides: Partial<CollectedDocument> = {}, bridgeOptions
 }
 
 describe('private Nowcoder operations workflow', () => {
+  it('uses the publishing snapshot timestamp even if the quota expires before the recovery response', async () => {
+    const c = await fixture(), now = Date.parse('2026-11-03T04:00:00.000Z');
+    const publishing = { schemaVersion: 1 as const, policy: { minIntervalMs: 120000, maxPerHour: 5, maxPer24Hours: 20 },
+      usage: { lastHour: 5, last24Hours: 16 }, nextAllowedAt: new Date(now + 1).toISOString(), verification: null };
+    vi.spyOn(NowcoderPublishingControl.prototype, 'recoverySnapshot').mockResolvedValue({ now, publishing });
+    const advice = await c.request('GET', '/v1/nowcoder/operations/recovery');
+    expect(advice.body).toMatchObject({ status: 'waiting', code: 'PUBLISH_WAIT', nextCheckAt: publishing.nextAllowedAt, requiresUser: false });
+  });
+  it('provides authenticated recovery advice without opening a site page or changing the publishing policy', async () => {
+    const c = await fixture(), path = '/v1/nowcoder/operations/recovery';
+    expect((await c.request('GET', path, undefined, false)).status).toBe(401);
+    const before = (await c.request('GET', '/v1/nowcoder/operations/publishing')).body;
+    const advice = await c.request('GET', `${path}?attempt=1`);
+    expect(advice.status).toBe(200);
+    expect(advice.body).toMatchObject({ status: 'waiting', code: 'EXTENSION_DISCONNECTED', canPrepareNewWork: false, requiresUser: false, canCompleteVerification: false });
+    expect((await c.request('GET', '/v1/nowcoder/operations/publishing')).body).toEqual(before);
+    expect((await c.request('GET', `${path}?attempt=101`)).status).toBe(400);
+  });
+
+  it('keeps the original verification generation intact during recovery polling', async () => {
+    const c = await fixture(), path = join(c.configDir, 'nowcoder-publishing.json');
+    const verification = { id: '12345678-1234-4234-8234-123456789012', detectedAt: new Date().toISOString(), sourceUrl: url, requestId: '12345678-1234-4234-8234-123456789013', opportunityId: 'ops-abcdef123456', key: 'original-comment-key' };
+    const state = { schemaVersion: 1, policy: { minIntervalMs: 120000, maxPerHour: 5, maxPer24Hours: 20 }, verification, knownRequestIds: [], clearedRequestIds: [] };
+    await writeFile(path, JSON.stringify(state));
+    const advice = await c.request('GET', '/v1/nowcoder/operations/recovery');
+    expect(advice.status).toBe(200);
+    expect(advice.body).toMatchObject({ status: 'needs_user', code: 'VERIFICATION_REQUIRED', verification, requiresUser: true, canPrepareNewWork: false });
+    expect(JSON.parse(await readFile(path, 'utf8'))).toEqual(state);
+  });
+
+  it('reports corrupt publishing state without repairing or clearing the journal during recovery', async () => {
+    const c = await fixture(), path = join(c.configDir, 'nowcoder-publishing.json');
+    await writeFile(path, '{broken');
+    const advice = await c.request('GET', '/v1/nowcoder/operations/recovery');
+    expect(advice.status).toBe(200);
+    expect(advice.body).toMatchObject({ status: 'needs_user', code: 'PUBLISH_CONTROL_CORRUPT', canPrepareNewWork: false, requiresUser: true });
+    expect(await readFile(path, 'utf8')).toBe('{broken');
+  });
+
   it('persists failure evidence in the private journal, omits stacks from stats and replays the original key read-only', async () => {
     const c = await fixture(), base = '/v1/nowcoder/operations';
     const entry = (await c.request('POST', base, { sourceId: c.sourceId })).body.entry;

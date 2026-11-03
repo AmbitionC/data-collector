@@ -96,3 +96,66 @@ it('fails closed across restart when previously observed journals disappear or o
   await expect(c.reopen().assertCapacity()).rejects.toThrow(/历史|记录/u);
   c.history.splice(0); await expect(c.reopen().status()).rejects.toThrow(/历史|记录/u);
 });
+
+it('does not invent a future interval when the clock advances during an otherwise available snapshot', async () => {
+  const { NowcoderPublishingControl } = await import('../../packages/bridge/src/operations/publishingControl.js');
+  let clock = base;
+  const control = new NowcoderPublishingControl(join(await dirs.create('advancing-status-'), 'control.json'), async () => [], { now: () => clock++ });
+  expect(await control.status()).toMatchObject({ usage: { lastHour: 0, last24Hours: 0 }, nextAllowedAt: null });
+});
+
+it('admits a comment with no prior attempts even when successive clock reads advance by a millisecond', async () => {
+  const { NowcoderPublishingControl } = await import('../../packages/bridge/src/operations/publishingControl.js');
+  let clock = base;
+  const control = new NowcoderPublishingControl(join(await dirs.create('advancing-admission-'), 'control.json'), async () => [], { now: () => clock++ });
+  await expect(control.assertCapacity()).resolves.toBeUndefined();
+});
+
+it('evaluates article rolling-day usage at the same instant as its interval snapshot', async () => {
+  const { NowcoderPublishingControl } = await import('../../packages/bridge/src/operations/publishingControl.js');
+  const history = [{ ...event(base - 24 * 3600_000 + 1), opportunityId: 'article-abcdef123456', channel: 'article' as const, browser: 'chrome' as const, accountId: '544222414' }];
+  let clock = base;
+  const control = new NowcoderPublishingControl(join(await dirs.create('advancing-article-'), 'control.json'), async () => history, { now: () => clock++ });
+  expect(await control.articleStatus()).toMatchObject({ usage: { last24Hours: 1 }, nextAllowedAt: null });
+});
+
+it('gives recovery the exact timestamp used by its publishing snapshot at a quota boundary', async () => {
+  const { NowcoderPublishingControl } = await import('../../packages/bridge/src/operations/publishingControl.js');
+  const { getNowcoderRecoveryAdvice } = await import('../../packages/bridge/src/operations/recovery.js');
+  const history = [event(base - 3600_000 + 1), ...[10, 9, 8, 7].map(minutes => event(base - minutes * 60_000))];
+  let clock = base;
+  const control = new NowcoderPublishingControl(join(await dirs.create('recovery-clock-'), 'control.json'), async () => history, { now: () => clock++ });
+  const snapshot = await control.recoverySnapshot();
+  expect(snapshot).toMatchObject({ now: base, publishing: { usage: { lastHour: 5 }, nextAllowedAt: new Date(base + 1).toISOString() } });
+  expect(getNowcoderRecoveryAdvice({ ...snapshot, attempt: 0,
+    runtime: { connected: true, supported: true, buildMatches: true, busy: false, updating: false } })).toMatchObject({ status: 'waiting', code: 'PUBLISH_WAIT' });
+});
+
+it('does not create a publishing journal while reading a recovery snapshot', async () => {
+  const c = await fixture([event(base - 300_000)]);
+  expect((await c.control.recoverySnapshot()).publishing.usage.last24Hours).toBe(1);
+  await expect(readFile(c.path, 'utf8')).rejects.toMatchObject({ code: 'ENOENT' });
+});
+
+it('preserves paused journal bytes during recovery even when a new historical request is observed', async () => {
+  const c = await fixture([event(base - 300_000)]);
+  const verification = { id: '12345678-1234-4234-8234-123456789013', detectedAt: new Date(base).toISOString(), sourceUrl,
+    requestId: '12345678-1234-4234-8234-123456789012', opportunityId: 'ops-abcdef123456', key: 'original-comment-key' };
+  const bytes = JSON.stringify({ schemaVersion: 1, policy: { minIntervalMs: 120000, maxPerHour: 5, maxPer24Hours: 20 }, verification, knownRequestIds: [], clearedRequestIds: [] });
+  await writeFile(c.path, bytes);
+  expect((await c.control.recoverySnapshot()).publishing.verification).toEqual(verification);
+  expect(await readFile(c.path, 'utf8')).toBe(bytes);
+  expect((await c.control.status()).verification).toEqual(verification);
+  expect(JSON.parse(await readFile(c.path, 'utf8')).knownRequestIds).toEqual([verification.requestId]);
+});
+
+it('reports legacy verification read-only and preserves its identity when normal migration subsequently persists it', async () => {
+  const c = await fixture([event(base - 3600_000, { state: 'uncertain', attentionCode: 'VERIFICATION_REQUIRED' })]);
+  const snapshot = await c.control.recoverySnapshot();
+  expect(snapshot.publishing.verification?.requestId).toBe(c.history[0]!.publication.requestId);
+  expect((await c.reopen().recoverySnapshot()).publishing.verification?.id).toBe(snapshot.publishing.verification?.id);
+  await expect(readFile(c.path, 'utf8')).rejects.toMatchObject({ code: 'ENOENT' });
+  expect((await c.control.status()).verification?.id).toBe(snapshot.publishing.verification?.id);
+  expect((await c.reopen().status()).verification?.id).toBe(snapshot.publishing.verification?.id);
+  await expect(c.control.assertCapacity()).rejects.toThrow(/验证/u);
+});

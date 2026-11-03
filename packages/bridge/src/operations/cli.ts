@@ -3,13 +3,18 @@ import { isAbsolute } from 'node:path';
 import { operationDraftImportSchema, operationIdSchema, operationPublishSchema, nowcoderPublishingPolicySchema, nowcoderVerificationResumeSchema } from '@data-collector/shared';
 
 import { workflowKey, workflowRequestSchema } from './workflowStore.js';
+import { getRecoveryFailureAdvice, recoveryAdviceSchema, recoveryAttemptSchema } from './recovery.js';
 
 interface OperationsIo { stdout(value: string): void; stderr(value: string): void }
+interface OperationsCredentials { baseUrl: string; token: string }
+class OperationsRequestError extends Error {
+  constructor(readonly status: number, readonly code: string, message: string) { super(message); }
+}
 
-export async function runOperationsCli(args: string[], credentials: { baseUrl: string; token: string }, io: OperationsIo): Promise<number> {
+export async function runOperationsCli(args: string[], credentials: OperationsCredentials | (() => Promise<OperationsCredentials>), io: OperationsIo): Promise<number> {
   const action = args[2];
   const values = new Map<string, string>();
-  const allowed = new Set(['--source', '--id', '--file', '--port', '--config', '--library', '--query', '--limit', '--pages', '--revision', '--key', '--wait']);
+  const allowed = new Set(['--source', '--id', '--file', '--port', '--config', '--library', '--query', '--limit', '--pages', '--revision', '--key', '--wait', '--attempt']);
   let send = false, verificationCompleted = false;
   for (let index = 3; index < args.length; index += 2) {
     const key = args[index], value = args[index + 1];
@@ -18,21 +23,41 @@ export async function runOperationsCli(args: string[], credentials: { baseUrl: s
     if (!key || !allowed.has(key) || !value || value.startsWith('--') || values.has(key)) throw new Error('牛客运营命令参数无效');
     values.set(key, value);
   }
-  const actionOptions: Record<string, string[]> = { list: [], add: ['--source'], brief: ['--id'], draft: ['--file'], search: ['--query', '--limit'], context: ['--id', '--pages'], publish: ['--id', '--revision', '--key'], verify: ['--id', '--key', '--pages'], workflow: ['--file', '--id', '--wait'], stats: ['--id'], limits: [], configure: ['--file'], resume: ['--id'] };
+  const actionOptions: Record<string, string[]> = { list: [], add: ['--source'], brief: ['--id'], draft: ['--file'], search: ['--query', '--limit'], context: ['--id', '--pages'], publish: ['--id', '--revision', '--key'], verify: ['--id', '--key', '--pages'], workflow: ['--file', '--id', '--wait'], stats: ['--id'], limits: [], recovery: ['--attempt'], configure: ['--file'], resume: ['--id'] };
   if (!action || !actionOptions[action] || [...values.keys()].some(key => !['--port', '--config', '--library', ...actionOptions[action]!].includes(key)) || (send && action !== 'publish' && action !== 'workflow') || (verificationCompleted && action !== 'resume')) throw new Error('牛客运营命令参数无效');
   if (action === 'resume' && !verificationCompleted) throw new Error('恢复需要确认已手动完成验证：--verification-completed');
-  const request = async (path: string, method = 'GET', body?: unknown) => {
-    const response = await fetch(`${credentials.baseUrl}/v1/nowcoder/operations${path}`, {
-      method, signal: AbortSignal.timeout(100_000),
-      headers: { authorization: `Bearer ${credentials.token}`, 'content-type': 'application/json' },
+  let loadedCredentials: OperationsCredentials | undefined;
+  const request = async (path: string, method = 'GET', body?: unknown, timeout = 100_000) => {
+    if (!loadedCredentials) {
+      try { loadedCredentials = typeof credentials === 'function' ? await credentials() : credentials; }
+      catch (error) {
+        if (action !== 'recovery') throw error;
+        throw new OperationsRequestError(401, 'LOCAL_AUTH_UNAVAILABLE', '本机连接授权不可用，请保留配置并恢复已配置插件的连接');
+      }
+    }
+    const response = await fetch(`${loadedCredentials.baseUrl}/v1/nowcoder/operations${path}`, {
+      method, signal: AbortSignal.timeout(timeout),
+      headers: { authorization: `Bearer ${loadedCredentials.token}`, 'content-type': 'application/json' },
       ...(body === undefined ? {} : { body: JSON.stringify(body) }),
     });
-    const result = await response.json() as { error?: { message?: string } };
-    if (!response.ok) throw new Error(result.error?.message ?? `读取牛客运营记录失败：HTTP ${response.status}`);
+    const result = await response.json() as { error?: { code?: string; message?: string } };
+    if (!response.ok) throw new OperationsRequestError(response.status, result.error?.code ?? 'OPERATIONS_REQUEST_FAILED', result.error?.message ?? `读取牛客运营记录失败：HTTP ${response.status}`);
     return result;
   };
   let result: unknown;
-  if (action === 'limits') {
+  if (action === 'recovery') {
+    const attempt = recoveryAttemptSchema.parse(values.get('--attempt'));
+    try {
+      const raw = await request(`/recovery?attempt=${attempt}`, 'GET', undefined, 5000);
+      const parsed = recoveryAdviceSchema.safeParse(raw);
+      result = parsed.success ? parsed.data : getRecoveryFailureAdvice({ now: Date.now(), attempt, code: 'RECOVERY_RESPONSE_INVALID', message: '本机恢复状态无法核验，稍后只读重查', requiresUser: false });
+    } catch (error) {
+      const api = error instanceof OperationsRequestError ? error : undefined;
+      result = getRecoveryFailureAdvice({ now: Date.now(), attempt, code: api?.code ?? 'BRIDGE_UNAVAILABLE',
+        message: api?.message ?? '本机服务暂不可用，保留进度并等待恢复',
+        requiresUser: api?.status === 401 || api?.status === 403 || ['PUBLISH_HISTORY_UNAVAILABLE', 'PUBLISH_CONTROL_CORRUPT'].includes(api?.code ?? '') });
+    }
+  } else if (action === 'limits') {
     result = await request('/publishing');
   } else if (action === 'configure' && values.has('--file')) {
     const path = values.get('--file')!;
@@ -100,7 +125,7 @@ export async function runOperationsCli(args: string[], credentials: { baseUrl: s
     result = await request(`/${draft.opportunityId}`, 'PUT', { revision: draft.revision, contextHash: draft.contextHash, drafts: draft.drafts,
       ...(draft.conversationHash ? { conversationHash: draft.conversationHash } : {}) });
   } else {
-    throw new Error('用法：nowcoder ops limits | configure --file /absolute/policy.private.json | resume --id VERIFICATION_ID --verification-completed | workflow --file /absolute/request.private.json [--send] [--wait 600000] | workflow --id RUN_ID [--wait 600000] | stats --id RUN_ID | search --query 关键词 [--limit 10] | add --source ID | context --id ID [--pages 1] | brief --id ID | draft --file /absolute/draft.private.json | publish --id ID --revision N --key KEY --send | verify --id ID --key KEY [--pages 1] | list');
+    throw new Error('用法：nowcoder ops recovery [--attempt N] | limits | configure --file /absolute/policy.private.json | resume --id VERIFICATION_ID --verification-completed | workflow --file /absolute/request.private.json [--send] [--wait 600000] | workflow --id RUN_ID [--wait 600000] | stats --id RUN_ID | search --query 关键词 [--limit 10] | add --source ID | context --id ID [--pages 1] | brief --id ID | draft --file /absolute/draft.private.json | publish --id ID --revision N --key KEY --send | verify --id ID --key KEY [--pages 1] | list');
   }
   if ((action === 'add' || action === 'draft') && result && typeof result === 'object' && 'entry' in result) {
     const { body, conversation, ...entry } = (result as { entry: Record<string, unknown> }).entry;

@@ -48,7 +48,7 @@ export class NowcoderPublishingControl {
     await atomicWriteText(dirname(this.path), this.path, `${JSON.stringify(checked, null, 2)}\n`);
     this.seenFile = true;
   }
-  private async read(): Promise<{ state: State; events: HistoryEvent[] }> {
+  private async read(persist = true): Promise<{ state: State; events: HistoryEvent[] }> {
     let events: HistoryEvent[];
     try { events = z.array(historyEntry).parse(await this.history()); }
     catch { throw new HttpError(409, 'PUBLISH_HISTORY_UNAVAILABLE', '发布历史记录不可用，请核对本机运营记录；已停止发布'); }
@@ -66,25 +66,25 @@ export class NowcoderPublishingControl {
     const observed = new Set(events.map(event => event.publication.requestId));
     if (state.knownRequestIds.some(id => !observed.has(id))) throw new HttpError(409, 'PUBLISH_HISTORY_UNAVAILABLE', '已记录的发布历史缺失，请保留本机记录后核对；已停止发布');
     if (observed.size !== state.knownRequestIds.length) { state.knownRequestIds = [...observed]; fresh = true; }
-    if (this.memoryPause) state.verification = this.memoryPause;
+    if (this.memoryPause && state.verification?.id !== this.memoryPause.id) { state.verification = this.memoryPause; fresh = true; }
     if (!state.verification) {
       const unresolved = events.filter(e => ['uncertain', 'dispatching', 'rejected'].includes(e.publication.state)
         && !state.clearedRequestIds.includes(e.publication.requestId)
         && (e.publication.attentionCode === 'VERIFICATION_REQUIRED' || /^牛客要求验证/u.test(e.publication.message ?? '')))
         .sort((a, b) => b.publication.updatedAt.localeCompare(a.publication.updatedAt))[0];
       if (unresolved) {
-        state.verification = { id: randomUUID(), detectedAt: unresolved.publication.updatedAt, sourceUrl: unresolved.sourceUrl,
+        state.verification = { id: unresolved.publication.requestId, detectedAt: unresolved.publication.updatedAt, sourceUrl: unresolved.sourceUrl,
           ...(unresolved.channel === 'article' ? { channel: 'article', articleId: unresolved.opportunityId, browser: unresolved.browser!, accountId: unresolved.accountId! } : { opportunityId: unresolved.opportunityId }),
           key: unresolved.publication.key, requestId: unresolved.publication.requestId };
         this.memoryPause = state.verification; fresh = true;
       }
     }
     this.memoryPause = state.verification ?? undefined;
-    if (fresh) await this.write(state);
+    if (fresh && persist) await this.write(state);
     return { state, events };
   }
-  private availableAt(state: State, events: HistoryEvent[], count = 1, channel: 'comment' | 'article' = 'comment'): number {
-    const now = this.now(), times = events.map(e => Date.parse(e.publication.createdAt)).sort((a, b) => a - b);
+  private availableAt(state: State, events: HistoryEvent[], count = 1, channel: 'comment' | 'article' = 'comment', now = this.now()): number {
+    const times = events.map(e => Date.parse(e.publication.createdAt)).sort((a, b) => a - b);
     const intervalAt = Math.max(now, times.length ? times[times.length - 1]! + state.policy.minIntervalMs : now);
     if (channel === 'article') return intervalAt;
     const channelTimes = events.filter(e => e.channel === 'comment').map(e => Date.parse(e.publication.createdAt)).sort((a, b) => a - b);
@@ -94,20 +94,26 @@ export class NowcoderPublishingControl {
       hour.length + count > maxHour ? hour[hour.length + count - maxHour - 1]! + HOUR : now,
       day.length + count > maxDay ? day[day.length + count - maxDay - 1]! + DAY : now);
   }
-  private summarize(state: State, events: HistoryEvent[]): NowcoderPublishingStatus {
-    const now = this.now(), times = events.filter(e => e.channel === 'comment').map(e => Date.parse(e.publication.createdAt)), earliest = this.availableAt(state, events);
+  private summarize(state: State, events: HistoryEvent[], now = this.now()): NowcoderPublishingStatus {
+    const times = events.filter(e => e.channel === 'comment').map(e => Date.parse(e.publication.createdAt)), earliest = this.availableAt(state, events, 1, 'comment', now);
     return { schemaVersion: 1, policy: state.policy, usage: { lastHour: times.filter(t => t > now - HOUR).length, last24Hours: times.filter(t => t > now - DAY).length },
       nextAllowedAt: earliest > now ? new Date(earliest).toISOString() : null, verification: state.verification };
   }
   async status(): Promise<NowcoderPublishingStatus> {
     return this.serialize(async () => { const { state, events } = await this.read(); return this.summarize(state, events); });
   }
+  async recoverySnapshot(): Promise<{ now: number; publishing: NowcoderPublishingStatus }> {
+    return this.serialize(async () => {
+      const { state, events } = await this.read(false), now = this.now();
+      return { now, publishing: this.summarize(state, events, now) };
+    });
+  }
   async articleStatus(): Promise<ArticlePublishingStatus> {
     return this.serialize(async () => {
-      const { state, events } = await this.read(), earliest = this.availableAt(state, events, 1, 'article');
+      const { state, events } = await this.read(), now = this.now(), earliest = this.availableAt(state, events, 1, 'article', now);
       return { schemaVersion: 1, policy: { minIntervalMs: state.policy.minIntervalMs, maxPer24Hours: null },
-        usage: { last24Hours: events.filter(e => e.channel === 'article' && Date.parse(e.publication.createdAt) > this.now() - DAY).length },
-        nextAllowedAt: earliest > this.now() ? new Date(earliest).toISOString() : null, verification: state.verification };
+        usage: { last24Hours: events.filter(e => e.channel === 'article' && Date.parse(e.publication.createdAt) > now - DAY).length },
+        nextAllowedAt: earliest > now ? new Date(earliest).toISOString() : null, verification: state.verification };
     });
   }
   async assertArticleCapacity(): Promise<void> {

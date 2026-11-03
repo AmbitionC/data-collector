@@ -55,6 +55,7 @@ import { loadConfig, type ConfigOverrides } from '../config.js';
 import { NowcoderScheduleStore } from '../plans/nowcoderSchedule.js';
 import { NowcoderOperationsStore } from '../operations/store.js';
 import { NowcoderPublishingControl } from '../operations/publishingControl.js';
+import { getNowcoderRecoveryAdvice, getRecoveryFailureAdvice, recoveryAttemptSchema } from '../operations/recovery.js';
 import { NowcoderOperationsTransport } from '../operations/transport.js';
 import { NowcoderOperationsWorkflow, workflowRequestSchema } from '../operations/workflow.js';
 import { NowcoderOperationsActivity } from '../operations/activity.js';
@@ -2104,6 +2105,25 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
     if (externalConflict && operationsWorkflow.busy) throw new HttpError(409, 'WORKFLOW_BUSY', '运营批次正在执行，外部修改已暂停');
     if (externalConflict) externalOperations++;
     try {
+    if (requestUrl.pathname === '/v1/nowcoder/operations/recovery' && request.method === 'GET') {
+      const input = z.object({ attempt: recoveryAttemptSchema }).strict().parse(Object.fromEntries(requestUrl.searchParams));
+      try {
+        await refreshArtifactBuildId();
+        const snapshot = await publishingControl.recoverySnapshot();
+        return sendJson(response, 200, getNowcoderRecoveryAdvice({ ...snapshot, attempt: input.attempt, runtime: {
+          connected: extensionReady && extensionSocket?.readyState === WebSocket.OPEN,
+          supported: !!extensionSocket && (extensionRuntime.get(extensionSocket)?.capabilities.includes(NOWCODER_BROWSER_OPERATIONS_CAPABILITY) ?? false),
+          buildMatches: extensionMatchesArtifact(), updating: updateCheckInFlight || restartPending || closing,
+          busy: externalOperations > 0 || operationsWorkflow.busy || operationsActivity.busy || operationsTransport.busy
+            || articlesActivity.busy || articleTransport.busy || (directedService?.hasActiveRun() ?? false)
+            || (planStore?.active().length ?? 0) > 0 || jobs.list().some(job => ['queued', 'dispatched', 'collecting'].includes(job.status)),
+        } }));
+      } catch (error) {
+        return sendJson(response, 200, getRecoveryFailureAdvice({ now: Date.now(), attempt: input.attempt,
+          code: error instanceof HttpError ? error.code : 'RECOVERY_CHECK_FAILED',
+          message: error instanceof HttpError ? error.message : '本机恢复状态暂不可用，保留记录后稍后重查', requiresUser: error instanceof HttpError }));
+      }
+    }
     if (requestUrl.pathname === '/v1/nowcoder/operations/workflow' && request.method === 'POST') {
       const raw = z.record(z.string(), z.unknown()).parse(await readJson(request));
       const { send, ...manifest } = raw;
