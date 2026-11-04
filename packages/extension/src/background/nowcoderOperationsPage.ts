@@ -99,7 +99,11 @@ export async function runNowcoderOperationPage(input: NowcoderOperationAction | 
     }
     if (!body || !title || !text(body)) return attention('POST_NOT_READY', '正文未完整加载，未进行操作');
     if (text(body).length > 24_000 || title.length > 500) return attention('CONTEXT_LIMIT', '原帖超过有界读取范围，未截断冒充全文');
-    const initialLoading = () => [...document.querySelectorAll('.comment-list .loading,.comment-list [aria-busy="true"],.comment-list[aria-busy="true"]')].some(visible);
+    const initialLoading = () => {
+      const list = document.querySelector('.comment-list');
+      return Boolean(list && [list, ...list.querySelectorAll('.loading,.is-loading,.el-loading-mask,[role="progressbar"],[aria-busy="true"]')]
+        .some(node => visible(node) && (node.getAttribute('aria-busy') === 'true' || node.matches('.loading,.is-loading,.el-loading-mask,[role="progressbar"]'))));
+    };
     const readTotal = () => {
       const match = text(document.querySelector('.comment-title')).match(/\d+/u);
       if (match) return Number(match[0]);
@@ -107,7 +111,7 @@ export async function runNowcoderOperationPage(input: NowcoderOperationAction | 
       // state can establish zero; stale cards, pagination and loading cannot.
       const list = document.querySelector('.comment-list');
       if (!list || initialLoading() || list.querySelector('.comment-box,.subcomment-box') || document.querySelector('.el-pagination')) return null;
-      return [...list.querySelectorAll('div,p,span')].some(node => visible(node) && text(node) === '暂无评论，快来抢首评~') ? 0 : null;
+      return [...list.querySelectorAll('div,p,span')].some(node => node.childElementCount === 0 && visible(node) && text(node) === '暂无评论，快来抢首评~') ? 0 : null;
     };
     const readiness = () => JSON.stringify([text(document.querySelector('h1,.post-title,.discuss-title')), text(document.querySelector('.feed-content-text,.nc-slate-editor-content,.post-topic-des,.nc-post-content')), text(document.querySelector('.comment-title')), readTotal(), fingerprint(readComments()), initialLoading()]);
     const initialTotal = readTotal();

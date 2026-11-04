@@ -372,14 +372,23 @@ it('recognizes a visible explicit empty state in the actual comment list without
  document.body.insertAdjacentHTML('beforeend', '<section class="comment-list"><div>暂无评论，快来抢首评~</div></section>');
  expect(await snapshot()).toMatchObject({ comments: [], coverage: { total: 0, observed: 0, complete: true } });
 });
-it.each(['hidden', 'outside-list', 'existing-comment', 'pagination'])('does not infer zero from a contradictory or unrelated empty marker: %s', async mode => {
+it.each(['hidden', 'nested-hidden', 'outside-list', 'existing-comment', 'pagination'])('does not infer zero from a contradictory or unrelated empty marker: %s', async mode => {
  vi.useFakeTimers(); document.querySelector('.comment-title')!.textContent = '全部评论'; document.querySelector('.comment-box')!.remove();
  const list = document.createElement('section'); list.className = mode === 'outside-list' ? 'recommendations' : 'comment-list';
- list.innerHTML = `<div${mode === 'hidden' ? ' hidden' : ''}>暂无评论，快来抢首评~</div>`;
+ list.innerHTML = mode === 'nested-hidden' ? '<div><span aria-hidden="true">暂无评论，快来抢首评~</span></div>' : `<div${mode === 'hidden' ? ' hidden' : ''}>暂无评论，快来抢首评~</div>`;
  if (mode === 'existing-comment') list.insertAdjacentHTML('beforeend', '<div class="comment-box">评论尚未完整加载</div>');
  if (mode === 'pagination') list.insertAdjacentHTML('beforeend', '<div class="el-pagination"><button class="btn-prev">上一页</button></div>');
  document.body.append(list);
  expect((await snapshot()).coverage).toMatchObject({ total: null, complete: false });
+});
+it.each(['is-loading', 'el-loading-mask', 'progressbar', 'root-loading'])('does not accept an empty list while a visible loader remains: %s', async mode => {
+ vi.useFakeTimers(); document.querySelector('.comment-title')!.textContent = '全部评论'; document.querySelector('.comment-box')!.remove();
+ const list = document.createElement('section'); list.className = mode === 'root-loading' ? 'comment-list is-loading' : 'comment-list';
+ list.innerHTML = '<div>暂无评论，快来抢首评~</div>';
+ if (mode !== 'root-loading') list.insertAdjacentHTML('beforeend', mode === 'progressbar' ? '<div role="progressbar">加载中</div>' : `<div class="${mode}">加载中</div>`);
+ document.body.append(list);
+ const pending = runNowcoderOperationPage({ kind: 'context', url, maxPages: 1 }); await vi.runAllTimersAsync();
+ expect(await pending).toMatchObject({ kind: 'attention', code: 'CONTEXT_NOT_STABLE', submission: 'not_attempted' });
 });
 it('does not silently truncate a body that grows during readiness and does not accept a persistent loading marker', async () => {
  vi.useFakeTimers();
