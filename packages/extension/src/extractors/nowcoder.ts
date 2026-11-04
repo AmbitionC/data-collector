@@ -29,6 +29,7 @@ const TITLE_SELECTORS = [
 // 顺序：feed/main/detail 的真实正文容器优先，其后是讨论区/其它页型与通用兜底。
 const CONTENT_SELECTORS = [
   '.feed-content-text',
+  '.nc-slate-editor-content',
   '.post-topic-des',
   '.nc-post-content',
   '.js-post-content',
@@ -169,10 +170,20 @@ function embeddedNowcoderPost(document: Document, url: URL): EmbeddedNowcoderPos
   return undefined;
 }
 
-function contentAccessOf(document: Document, content: Element): ContentAccess {
+function contentAccessOf(document: Document, content: Element, postBody: Element | null): ContentAccess {
   const evidence = `${visibleText(content)} ${visibleText(document.body)}`;
   if (PAYWALL_SIGNAL.test(evidence)) return 'paywalled';
-  return TRUNCATION_SIGNAL.test(visibleText(content)) ? 'truncated' : 'full';
+  let truncated = TRUNCATION_SIGNAL.test(visibleText(content));
+  if (!truncated && postBody?.matches('.nc-slate-editor-content')) {
+    // Slate's fold control can be beside the editor. Keep its access evidence
+    // without collecting the surrounding title, dialogs or comment thread.
+    const boundary = postBody.closest('.post-content-box,section,article') ?? postBody.parentElement;
+    truncated = [...boundary?.querySelectorAll('button,a,[role="button"]') ?? []].some(control =>
+      !postBody.contains(control)
+      && !control.closest('.js-comment-container,.comment-list,.comment-box,.subcomment-box')
+      && TRUNCATION_SIGNAL.test(visibleText(control)));
+  }
+  return truncated ? 'truncated' : 'full';
 }
 
 function firstWithin(root: ParentNode, selectors: string[], onlyVisible = false): Element | null {
@@ -366,7 +377,7 @@ export function extractNowcoder(document: Document, url: URL, now: Clock) {
 
   // Genuine feed bodies can be a single short question. Keep the length gate for generic fallbacks.
   const preciseText = primary ? visibleText(primary).trim() : '';
-  const preciseShortBody = primary?.matches('.feed-content-text, .post-topic-des, .nc-post-content, .js-post-content')
+  const preciseShortBody = primary?.matches('.feed-content-text, .nc-slate-editor-content, .post-topic-des, .nc-post-content, .js-post-content')
     && preciseText.length >= 2 && !/^(?:正在加载|加载中|loading)[\s.。…]*$/iu.test(preciseText);
   if (!content || !title || (!preciseShortBody && visibleText(content).length < 40)) {
     throw new ExtractionError(
@@ -382,7 +393,7 @@ export function extractNowcoder(document: Document, url: URL, now: Clock) {
     time?.getAttribute('datetime') ?? null,
     now(),
   ) ?? embedded?.createdAt;
-  const contentAccess = contentAccessOf(document, content);
+  const contentAccess = contentAccessOf(document, content, primary);
   return buildDocument({
     source: 'nowcoder',
     kind: 'post',
