@@ -1,8 +1,89 @@
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { NowcoderOperationsRunner } from '../../packages/extension/src/background/nowcoderOperations.js';
 
 const action = { kind: 'context' as const, url: 'https://www.nowcoder.com/discuss/123456', maxPages: 1 };
+afterEach(() => vi.useRealTimers());
 describe('plugin operation owned tabs', () => {
+  it('returns the original click checkpoint before a stalled script can strand the operation indefinitely', async () => {
+    vi.useFakeTimers();
+    let executionId = '', resolveExecution!: (value: unknown) => void, settled = false;
+    const runner = new NowcoderOperationsRunner({ create: async () => ({ id: 77 }), wait: async () => undefined,
+      execute: async (_id, _action, nonce) => { executionId = nonce; return new Promise(resolve => { resolveExecution = resolve; }); },
+      readProgress: async () => ({ executionId, actionKind: 'publish', url: action.url, pageStage: 'wait_receipt',
+        diagnostics: { pageStartedAt: '2026-11-04T12:01:04.257Z', submitClickedAt: '2026-11-04T12:01:10.553Z' } }),
+      close: async () => { throw new Error('A pending original page must be preserved'); }, handoff: async () => undefined });
+    const publish = { kind: 'publish' as const, url: action.url, text: '先做一个项目', expected: { sourceUrl: action.url,
+      readAt: '2026-11-04T12:00:00.000Z', post: { title: '项目', body: '讨论项目', images: [] }, comments: [],
+      coverage: { total: 0, observed: 0, pagesRead: 1, hasMore: false, complete: true, limitations: [] } } };
+    const pending = runner.run(publish); void pending.then(() => { settled = true; });
+    await vi.advanceTimersByTimeAsync(70_000);
+    try {
+      expect(settled).toBe(true);
+      expect(await pending).toMatchObject({ code: 'OPERATION_DEADLINE_EXCEEDED', submission: 'uncertain',
+        diagnostics: { submitClickedAt: '2026-11-04T12:01:10.553Z' },
+        failure: { stage: 'execute_script', pageStage: 'wait_receipt', clickState: 'invoked' } });
+      expect(runner.busy).toBe(false);
+    } finally { resolveExecution({ kind: 'attention', code: 'RECEIPT_NOT_OBSERVED', message: '未观察到回执', submission: 'uncertain' }); await pending; }
+  });
+
+  it('does not inject a late script after the owned page misses its load deadline', async () => {
+    vi.useFakeTimers();
+    let release!: () => void, settled = false, executions = 0;
+    const runner = new NowcoderOperationsRunner({ create: async () => ({ id: 78 }), wait: () => new Promise(resolve => { release = resolve; }),
+      execute: async () => { executions++; return { kind: 'attention', code: 'TEST_DONE', message: '读取完成', submission: 'not_attempted' }; },
+      close: async () => undefined, handoff: async () => undefined });
+    const pending = runner.run(action); void pending.then(() => { settled = true; });
+    await vi.advanceTimersByTimeAsync(70_000);
+    try {
+      expect(settled).toBe(true);
+      expect(await pending).toMatchObject({ code: 'OPERATION_DEADLINE_EXCEEDED', submission: 'not_attempted', failure: { stage: 'wait_tab', clickState: 'not_attempted' } });
+    } finally { release(); await pending; }
+    expect(executions).toBe(0);
+  });
+
+  it('keeps a pre-injection deadline rejection explicitly not attempted when the load completes after a clock jump', async () => {
+    vi.useFakeTimers();
+    let executions = 0;
+    const runner = new NowcoderOperationsRunner({ create: async () => ({ id: 79 }),
+      wait: async () => { vi.setSystemTime(Date.now() + 120_000); },
+      execute: async () => { executions++; throw new Error('Expired work must never execute'); },
+      close: async () => undefined, handoff: async () => undefined });
+    const result = await runner.run({ kind: 'publish', url: action.url, text: '先做一个项目', expected: { sourceUrl: action.url,
+      readAt: '2026-11-04T12:00:00.000Z', post: { title: '项目', body: '讨论项目', images: [] }, comments: [],
+      coverage: { total: 0, observed: 0, pagesRead: 1, hasMore: false, complete: true, limitations: [] } } });
+    expect(result).toMatchObject({ code: 'OPERATION_DEADLINE_EXCEEDED', submission: 'not_attempted', failure: { clickState: 'not_attempted' } });
+    expect(executions).toBe(0);
+  });
+
+  it('bounds a missing checkpoint read and keeps the click unknown instead of declaring it unsent', async () => {
+    vi.useFakeTimers();
+    let settled = false;
+    const runner = new NowcoderOperationsRunner({ create: async () => ({ id: 80 }), wait: async () => undefined,
+      execute: async () => new Promise(() => undefined), readProgress: async () => new Promise(() => undefined),
+      close: async () => { throw new Error('Keep original'); }, handoff: async () => new Promise(() => undefined) });
+    const pending = runner.run({ kind: 'publish', url: action.url, text: '先做一个项目', expected: { sourceUrl: action.url,
+      readAt: '2026-11-04T12:00:00.000Z', post: { title: '项目', body: '讨论项目', images: [] }, comments: [],
+      coverage: { total: 0, observed: 0, pagesRead: 1, hasMore: false, complete: true, limitations: [] } } });
+    void pending.then(() => { settled = true; }); await vi.advanceTimersByTimeAsync(70_000);
+    expect(settled).toBe(true);
+    expect(await pending).toMatchObject({ submission: 'uncertain', failure: { clickState: 'unknown' } });
+    expect((await pending).diagnostics).toBeUndefined();
+    expect(runner.busy).toBe(false);
+  });
+
+  it('hands off a late-created owned tab without injecting any abandoned work', async () => {
+    vi.useFakeTimers();
+    let release!: (tab: { id: number }) => void, executions = 0;
+    const handedOff: number[] = [];
+    const runner = new NowcoderOperationsRunner({ create: () => new Promise(resolve => { release = resolve; }), wait: async () => undefined,
+      execute: async () => { executions++; throw new Error('Abandoned work'); },
+      close: async () => undefined, handoff: async id => { handedOff.push(id); } });
+    const pending = runner.run(action); await vi.advanceTimersByTimeAsync(70_000);
+    expect(await pending).toMatchObject({ code: 'OPERATION_DEADLINE_EXCEEDED', submission: 'not_attempted', failure: { stage: 'create_tab' } });
+    release({ id: 81 }); for (let i = 0; i < 5; i++) await Promise.resolve();
+    expect(handedOff).toEqual([81]); expect(executions).toBe(0);
+  });
+
   it('retains an actually observed verification pause when the execution result is lost', async () => {
     let executionId = '';
     const runner = new NowcoderOperationsRunner({ create: async () => ({ id: 77 }), wait: async () => undefined,

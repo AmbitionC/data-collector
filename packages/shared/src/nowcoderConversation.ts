@@ -45,7 +45,7 @@ export type NowcoderOperationDiagnostics = z.infer<typeof nowcoderOperationDiagn
 export const nowcoderPageStageSchema = z.enum(['read_context', 'compare_context', 'find_composer', 'write_editor', 'before_submit', 'click_submit', 'wait_receipt']);
 export type NowcoderPageStage = z.infer<typeof nowcoderPageStageSchema>;
 export const nowcoderOperationFailureSchema = z.object({
-  stage: z.enum(['create_tab', 'wait_tab', 'execute_script', 'parse_result', 'page_operation']),
+  stage: z.enum(['create_tab', 'wait_tab', 'execute_script', 'parse_result', 'page_operation', 'transport']),
   pageStage: nowcoderPageStageSchema.optional(), occurredAt: z.iso.datetime(),
   executionId: z.string().uuid().optional(), clickState: z.enum(['not_attempted', 'invoked', 'unknown']),
   error: z.object({ name: z.string().min(1).max(120), message: z.string().min(1).max(1000), stack: z.string().max(4000).optional() }).strict(),

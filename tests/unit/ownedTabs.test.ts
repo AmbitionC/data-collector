@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
+import { NowcoderOperationsRunner } from '../../packages/extension/src/background/nowcoderOperations.js';
 import {
   OWNED_TABS_STORAGE_KEY,
   OwnedTabRegistry,
@@ -18,6 +19,49 @@ class MemorySessionStorage implements OwnedTabsStorage {
 }
 
 describe('owned browser tabs', () => {
+  it('preserves an uncertain original page across worker restart when its handoff storage read never completes', async () => {
+    vi.useFakeTimers();
+    try {
+      const storage = new MemorySessionStorage(), remove = vi.fn(async () => undefined);
+      const registry = new OwnedTabRegistry(storage, { remove });
+      const url = 'https://www.nowcoder.com/discuss/77';
+      await registry.track({ id: 77, url }, 'nowcoder-operations');
+      await registry.track({ id: 78, url: 'https://www.nowcoder.com/discuss/78' }, 'remote-job');
+      await registry.track({ id: 79, url: 'https://wx.zsxq.com/group/1' }, 'zsxq-plan');
+      await registry.track({ id: 80, url: 'https://articles.zsxq.com/a.html' }, 'linked-article');
+      const get = storage.get.bind(storage); let stalled = false, executionId = '';
+      storage.get = () => stalled ? new Promise(() => undefined) : get();
+      const runner = new NowcoderOperationsRunner({ create: async () => ({ id: 77 }), wait: async () => undefined,
+        execute: async (_id, _action, nonce) => { executionId = nonce; throw new Error('Lost after click'); },
+        readProgress: async () => ({ executionId, actionKind: 'publish', url, pageStage: 'wait_receipt',
+          diagnostics: { pageStartedAt: '2026-11-04T12:01:04.257Z', submitClickedAt: '2026-11-04T12:01:10.553Z' } }),
+        close: id => registry.close(id), handoff: (id, source) => { stalled = true; return registry.handoff(id, source, { preservePrevious: true }); } });
+      const pending = runner.run({ kind: 'publish', url, text: '先做一个项目', expected: { sourceUrl: url,
+        readAt: '2026-11-04T12:00:00.000Z', post: { title: '项目', body: '讨论项目', images: [] }, comments: [],
+        coverage: { total: 0, observed: 0, pagesRead: 1, hasMore: false, complete: true, limitations: [] } } });
+      await vi.advanceTimersByTimeAsync(5000);
+      expect(await pending).toMatchObject({ submission: 'uncertain', failure: { clickState: 'invoked' } });
+      expect(runner.busy).toBe(false);
+      // A fresh registry represents a worker restart, without the abandoned queue.
+      stalled = false;
+      await new OwnedTabRegistry(storage, { remove }).cleanupStale();
+      expect(remove.mock.calls.map(([id]) => id)).toEqual([78, 79, 80]);
+      expect(storage.values[OWNED_TABS_STORAGE_KEY]).toMatchObject({ owned: [], attention: { id: 77, preserve: true } });
+    } finally { vi.useRealTimers(); }
+  });
+
+  it('still closes successful operation pages normally and leaves an earlier attention page intact during recovery', async () => {
+    const storage = new MemorySessionStorage(), remove = vi.fn(async () => undefined);
+    const registry = new OwnedTabRegistry(storage, { remove });
+    await registry.track({ id: 83, url: 'https://www.nowcoder.com/discuss/83' }, 'nowcoder-operations');
+    await registry.close(83);
+    await registry.track({ id: 84, url: 'https://www.nowcoder.com/discuss/84' }, 'nowcoder-operations');
+    await registry.handoff(84, 'https://www.nowcoder.com/discuss/84', { preservePrevious: true });
+    await registry.track({ id: 85, url: 'https://www.nowcoder.com/discuss/85' }, 'nowcoder-operations');
+    await new OwnedTabRegistry(storage, { remove }).cleanupStale();
+    expect(remove.mock.calls.map(([id]) => id)).toEqual([83]);
+    expect(storage.values[OWNED_TABS_STORAGE_KEY]).toMatchObject({ owned: [], attention: { id: 84, preserve: true } });
+  });
   it('preserves operation handoffs and earlier user work when another attention tab is handed off', async () => {
     const storage = new MemorySessionStorage(), remove = vi.fn(async () => undefined);
     const registry = new OwnedTabRegistry(storage, { remove });

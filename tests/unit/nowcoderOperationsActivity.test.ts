@@ -59,6 +59,21 @@ describe('durable plugin publication workflow', () => {
     expect(execute).toHaveBeenCalledTimes(2);
   });
 
+  it('journals a sanitized transport failure instead of discarding the cause of an uncertain send', async () => {
+    const c = await fixture();
+    const activity = new NowcoderOperationsActivity(c.store, { assertAvailable() {}, async execute(action) {
+      if (action.kind === 'context') return { kind: 'context', snapshot };
+      throw new TypeError('RPC timed out\nAuthorization: Bearer private-token\nURL=https://example.test/task?token=private-url');
+    } }, fetch);
+    await activity.context(c.id); const entry = await drafted(c.store, c.id);
+    const result = await activity.publish(c.id, { revision: entry.revision, contextHash: entry.contextHash, key: 'transport-diagnostics-01', send: true });
+    expect(result).toMatchObject({ publication: { state: 'uncertain', failure: { stage: 'transport', clickState: 'unknown', error: { name: 'TypeError', message: expect.stringContaining('RPC timed out') } } } });
+    const disk = await c.store.get(c.id);
+    expect(disk?.publicationAttempts?.[0].failure?.error.message).toContain('https://example.test/task');
+    expect(JSON.stringify(disk)).not.toMatch(/private-token|private-url/u);
+    expect(disk?.publicationAttempts?.[0].diagnostics).toBeUndefined();
+  });
+
   it('rejects stale/unreviewed drafts and receipts from another source before marking replied', async () => {
     const c = await fixture();
     const execute = vi.fn(async () => ({ kind: 'context' as const, snapshot }));

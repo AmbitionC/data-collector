@@ -126,6 +126,16 @@ export class OwnedTabRegistry {
   async cleanupStale(): Promise<void> {
     let firstFailure: unknown;
     await this.mutate(async state => {
+      // A worker can disappear before an operation's handoff is persisted. Its
+      // page may contain a click, user draft or challenge; cleanup has no proof
+      // that it is safe to close. Release automatic ownership, preserving every
+      // original page and any earlier attention page for read-only recovery.
+      const operations = state.owned.filter(tab => tab.purpose === 'nowcoder-operations');
+      state.owned = state.owned.filter(tab => tab.purpose !== 'nowcoder-operations');
+      if (operations.length && !state.attention) {
+        const original = operations[operations.length - 1]!;
+        state.attention = { id: original.id, url: original.url, handedOffAt: this.now(), preserve: true };
+      }
       const stale = [...state.owned].sort((left, right) => left.id - right.id);
       const cleared = new Set<number>();
       for (const tab of stale) {

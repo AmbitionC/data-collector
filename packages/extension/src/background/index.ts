@@ -190,8 +190,8 @@ const operationsRunner = new NowcoderOperationsRunner({
   close: id => ownedTabs.close(id),
   handoff: (id, url) => ownedTabs.handoff(id, url, { preservePrevious: true }),
   wait: id => waitForTabComplete(id),
-  execute: async (tabId, action, executionId) => {
-    const results = await chrome.scripting.executeScript({ target: { tabId }, func: runNowcoderOperationPage, args: [JSON.stringify(action), executionId] });
+  execute: async (tabId, action, executionId, deadlineAt) => {
+    const results = await chrome.scripting.executeScript({ target: { tabId }, func: runNowcoderOperationPage, args: [JSON.stringify(action), executionId, deadlineAt] });
     return results[0]?.result;
   },
   readProgress: async (tabId, executionId) => {
@@ -199,7 +199,7 @@ const operationsRunner = new NowcoderOperationsRunner({
     return results[0]?.result;
   },
 });
-connection.onOperations(action => operationsRunner.run(action));
+connection.onOperations((action, dispatchedAt) => operationsRunner.run(action, dispatchedAt));
 const articlesRunner = new NowcoderArticlesRunner({
   create: url => tabs.create({ url, active: false, purpose: 'nowcoder-operations' }),
   get: async id => { const tab = await chrome.tabs.get(id); return tab.url ? { url: tab.url } : {}; },
