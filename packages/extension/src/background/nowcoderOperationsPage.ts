@@ -99,10 +99,23 @@ export async function runNowcoderOperationPage(input: NowcoderOperationAction | 
     }
     if (!body || !title || !text(body)) return attention('POST_NOT_READY', '正文未完整加载，未进行操作');
     if (text(body).length > 24_000 || title.length > 500) return attention('CONTEXT_LIMIT', '原帖超过有界读取范围，未截断冒充全文');
-    const initialLoading = () => [...document.querySelectorAll('.comment-list .loading,.comment-list [aria-busy="true"],.comment-list[aria-busy="true"]')].some(visible);
-    const readiness = () => JSON.stringify([text(document.querySelector('h1,.post-title,.discuss-title')), text(document.querySelector('.feed-content-text,.nc-slate-editor-content,.post-topic-des,.nc-post-content')), text(document.querySelector('.comment-title')), fingerprint(readComments()), initialLoading()]);
-    const initialTotal = text(document.querySelector('.comment-title')).match(/\d+/u);
-    if (!await settle(readiness, initialTotal ? (Number(initialTotal[0]) === 0 ? 1000 : 500) : 2000, 5000, undefined, () => !initialLoading())) {
+    const initialLoading = () => {
+      const list = document.querySelector('.comment-list');
+      return Boolean(list && [list, ...list.querySelectorAll('.loading,.is-loading,.el-loading-mask,[role="progressbar"],[aria-busy="true"]')]
+        .some(node => visible(node) && (node.getAttribute('aria-busy') === 'true' || node.matches('.loading,.is-loading,.el-loading-mask,[role="progressbar"]'))));
+    };
+    const readTotal = () => {
+      const match = text(document.querySelector('.comment-title')).match(/\d+/u);
+      if (match) return Number(match[0]);
+      // A missing counter is unknown. Only the thread's visible, explicit empty
+      // state can establish zero; stale cards, pagination and loading cannot.
+      const list = document.querySelector('.comment-list');
+      if (!list || initialLoading() || list.querySelector('.comment-box,.subcomment-box') || document.querySelector('.el-pagination')) return null;
+      return [...list.querySelectorAll('div,p,span')].some(node => node.childElementCount === 0 && visible(node) && text(node) === '暂无评论，快来抢首评~') ? 0 : null;
+    };
+    const readiness = () => JSON.stringify([text(document.querySelector('h1,.post-title,.discuss-title')), text(document.querySelector('.feed-content-text,.nc-slate-editor-content,.post-topic-des,.nc-post-content')), text(document.querySelector('.comment-title')), readTotal(), fingerprint(readComments()), initialLoading()]);
+    const initialTotal = readTotal();
+    if (!await settle(readiness, initialTotal === null ? 2000 : initialTotal === 0 ? 1000 : 500, 5000, undefined, () => !initialLoading())) {
       blocked = challenge(); if (blocked) return blocked;
       return attention('CONTEXT_NOT_STABLE', '原帖或评论仍在变化，未读取稳定语境，请稍后重试');
     }
@@ -110,7 +123,6 @@ export async function runNowcoderOperationPage(input: NowcoderOperationAction | 
     body = document.querySelector('.feed-content-text,.nc-slate-editor-content,.post-topic-des,.nc-post-content');
     if (!body || !title || !text(body)) return attention('POST_NOT_READY', '正文仍未就绪');
     if (text(body).length > 24_000 || title.length > 500) return attention('CONTEXT_LIMIT', '原帖超过有界读取范围，未截断冒充全文');
-    const readTotal = () => { const match = text(document.querySelector('.comment-title')).match(/\d+/u); return match ? Number(match[0]) : null; };
     let total = readTotal();
     const gallery = document.querySelector('.feed-img,.feed-content-imgs');
     const galleryHasSlots = Boolean(gallery?.querySelector('.el-image,img'));
