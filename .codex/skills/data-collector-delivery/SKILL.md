@@ -26,4 +26,6 @@ The following run/batch contract applies to collection and repository delivery. 
 5. Invoke the target repository’s own Skill for judgment and publication. Do not duplicate its content rules here.
 6. Remove only entries that the target Skill confirms were successfully consumed. Keep blocked, malformed, failed, and unpublished entries for retry.
 
+For technical blockers, trace the saved run/key and actual failure before scheduling another wait. Resolve prerequisites within the existing authorization, then validate the affected stage; repeated healthy runtime checks do not establish content recovery. Record the remaining external dependency when waiting is necessary. Preserve verification, account, moderation and no-resend guards. For Nowcoder recovery details, use the recovery section of [the operations guide](../../../docs/nowcoder-operations.md).
+
 Completion requires a terminal exact run or batch, a clean target-repository validation, pushed commits, and—where the target has a publication workflow—a successful workflow run. Report counts for discovered, delivered, consumed, blocked, and failed items plus commit/workflow identifiers.
