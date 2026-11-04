@@ -449,10 +449,11 @@ describe('built Chrome extension', () => {
     expect(profiles.every(p => p.isClosed())).toBe(true); expect(editor.isClosed()).toBe(true);
   });
   it.each([
-    { loseResult: false, unknownTotal: false },
-    { loseResult: true, unknownTotal: false },
-    { loseResult: false, unknownTotal: true },
-  ])('executes packaged workflow once with result loss=$loseResult and unknown total=$unknownTotal', async ({ loseResult, unknownTotal }) => {
+    { loseResult: false, unknownTotal: false, expireBeforeClick: false },
+    { loseResult: true, unknownTotal: false, expireBeforeClick: false },
+    { loseResult: false, unknownTotal: true, expireBeforeClick: false },
+    { loseResult: false, unknownTotal: false, expireBeforeClick: true },
+  ])('executes packaged workflow once with result loss=$loseResult, unknown total=$unknownTotal, expired=$expireBeforeClick', async ({ loseResult, unknownTotal, expireBeforeClick }) => {
     const { libraryRoot } = await startStack();
     const url = 'https://www.nowcoder.com/discuss/123456', sourceId = stableContentId(url);
     const store = new NowcoderOperationsStore(join(libraryRoot, '.config', 'nowcoder-operations'), libraryRoot);
@@ -467,25 +468,28 @@ describe('built Chrome extension', () => {
     // Only tab creation is substituted: three preloaded fixture pages represent collection,
     // context and publication. The packaged ordinary extractor/job protocol/raw proof,
     // isolated-world page runner/editor, authenticated RPC and owned-tab cleanup remain real.
-    await worker.evaluate(async ({ targetUrl, loseResult }) => {
+    await worker.evaluate(async ({ targetUrl, loseResult, expireBeforeClick }) => {
       const matches = (await chrome.tabs.query({ url: targetUrl })).sort((a, b) => a.id! - b.id!);
       const queue = matches.slice(1).map(tab => tab.id!);
       chrome.tabs.create = (async input => {
         if (input.url !== targetUrl || input.active !== false || !queue.length) throw new Error('Unexpected E2E owned tab');
         return chrome.tabs.update(queue.shift()!, { active: false });
       }) as typeof chrome.tabs.create;
-      if (loseResult) {
+      if (loseResult || expireBeforeClick) {
         const execute = chrome.scripting.executeScript.bind(chrome.scripting);
         let lost = false;
         chrome.scripting.executeScript = (async input => {
-          const result = await execute(input);
           const firstArg = input.args?.[0];
           const action = typeof firstArg === 'string' && firstArg.startsWith('{') ? JSON.parse(firstArg) : firstArg;
-          if (!lost && (action as { kind?: string } | undefined)?.kind === 'publish') { lost = true; throw new Error('E2E injected result lost'); }
+          // Expire only the real serialized publication; the packaged runner,
+          // original request/key, page fence and Bridge journal remain intact.
+          if (expireBeforeClick && (action as { kind?: string } | undefined)?.kind === 'publish') input.args = [firstArg, input.args?.[1], Date.now() - 1];
+          const result = await execute(input);
+          if (loseResult && !lost && (action as { kind?: string } | undefined)?.kind === 'publish') { lost = true; throw new Error('E2E injected result lost'); }
           return result;
         }) as typeof chrome.scripting.executeScript;
       }
-    }, { targetUrl: url, loseResult });
+    }, { targetUrl: url, loseResult, expireBeforeClick });
     let token = '';
     for (let i = 0; i < 50 && !token; i++) {
       token = await worker.evaluate(async () => String((await chrome.storage.local.get('bridgeToken')).bridgeToken ?? ''));
@@ -519,22 +523,29 @@ describe('built Chrome extension', () => {
     expect((await request('POST', base, prepareRequest)).runId).toBe(preparing.runId);
     const publishRequest = { schemaVersion: 1, kind: 'publish', key: 'authorized-e2e-batch-01', send: true, items: [{ key: 'authorized-e2e-comment-01', draft: { ...prepared.prepared[0].draftEnvelope,
       drafts: { primary: '先做个同事能用的文档问答呗', alternative: '拿自己的资料试试', anchor: 'LangGraph', tone: 'practical', notes: '' } } }] };
-    const publishing = await request('POST', base, publishRequest), publishedRun = await waitForWorkflow(publishing.runId, loseResult ? 'needs_attention' : 'completed');
+    const needsAttention = loseResult || expireBeforeClick;
+    const publishing = await request('POST', base, publishRequest), publishedRun = await waitForWorkflow(publishing.runId, needsAttention ? 'needs_attention' : 'completed');
     const published = JSON.parse(await readFile(publishedRun.resultPath, 'utf8'));
-    expect(publishedRun.counts).toMatchObject({ succeeded: loseResult ? 0 : 1, failed: loseResult ? 1 : 0, notExecuted: 0 });
-    if (loseResult) {
+    expect(publishedRun.counts).toMatchObject({ succeeded: needsAttention ? 0 : 1, failed: needsAttention ? 1 : 0, notExecuted: 0 });
+    if (expireBeforeClick) {
+      expect(published.items[0].result.publication).toMatchObject({ state: 'rejected', attentionCode: 'OPERATION_DEADLINE_EXCEEDED',
+        failure: { stage: 'page_operation', clickState: 'not_attempted' } });
+      expect(published.items[0].result.publication.diagnostics).not.toHaveProperty('submitClickedAt');
+      expect(await pages[3]!.evaluate(() => document.querySelectorAll('.comment-box').length)).toBe(0);
+      expect(await pages[3]!.evaluate(() => document.querySelector('#nc-e-textarea-1')!.textContent)).toBe('');
+    } else if (loseResult) {
       expect(published.items[0].result.publication).toMatchObject({ state: 'uncertain', diagnostics: { submitClickedAt: expect.any(String) },
         failure: { stage: 'execute_script', pageStage: 'wait_receipt', clickState: 'invoked', error: { message: 'E2E injected result lost' } } });
       expect(publishedRun.items[0].failure.error).not.toHaveProperty('stack');
     } else expect(published.items[0].result.publication).toMatchObject({ state: 'published', evidence: 'observed', replyUrl: 'https://www.nowcoder.com/discuss/comment/987654321' });
     expect((await request('POST', base, publishRequest)).runId).toBe(publishing.runId);
     const entry = (await store.get(`ops-${sourceId}`))!;
-    if (!loseResult) expect(entry.status).toBe('replied');
+    if (!needsAttention) expect(entry.status).toBe('replied');
     expect(entry.publicationAttempts).toHaveLength(1);
     expect(pages[0]!.isClosed()).toBe(false);
     expect(await pages[0]!.evaluate(() => document.querySelector('.feed-content-text')!.textContent)).toBe('学过 LangGraph，想做一个能用的项目');
     expect(pages.slice(1, 3).every(page => page.isClosed())).toBe(true);
-    expect(pages[3]!.isClosed()).toBe(!loseResult);
+    expect(pages[3]!.isClosed()).toBe(!needsAttention);
     if (loseResult) expect(await pages[3]!.evaluate(() => document.querySelectorAll('.comment-box').length)).toBe(1);
   });
   it('edits private Nowcoder replies through the built panel without publishing', async () => {

@@ -163,7 +163,7 @@ export class BridgeConnection {
   private cancelHandler: CancelHandler | undefined;
   private jobAcknowledgedHandler: JobAcknowledgedHandler | undefined;
   private planCollectHandler: PlanCollectHandler | undefined;
-  private operationsHandler: ((action: NowcoderOperationAction) => Promise<NowcoderOperationResult>) | undefined;
+  private operationsHandler: ((action: NowcoderOperationAction, dispatchedAt: number) => Promise<NowcoderOperationResult>) | undefined;
   private readonly operationsRequests = new Map<string, Promise<NowcoderOperationResult>>();
   private articleHandler: ((action: ArticleAction) => Promise<ArticleResult>) | undefined;
   private readonly articleRequests = new Map<string, { signature: string; kind: ArticleAction['kind']; result: Promise<ArticleResult> }>();
@@ -204,7 +204,7 @@ export class BridgeConnection {
     this.planCollectHandler = handler;
   }
 
-  onOperations(handler: (action: NowcoderOperationAction) => Promise<NowcoderOperationResult>): void {
+  onOperations(handler: (action: NowcoderOperationAction, dispatchedAt: number) => Promise<NowcoderOperationResult>): void {
     this.operationsHandler = handler;
   }
 
@@ -1067,7 +1067,7 @@ export class BridgeConnection {
           return;
         }
         this.activeOperations += 1;
-        flight = Promise.resolve().then(() => this.operationsHandler!(parsed.data))
+        flight = Promise.resolve().then(() => this.operationsHandler!(parsed.data, Date.parse(message.timestamp)))
           .finally(() => { this.activeOperations -= 1; });
         this.operationsRequests.set(message.requestId, flight);
       }

@@ -12,6 +12,7 @@ import {
   type ExtensionStorage,
   type SocketLike,
 } from '../../packages/extension/src/background/connection.js';
+import { NowcoderOperationsRunner } from '../../packages/extension/src/background/nowcoderOperations.js';
 
 class MemoryStorage implements ExtensionStorage {
   readonly writes: Array<Record<string, unknown>> = [];
@@ -178,6 +179,25 @@ async function flushPromises(): Promise<void> {
 const PLAN_ATTEMPT = 'a1b2c3d4e5f60718';
 
 describe('extension Bridge connection', () => {
+  it('does not start an operation whose original Bridge dispatch deadline expired in the worker message queue', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] }); vi.setSystemTime('2026-11-04T12:03:00.000Z');
+    const storage = new MemoryStorage({ bridgeToken: 'x'.repeat(43) }), socket = new MemorySocket();
+    const connection = new BridgeConnection(dependencies(storage, () => socket, async () => healthResponse()));
+    let created = 0;
+    const runner = new NowcoderOperationsRunner({ create: async () => { created++; return { id: 77 }; }, wait: async () => undefined,
+      execute: async () => ({ kind: 'attention', code: 'TEST_DONE', message: '不应运行', submission: 'not_attempted' }),
+      close: async () => undefined, handoff: async () => undefined });
+    connection.onOperations((action, dispatchedAt) => runner.run(action, dispatchedAt));
+    try {
+      await connection.start(); socket.emit('open');
+      await vi.waitFor(() => expect(socket.sent).toHaveLength(1));
+      socket.emit('message', JSON.stringify({ protocolVersion: 1, type: 'operations.execute', requestId: 'expired-original-request',
+        timestamp: '2026-11-04T12:01:00.000Z', payload: { kind: 'context', url: 'https://www.nowcoder.com/discuss/123456', maxPages: 1 } }));
+      await vi.waitFor(() => expect(socket.sent.map(text => JSON.parse(text)).find(packet => packet.type === 'operations.result')).toMatchObject({
+        requestId: 'expired-original-request', payload: { code: 'OPERATION_DEADLINE_EXCEEDED', submission: 'not_attempted' } }));
+      expect(created).toBe(0);
+    } finally { await connection.stop(); vi.useRealTimers(); }
+  });
   it('executes duplicate operation requests once and drops deferred results after socket replacement', async () => {
     const storage = new MemoryStorage({ bridgeToken: 'x'.repeat(43) });
     const first = new MemorySocket(), second = new MemorySocket();

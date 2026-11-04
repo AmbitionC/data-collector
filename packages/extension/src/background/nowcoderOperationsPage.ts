@@ -1,12 +1,13 @@
 import type { NowcoderConversationSnapshot, NowcoderOperationAction, NowcoderOperationDiagnostics, NowcoderOperationResult, NowcoderPageStage } from '@data-collector/shared';
 
 /** Serialized by chrome.scripting: all runtime helpers must remain inside this function. */
-export async function runNowcoderOperationPage(input: NowcoderOperationAction | string, executionId?: string): Promise<NowcoderOperationResult> {
+export async function runNowcoderOperationPage(input: NowcoderOperationAction | string, executionId?: string, deadlineAt = Date.now() + 60_000): Promise<NowcoderOperationResult> {
   // The worker validates before serialization. JSON text preserves nullable fields
   // that the browser can omit from nested scripting object arguments.
   const action: NowcoderOperationAction = typeof input === 'string' ? JSON.parse(input) : input;
   const diagnostics: NowcoderOperationDiagnostics = { pageStartedAt: new Date().toISOString() };
   let clicked = false;
+  let deadlineExceeded = false;
   let pageStage: NowcoderPageStage = 'read_context';
   const checkpoint = (stage: NowcoderPageStage) => {
     pageStage = stage;
@@ -16,7 +17,27 @@ export async function runNowcoderOperationPage(input: NowcoderOperationAction | 
       executionId, actionKind: action.kind, url: action.url, pageStage, diagnostics: { ...diagnostics },
     };
   };
-  const pause = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms));
+  const assertDeadline = () => {
+    if (!Number.isFinite(deadlineAt) || Date.now() >= deadlineAt) {
+      deadlineExceeded = true;
+      throw new Error('本次页面操作已到截止点，禁止继续点击发送');
+    }
+  };
+  const pause = async (ms: number) => {
+    assertDeadline();
+    await new Promise<void>(resolve => setTimeout(resolve, Math.min(ms, Math.max(0, deadlineAt - Date.now()))));
+    assertDeadline();
+  };
+  const receiptChange = (ms: number) => new Promise<void>(resolve => {
+    // DOM updates can be delivered while a hidden tab's chained timers are
+    // throttled. Keep a bounded fallback for changes without a DOM mutation.
+    const observer = new MutationObserver(() => finish());
+    let timer: ReturnType<typeof setTimeout>;
+    const finish = () => { observer.disconnect(); clearTimeout(timer); resolve(); };
+    observer.observe(document.documentElement, { subtree: true, childList: true, characterData: true, attributes: true,
+      attributeFilter: ['href', 'class', 'style', 'hidden', 'aria-hidden'] });
+    timer = setTimeout(finish, ms);
+  });
   const normalized = (value: string) => value.replace(/[\s\u200b-\u200d\ufeff]+/gu, '').normalize('NFKC');
   const text = (node: Element | null) => ((node as HTMLElement | null)?.innerText ?? node?.textContent ?? '').trim();
   const attention = (code: string, message: string): Extract<NowcoderOperationResult, { kind: 'attention' }> => {
@@ -89,6 +110,7 @@ export async function runNowcoderOperationPage(input: NowcoderOperationAction | 
     checkpoint('read_context');
     if (canonical(location.href) !== action.url) return attention('SOURCE_MISMATCH', '当前页不是指定原帖，未进行操作');
     let blocked = challenge(); if (blocked) return blocked;
+    assertDeadline();
     let body: Element | null = null, title = '';
     for (let i = 0; i < 40; i++) {
       body = document.querySelector('.feed-content-text,.nc-slate-editor-content,.post-topic-des,.nc-post-content');
@@ -219,6 +241,7 @@ export async function runNowcoderOperationPage(input: NowcoderOperationAction | 
         contextChanges: { fields, comments: { added: added.slice(0, 30), removed: removed.slice(0, 30), changed: changed.slice(0, 30), truncated: [added, removed, changed].some(a => a.length > 30) }, total: { before: action.expected.coverage.total, after: total } } };
     }
     if (snapshot.comments.some(comment => normalized(comment.text) === normalized(action.text))) return attention('DUPLICATE_TEXT', '已有相同评论，未再次发送');
+    assertDeadline();
     checkpoint('find_composer');
     const editor = document.querySelector<HTMLElement>('#nc-e-textarea-1[contenteditable="true"]');
     if (!editor || !visible(editor)) return attention('COMPOSER_UNAVAILABLE', '未找到可用的主评论编辑器，请确认登录状态');
@@ -258,9 +281,13 @@ export async function runNowcoderOperationPage(input: NowcoderOperationAction | 
     if (!editor.isConnected || !button.isConnected) return attention('COMPOSER_UNAVAILABLE', '输入期间编辑器已被替换，未点击发送');
     if ([...scope.querySelectorAll<HTMLInputElement>('input[type="checkbox"]')].some(input => input.checked && /同时转发/u.test(text(input.closest('label') ?? input.parentElement)))) return attention('FORWARDING_ENABLED', '输入期间同时转发被开启，未点击发送');
     const before = new Set(snapshot.comments.map(comment => comment.url));
+    // No await between this fence and the only click. A script that resumes
+    // after its worker has stopped waiting cannot publish late.
+    assertDeadline();
     clicked = true; diagnostics.submitClickedAt = new Date().toISOString(); checkpoint('click_submit'); button.click();
     checkpoint('wait_receipt');
-    for (let i = 0; i < 60; i++) {
+    const receiptDeadlineAt = Math.min(deadlineAt, Date.now() + 12_000);
+    for (;;) {
       if (canonical(location.href) !== action.url) return attention('SOURCE_MISMATCH', '点击后页面离开原帖，发送结果待核验');
       blocked = challenge(); if (blocked) return blocked;
       const observed = readComments().find(comment => !before.has(comment.url) && normalized(comment.text) === normalized(action.text));
@@ -268,15 +295,17 @@ export async function runNowcoderOperationPage(input: NowcoderOperationAction | 
         const observedAt = new Date().toISOString(); diagnostics.receiptObservedAt = observedAt; checkpoint('wait_receipt');
         return { kind: 'published', receipt: { sourceUrl: action.url, url: observed.url, text: action.text, observedAt }, diagnostics };
       }
-      await pause(200);
+      if (Date.now() >= receiptDeadlineAt) break;
+      await receiptChange(Math.min(200, receiptDeadlineAt - Date.now()));
     }
     return attention('RECEIPT_NOT_OBSERVED', '已点击一次，但未观察到新评论链接；请核验，禁止自动重发');
   } catch (error) {
+    const blocked = challenge(); if (blocked) return blocked;
     const field = (key: string, fallback: string, max: number) => {
       try { const value = error && typeof error === 'object' ? (error as Record<string, unknown>)[key] : undefined; return (typeof value === 'string' && value ? value : fallback).slice(0, max); }
       catch { return fallback; }
     };
-    return { ...attention('PAGE_OPERATION_FAILED', clicked ? '发送结果不确定，请核验，禁止自动重发' : '页面操作失败，未点击发送'),
+    return { ...attention(deadlineExceeded ? 'OPERATION_DEADLINE_EXCEEDED' : 'PAGE_OPERATION_FAILED', clicked ? '发送结果不确定，请核验，禁止自动重发' : deadlineExceeded ? '页面操作已到截止点，未点击发送' : '页面操作失败，未点击发送'),
       failure: { stage: 'page_operation', pageStage, occurredAt: new Date().toISOString(), ...(executionId ? { executionId } : {}),
         clickState: clicked ? 'invoked' : 'not_attempted',
         error: { name: field('name', 'Error', 120), message: field('message', typeof error === 'string' ? error.slice(0, 1000) || 'Unknown failure' : 'Unknown failure', 1000),

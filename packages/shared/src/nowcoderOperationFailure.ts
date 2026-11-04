@@ -1,4 +1,4 @@
-import type { NowcoderOperationFailure } from '@data-collector/shared';
+import type { NowcoderOperationFailure } from './nowcoderConversation.js';
 
 // Exceptions stay in the authenticated private operation journal, not in UI copy.
 // Remove credentials and URL queries before they cross the extension boundary.

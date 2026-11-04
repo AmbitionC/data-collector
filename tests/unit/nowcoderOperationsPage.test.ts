@@ -28,6 +28,77 @@ async function snapshot() {
 }
 
 describe('Nowcoder plugin page operations', () => {
+  it('ends receipt observation on the first wake after its wall-clock deadline, rather than waiting for every delayed poll', async () => {
+    vi.useFakeTimers();
+    const expected = await snapshot();
+    let clicks = 0, settled = false;
+    document.querySelector('button')!.addEventListener('click', () => { clicks++; });
+    const pending = runNowcoderOperationPage({ kind: 'publish', url, text: '先做一个项目', expected });
+    void pending.then(() => { settled = true; });
+    for (let i = 0; i < 40 && !clicks; i++) await vi.advanceTimersByTimeAsync(250);
+    expect(clicks).toBe(1);
+    vi.setSystemTime(Date.now() + 120_000); // The hidden tab did not run its timer callbacks.
+    await vi.advanceTimersByTimeAsync(250);
+    try {
+      expect(settled).toBe(true);
+      expect(await pending).toMatchObject({ code: 'RECEIPT_NOT_OBSERVED', submission: 'uncertain', diagnostics: { submitClickedAt: expect.any(String) } });
+      expect(clicks).toBe(1);
+    } finally { await vi.runAllTimersAsync(); }
+  });
+
+  it('observes a new receipt from a DOM mutation while polling timers are suspended', async () => {
+    vi.useFakeTimers();
+    const expected = await snapshot();
+    let clicks = 0, settled = false;
+    document.querySelector('button')!.addEventListener('click', () => { clicks++; });
+    const pending = runNowcoderOperationPage({ kind: 'publish', url, text: '先做一个项目', expected });
+    void pending.then(() => { settled = true; });
+    for (let i = 0; i < 40 && !clicks; i++) await vi.advanceTimersByTimeAsync(250);
+    expect(clicks).toBe(1);
+    document.body.insertAdjacentHTML('beforeend', comment(102, '先做一个项目'));
+    for (let i = 0; i < 10; i++) await Promise.resolve();
+    try {
+      expect(settled).toBe(true);
+      expect(await pending).toMatchObject({ kind: 'published', receipt: { url: 'https://www.nowcoder.com/discuss/comment/102' } });
+      expect(clicks).toBe(1);
+    } finally { await vi.runAllTimersAsync(); }
+  });
+
+  it('never clicks if execution expires during editor input, even when the page resumes later', async () => {
+    vi.useFakeTimers();
+    const expected = await snapshot(), deadlineAt = Date.now() + 60_000;
+    let clicks = 0;
+    document.querySelector('button')!.addEventListener('click', () => { clicks++; });
+    document.querySelector('#nc-e-textarea-1')!.addEventListener('beforeinput', () => { vi.setSystemTime(deadlineAt + 1); });
+    const pending = runNowcoderOperationPage({ kind: 'publish', url, text: '先做一个项目', expected }, undefined, deadlineAt);
+    await vi.runAllTimersAsync();
+    expect(await pending).toMatchObject({ code: 'OPERATION_DEADLINE_EXCEEDED', submission: 'not_attempted' });
+    expect(clicks).toBe(0);
+    expect((await pending).diagnostics).not.toHaveProperty('submitClickedAt');
+  });
+
+  it.each(['href', 'challenge_title'])('reacts to a late %s change without waiting for a suspended poll timer', async mode => {
+    vi.useFakeTimers();
+    const expected = await snapshot(), previousTitle = document.title;
+    let clicks = 0, settled = false;
+    document.querySelector('button')!.addEventListener('click', () => { clicks++; });
+    const pending = runNowcoderOperationPage({ kind: 'publish', url, text: '先做一个项目', expected });
+    void pending.then(() => { settled = true; });
+    for (let i = 0; i < 40 && !clicks; i++) await vi.advanceTimersByTimeAsync(250);
+    expect(clicks).toBe(1);
+    if (mode === 'href') {
+      document.body.insertAdjacentHTML('beforeend', comment(102, '先做一个项目').replace('/discuss/comment/102', '#pending'));
+      for (let i = 0; i < 10; i++) await Promise.resolve();
+      document.querySelector<HTMLAnchorElement>('a[href="#pending"]')!.href = '/discuss/comment/102';
+    } else document.title = '安全验证';
+    for (let i = 0; i < 10; i++) await Promise.resolve();
+    try {
+      expect(settled).toBe(true);
+      expect(await pending).toMatchObject(mode === 'href' ? { kind: 'published', receipt: { url: 'https://www.nowcoder.com/discuss/comment/102' } }
+        : { code: 'VERIFICATION_REQUIRED', submission: 'uncertain', diagnostics: { verificationObservedAt: expect.any(String) } });
+    } finally { await vi.runAllTimersAsync(); document.title = previousTitle; }
+  });
+
   it('rejects changed serialized context with an unknown total before writing or clicking', async () => {
     vi.useFakeTimers();
     document.querySelector('.comment-title')!.textContent = '全部评论';
