@@ -1,9 +1,9 @@
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { lstat, readFile, readdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { z } from 'zod';
 import {
-  APP_VERSION, DEFAULT_OUTREACH_POLICY, OUTREACH_READY_CHANNELS, OUTREACH_BARRIER_CODES, outreachChannelSchema, outreachIdSchema, outreachPolicySchema,
+  APP_VERSION, DEFAULT_OUTREACH_POLICY, outreachApprovalSchema, OUTREACH_READY_CHANNELS, OUTREACH_BARRIER_CODES, outreachChannelSchema, outreachIdSchema, outreachPolicySchema,
   outreachPostSchema, outreachReceiptSchema, outreachTiming, recheckOutreachPost,
   type OutreachAction, type OutreachChannel, type OutreachPolicy, type OutreachPost, type OutreachReceipt, type OutreachResult,
 } from '@data-collector/shared';
@@ -18,7 +18,8 @@ import { atomicWriteText } from '../library/writer.js';
  *   **整体暂停**、等用户核验，绝不自动重发；
  * - 登录失效 / 验证码 / 限制 → 整体暂停，原稿保留，等用户处理后 resume；
  * - 过期稿件（晚于 notAfter）写 expired 回执、不发；复核不过写 refused 回执、不发；
- * - 每次 tick 最多发一篇；两次发布间隔与每渠道 24 小时篇数有上限。
+ * - 每次 tick 最多发一篇；两次发布间隔与每渠道 24 小时篇数有上限；
+ * - **只发用户逐篇批准过的稿件**（outreach/approvals/<id>.json，内容哈希必须与当前稿件一致）。
  */
 
 const attemptSchema = z.object({
@@ -153,6 +154,7 @@ export class InvestOutreachService {
 
     const now = this.now();
     let wroteReceipt = false, published: OutreachTick | undefined;
+    const awaiting: string[] = [];
     for (const candidate of candidates) {
       const { post } = candidate;
       const timing = outreachTiming(post, now);
@@ -166,6 +168,8 @@ export class InvestOutreachService {
         await this.writeReceipt(post, 'refused', null, problems.join('；'));
         wroteReceipt = true; continue;
       }
+      const approval = await this.approval(candidate);
+      if (approval !== 'ok') { awaiting.push(`${post.id}（${approval}）`); continue; }
       if (published) continue;
       const wait = this.pacing(await this.state(), post.channel, now);
       if (wait) { published = { outcome: 'waiting', detail: wait, postId: post.id }; continue; }
@@ -177,7 +181,9 @@ export class InvestOutreachService {
       const pushed = await this.pushReceipts();
       if (!pushed.ok) return { outcome: 'attention', detail: `回执已写本机但推送失败：${pushed.reason}` };
     }
-    return published ?? { outcome: 'idle', detail: candidates.length ? '没有到发布时间的稿件' : '没有待发稿件' };
+    if (published) return published;
+    if (awaiting.length) return { outcome: 'waiting', detail: `等待人工批准：${awaiting.join('、').slice(0, 900)}` };
+    return { outcome: 'idle', detail: candidates.length ? '没有到发布时间的稿件' : '没有待发稿件' };
   }
 
   private pacing(state: OutreachState, channel: OutreachChannel, now: number): string | undefined {
@@ -250,6 +256,31 @@ export class InvestOutreachService {
       return { outcome: 'attention', detail: `${post.id} 多次未能发布，已放弃：${result.message}`, postId: post.id };
     }
     return { outcome: 'waiting', detail: `${post.id} 本轮未发布（${result.code}），下轮再试`, postId: post.id };
+  }
+
+  /** 稿件内容哈希：post.json 字节 + 按 images 顺序的「\n名字\n图片字节」。与 invest-model scripts/outreach/approve.py 同算法。 */
+  static async contentSha256(dir: string, post: OutreachPost): Promise<string> {
+    const hash = createHash('sha256');
+    hash.update(await readFile(join(dir, 'post.json')));
+    for (const name of post.images) {
+      hash.update(Buffer.from(`\n${name}\n`, 'utf8'));
+      hash.update(await readFile(join(dir, name)));
+    }
+    return hash.digest('hex');
+  }
+
+  /** 'ok' 或说明为什么还不能发。读不到、格式不对、哈希不符一律当作未批准。 */
+  private async approval(candidate: Candidate): Promise<string> {
+    const { post } = candidate;
+    let raw: string;
+    try { raw = await readFile(join(this.deps.repoPath, 'outreach', 'approvals', `${post.id}.json`), 'utf8'); }
+    catch { return '未批准'; }
+    const parsed = outreachApprovalSchema.safeParse((() => { try { return JSON.parse(raw); } catch { return null; } })());
+    if (!parsed.success || parsed.data.id !== post.id) return '批准记录格式不对';
+    let actual: string;
+    try { actual = await InvestOutreachService.contentSha256(candidate.dir, post); } catch { return '配图缺失'; }
+    if (actual !== parsed.data.contentSha256) return '批准后稿件被改过，需重新批准';
+    return 'ok';
   }
 
   /** 只看待发目录；blocked 里的稿件云端已标红，永不发布。 */

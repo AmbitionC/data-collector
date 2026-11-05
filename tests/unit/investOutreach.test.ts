@@ -22,14 +22,25 @@ function post(overrides: Record<string, unknown> = {}) {
   };
 }
 
+async function approve(repo: string, id: string) {
+  const dir = join(repo, 'outreach', 'outbox', id);
+  const parsed = outreachPostSchema.parse(JSON.parse(await readFile(join(dir, 'post.json'), 'utf8')));
+  await mkdir(join(repo, 'outreach', 'approvals'), { recursive: true });
+  await writeFile(join(repo, 'outreach', 'approvals', `${id}.json`), JSON.stringify({
+    schemaVersion: 1, id, approvedBy: 'owner', approvedAt: '2026-11-06T19:00:00+08:00',
+    contentSha256: await InvestOutreachService.contentSha256(dir, parsed),
+  }));
+}
+
 async function setup(posts: Record<string, unknown>[], execute?: (action: OutreachAction) => Promise<OutreachResult>,
-  options: { available?: boolean; now?: () => number } = {}) {
+  options: { available?: boolean; now?: () => number; approve?: boolean } = {}) {
   const repo = await dirs.create('outreach-repo-'), config = await dirs.create('outreach-config-');
   for (const p of posts) {
     const dir = join(repo, 'outreach', 'outbox', String(p.id));
     await mkdir(dir, { recursive: true });
     await writeFile(join(dir, 'post.json'), JSON.stringify(p));
     for (const img of p.images as string[]) await writeFile(join(dir, img), PNG);
+    if (options.approve ?? true) await approve(repo, String(p.id));
   }
   const git: string[][] = [], sent: OutreachAction[] = [];
   const service = new InvestOutreachService({
@@ -136,6 +147,33 @@ describe('引流发布服务', () => {
     now += 121_000;
     expect((await service.tick()).outcome).toBe('published');
     expect(sent).toHaveLength(2);
+  });
+
+  it('没有人工批准的稿件不发、不写回执；批准后才发', async () => {
+    const { service, sent, repo } = await setup([post()], undefined, { approve: false });
+    const tick = await service.tick();
+    expect(tick.outcome).toBe('waiting');
+    expect(tick.detail).toContain('等待人工批准');
+    expect(sent).toHaveLength(0);
+    await expect(readdir(join(repo, 'outreach', 'receipts'))).rejects.toThrow();
+    await approve(repo, '20261106-xueqiu-weekly');
+    expect((await service.tick()).outcome).toBe('published');
+    expect(sent).toHaveLength(1);
+  });
+
+  it('批准后稿件或配图被改过：哈希不符，不发', async () => {
+    const { service, sent, repo } = await setup([post()]);
+    await writeFile(join(repo, 'outreach', 'outbox', '20261106-xueqiu-weekly', 'fear.png'), Buffer.concat([PNG, Buffer.from([0])]));
+    const tick = await service.tick();
+    expect(tick.detail).toContain('需重新批准');
+    expect(sent).toHaveLength(0);
+  });
+
+  it('未批准的稿件过期照样写 expired', async () => {
+    const late = post({ id: '20261101-xueqiu-weekly', notBefore: '2026-11-01T20:00+08:00', notAfter: '2026-11-02T22:00+08:00' });
+    const { service, receipt } = await setup([late], undefined, { approve: false });
+    await service.tick();
+    expect((await receipt('20261101-xueqiu-weekly')).status).toBe('expired');
   });
 
   it('插件没连上就等，不写任何回执', async () => {

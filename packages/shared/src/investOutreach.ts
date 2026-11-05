@@ -66,6 +66,22 @@ export const outreachReceiptSchema = z.object({
 });
 export type OutreachReceipt = z.infer<typeof outreachReceiptSchema>;
 
+/**
+ * 人工批准（2026-11-05 用户要求：每篇发布前必须先给他审稿、他确认后才发）。
+ * `<invest-model>/outreach/approvals/<id>.json`，只在用户在对话里明确确认这篇之后写入。
+ * contentSha256 把批准绑死在审过的那一版：post.json 字节 + 按 images 顺序的「\n名字\n图片字节」。
+ * 没有批准、或稿件/配图在批准后被改过 → 不发（也不写回执，等批准或过期）。
+ */
+export const outreachApprovalSchema = z.object({
+  schemaVersion: z.literal(1),
+  id: outreachIdSchema,
+  approvedBy: z.string().min(1).max(100),
+  approvedAt: isoTime,
+  contentSha256: z.string().regex(/^[a-f0-9]{64}$/u),
+  note: z.string().max(1000).nullable().optional(),
+});
+export type OutreachApproval = z.infer<typeof outreachApprovalSchema>;
+
 const pngDataUrl = z.string().max(4_000_000).regex(/^data:image\/png;base64,[A-Za-z0-9+/=]+$/u);
 export const outreachImagePayloadSchema = z.object({ name: imageName, dataUrl: pngDataUrl }).strict();
 
