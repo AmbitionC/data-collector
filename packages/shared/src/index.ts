@@ -6,6 +6,7 @@ export * from './nowcoderConversation.js';
 export * from './nowcoderOperationFailure.js';
 export * from './nowcoderPublishing.js';
 export * from './nowcoderArticles.js';
+export * from './investOutreach.js';
 export * from './nowcoderReplyStyle.js';
 export * from './nowcoderDirected.js';
 export * from './plans.js';

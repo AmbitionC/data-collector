@@ -13,6 +13,7 @@ import {
   NOWCODER_OPERATIONS_CAPABILITY,
   NOWCODER_BROWSER_OPERATIONS_CAPABILITY,
   NOWCODER_ARTICLE_CAPABILITY,
+  INVEST_OUTREACH_CAPABILITY,
   COLLECTOR_CHANNEL_CLAIM_CAPABILITY,
   NOWCODER_ARTICLE_EDITOR_URL,
   articleImportSchema,
@@ -88,7 +89,10 @@ import {
   updateWorkspace,
   type UpdateOutcome,
 } from '../autoUpdate.js';
-import { runTool, terminateActiveToolProcesses } from '../git.js';
+import { runGit, runTool, terminateActiveToolProcesses } from '../git.js';
+import { OutreachTransport } from '../outreach/transport.js';
+import { InvestOutreachService } from '../outreach/service.js';
+import { homedir } from 'node:os';
 import {
   FeJourneyCollector,
   FeJourneyCandidateIndex,
@@ -312,6 +316,9 @@ export interface StartBridgeOptions extends ConfigOverrides {
   /** 常驻服务才开启两个固定采集计划；测试/嵌入启动不产生定时任务。 */
   enableCollectionPlanScheduler?: boolean;
   collectionPlanCheckIntervalMs?: number;
+  /** invest-model 本机工作区（引流稿件出箱）；缺省 ~/code/invest-model，不存在则不启用。 */
+  investOutreachRepoPath?: string;
+  outreachCheckIntervalMs?: number;
 }
 
 export interface BridgeHandle {
@@ -728,6 +735,20 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
     runtimeId: articleSocket ? extensionRuntime.get(articleSocket)?.runtimeId : undefined,
   }));
   const articlesActivity = new NowcoderArticlesActivity(articles, articleTransport, publishingControl);
+  const outreachTransport = new OutreachTransport(() => ({
+    socket: articleSocket,
+    ready: !closing && !updateCheckInFlight && !restartPending && articleReady && extensionMatchesArtifact(articleSocket)
+      && !articlesActivity.busy && !articleTransport.busy,
+    capabilities: articleSocket ? extensionRuntime.get(articleSocket)?.capabilities ?? [] : [],
+  }));
+  const outreach = new InvestOutreachService({
+    configDir: config.configDir,
+    repoPath: options.investOutreachRepoPath ?? join(homedir(), 'code', 'invest-model'),
+    git: runGit,
+    execute: (action, requestId) => outreachTransport.execute(action, requestId),
+    available: () => outreachTransport.isAvailable(),
+  });
+  const outreachBusy = (): boolean => outreach.busy || outreachTransport.busy;
   const articleRuntime = () => {
     const runtime = articleSocket ? extensionRuntime.get(articleSocket) : undefined;
     return { connected: articleReady && articleSocket?.readyState === WebSocket.OPEN, channel: 'articles',
@@ -787,7 +808,7 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
    */
   const maybeRestart = (): void => {
     if (closing || !restartPending) return;
-    if (operationsWorkflow.busy || operationsActivity.busy || operationsTransport.busy || articlesActivity.busy || articleTransport.busy) return;
+    if (operationsWorkflow.busy || operationsActivity.busy || operationsTransport.busy || articlesActivity.busy || articleTransport.busy || outreachBusy()) return;
     // 新 build-id 可能已经落盘，但打包子进程还在收尾。先记住交接，
     // 等 runUpdate 真正返回后再退出，避免杀掉尚未完成的更新。
     if (updateCheckInFlight) return;
@@ -821,7 +842,7 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
     const readerState = artifactReaders.snapshot();
     if (
       zsxqPersistingJobIds.size > 0
-      || operationsWorkflow.busy || operationsActivity.busy || operationsTransport.busy || articlesActivity.busy || articleTransport.busy
+      || operationsWorkflow.busy || operationsActivity.busy || operationsTransport.busy || articlesActivity.busy || articleTransport.busy || outreachBusy()
       || hasActiveZsxqAttempt()
       || shouldDeferArtifactUpdate(readerState, directedService?.hasActiveRun() ?? false)
     ) {
@@ -1547,6 +1568,11 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
         setImmediate(maybeRestart);
         return;
       }
+      if (message.type === 'outreach.result' && articleReady) {
+        outreachTransport.receive(socket, message.requestId, message.payload);
+        setImmediate(maybeRestart);
+        return;
+      }
       if (message.type === 'bridge.ping') {
         socket.send(JSON.stringify(envelope('bridge.pong', message.requestId, {})));
         return;
@@ -2054,7 +2080,7 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
       return sendJson(response, 200, {
         ok: true,
         version: APP_VERSION,
-        bridgeCapabilities: [NOWCODER_HOT_MATERIAL_CAPABILITY, NOWCODER_OPERATIONS_CAPABILITY, NOWCODER_BROWSER_OPERATIONS_CAPABILITY, NOWCODER_ARTICLE_CAPABILITY, COLLECTOR_CHANNEL_CLAIM_CAPABILITY],
+        bridgeCapabilities: [NOWCODER_HOT_MATERIAL_CAPABILITY, NOWCODER_OPERATIONS_CAPABILITY, NOWCODER_BROWSER_OPERATIONS_CAPABILITY, NOWCODER_ARTICLE_CAPABILITY, COLLECTOR_CHANNEL_CLAIM_CAPABILITY, INVEST_OUTREACH_CAPABILITY],
         collectorChannelOccupied: extensionSocket?.readyState === WebSocket.OPEN,
         nowcoderOperationsActive: operationsWorkflow.busy || operationsActivity.busy || operationsTransport.busy,
         nowcoderArticlesActive: articlesActivity.busy || articleTransport.busy,
@@ -2139,6 +2165,18 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
       if (request.method === 'POST') return sendJson(response, 200, { entry: await articles.import(articleImportSchema.parse(await readJson(request))) });
     }
     if (requestUrl.pathname === '/v1/nowcoder/articles/runtime' && request.method === 'GET') return sendJson(response, 200, articleRuntime());
+    if (requestUrl.pathname === '/v1/outreach' && request.method === 'GET') return sendJson(response, 200, await outreach.status());
+    if (requestUrl.pathname === '/v1/outreach/run' && request.method === 'POST') {
+      if (outreachBusy()) throw new HttpError(409, 'OUTREACH_BUSY', '引流发布正在执行');
+      return sendJson(response, 200, await outreach.tick());
+    }
+    if (requestUrl.pathname === '/v1/outreach/resume' && request.method === 'POST') {
+      z.object({ handled: z.literal(true) }).strict().parse(await readJson(request));
+      return sendJson(response, 200, await outreach.resume());
+    }
+    if (requestUrl.pathname === '/v1/outreach/policy' && request.method === 'PUT') {
+      return sendJson(response, 200, await outreach.configure(await readJson(request)));
+    }
     if (requestUrl.pathname === '/v1/nowcoder/articles/limits' && request.method === 'GET') return sendJson(response, 200, await publishingControl.articleStatus());
     if (requestUrl.pathname === '/v1/nowcoder/articles/account' && request.method === 'POST') {
       const input = z.object({ browser: browserFamilySchema, accountId: nowcoderAccountIdSchema }).strict().parse(await readJson(request));
@@ -2549,6 +2587,7 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
       if (authorization.channel === 'articles') {
         if (articleSocket && articleSocket.readyState === WebSocket.OPEN) {
           articleTransport.disconnect(articleSocket);
+          outreachTransport.disconnect(articleSocket);
           articleSocket.close(EXTENSION_REPLACED_CLOSE_CODE, EXTENSION_REPLACED_CLOSE_REASON);
         }
         articleSocket = socket;
@@ -2606,6 +2645,7 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
       socket.once('close', () => {
         operationsTransport.disconnect(socket);
         articleTransport.disconnect(socket);
+        outreachTransport.disconnect(socket);
         if (articleSocket === socket) { articleSocket = undefined; articleReady = false; setImmediate(maybeRestart); }
         if (extensionSocket === socket) {
           extensionSocket = undefined;
@@ -2650,6 +2690,18 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
     }, options.collectionPlanCheckIntervalMs ?? 15 * 60_000);
     collectionPlanTimer.unref?.();
   }
+  let outreachTimer: NodeJS.Timeout | undefined;
+  if (options.enableCollectionPlanScheduler) {
+    outreachTimer = setInterval(() => {
+      if (closing || updateCheckInFlight || restartPending || outreachBusy()) return;
+      void trackOperation(outreach.tick().then(result => {
+        if (result.outcome !== 'idle' && result.outcome !== 'disabled') console.warn(`[outreach] ${result.outcome}：${result.detail}`);
+      }).catch(error => {
+        console.warn(`[outreach] 检查失败：${error instanceof Error ? error.message : error}`);
+      }));
+    }, options.outreachCheckIntervalMs ?? 15 * 60_000);
+    outreachTimer.unref?.();
+  }
   const address = server.address() as AddressInfo;
   const url = `http://${config.host}:${address.port}`;
   let closePromise: Promise<void> | undefined;
@@ -2662,12 +2714,14 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
         closing = true;
         operationsTransport.disconnect();
         articleTransport.disconnect();
+        outreachTransport.disconnect();
         if (updateTimer) clearInterval(updateTimer);
         // 服务已经明确进入关闭流程，不再等待外部更新命令优雅退出；立即收掉整棵树，
         // 否则忽略 TERM 的 git/npm 孙进程会反过来卡住 Node 的自然退出。
         terminateActiveToolProcesses('SIGKILL');
         if (feJourneyTimer) clearInterval(feJourneyTimer);
         if (collectionPlanTimer) clearInterval(collectionPlanTimer);
+        if (outreachTimer) clearInterval(outreachTimer);
         for (const socket of websocketServer.clients) socket.close(1001, 'server shutdown');
         const websocketClosed = new Promise<void>(resolveClosed => {
           websocketServer.close(() => resolveClosed());

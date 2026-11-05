@@ -24,6 +24,8 @@ import { HotMaterialSession } from './hotMaterials.js';
 import { NowcoderOperationsRunner } from './nowcoderOperations.js';
 import { runNowcoderOperationPage, readNowcoderOperationProgress } from './nowcoderOperationsPage.js';
 import { NowcoderArticlesRunner } from './nowcoderArticles.js';
+import { InvestOutreachRunner } from './investOutreach.js';
+import { runInvestOutreachPage } from './investOutreachPage.js';
 import { runNowcoderArticlePage } from './nowcoderArticlesPage.js';
 import { collectedDocumentSchema, type CollectedDocument } from '@data-collector/shared';
 
@@ -212,6 +214,18 @@ const articlesRunner = new NowcoderArticlesRunner({
   },
 });
 connection.setArticleHandler(action => articlesRunner.run(action));
+const outreachRunner = new InvestOutreachRunner({
+  create: url => tabs.create({ url, active: false, purpose: 'nowcoder-operations' }),
+  get: async id => { const tab = await chrome.tabs.get(id); return tab.url ? { url: tab.url } : {}; },
+  close: id => ownedTabs.close(id),
+  handoff: (id, url) => ownedTabs.handoff(id, url, { preservePrevious: true }),
+  wait: id => waitForTabComplete(id),
+  execute: async (tabId, action) => {
+    const results = await chrome.scripting.executeScript({ target: { tabId }, func: runInvestOutreachPage, args: [action] });
+    return results[0]?.result;
+  },
+});
+connection.setOutreachHandler(action => outreachRunner.run(action));
 const hotMaterials = new HotMaterialSession({
   storage: sessionStorage,
   readList: () => runner.previewHotList(),
@@ -309,7 +323,7 @@ function updateSignal(values: Record<string, unknown>): UpdateSignal {
     buildFailed: update?.buildFailed === true,
     updateMessage: update?.message,
     directedRunActive: values.directedRunActive === true,
-    busy: connection.busy || hotMaterials.processing || operationsRunner.busy || articlesRunner.busy || isCollecting({
+    busy: connection.busy || hotMaterials.processing || operationsRunner.busy || articlesRunner.busy || outreachRunner.busy || isCollecting({
       batch: values.batch as { phase?: string; updatedAt?: number } | undefined,
       lastJobStatus: values.lastJobStatus as string | undefined,
       lastJobUpdatedAt: values.lastJobUpdatedAt as number | undefined,

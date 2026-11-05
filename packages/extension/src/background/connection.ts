@@ -2,6 +2,11 @@ import {
   APP_VERSION,
   NOWCODER_ARTICLE_CAPABILITY,
   COLLECTOR_CHANNEL_CLAIM_CAPABILITY,
+  INVEST_OUTREACH_CAPABILITY,
+  outreachActionSchema,
+  outreachResultSchema,
+  type OutreachAction,
+  type OutreachResult,
   articleActionSchema,
   articleResultSchema,
   connectionRoleSchema,
@@ -169,6 +174,8 @@ export class BridgeConnection {
   private readonly articleRequests = new Map<string, { signature: string; kind: ArticleAction['kind']; result: Promise<ArticleResult> }>();
   private activeOperations = 0;
   private activeArticles = 0;
+  private outreachHandler: ((action: OutreachAction) => Promise<OutreachResult>) | undefined;
+  private readonly outreachRequests = new Map<string, { signature: string; result: Promise<OutreachResult> }>();
   private connectionRole: ConnectionRole = 'collector';
   private roleChanging = false;
   private stopped = false;
@@ -210,6 +217,10 @@ export class BridgeConnection {
 
   setArticleHandler(handler: (action: ArticleAction) => Promise<ArticleResult>): void {
     this.articleHandler = handler;
+  }
+
+  setOutreachHandler(handler: (action: OutreachAction) => Promise<OutreachResult>): void {
+    this.outreachHandler = handler;
   }
 
   get busy(): boolean {
@@ -452,7 +463,8 @@ export class BridgeConnection {
         ...(runningBuildId ? { buildId: runningBuildId } : {}),
         runtimeId: this.runtimeId,
         ...(articleCompatible && this.dependencies.browserFamily ? { browserFamily: this.dependencies.browserFamily } : {}),
-        capabilities: (settings.role === 'articles' ? [NOWCODER_ARTICLE_CAPABILITY]
+        capabilities: (settings.role === 'articles'
+          ? [NOWCODER_ARTICLE_CAPABILITY, ...(this.bridgeCapabilities.has(INVEST_OUTREACH_CAPABILITY) && this.outreachHandler ? [INVEST_OUTREACH_CAPABILITY] : [])]
           : [NOWCODER_DETAIL_CAPABILITY, ZSXQ_COMPLETE_CONTENT_CAPABILITY, NOWCODER_BROWSER_OPERATIONS_CAPABILITY])
           .sort((left, right) => left.localeCompare(right)),
       });
@@ -1028,7 +1040,31 @@ export class BridgeConnection {
     }
     if (!isCurrent()) return;
 
-    if (this.connectionRole === 'articles' && message.type !== 'bridge.authorized' && message.type !== 'article.execute') return;
+    if (this.connectionRole === 'articles' && message.type !== 'bridge.authorized' && message.type !== 'article.execute' && message.type !== 'outreach.execute') return;
+    if (message.type === 'outreach.execute') {
+      if (this.connectionRole !== 'articles' || !this.outreachHandler) return;
+      const parsed = outreachActionSchema.safeParse(message.payload);
+      if (!parsed.success) return;
+      const action = parsed.data, signature = JSON.stringify(action);
+      let cached = this.outreachRequests.get(message.requestId);
+      if (cached && cached.signature !== signature) {
+        this.send('outreach.result', message.requestId, { kind: 'attention', code: 'OUTREACH_REQUEST_CONFLICT', message: '引流请求编号已绑定其他内容，请先核验原记录', submission: 'uncertain' });
+        return;
+      }
+      if (!cached) {
+        if (this.outreachRequests.size >= 100) this.outreachRequests.clear();
+        this.activeArticles += 1;
+        const result = Promise.resolve().then(() => this.outreachHandler!(action))
+          .then(rawResult => outreachResultSchema.parse(rawResult))
+          .catch((): OutreachResult => ({ kind: 'attention', code: 'OUTREACH_FAILED', message: '引流发布插件操作失败，请核验', submission: action.kind === 'outreach-publish' ? 'uncertain' : 'not_attempted' }))
+          .finally(() => { this.activeArticles -= 1; });
+        cached = { signature, result };
+        this.outreachRequests.set(message.requestId, cached);
+      }
+      const result = await cached.result;
+      if (isCurrent()) this.send('outreach.result', message.requestId, result);
+      return;
+    }
     if (message.type === 'article.execute') {
       if (this.connectionRole !== 'articles' || !this.articleHandler) return;
       const parsed = articleActionSchema.safeParse(message.payload);
