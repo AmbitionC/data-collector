@@ -1,8 +1,8 @@
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
   MISSING_GIT_PREFIX,
   explainMissingGit,
@@ -31,6 +31,81 @@ const LAUNCHD_PATH = '/usr/bin:/bin:/usr/sbin:/sbin';
 
 const XCRUN_ERROR =
   'xcrun: error: invalid active developer path (/Library/Developer/CommandLineTools)';
+
+async function withStalledTool(
+  name: string,
+  args: string[],
+  check: (outcome: Promise<Error | undefined>) => Promise<void>,
+  options: { timeoutMs?: number } = {},
+): Promise<void> {
+  const directory = await mkdtemp(join(tmpdir(), 'data-collector-update-deadline-'));
+  const executable = join(directory, name);
+  const ready = join(directory, 'ready');
+  await writeFile(executable, [
+    `#!${process.execPath}`,
+    "const { writeFileSync } = require('node:fs');",
+    `writeFileSync(${JSON.stringify(ready)}, String(process.pid));`,
+    'setInterval(() => {}, 1000);',
+  ].join('\n'), { mode: 0o755 });
+  vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+  const outcome = runProcessForTool(executable, args, directory, process.env, options).then(
+    () => undefined,
+    error => error as Error,
+  );
+  try {
+    let started = false;
+    for (let attempt = 0; attempt < 200 && !started; attempt += 1) {
+      try { await readFile(ready); started = true; } catch { await delay(10); }
+    }
+    expect(started).toBe(true);
+    await check(outcome);
+  } finally {
+    terminateActiveToolProcesses('SIGKILL');
+    await outcome;
+    vi.useRealTimers();
+    await rm(directory, { recursive: true, force: true });
+  }
+}
+
+describe.skipIf(process.platform === 'win32')('optional update fetch deadline', () => {
+  it.each([
+    ['fetch', 'origin', 'master'],
+    ['-c', 'http.version=HTTP/1.1', 'fetch', 'origin', 'master'],
+  ])('releases a stalled %j fetch after the short network budget', async (...args) => {
+    await withStalledTool('git', args, async outcome => {
+      await vi.advanceTimersByTimeAsync(15_000);
+      const result = await Promise.race([
+        outcome,
+        delay(2_000).then(() => new Error('fetch still holds the update gate')),
+      ]);
+      expect(result?.message).toBe('命令执行超时（15000ms）');
+    });
+  });
+
+  it.each([
+    ['git', ['merge', '--ff-only', 'origin/master']],
+    ['npm', ['run', 'package']],
+  ] as const)('keeps the longer mutation/build budget for %s', async (name, args) => {
+    await withStalledTool(name, [...args], async outcome => {
+      let finished = false;
+      void outcome.then(() => { finished = true; });
+      await vi.advanceTimersByTimeAsync(15_000);
+      await delay(20);
+      expect(finished).toBe(false);
+    });
+  });
+
+  it('honors an explicit process deadline instead of overriding it', async () => {
+    await withStalledTool('git', ['fetch', 'origin', 'master'], async outcome => {
+      let finished = false;
+      void outcome.then(() => { finished = true; });
+      await vi.advanceTimersByTimeAsync(15_000);
+      expect(finished).toBe(false);
+      await vi.advanceTimersByTimeAsync(45_000);
+      expect((await outcome)?.message).toBe('命令执行超时（60000ms）');
+    }, { timeoutMs: 60_000 });
+  });
+});
 
 /** 只有 Homebrew 那份能跑，系统壳报 xcrun——用户机器的真实状态。 */
 function probeWithOnlyHomebrew(seen: string[]): GitProbe {

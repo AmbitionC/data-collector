@@ -1,6 +1,6 @@
 import { execFile, spawn } from 'node:child_process';
 import { existsSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 
 /**
  * 让本机服务能跑起 git。
@@ -269,7 +269,12 @@ export function runProcessForTool(
   env: NodeJS.ProcessEnv,
   options: ToolProcessOptions = {},
 ): Promise<string> {
-  const timeoutMs = options.timeoutMs ?? 10 * 60_000;
+  const tool = basename(command).toLowerCase();
+  const updateFetch = (tool === 'git' || tool === 'git.exe')
+    && (args[0] === 'fetch'
+      || (args[0] === '-c' && args[1] === 'http.version=HTTP/1.1' && args[2] === 'fetch'));
+  // 可选的远程引用检查不能借用构建预算长期占住更新意图；变更和打包仍保留原预算。
+  const timeoutMs = options.timeoutMs ?? (updateFetch ? 15_000 : 10 * 60_000);
   const maxBufferBytes = options.maxBufferBytes ?? 8 * 1024 * 1024;
   const killGraceMs = options.killGraceMs ?? 2_000;
   const platform = options.platform ?? process.platform;
