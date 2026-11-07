@@ -64,7 +64,10 @@ export async function articleTick(state: ArticleState, deps: ArticleDeps, option
   }
   if (live && (!slot || state.slots[slot.id] || (state.retryAt && deps.now() < Date.parse(state.retryAt)))) return { outcome: 'not_due' };
   const [runtime, limits] = await Promise.all([deps.api('/runtime'), deps.api('/limits')]);
-  if (limits.verification) { if (!state.notified.verification) { state.notified.verification = new Date(deps.now()).toISOString(); await save(state); await deps.notify('牛客发文遇到验证，需要你处理').catch(() => undefined); } return { outcome: 'needs_user', detail: 'verification' }; }
+  if (limits.verification) { // Notify and log once; later minutes are silent waiting.
+    if (state.notified.verification) return { outcome: 'waiting', detail: 'verification' };
+    state.notified.verification = new Date(deps.now()).toISOString(); await save(state); await deps.notify('牛客发文遇到验证，需要你处理').catch(() => undefined); return { outcome: 'needs_user', detail: 'verification' }; }
+  delete state.notified.verification;
   if (!runtime.connected || runtime.active) return { outcome: 'waiting', detail: 'runtime' };
   if (live && limits.nextAllowedAt && Date.parse(limits.nextAllowedAt) > deps.now()) return { outcome: 'waiting', detail: 'interval' };
   if (live) { // Counted before any model call, so a failing slot can never spend tokens every minute.

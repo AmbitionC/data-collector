@@ -123,11 +123,11 @@ describe('need-gated lead experiment', () => {
   it('caps leads per day, by gap and by weekly share', () => {
     expect(leadBudgetClosed(seeded(5), NOW)).toBe('too-few-comments');
     expect(leadBudgetClosed(seeded(30), NOW)).toBeUndefined();
-    const today = seeded(30); today.leads = [{ at: new Date(NOW - 60_000).toISOString(), sourceId: 'x' }];
+    const today = seeded(60); today.leads = [1, 2, 3, 4, 5, 6].map(m => ({ at: new Date(NOW - m * 60_000).toISOString(), sourceId: `t${m}` }));
     expect(leadBudgetClosed(today, NOW)).toBe('daily-cap');
-    const late = seeded(30); late.leads = [{ at: new Date(NOW + 10 * 3_600_000).toISOString(), sourceId: 'x' }]; // 22:00, next check 01:00 the following day
-    expect(leadBudgetClosed(late, NOW + 13 * 3_600_000)).toBe('min-gap');
-    const share = seeded(20); share.leads = [1, 2, 3].map(d => ({ at: new Date(NOW - d * 86_400_000).toISOString(), sourceId: `s${d}` }));
+    const late = seeded(30); late.leads = [{ at: new Date(NOW + 10 * 3_600_000).toISOString(), sourceId: 'x' }]; // 22:00, next check 23:30 the same evening
+    expect(leadBudgetClosed(late, NOW + 11.5 * 3_600_000)).toBe('min-gap');
+    const share = seeded(20); share.leads = [1, 2, 3, 4].map(d => ({ at: new Date(NOW - d * 86_400_000).toISOString(), sourceId: `s${d}` }));
     expect(leadBudgetClosed(share, NOW)).toBe('weekly-share');
   });
   it('shadow mode publishes the link-free text and logs the lead', async () => {

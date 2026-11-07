@@ -24,8 +24,8 @@ export const COMMENT_QUERIES = ['Agent 面经', 'RAG 面经', '大模型应用 �
  */
 export type LeadMode = 'off' | 'shadow' | 'live';
 export const LEAD_POLICY = {
-  defaultMode: 'shadow' as LeadMode, domain: 'agent-journey.cn', maxPerDay: 1, minGapMs: 6 * 3_600_000,
-  maxShareOf7Days: 0.1, minPublished7Days: 10, minLength: 150, maxClauseShare: 0.2, tailWindow: 0.25,
+  defaultMode: 'shadow' as LeadMode, domain: 'agent-journey.cn', maxPerDay: 6, minGapMs: 2 * 3_600_000,
+  maxShareOf7Days: 0.2, minPublished7Days: 10, minLength: 150, maxClauseShare: 0.2, tailWindow: 0.25,
 } as const;
 const LEAD_NEED = /求(助|建议|指点|指导|推荐|路线|资料)|怎么学|学习路线|(转|入门|入行).{0,6}(agent|大模型|ai)|做(什么|啥)项目|项目.{0,8}(推荐|建议|怎么做|做什么|选)|有没有.{0,10}(资料|教程|路线|项目)|迷茫|(选|走).{0,6}方向/iu;
 const INTERVIEW_TITLE = /面经|一面|二面|三面|终面|hr面|凉经|笔试|oc|offer|八股/iu;
