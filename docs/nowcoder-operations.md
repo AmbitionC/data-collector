@@ -105,6 +105,10 @@ Bridge 的传输异常另存 `failure.stage: transport` 和脱敏原始原因，
 
 `nowcoder articles autopilot` 同样默认演练（生成、导入、账号预览，不发布），`--send` 才发布。只在 10:30–12:00、18:30–20:00 工作，每个时段最多一次，错过不补。来源是已发布面经全文，按公司轮换，用过的来源不再用。模型只生成正文，校验标题、模拟备考语境、虚构经历、推广词和排版；账号预览必须是 Chrome 544222414。结果不确定只记录该时段并通知，绝不重发。状态在 `nowcoder-autopilot/articles.json`。
 
+### 独立面经采集运行（v0.4.77）
+
+`scripts/nowcoder-collection-run.mjs` 每次启动一个全新的 `codex exec --ephemeral` 会话，只靠私有 `nowcoder-autopilot/collection.handoff.md` 交接，提示词在同目录 `collection.prompt.md`。硬时限 90 分钟，到时杀掉整个进程组；token 上限只在模型回合结束时才能统计到，运行中实际起作用的是时限。尚未安装定时任务，须用户确认。
+
 ## 回复策略模块
 
 v0.4.67 按用户明确纠正移除发文渠道的固定每日上限，`articles limits` 返回 `maxPer24Hours: null`，仍显示滚动24小时实际尝试数。发文按用户指定时间执行；“一天至少一次”是运营目标，不是上限，不把即时请求延期到凌晨。历史发送台账、两渠道共用的最小间隔、验证暂停、账号核验和单次回执保护继续生效。评论渠道的累计上限独立保留。
