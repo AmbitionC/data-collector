@@ -4,7 +4,7 @@ import { atomicWriteText } from '../library/writer.js';
 import { codexJson, macNotify, withLock } from '../operations/autopilot.js';
 
 /** Deterministic article runner: one slot, one attempt, its own state. The model only writes the draft. */
-export const ARTICLE_POLICY = { browser: 'chrome', accountId: '544222414', maxSourcesPerTick: 3, retryMs: 5 * 60_000,
+export const ARTICLE_POLICY = { browser: 'chrome', accountId: '544222414', maxSourcesPerTick: 3, maxTriesPerSlot: 3, retryMs: 15 * 60_000,
   slots: { am: { start: 10 * 60 + 30, end: 12 * 60 }, pm: { start: 18 * 60 + 30, end: 20 * 60 } } } as const;
 const CATALOG = 'https://fe-journey-main-ktantdfjcs.cn-hangzhou.fcapp.run/article/navList?module=interview';
 const SOURCE_ROOT = 'https://font-end-journey-resources.oss-cn-hangzhou.aliyuncs.com/interview';
@@ -12,8 +12,8 @@ export const COMPANIES = [['Bytedance', '字节'], ['Meituan', '美团'], ['Kuai
 
 export interface Leaf { key: string; company: string; label: string; url: string; updatedAt: string }
 export interface GeneratedArticle { decision: 'write' | 'skip'; title: string; body: string; notes: string }
-export interface ArticleState { schemaVersion: 1; slots: Record<string, { state: string; articleId?: string; url?: string }>; used: string[]; lastCompany: string | null; inflight: { key: string; id: string; slot: string } | null; notified: Record<string, string> }
-export const initialArticleState = (): ArticleState => ({ schemaVersion: 1, slots: {}, used: [], lastCompany: null, inflight: null, notified: {} });
+export interface ArticleState { schemaVersion: 1; slots: Record<string, { state: string; articleId?: string; url?: string }>; used: string[]; lastCompany: string | null; inflight: { key: string; id: string; slot: string } | null; notified: Record<string, string>; tries: Record<string, number>; retryAt: string | null }
+export const initialArticleState = (): ArticleState => ({ schemaVersion: 1, slots: {}, used: [], lastCompany: null, inflight: null, notified: {}, tries: {}, retryAt: null });
 export interface ArticleDeps {
   api(path: string, method?: string, body?: unknown): Promise<any>;
   catalog(): Promise<Leaf[]>; source(url: string): Promise<string>;
@@ -60,16 +60,21 @@ export async function articleTick(state: ArticleState, deps: ArticleDeps, option
     const { inflight } = state, attempt = (await deps.api(`/${inflight.id}`)).entry.publicationAttempts?.find((a: { key: string }) => a.key === inflight.key);
     state.slots[inflight.slot] = { state: attempt?.state ?? 'not-attempted', articleId: inflight.id }; state.inflight = null; await save(state);
   }
-  if (live && (!slot || state.slots[slot.id])) return { outcome: 'not_due' };
+  if (live && (!slot || state.slots[slot.id] || (state.retryAt && deps.now() < Date.parse(state.retryAt)))) return { outcome: 'not_due' };
   const [runtime, limits] = await Promise.all([deps.api('/runtime'), deps.api('/limits')]);
   if (limits.verification) { if (!state.notified.verification) { state.notified.verification = new Date(deps.now()).toISOString(); await save(state); await deps.notify('牛客发文遇到验证，需要你处理').catch(() => undefined); } return { outcome: 'needs_user', detail: 'verification' }; }
   if (!runtime.connected || runtime.active) return { outcome: 'waiting', detail: 'runtime' };
   if (live && limits.nextAllowedAt && Date.parse(limits.nextAllowedAt) > deps.now()) return { outcome: 'waiting', detail: 'interval' };
+  if (live) { // Counted before any model call, so a failing slot can never spend tokens every minute.
+    const tries = state.tries[slot!.id] ?? 0;
+    if (tries >= ARTICLE_POLICY.maxTriesPerSlot) { state.slots[slot!.id] = { state: 'gave_up' }; await save(state); await deps.notify('牛客发文本时段三次都没写成，已跳过').catch(() => undefined); return { outcome: 'gave_up' }; }
+    state.tries = { [slot!.id]: tries + 1 }; state.retryAt = new Date(deps.now() + ARTICLE_POLICY.retryMs).toISOString(); await save(state);
+  }
   const sources = pickSources(await deps.catalog(), state.used, state.lastCompany).slice(0, ARTICLE_POLICY.maxSourcesPerTick), skipped: Array<{ url: string; reason: string }> = [];
   for (const leaf of sources) {
     const generated = await deps.generate(`${RULES}\n\n<source>${(await deps.source(leaf.url)).slice(0, 12000)}</source>`), article = generated.value;
     const reason = article.decision === 'skip' ? 'model-skip' : articleRejection(article, leaf.company);
-    if (reason) { skipped.push({ url: leaf.url, reason }); continue; }
+    if (reason) { skipped.push({ url: leaf.url, reason }); state.used.push(leaf.url); await save(state); continue; }
     const { browser, accountId } = ARTICLE_POLICY;
     const saved = (await deps.api('', 'POST', { schemaVersion: 1, title: article.title, body: article.body, browser, accountId, provenance: 'compiled', sourceUrls: [leaf.url] })).entry;
     const preview = await deps.api(`/${saved.id}/preview`, 'POST', {}), entry = preview.entry ?? (await deps.api(`/${saved.id}`)).entry;
@@ -110,6 +115,6 @@ export async function runArticleAutopilot(input: { configDir: string; live: bool
     return articleTick(state, deps, { live: input.live, save: next => atomicWriteText(root, path, `${JSON.stringify(next)}\n`) })
       .catch(async (error: unknown) => ({ outcome: 'technical_failure', detail: error instanceof Error ? error.message : 'unknown' }));
   }) ?? { outcome: 'already_running' };
-  if (result.outcome !== 'not_due' && result.outcome !== 'already_running') await appendFile(join(root, `${name}.log.jsonl`), `${JSON.stringify({ at: new Date(deps.now()).toISOString(), ...result })}\n`, { mode: 0o600 });
+  if (!['not_due', 'already_running', 'waiting'].includes(String(result.outcome))) await appendFile(join(root, `${name}.log.jsonl`), `${JSON.stringify({ at: new Date(deps.now()).toISOString(), ...result })}\n`, { mode: 0o600 });
   return result;
 }

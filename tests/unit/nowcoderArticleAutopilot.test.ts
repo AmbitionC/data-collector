@@ -47,6 +47,13 @@ describe('article autopilot', () => {
     h.deps.api = async (p, m, b) => p.endsWith('/preview') ? { entry: { preview: { identity: { userId: '1' } } } } : api(p, m, b);
     expect((await run(initialArticleState(), h.deps)).detail).toBe('account-mismatch');
   });
+  it('caps model calls when a slot keeps failing', async () => {
+    let now = AM; const generate = vi.fn(async () => ({ value: { ...article, decision: 'skip' as const } })), { deps } = harness(); deps.now = () => now; deps.generate = generate; deps.catalog = async () => [{ ...leaf, url: `u${generate.mock.calls.length}` }];
+    const state = initialArticleState();
+    for (let minute = 0; minute < 80; minute++) { await run(state, deps); now += 60_000; }
+    expect(generate).toHaveBeenCalledTimes(3);
+    expect(state.slots['2026-11-07-am']?.state).toBe('gave_up');
+  });
   it('enforces windows, rotation and content rules', () => {
     expect(currentSlot(AM)?.id).toBe('2026-11-07-am');
     expect(currentSlot(Date.parse('2026-11-07T05:00:00.000Z'))).toBeNull();
