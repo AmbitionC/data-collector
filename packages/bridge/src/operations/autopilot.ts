@@ -246,11 +246,11 @@ const DRAFT_SCHEMA = { type: 'object', additionalProperties: false, required: ['
   properties: { decision: { type: 'string', enum: ['reply', 'skip'] }, primary: { type: 'string' }, alternative: { type: 'string' }, anchorIndex: { type: 'integer' }, notes: { type: 'string' } } };
 
 /** Fresh ephemeral Codex process: no user config, no MCP, no history, read-only sandbox, hard timeout. */
-export async function codexDraft(prompt: string, options: { binary?: string; model?: string; effort?: string; timeoutMs?: number } = {}): Promise<DraftResult> {
+export async function codexJson<T>(prompt: string, jsonSchema: object, options: { binary?: string; model?: string; effort?: string; timeoutMs?: number } = {}): Promise<{ value: T; usage?: unknown }> {
   const dir = await mkdtemp(join(tmpdir(), 'nowcoder-draft-'));
   try {
     const schema = join(dir, 'schema.json'), output = join(dir, 'out.json');
-    await writeFile(schema, JSON.stringify(DRAFT_SCHEMA));
+    await writeFile(schema, JSON.stringify(jsonSchema));
     const args = ['exec', '--ephemeral', '--ignore-user-config', '--ignore-rules', '--skip-git-repo-check', '--sandbox', 'read-only', '--cd', dir,
       '-m', options.model ?? process.env.NOWCODER_AUTOPILOT_MODEL ?? 'gpt-6.1-sol', '-c', `model_reasoning_effort="${options.effort ?? 'medium'}"`, '--output-schema', schema, '-o', output, '--json', '-'];
     const stdout = await new Promise<string>((resolve, reject) => {
@@ -263,9 +263,10 @@ export async function codexDraft(prompt: string, options: { binary?: string; mod
       child.stdin.end(prompt);
     });
     const usage = stdout.split('\n').filter(Boolean).map(line => { try { return JSON.parse(line) as { type?: string; usage?: unknown }; } catch { return {}; } }).find(event => event.type === 'turn.completed')?.usage;
-    return { draft: JSON.parse(await readFile(output, 'utf8')) as Draft, ...(usage ? { usage } : {}) };
+    return { value: JSON.parse(await readFile(output, 'utf8')) as T, ...(usage ? { usage } : {}) };
   } finally { await rm(dir, { recursive: true, force: true }); }
 }
+export const codexDraft = async (prompt: string): Promise<DraftResult> => { const { value, usage } = await codexJson<Draft>(prompt, DRAFT_SCHEMA); return { draft: value, ...(usage ? { usage } : {}) }; };
 
 export async function ownArticleUrls(configDir: string): Promise<Set<string>> {
   const root = join(configDir, 'nowcoder-articles'), urls = new Set<string>();
