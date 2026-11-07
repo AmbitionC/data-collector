@@ -1,8 +1,6 @@
-import { spawn } from 'node:child_process';
-import { appendFile, mkdir, mkdtemp, open, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { readFile, readdir } from 'node:fs/promises';
 import { join } from 'node:path';
-import { atomicWriteText } from '../library/writer.js';
+import { codexJson, macNotify, runJob } from '../autopilot/core.js';
 
 /**
  * Deterministic comment runner. One short-lived process per tick; the model is
@@ -12,8 +10,8 @@ import { atomicWriteText } from '../library/writer.js';
 export const COMMENT_POLICY = {
   windowStartHour: 8, lastDispatchMinute: 23 * 60 + 58, cadenceMs: 510_000, noOpportunityDelayMs: 15 * 60_000,
   failureBackoffMs: [5 * 60_000, 15 * 60_000, 30 * 60_000], failuresBeforeNotice: 6, maxCandidatesPerTick: 3,
-  maxDraftsPerDay: 80, maxCandidateAgeMs: 30 * 86_400_000, tickDeadlineMs: 8 * 60_000, staleLockMs: 15 * 60_000,
-  searchWaitMs: 60_000, prepareWaitMs: 120_000, publishWaitMs: 240_000, draftTimeoutMs: 180_000, similarityLimit: 0.6,
+  maxDraftsPerDay: 80, maxCandidateAgeMs: 30 * 86_400_000, tickDeadlineMs: 8 * 60_000, 
+  searchWaitMs: 60_000, prepareWaitMs: 120_000, publishWaitMs: 240_000, similarityLimit: 0.6,
 } as const;
 export const COMMENT_QUERIES = ['Agent 面经', 'RAG 面经', '大模型应用 面经', 'LangGraph', 'Agent 开发 一面', 'AI 应用开发 面经',
   'MCP 面试', '前端 面经', 'Agent 项目 怎么做', 'RAG 评测', '后端 面经 Agent', 'Agent 工具调用', 'AI 全栈', '校招 Agent', '大模型 实习 面经', 'Function Calling 面试'];
@@ -227,45 +225,9 @@ export async function tick(state: AutopilotState, deps: AutopilotDeps, options: 
   return finish({ outcome: 'no_opportunity', skipped }, deps.now() + (state.candidates.length ? 60_000 : COMMENT_POLICY.noOpportunityDelayMs));
 }
 
-/** One tick at most per machine. A dead or overdue holder cannot wedge the schedule. */
-export async function withLock<T>(path: string, now: number, work: () => Promise<T>): Promise<T | undefined> {
-  const acquire = async () => { const handle = await open(path, 'wx', 0o600); await handle.writeFile(String(process.pid)); await handle.close(); };
-  try { await acquire(); }
-  catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
-    const [holder, info] = await Promise.all([readFile(path, 'utf8').catch(() => ''), stat(path).catch(() => undefined)]);
-    let alive = false;
-    try { process.kill(Number(holder), 0); alive = Number(holder) > 0; } catch { alive = false; }
-    if (alive && info && now - info.mtimeMs < COMMENT_POLICY.staleLockMs) return undefined;
-    await rm(path, { force: true }); await acquire();
-  }
-  try { return await work(); } finally { await rm(path, { force: true }); }
-}
-
 const DRAFT_SCHEMA = { type: 'object', additionalProperties: false, required: ['decision', 'primary', 'alternative', 'anchorIndex', 'notes'],
   properties: { decision: { type: 'string', enum: ['reply', 'skip'] }, primary: { type: 'string' }, alternative: { type: 'string' }, anchorIndex: { type: 'integer' }, notes: { type: 'string' } } };
 
-/** Fresh ephemeral Codex process: no user config, no MCP, no history, read-only sandbox, hard timeout. */
-export async function codexJson<T>(prompt: string, jsonSchema: object, options: { binary?: string; model?: string; effort?: string; timeoutMs?: number } = {}): Promise<{ value: T; usage?: unknown }> {
-  const dir = await mkdtemp(join(tmpdir(), 'nowcoder-draft-'));
-  try {
-    const schema = join(dir, 'schema.json'), output = join(dir, 'out.json');
-    await writeFile(schema, JSON.stringify(jsonSchema));
-    const args = ['exec', '--ephemeral', '--ignore-user-config', '--ignore-rules', '--skip-git-repo-check', '--sandbox', 'read-only', '--cd', dir,
-      '-m', options.model ?? process.env.NOWCODER_AUTOPILOT_MODEL ?? 'gpt-6.1-sol', '-c', `model_reasoning_effort="${options.effort ?? 'medium'}"`, '--output-schema', schema, '-o', output, '--json', '-'];
-    const stdout = await new Promise<string>((resolve, reject) => {
-      const child = spawn(options.binary ?? process.env.NOWCODER_AUTOPILOT_CODEX ?? `${process.env.HOME}/.local/bin/codex`, args, { stdio: ['pipe', 'pipe', 'ignore'] });
-      let text = '';
-      const timer = setTimeout(() => { child.kill('SIGKILL'); reject(new Error('起草超时')); }, options.timeoutMs ?? COMMENT_POLICY.draftTimeoutMs);
-      child.stdout.on('data', chunk => { text += chunk; });
-      child.on('error', error => { clearTimeout(timer); reject(error); });
-      child.on('close', code => { clearTimeout(timer); if (code === 0) resolve(text); else reject(new Error(`起草进程退出 ${code}`)); });
-      child.stdin.end(prompt);
-    });
-    const usage = stdout.split('\n').filter(Boolean).map(line => { try { return JSON.parse(line) as { type?: string; usage?: unknown }; } catch { return {}; } }).find(event => event.type === 'turn.completed')?.usage;
-    return { value: JSON.parse(await readFile(output, 'utf8')) as T, ...(usage ? { usage } : {}) };
-  } finally { await rm(dir, { recursive: true, force: true }); }
-}
 export const codexDraft = async (prompt: string): Promise<DraftResult> => { const { value, usage } = await codexJson<Draft>(prompt, DRAFT_SCHEMA); return { draft: value, ...(usage ? { usage } : {}) }; };
 
 export async function ownArticleUrls(configDir: string): Promise<Set<string>> {
@@ -278,22 +240,9 @@ export async function ownArticleUrls(configDir: string): Promise<Set<string>> {
   return urls;
 }
 
-export const macNotify = (message: string) => new Promise<void>(resolve => {
-  const child = spawn('/usr/bin/osascript', ['-e', `display notification ${JSON.stringify(message)} with title "牛客评论运行器"`], { stdio: 'ignore' });
-  child.on('close', () => resolve()); child.on('error', () => resolve());
-});
-
 export async function runAutopilot(input: { configDir: string; live: boolean; deps: Omit<AutopilotDeps, 'ownPostUrls' | 'draft' | 'notify' | 'now' | 'sleep' | 'readPacket'> & Partial<AutopilotDeps> }): Promise<TickResult> {
-  const root = join(input.configDir, 'nowcoder-autopilot');
-  await mkdir(root, { recursive: true, mode: 0o700 });
-  const name = input.live ? 'comments' : 'comments.dry-run', path = join(root, `${name}.json`);
   const deps: AutopilotDeps = { ownPostUrls: () => ownArticleUrls(input.configDir), draft: prompt => codexDraft(prompt), notify: macNotify, now: Date.now,
     sleep: ms => new Promise(resolve => setTimeout(resolve, ms)), readPacket: async file => JSON.parse(await readFile(file, 'utf8')) as Record<string, unknown>, ...input.deps };
-  const result = await withLock(join(root, `${name}.lock`), deps.now(), async () => {
-    const state: AutopilotState = await readFile(path, 'utf8').then(text => ({ ...initialState(), ...JSON.parse(text) as AutopilotState }), (error: NodeJS.ErrnoException) => { if (error.code === 'ENOENT') return initialState(); throw error; });
-    return tick(state, deps, { live: input.live, saveState: next => atomicWriteText(root, path, `${JSON.stringify(next)}\n`) });
-  }) ?? { outcome: 'already_running' };
-  // launchd ticks every minute; idle ticks stay out of the log.
-  if (result.outcome !== 'not_due' && result.outcome !== 'already_running') await appendFile(join(root, `${name}.log.jsonl`), `${JSON.stringify({ at: iso(deps.now()), ...result })}\n`, { mode: 0o600 });
-  return result;
+  return runJob<AutopilotState, TickResult>({ configDir: input.configDir, name: input.live ? 'comments' : 'comments.dry-run', now: deps.now, initial: async () => initialState(),
+    tick: (state, save) => tick(state, deps, { live: input.live, saveState: save }), ...(input.live ? { watch: deps.notify } : {}) });
 }

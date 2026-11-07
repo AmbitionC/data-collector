@@ -4,6 +4,8 @@ import { operationDraftImportSchema, operationIdSchema, operationPublishSchema, 
 
 import { workflowKey, workflowRequestSchema } from './workflowStore.js';
 import { getRecoveryFailureAdvice, recoveryAdviceSchema, recoveryAttemptSchema } from './recovery.js';
+import { jobIssues, jobStatus } from '../autopilot/core.js';
+import { join } from 'node:path';
 import { runAutopilot, type Attempt, type Recovery, type RunSummary } from './autopilot.js';
 import { loadConfig } from '../config.js';
 
@@ -25,7 +27,7 @@ export async function runOperationsCli(args: string[], credentials: OperationsCr
     if (!key || !allowed.has(key) || !value || value.startsWith('--') || values.has(key)) throw new Error('牛客运营命令参数无效');
     values.set(key, value);
   }
-  const actionOptions: Record<string, string[]> = { list: [], add: ['--source'], brief: ['--id'], draft: ['--file'], search: ['--query', '--limit'], context: ['--id', '--pages'], publish: ['--id', '--revision', '--key'], verify: ['--id', '--key', '--pages'], workflow: ['--file', '--id', '--wait'], stats: ['--id'], limits: [], recovery: ['--attempt'], configure: ['--file'], resume: ['--id'], autopilot: [] };
+  const actionOptions: Record<string, string[]> = { list: [], add: ['--source'], brief: ['--id'], draft: ['--file'], search: ['--query', '--limit'], context: ['--id', '--pages'], publish: ['--id', '--revision', '--key'], verify: ['--id', '--key', '--pages'], workflow: ['--file', '--id', '--wait'], stats: ['--id'], limits: [], recovery: ['--attempt'], configure: ['--file'], resume: ['--id'], autopilot: [], 'autopilot-status': [] };
   if (!action || !actionOptions[action] || [...values.keys()].some(key => !['--port', '--config', '--library', ...actionOptions[action]!].includes(key)) || (send && action !== 'publish' && action !== 'workflow' && action !== 'autopilot') || (verificationCompleted && action !== 'resume')) throw new Error('牛客运营命令参数无效');
   if (action === 'resume' && !verificationCompleted) throw new Error('恢复需要确认已手动完成验证：--verification-completed');
   let loadedCredentials: OperationsCredentials | undefined;
@@ -47,7 +49,10 @@ export async function runOperationsCli(args: string[], credentials: OperationsCr
     return result;
   };
   let result: unknown;
-  if (action === 'autopilot') {
+  if (action === 'autopilot-status') {
+    const now = Date.now(), jobs = await jobStatus(join(loadConfig(values.has('--config') ? { configDir: values.get('--config')! } : {}).configDir, 'nowcoder-autopilot'), now);
+    result = { jobs, issues: jobIssues(jobs, now) };
+  } else if (action === 'autopilot') {
     // Without --send this is a rehearsal: it reads and drafts but never reaches a publish request.
     const watchdog = setTimeout(() => process.exit(3), 10 * 60_000); watchdog.unref();
     const summary = (raw: unknown) => raw as RunSummary;
@@ -138,7 +143,7 @@ export async function runOperationsCli(args: string[], credentials: OperationsCr
     result = await request(`/${draft.opportunityId}`, 'PUT', { revision: draft.revision, contextHash: draft.contextHash, drafts: draft.drafts,
       ...(draft.conversationHash ? { conversationHash: draft.conversationHash } : {}) });
   } else {
-    throw new Error('用法：nowcoder ops autopilot [--send] | recovery [--attempt N] | limits | configure --file /absolute/policy.private.json | resume --id VERIFICATION_ID --verification-completed | workflow --file /absolute/request.private.json [--send] [--wait 600000] | workflow --id RUN_ID [--wait 600000] | stats --id RUN_ID | search --query 关键词 [--limit 10] | add --source ID | context --id ID [--pages 1] | brief --id ID | draft --file /absolute/draft.private.json | publish --id ID --revision N --key KEY --send | verify --id ID --key KEY [--pages 1] | list');
+    throw new Error('用法：nowcoder ops autopilot [--send] | autopilot-status | recovery [--attempt N] | limits | configure --file /absolute/policy.private.json | resume --id VERIFICATION_ID --verification-completed | workflow --file /absolute/request.private.json [--send] [--wait 600000] | workflow --id RUN_ID [--wait 600000] | stats --id RUN_ID | search --query 关键词 [--limit 10] | add --source ID | context --id ID [--pages 1] | brief --id ID | draft --file /absolute/draft.private.json | publish --id ID --revision N --key KEY --send | verify --id ID --key KEY [--pages 1] | list');
   }
   if ((action === 'add' || action === 'draft') && result && typeof result === 'object' && 'entry' in result) {
     const { body, conversation, ...entry } = (result as { entry: Record<string, unknown> }).entry;

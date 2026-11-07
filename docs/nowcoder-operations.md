@@ -109,6 +109,8 @@ Bridge 的传输异常另存 `failure.stage: transport` 和脱敏原始原因，
 
 `scripts/nowcoder-collection-run.mjs` 每次启动一个全新的 `codex exec --ephemeral` 会话，只靠私有 `nowcoder-autopilot/collection.handoff.md` 交接，提示词在同目录 `collection.prompt.md`。硬时限 90 分钟，到时杀掉整个进程组；token 上限只在模型回合结束时才能统计到，运行中实际起作用的是时限。尚未安装定时任务，须用户确认。
 
+公共运行方式和新渠道接入见 [无人值守发布任务](autopilot.md)。
+
 ## 回复策略模块
 
 v0.4.67 按用户明确纠正移除发文渠道的固定每日上限，`articles limits` 返回 `maxPer24Hours: null`，仍显示滚动24小时实际尝试数。发文按用户指定时间执行；“一天至少一次”是运营目标，不是上限，不把即时请求延期到凌晨。历史发送台账、两渠道共用的最小间隔、验证暂停、账号核验和单次回执保护继续生效。评论渠道的累计上限独立保留。

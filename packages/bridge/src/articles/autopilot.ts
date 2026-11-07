@@ -1,7 +1,6 @@
-import { appendFile, mkdir, readFile, readdir } from 'node:fs/promises';
+import { readFile, readdir } from 'node:fs/promises';
 import { join } from 'node:path';
-import { atomicWriteText } from '../library/writer.js';
-import { codexJson, macNotify, withLock } from '../operations/autopilot.js';
+import { codexJson, macNotify, runJob, type JobResult } from '../autopilot/core.js';
 
 /** Deterministic article runner: one slot, one attempt, its own state. The model only writes the draft. */
 export const ARTICLE_POLICY = { browser: 'chrome', accountId: '544222414', maxSourcesPerTick: 3, maxTriesPerSlot: 3, retryMs: 15 * 60_000,
@@ -110,20 +109,12 @@ function leaves(nodes: any[], company: string, out: Leaf[] = []): Leaf[] {
 const text = async (url: string) => { const response = await fetch(url, { signal: AbortSignal.timeout(20_000) }); if (!response.ok) throw new Error(`读取失败 ${response.status}`); return response.text(); };
 
 export async function runArticleAutopilot(input: { configDir: string; live: boolean; api: ArticleDeps['api'] }): Promise<Record<string, unknown>> {
-  const root = join(input.configDir, 'nowcoder-autopilot'), name = input.live ? 'articles' : 'articles.dry-run', path = join(root, `${name}.json`);
-  await mkdir(root, { recursive: true, mode: 0o700 });
   const deps: ArticleDeps = { api: input.api, now: Date.now, sleep: ms => new Promise(resolve => setTimeout(resolve, ms)), notify: macNotify, source: text, generate: prompt => codexJson<GeneratedArticle>(prompt, SCHEMA, { effort: 'high', timeoutMs: 300_000 }),
     catalog: async () => (JSON.parse(await text(CATALOG)) as { data: { navData: any[] } }).data.navData.flatMap(company => leaves(company.children ?? [], company.key)) };
-  const result = await withLock(join(root, `${name}.lock`), deps.now(), async () => {
-    const state: ArticleState = await readFile(path, 'utf8').then(raw => ({ ...initialArticleState(), ...JSON.parse(raw) as ArticleState }), async (error: NodeJS.ErrnoException) => {
-      if (error.code !== 'ENOENT') throw error;
+  return runJob<ArticleState, JobResult>({ configDir: input.configDir, name: input.live ? 'articles' : 'articles.dry-run', now: deps.now, tick: async (state, save) => articleTick(state, deps, { live: input.live, save }) as Promise<JobResult>,
+    initial: async () => {
       const seeded = initialArticleState(), dir = join(input.configDir, 'nowcoder-articles');
       for (const file of await readdir(dir).catch(() => [] as string[])) if (file.endsWith('.json')) seeded.used.push(...((JSON.parse(await readFile(join(dir, file), 'utf8')) as { sourceUrls?: string[] }).sourceUrls ?? []));
       return seeded;
-    });
-    return articleTick(state, deps, { live: input.live, save: next => atomicWriteText(root, path, `${JSON.stringify(next)}\n`) })
-      .catch(async (error: unknown) => ({ outcome: 'technical_failure', detail: error instanceof Error ? error.message : 'unknown' }));
-  }) ?? { outcome: 'already_running' };
-  if (!['not_due', 'already_running', 'waiting'].includes(String(result.outcome))) await appendFile(join(root, `${name}.log.jsonl`), `${JSON.stringify({ at: new Date(deps.now()).toISOString(), ...result })}\n`, { mode: 0o600 });
-  return result;
+    } });
 }
