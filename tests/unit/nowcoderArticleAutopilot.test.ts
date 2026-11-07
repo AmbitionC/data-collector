@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { articleRejection, articleTick, currentSlot, initialArticleState, pickSources, type ArticleDeps, type GeneratedArticle, type Leaf } from '../../packages/bridge/src/articles/autopilot.js';
 
 const AM = Date.parse('2026-11-07T02:40:00.000Z'); // 10:40 Shanghai
-const body = `今晚按这场做一轮模拟，下面是备考题单。\n\n1. 队列不一致怎么定位？\n\n${'先画时间线，再看消息和状态。'.repeat(30)}`;
+const body = `今晚按这场做一轮模拟，下面是我的备考题单。\n\n1. 队列不一致怎么定位？\n\n${'先画时间线，再看消息和状态。'.repeat(30)}`;
 const article: GeneratedArticle = { decision: 'write', title: '腾讯 后台开发二面', body, notes: '' };
 const leaf: Leaf = { key: 'k', company: 'Tencent', label: 'l', url: 'https://x/k.md', updatedAt: '2026-11-01' };
 function harness(publication: Record<string, unknown> = { state: 'published', evidence: 'observed' }) {
@@ -51,6 +51,12 @@ describe('article autopilot', () => {
     expect((await run(state, h.deps)).outcome).toBe('not_due');
     expect(state.slots[id]?.state).toBe('uncertain');
   });
+  it('keeps the slot open when the plugin refuses before clicking', async () => {
+    const { deps } = harness({ state: 'rejected', message: 'x' }), state = initialArticleState();
+    expect((await run(state, deps)).outcome).toBe('rejected');
+    expect(state.slots['2026-11-07-am']).toBeUndefined();
+    expect(deps.notify).not.toHaveBeenCalled();
+  });
   it('rejects a different account', async () => {
     const h = harness(), api = h.deps.api;
     h.deps.api = async (p, m, b) => p.endsWith('/preview') ? { entry: { preview: { identity: { userId: '1' } } } } : api(p, m, b);
@@ -69,7 +75,7 @@ describe('article autopilot', () => {
     expect(pickSources([leaf, { ...leaf, company: 'Meituan', url: 'm' }], [], 'Bytedance')[0]?.company).toBe('Meituan');
     expect(articleRejection(article, 'Tencent')).toBeUndefined();
     expect(articleRejection({ ...article, title: '腾讯 二面｜整理版' }, 'Tencent')).toBe('title');
-    expect(articleRejection({ ...article, body: body.replace('模拟', '').replace('备考', '') }, 'Tencent')).toBe('missing-practice-context');
+    expect(articleRejection({ ...article, body: body.replace('备考题单', '题目') }, 'Tencent')).toBe('missing-practice-context');
     expect(articleRejection({ ...article, body: `${body}\n\n面试官问我这题` }, 'Tencent')).toBe('invented-experience');
     expect(articleRejection({ ...article, body: `${body}\n\nhttps://a.cn` }, 'Tencent')).toBe('promotion');
   });
