@@ -12,13 +12,13 @@ export const COMPANIES = [['Bytedance', '字节'], ['Meituan', '美团'], ['Kuai
 
 export interface Leaf { key: string; company: string; label: string; url: string; updatedAt: string }
 export interface GeneratedArticle { decision: 'write' | 'skip'; title: string; body: string; notes: string }
-export interface ArticleState { schemaVersion: 1; slots: Record<string, { state: string; articleId?: string; url?: string }>; used: string[]; lastCompany: string | null; inflight: { key: string; id: string; slot: string } | null; notified: Record<string, string>; tries: Record<string, number>; retryAt: string | null }
+export interface ArticleState { schemaVersion: 1; slots: Record<string, { state: string; articleId?: string; url?: string }>; used: string[]; lastCompany: string | null; inflight: { key: string; id: string; slot: string; source?: string } | null; notified: Record<string, string>; tries: Record<string, number>; retryAt: string | null }
 export const initialArticleState = (): ArticleState => ({ schemaVersion: 1, slots: {}, used: [], lastCompany: null, inflight: null, notified: {}, tries: {}, retryAt: null });
 export interface ArticleDeps {
   api(path: string, method?: string, body?: unknown): Promise<any>;
   catalog(): Promise<Leaf[]>; source(url: string): Promise<string>;
   generate(prompt: string): Promise<{ value: GeneratedArticle; usage?: unknown }>;
-  notify(message: string): Promise<void>; now(): number;
+  notify(message: string): Promise<void>; now(): number; sleep(ms: number): Promise<void>;
 }
 
 export function currentSlot(now: number): { day: string; slot: 'am' | 'pm'; id: string } | null {
@@ -58,7 +58,10 @@ export async function articleTick(state: ArticleState, deps: ArticleDeps, option
   const { live, save } = options, slot = currentSlot(deps.now());
   if (state.inflight) { // Only the journal decides a crashed attempt; the slot is never sent again.
     const { inflight } = state, attempt = (await deps.api(`/${inflight.id}`)).entry.publicationAttempts?.find((a: { key: string }) => a.key === inflight.key);
-    state.slots[inflight.slot] = { state: attempt?.state ?? 'not-attempted', articleId: inflight.id }; state.inflight = null; await save(state);
+    // No journal entry means the server refused before any send, so the slot stays open for a later try.
+    if (attempt) state.slots[inflight.slot] = { state: attempt.state, articleId: inflight.id };
+    else state.used = state.used.filter(url => url !== inflight.source);
+    state.inflight = null; await save(state);
   }
   if (live && (!slot || state.slots[slot.id] || (state.retryAt && deps.now() < Date.parse(state.retryAt)))) return { outcome: 'not_due' };
   const [runtime, limits] = await Promise.all([deps.api('/runtime'), deps.api('/limits')]);
@@ -81,7 +84,10 @@ export async function articleTick(state: ArticleState, deps: ArticleDeps, option
     if (entry.preview?.identity?.userId !== accountId) return { outcome: 'needs_user', detail: 'account-mismatch', articleId: saved.id };
     if (!live) return { outcome: 'dry_run_draft', articleId: saved.id, title: article.title, body: article.body, source: leaf.url, usage: generated.usage, skipped };
     const key = `article-auto-${slot!.id.replaceAll('-', '')}`;
-    state.inflight = { key, id: saved.id, slot: slot!.id }; state.used.push(leaf.url); state.lastCompany = leaf.company; await save(state);
+    // Comments share the minimum interval and may have sent while this draft was being written.
+    const wait = (await deps.api('/limits')).nextAllowedAt;
+    if (wait) await deps.sleep(Math.min(Math.max(Date.parse(wait) - deps.now() + 1000, 0), 180_000));
+    state.inflight = { key, id: saved.id, slot: slot!.id, source: leaf.url }; state.used.push(leaf.url); state.lastCompany = leaf.company; await save(state);
     const sent = await deps.api(`/${saved.id}/publish`, 'POST', { revision: entry.revision, contentHash: entry.contentHash, key, browser, accountId, send: true });
     const stateName = sent.publication?.state ?? 'unknown', ok = stateName === 'published' && sent.publication?.evidence === 'observed';
     state.slots[slot!.id] = { state: stateName, articleId: saved.id, ...(ok ? { url: sent.receipt?.url } : {}) }; state.inflight = null; await save(state);
@@ -103,7 +109,7 @@ const text = async (url: string) => { const response = await fetch(url, { signal
 export async function runArticleAutopilot(input: { configDir: string; live: boolean; api: ArticleDeps['api'] }): Promise<Record<string, unknown>> {
   const root = join(input.configDir, 'nowcoder-autopilot'), name = input.live ? 'articles' : 'articles.dry-run', path = join(root, `${name}.json`);
   await mkdir(root, { recursive: true, mode: 0o700 });
-  const deps: ArticleDeps = { api: input.api, now: Date.now, notify: macNotify, source: text, generate: prompt => codexJson<GeneratedArticle>(prompt, SCHEMA, { effort: 'high', timeoutMs: 300_000 }),
+  const deps: ArticleDeps = { api: input.api, now: Date.now, sleep: ms => new Promise(resolve => setTimeout(resolve, ms)), notify: macNotify, source: text, generate: prompt => codexJson<GeneratedArticle>(prompt, SCHEMA, { effort: 'high', timeoutMs: 300_000 }),
     catalog: async () => (JSON.parse(await text(CATALOG)) as { data: { navData: any[] } }).data.navData.flatMap(company => leaves(company.children ?? [], company.key)) };
   const result = await withLock(join(root, `${name}.lock`), deps.now(), async () => {
     const state: ArticleState = await readFile(path, 'utf8').then(raw => ({ ...initialArticleState(), ...JSON.parse(raw) as ArticleState }), async (error: NodeJS.ErrnoException) => {

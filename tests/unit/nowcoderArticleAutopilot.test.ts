@@ -7,7 +7,7 @@ const article: GeneratedArticle = { decision: 'write', title: '腾讯 后台开�
 const leaf: Leaf = { key: 'k', company: 'Tencent', label: 'l', url: 'https://x/k.md', updatedAt: '2026-11-01' };
 function harness(publication: Record<string, unknown> = { state: 'published', evidence: 'observed' }) {
   const calls: Array<[string, string | undefined]> = [];
-  const deps: ArticleDeps = { now: () => AM, notify: vi.fn(async () => undefined), catalog: async () => [leaf], source: async () => 'q', generate: async () => ({ value: article }),
+  const deps: ArticleDeps = { now: () => AM, sleep: async () => undefined, notify: vi.fn(async () => undefined), catalog: async () => [leaf], source: async () => 'q', generate: async () => ({ value: article }),
     api: async (path, method) => { calls.push([path, method]);
       if (path === '/runtime') return { connected: true, active: false };
       if (path === '/limits') return { verification: null, nextAllowedAt: null };
@@ -38,9 +38,18 @@ describe('article autopilot', () => {
   it('resolves a crashed attempt from the journal', async () => {
     const { deps, calls } = harness(), state = initialArticleState(), id = '2026-11-07-am';
     state.inflight = { key: 'key-000000000', id: 'article-1', slot: id };
+    state.retryAt = new Date(AM + 60_000).toISOString();
     expect((await run(state, deps)).outcome).toBe('not_due');
-    expect(state.slots[id]?.state).toBe('not-attempted');
+    expect(state.slots[id]).toBeUndefined();
+    expect(state.inflight).toBeNull();
     expect(calls.some(([p]) => p.endsWith('/publish'))).toBe(false);
+  });
+  it('closes the slot when the journal shows an attempt', async () => {
+    const h = harness(), api = h.deps.api, state = initialArticleState(), id = '2026-11-07-am';
+    h.deps.api = async (p, m, b) => p === '/article-1' ? { entry: { publicationAttempts: [{ key: 'key-000000000', state: 'uncertain' }] } } : api(p, m, b);
+    state.inflight = { key: 'key-000000000', id: 'article-1', slot: id };
+    expect((await run(state, h.deps)).outcome).toBe('not_due');
+    expect(state.slots[id]?.state).toBe('uncertain');
   });
   it('rejects a different account', async () => {
     const h = harness(), api = h.deps.api;
