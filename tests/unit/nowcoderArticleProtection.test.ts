@@ -10,11 +10,11 @@ it('fences publication synchronously when a challenge is observed while status I
   const control = new NowcoderPublishingControl(join(root, 'control.json'), async () => { await new Promise<void>(r => { release = r; }); return []; });
   const read = control.status(); await vi.waitFor(() => expect(release).toBeTypeOf('function'));
   const pause = control.pause({ requestId: randomUUID(), sourceUrl: 'https://www.nowcoder.com/discuss/123456' });
-  const immediate = control.verificationPending;
+  const immediate = control.verificationPendingFor('comment'), other = control.verificationPendingFor('article');
   release();
   // Subsequent reads should not stall this synthetic history source.
   const releaseQueued = setInterval(() => release(), 1);
-  try { await read; await pause; expect(immediate).toBe(true); } finally { clearInterval(releaseQueued); }
+  try { await read; await pause; expect(immediate).toBe(true); expect(other).toBe(false); } finally { clearInterval(releaseQueued); }
 });
 const base = Date.parse('2026-10-31T16:00:00.000Z');
 function event(at: number, article = false, extra: Record<string, unknown> = {}) {
@@ -52,7 +52,8 @@ it('restores an article challenge with its exact owner and prevents a stale or p
   const c = await setup([e]);
   const pause = (await c.control.status()).verification!;
   expect(pause).toMatchObject({ channel: 'article', articleId: e.opportunityId, browser: 'chrome', accountId: '544222414' });
-  await expect(c.control.assertCapacity()).rejects.toThrow(/验证/u);
+  c.at(base + 120000); // past the shared interval: only the captcha can block now
+  await expect(c.control.assertCapacity()).resolves.toBeUndefined();
   await expect(c.control.assertArticleCapacity()).rejects.toThrow(/验证/u);
   const newer = await c.control.pause({ channel: 'article', articleId: e.opportunityId, sourceUrl: e.sourceUrl, browser: 'chrome', accountId: '544222414', key: e.publication.key, requestId: randomUUID() } as any);
   await expect(c.control.clearVerification(pause.id)).rejects.toThrow(/变化/u);
@@ -61,4 +62,16 @@ it('restores an article challenge with its exact owner and prevents a stale or p
 it('detects lost article history after its request has been durably observed', async () => {
   const c = await setup([event(base - 3600000, true)]); await c.control.status();
   c.history.splice(0); await expect(c.control.assertCapacity()).rejects.toThrow(/历史|记录/u);
+});
+it('a comment captcha leaves articles running, and a second captcha on the other account pauses both', async () => {
+  const c = await setup([]);
+  const comment = await c.control.pause({ requestId: randomUUID(), sourceUrl: 'https://www.nowcoder.com/discuss/123456' });
+  await expect(c.control.assertCapacity()).rejects.toThrow(/验证/u);
+  await expect(c.control.assertArticleCapacity()).resolves.toBeUndefined();
+  expect(c.control.verificationPendingFor('article')).toBe(false);
+  const widened = await c.control.pause({ channel: 'article', articleId: 'article-abcdef123456', sourceUrl: 'https://www.nowcoder.com/creation/write/article', browser: 'chrome', accountId: '544222414', requestId: randomUUID() } as any);
+  expect(widened).toMatchObject({ id: comment.id, allChannels: true });
+  await expect(c.control.assertArticleCapacity()).rejects.toThrow(/验证/u);
+  await c.control.clearVerification(comment.id);
+  await expect(c.control.assertArticleCapacity()).resolves.toBeUndefined();
 });

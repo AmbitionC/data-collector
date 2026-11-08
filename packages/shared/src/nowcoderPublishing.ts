@@ -17,6 +17,8 @@ export const nowcoderVerificationPauseSchema = z.object({
   key: z.string().regex(/^[a-zA-Z0-9_-]{12,100}$/u).optional(),
   channel: z.enum(['comment', 'article']).optional(), articleId: articleIdSchema.optional(),
   browser: browserFamilySchema.optional(), accountId: nowcoderAccountIdSchema.optional(),
+  /** Set when the other channel also hit verification while this pause was pending. */
+  allChannels: z.literal(true).optional(),
 }).strict();
 export type NowcoderVerificationPause = z.infer<typeof nowcoderVerificationPauseSchema>;
 export const nowcoderPublishingStatusSchema = z.object({
@@ -34,3 +36,9 @@ export type ArticlePublishingStatus = z.infer<typeof articlePublishingStatusSche
 export const nowcoderVerificationResumeSchema = z.object({
   id: z.string().uuid(), verificationCompleted: z.literal(true),
 }).strict();
+
+export type NowcoderPublishingChannel = 'comment' | 'article';
+/** A captcha belongs to one account: it pauses only its own channel unless both were hit. */
+export function verificationBlocks(pause: NowcoderVerificationPause | null | undefined, channel: NowcoderPublishingChannel): boolean {
+  return !!pause && (pause.allChannels === true || (pause.channel ?? 'comment') === channel);
+}

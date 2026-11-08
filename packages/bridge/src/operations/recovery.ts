@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { nowcoderPublishingStatusSchema, nowcoderVerificationPauseSchema, type NowcoderPublishingStatus } from '@data-collector/shared';
+import { nowcoderPublishingStatusSchema, nowcoderVerificationPauseSchema, type NowcoderPublishingStatus, verificationBlocks } from '@data-collector/shared';
 
 export const recoveryAttemptSchema = z.coerce.number().int().min(0).max(100).default(0);
 export const recoveryAdviceSchema = z.object({
@@ -10,8 +10,8 @@ export const recoveryAdviceSchema = z.object({
   limits: nowcoderPublishingStatusSchema.optional(), verification: nowcoderVerificationPauseSchema.nullable().optional(),
 }).superRefine((value, ctx) => {
   if (value.status === 'ready'
-    ? !value.canPrepareNewWork || value.requiresUser || value.nextCheckAt !== null || !value.limits || value.limits.verification !== null
-      || value.limits.nextAllowedAt !== null || value.verification != null
+    ? !value.canPrepareNewWork || value.requiresUser || value.nextCheckAt !== null || !value.limits || verificationBlocks(value.limits.verification, 'comment')
+      || value.limits.nextAllowedAt !== null || verificationBlocks(value.verification, 'comment')
       || value.limits.usage.lastHour >= value.limits.policy.maxPerHour || value.limits.usage.last24Hours >= value.limits.policy.maxPer24Hours
     : value.canPrepareNewWork || value.nextCheckAt === null || value.requiresUser !== (value.status === 'needs_user')) {
     ctx.addIssue({ code: 'custom', message: '恢复状态与允许动作不一致' });
@@ -39,7 +39,7 @@ export function getNowcoderRecoveryAdvice(input: { now: number; attempt: number;
   const waiting = (code: string, message: string) => advice('waiting', code, message,
     new Date(now + backoff[Math.min(attempt, 2)]!).toISOString(), evidence);
   const handoff = (code: string, message: string) => advice('needs_user', code, message, new Date(now + backoff[2]).toISOString(), evidence);
-  if (publishing.verification) return handoff('VERIFICATION_REQUIRED', '保留原验证页并通知用户完成；定时任务继续只读等待，用户明确完成后按原记录核验');
+  if (verificationBlocks(publishing.verification, 'comment')) return handoff('VERIFICATION_REQUIRED', '保留原验证页并通知用户完成；定时任务继续只读等待，用户明确完成后按原记录核验');
   const next = publishing.nextAllowedAt === null ? null : Date.parse(publishing.nextAllowedAt);
   if ((next !== null && !Number.isFinite(next))
     || ((publishing.usage.lastHour >= publishing.policy.maxPerHour || publishing.usage.last24Hours >= publishing.policy.maxPer24Hours) && !(next !== null && next > now))) {

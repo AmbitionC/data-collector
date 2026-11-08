@@ -1,8 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { articlePublishSchema, browserFamilySchema, nowcoderAccountIdSchema, nowcoderVerificationResumeSchema,
-  publishingReferenceUrlSchema, NOWCODER_ARTICLE_EDITOR_URL, type ArticleAction, type ArticleResult, type BrowserFamily,
-} from '@data-collector/shared';
+  publishingReferenceUrlSchema, NOWCODER_ARTICLE_EDITOR_URL, type ArticleAction, type ArticleResult, type BrowserFamily, verificationBlocks } from '@data-collector/shared';
 import { HttpError } from '../server/http.js';
 import type { NowcoderPublishingControl } from '../operations/publishingControl.js';
 import type { NowcoderArticle, NowcoderArticlesStore } from './store.js';
@@ -15,7 +14,7 @@ export class NowcoderArticlesActivity {
   get busy(): boolean { return this.active > 0; }
   isPublishing(id: string): boolean { return this.publishing.has(id); }
   private async assertSiteAccess(): Promise<void> {
-    if ((await this.control.status()).verification) throw new HttpError(409, 'PUBLISH_VERIFICATION_PAUSED', '牛客验证尚待处理，两个渠道均已暂停；请完成原页验证后显式核验恢复');
+    if (verificationBlocks((await this.control.status()).verification, 'article')) throw new HttpError(409, 'PUBLISH_VERIFICATION_PAUSED', '牛客验证尚待处理，发文已暂停；请完成原页验证后显式核验恢复');
   }
   private reference(result: ArticleResult): string {
     if (result.kind === 'attention' && result.tabUrl) {
@@ -76,7 +75,7 @@ export class NowcoderArticlesActivity {
       try {
         // A context result on either channel can establish this latch while the
         // journal is being written. No await between final fence and dispatch.
-        result = this.control.verificationPending
+        result = this.control.verificationPendingFor('article')
           ? { kind: 'attention', code: 'PUBLISH_VERIFICATION_PAUSED', message: '发送前出现待处理验证，本条未点击发送', submission: 'not_attempted' }
           : await this.transport.execute({ kind: 'article-publish', title: started.entry.title, body: started.entry.body,
             expectedAccountId: started.entry.accountId, provenance: started.entry.provenance }, started.publication.requestId, started.entry.browser);

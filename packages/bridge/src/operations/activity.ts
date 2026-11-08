@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
-import { operationPublishSchema, nowcoderVerificationResumeSchema, sanitizeOperationError, type NowcoderOperationAction, type NowcoderOperationResult } from '@data-collector/shared';
+import { operationPublishSchema, nowcoderVerificationResumeSchema, sanitizeOperationError, type NowcoderOperationAction, type NowcoderOperationResult, verificationBlocks } from '@data-collector/shared';
 import { discoverNowcoderDirectedCandidates } from '../nowcoderDirected/discovery.js';
 import { HttpError } from '../server/http.js';
 import type { NowcoderOperationsStore } from './store.js';
@@ -19,7 +19,7 @@ export class NowcoderOperationsActivity {
   isPublishing(id: string): boolean { return this.publishing.has(id); }
 
   async assertSiteAccess(): Promise<void> {
-    if ((await this.publishingControl?.status())?.verification) throw new HttpError(409, 'PUBLISH_VERIFICATION_PAUSED', '牛客验证尚待处理，请完成原页验证后显式核验恢复');
+    if (verificationBlocks((await this.publishingControl?.status())?.verification, 'comment')) throw new HttpError(409, 'PUBLISH_VERIFICATION_PAUSED', '牛客验证尚待处理，请完成原页验证后显式核验恢复');
   }
 
   private async observeVerification(result: NowcoderOperationResult, sourceUrl: string, requestId: string, opportunityId?: string, key?: string): Promise<void> {
@@ -76,7 +76,7 @@ export class NowcoderOperationsActivity {
       try {
         // No await between the final in-memory pause fence and dispatch. A
         // concurrent context result may establish a pause while journaling.
-        result = this.publishingControl?.verificationPending
+        result = this.publishingControl?.verificationPendingFor('comment')
           ? { kind: 'attention', code: 'PUBLISH_VERIFICATION_PAUSED', message: '发送前已出现待处理验证，本条未点击发送；请完成原页验证后核验恢复', submission: 'not_attempted' }
           : await this.transport.execute({ kind: 'publish', url: started.entry.canonicalUrl,
             text: started.entry.drafts!.primary, expected: started.entry.conversation!.snapshot }, started.publication.requestId);

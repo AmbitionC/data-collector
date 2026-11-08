@@ -5,8 +5,7 @@ import { z } from 'zod';
 import {
   DEFAULT_NOWCODER_PUBLISHING_POLICY, nowcoderPublishingPolicySchema, nowcoderVerificationPauseSchema,
   operationIdSchema, articleIdSchema, publishingReferenceUrlSchema, operationPublicationSchema, browserFamilySchema, nowcoderAccountIdSchema,
-  type NowcoderPublishingPolicy, type NowcoderPublishingStatus, type NowcoderVerificationPause, type ArticlePublishingStatus,
-} from '@data-collector/shared';
+  type NowcoderPublishingPolicy, type NowcoderPublishingStatus, type NowcoderVerificationPause, type ArticlePublishingStatus, verificationBlocks, type NowcoderPublishingChannel } from '@data-collector/shared';
 import { atomicWriteText } from '../library/writer.js';
 import { HttpError } from '../server/http.js';
 
@@ -29,9 +28,12 @@ export class NowcoderPublishingControl {
   private pending: Promise<unknown> = Promise.resolve();
   private seenFile = false;
   private memoryPause: NowcoderVerificationPause | undefined;
-  private observedPauseEpoch = 0;
-  private clearedPauseEpoch = 0;
-  get verificationPending(): boolean { return this.memoryPause !== undefined || this.observedPauseEpoch > this.clearedPauseEpoch; }
+  private observedPauseEpoch = { comment: 0, article: 0 };
+  private clearedPauseEpoch = { comment: 0, article: 0 };
+  /** Synchronous fence before dispatch, per channel: the other account's captcha does not stop this one. */
+  verificationPendingFor(channel: NowcoderPublishingChannel): boolean {
+    return verificationBlocks(this.memoryPause, channel) || this.observedPauseEpoch[channel] > this.clearedPauseEpoch[channel];
+  }
   readonly now: () => number;
   private readonly sleep: (ms: number) => Promise<void>;
   constructor(private readonly path: string, private readonly history: () => Promise<PublishingHistoryEntry[]>,
@@ -113,19 +115,19 @@ export class NowcoderPublishingControl {
       const { state, events } = await this.read(), now = this.now(), earliest = this.availableAt(state, events, 1, 'article', now);
       return { schemaVersion: 1, policy: { minIntervalMs: state.policy.minIntervalMs, maxPer24Hours: null },
         usage: { last24Hours: events.filter(e => e.channel === 'article' && Date.parse(e.publication.createdAt) > now - DAY).length },
-        nextAllowedAt: earliest > now ? new Date(earliest).toISOString() : null, verification: state.verification };
+        nextAllowedAt: earliest > now ? new Date(earliest).toISOString() : null, verification: verificationBlocks(state.verification, 'article') ? state.verification : null };
     });
   }
   async assertArticleCapacity(): Promise<void> {
     const status = await this.articleStatus();
-    if (status.verification) throw new HttpError(409, 'PUBLISH_VERIFICATION_PAUSED', '牛客验证尚待处理，两个渠道均已暂停；请完成原页验证后核验恢复');
+    if (status.verification) throw new HttpError(409, 'PUBLISH_VERIFICATION_PAUSED', '发文账号的牛客验证尚待处理，发文已暂停；请完成原页验证后核验恢复');
     if (status.nextAllowedAt) throw new HttpError(429, 'PUBLISH_INTERVAL_REQUIRED', `两个渠道共用发布间隔，请在 ${status.nextAllowedAt} 后重试；未发送`);
   }
   async assertCapacity(count = 1, ignoreInterval = false): Promise<void> {
     if (!Number.isSafeInteger(count) || count < 1) throw new Error('发布数量无效');
     await this.serialize(async () => {
       const { state, events } = await this.read(), status = this.summarize(state, events);
-      if (status.verification) throw new HttpError(409, 'PUBLISH_VERIFICATION_PAUSED', '牛客验证尚待处理，已全局暂停发布；完成原页验证后显式核验恢复');
+      if (verificationBlocks(status.verification, 'comment')) throw new HttpError(409, 'PUBLISH_VERIFICATION_PAUSED', '评论账号的牛客验证尚待处理，评论已暂停；完成原页验证后显式核验恢复');
       if (count > status.policy.maxPerHour || count > status.policy.maxPer24Hours) throw new HttpError(429, 'PUBLISH_BUDGET_EXHAUSTED', '整批数量超过本机累计上限，请缩小清单并重新审阅；未发送');
       if (status.usage.lastHour + count > status.policy.maxPerHour || status.usage.last24Hours + count > status.policy.maxPer24Hours) {
         throw new HttpError(429, 'PUBLISH_BUDGET_EXHAUSTED', `本机累计上限内整批可用额度不足，按当前记录最早 ${new Date(this.availableAt(state, events, count)).toISOString()} 可容纳本清单；保留未执行条目，届时重新读取语境并审阅`);
@@ -152,15 +154,20 @@ export class NowcoderPublishingControl {
     const verification = nowcoderVerificationPauseSchema.parse({ ...input, id: randomUUID(), detectedAt: new Date(this.now()).toISOString() });
     // Observation fences both channels synchronously, before queued history or
     // filesystem reads. A failed persistence keeps this latch closed.
-    this.observedPauseEpoch++;
+    const channel = input.channel ?? 'comment';
+    this.observedPauseEpoch[channel]++;
     return this.serialize(async () => {
       const { state } = await this.read();
       if (state.verification?.requestId === input.requestId) return state.verification;
+      // The other account is already paused: keep its record and widen it, so neither channel resumes early.
+      if (state.verification && !verificationBlocks(state.verification, channel)) {
+        state.verification = { ...state.verification, allChannels: true }; this.memoryPause = state.verification; await this.write(state); return state.verification;
+      }
       this.memoryPause = verification; state.verification = verification; await this.write(state); return verification;
     });
   }
   async clearVerification(id: string): Promise<void> {
-    const epoch = this.observedPauseEpoch;
+    const epoch = { ...this.observedPauseEpoch };
     await this.serialize(async () => {
       const { state, events } = await this.read();
       if (state.verification?.id !== id) throw new HttpError(409, 'PUBLISH_VERIFICATION_CHANGED', '待处理验证已变化，请重读发布状态；未恢复');
@@ -169,7 +176,7 @@ export class NowcoderPublishingControl {
       const linkedRequests = owner && pause.key ? events.filter(e => e.opportunityId === owner && e.publication.key === pause.key).map(e => e.publication.requestId) : [];
       state.clearedRequestIds = [...new Set([...state.clearedRequestIds, pause.requestId, ...linkedRequests])];
       state.verification = null; await this.write(state); this.memoryPause = undefined;
-      this.clearedPauseEpoch = epoch;
+      for (const channel of ['comment', 'article'] as const) if (verificationBlocks(pause, channel)) this.clearedPauseEpoch[channel] = epoch[channel];
     });
   }
 }

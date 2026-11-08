@@ -84,13 +84,14 @@ it('wrong live account refuses preview without recording a send', async () => {
   expect((await c.request('POST', `${base}/${id}/preview`, {})).status).toBe(409);
   expect(JSON.parse(await readFile(join(c.configDir, 'nowcoder-articles', `${id}.json`), 'utf8')).publicationAttempts).toEqual([]);
 });
-it('article challenge pauses both channels and common explicit resume only reconciles the original article', async () => {
+it('article challenge pauses only articles and common explicit resume only reconciles the original article', async () => {
   const c = await setup('challenge'), base = '/v1/nowcoder/articles', common = '/v1/nowcoder/operations/publishing';
   const id = (await c.request('POST', base, draft)).body.entry.id, p = (await c.request('POST', `${base}/${id}/preview`, {})).body.entry;
   const input = { revision: p.revision, contentHash: p.contentHash, browser: 'chrome', accountId: draft.accountId, key: 'article-challenge-api-key', send: true };
   expect((await c.request('POST', `${base}/${id}/publish`, input)).body.publication.state).toBe('uncertain');
   const status = (await c.request('GET', common)).body; expect(status.verification).toMatchObject({ channel: 'article', articleId: id });
-  expect((await c.request('POST', '/v1/nowcoder/operations/search', { query: 'Agent' })).status).toBe(409);
+  // The Edge comment account is independent of the Chrome article account's captcha.
+  expect((await c.request('POST', '/v1/nowcoder/operations/search', { query: 'Agent' })).status).not.toBe(409);
   const resumed = await c.request('POST', `${common}/resume`, { id: status.verification.id, verificationCompleted: true });
   expect(resumed).toMatchObject({ status: 200, body: { status: { verification: null }, publication: { state: 'published' } } });
   expect(c.secondaryActions.filter(x => x === 'article-publish')).toHaveLength(1);

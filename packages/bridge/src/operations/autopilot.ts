@@ -8,7 +8,8 @@ import { codexJson, notifyUser, runJob } from '../autopilot/core.js';
  * scheduling, retries and bookkeeping live here, never in a model session.
  */
 export const COMMENT_POLICY = {
-  windowStartHour: 8, lastDispatchMinute: 23 * 60 + 58, cadenceMs: 510_000, noOpportunityDelayMs: 15 * 60_000,
+  // 2026-11-09 user: post around the clock, at least 15 minutes apart, 60 a day.
+  windowStartHour: 0, lastDispatchMinute: 24 * 60, cadenceMs: 15 * 60_000, noOpportunityDelayMs: 15 * 60_000,
   failureBackoffMs: [5 * 60_000, 15 * 60_000, 30 * 60_000], failuresBeforeNotice: 6, maxCandidatesPerTick: 3,
   maxDraftsPerDay: 80, maxCandidateAgeMs: 30 * 86_400_000, tickDeadlineMs: 8 * 60_000, 
   searchWaitMs: 60_000, prepareWaitMs: 120_000, publishWaitMs: 240_000, similarityLimit: 0.6,
