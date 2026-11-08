@@ -83,10 +83,32 @@ export async function sendEmail(configDir: string, subject: string, text: string
     });
   } finally { await rm(dir, { recursive: true, force: true }); }
 }
+/**
+ * Preferred route: the fe-journey-faas alert mailer (`POST /pos/notify/alert`), so no SMTP secret lives on this Mac.
+ * `<config>/notify-faas.json` = {"token":"<HEALTH_API_TOKEN>"}; the token goes to curl through stdin.
+ */
+export const FAAS_ALERT_URL = 'https://fe-journey-main-ktantdfjcs.cn-hangzhou.fcapp.run/pos/notify/alert';
+export async function sendFaasAlert(configDir: string, subject: string, text: string): Promise<'sent' | 'not_configured' | 'failed'> {
+  const settings = await readFile(join(configDir, 'notify-faas.json'), 'utf8').then(raw => JSON.parse(raw) as { token?: string; url?: string }, () => undefined);
+  if (!settings?.token) return 'not_configured';
+  const quote = (value: string) => `"${value.replace(/[\\"]/gu, ch => `\\${ch}`)}"`;
+  const config = [`url = ${quote(settings.url ?? FAAS_ALERT_URL)}`, `header = ${quote(`X-Health-Token: ${settings.token}`)}`, 'header = "Content-Type: application/json"',
+    `data = ${quote(JSON.stringify({ subject, text }))}`, 'silent', 'max-time = 30'].join('\n');
+  return new Promise(resolve => {
+    let out = '';
+    const child = spawn('/usr/bin/curl', ['-K', '-'], { stdio: ['pipe', 'pipe', 'ignore'] });
+    child.stdout.on('data', chunk => { out += chunk; });
+    child.on('close', () => { try { resolve((JSON.parse(out) as { data?: { status?: string } }).data?.status === 'sent' ? 'sent' : 'failed'); } catch { resolve('failed'); } });
+    child.on('error', () => resolve('failed'));
+    child.stdin.end(config);
+  });
+}
 /** Blockers that need the user: desktop notification plus email when configured. Every caller already dedupes per event. */
 export const notifyUser = (configDir: string) => async (message: string): Promise<void> => {
   await macNotify(message);
-  const outcome = await sendEmail(configDir, `牛客运营需要你处理：${message.slice(0, 40)}`, `${message}\n\n时间：${new Date().toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' })}\n状态：node packages/bridge/dist/cli.js nowcoder ops autopilot-status`);
+  const subject = `牛客运营需要你处理：${message.slice(0, 40)}`, body = `${message}\n\n时间：${new Date().toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' })}\n状态：node packages/bridge/dist/cli.js nowcoder ops autopilot-status`;
+  const viaFaas = await sendFaasAlert(configDir, subject, body);
+  const outcome = viaFaas === 'not_configured' ? await sendEmail(configDir, subject, body) : `faas:${viaFaas}`;
   await appendFile(join(configDir, 'nowcoder-autopilot', 'notify.log.jsonl'), `${JSON.stringify({ at: new Date().toISOString(), message, email: outcome })}\n`, { mode: 0o600 }).catch(() => undefined);
 };
 

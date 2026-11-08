@@ -24,4 +24,4 @@
 
 ## 阻塞提醒
 
-需要用户处理的阻塞（验证码、风控、授权、登录、连续失败、结果不确定）会发 Mac 通知，并在配置了 `<config>/notify-email.json` 时发邮件，每个事件只发一次，记录在 `nowcoder-autopilot/notify.log.jsonl`。用户自己运行 `scripts/setup-email-alerts.sh` 填写 SMTP（Gmail 需应用专用密码）。面经采集会话把这类阻塞写成交接文件中以「需要用户：」开头的一行，运行器据此提醒。
+需要用户处理的阻塞（验证码、风控、授权、登录、连续失败、结果不确定）会发 Mac 通知并发邮件：优先走 fe-journey-faas 的 `POST /pos/notify/alert`（运维告警发信，收件人为 faas 的 PAY_NOTIFY_EMAIL，配置 `<config>/notify-faas.json`），没配时才用 `<config>/notify-email.json` 的 SMTP，每个事件只发一次，记录在 `nowcoder-autopilot/notify.log.jsonl`。用户自己运行 `scripts/setup-email-alerts.sh` 填入 HEALTH_API_TOKEN。面经采集会话把这类阻塞写成交接文件中以「需要用户：」开头的一行，运行器据此提醒。
