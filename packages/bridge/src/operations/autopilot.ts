@@ -9,7 +9,7 @@ import { codexJson, notifyUser, runJob } from '../autopilot/core.js';
  */
 export const COMMENT_POLICY = {
   // 2026-11-09 user: post around the clock, at least 15 minutes apart, 60 a day.
-  windowStartHour: 0, lastDispatchMinute: 24 * 60, cadenceMs: 15 * 60_000, noOpportunityDelayMs: 15 * 60_000,
+  windowStartHour: 0, lastDispatchMinute: 24 * 60, cadenceMs: 15 * 60_000, captchaProbeAfterMs: 90 * 60_000, captchaProbeSpacingMs: 6 * 3_600_000, noOpportunityDelayMs: 15 * 60_000,
   failureBackoffMs: [5 * 60_000, 15 * 60_000, 30 * 60_000], failuresBeforeNotice: 6, maxCandidatesPerTick: 3,
   maxDraftsPerDay: 80, maxCandidateAgeMs: 30 * 86_400_000, tickDeadlineMs: 8 * 60_000, 
   searchWaitMs: 60_000, prepareWaitMs: 120_000, publishWaitMs: 240_000, similarityLimit: 0.6,
@@ -45,13 +45,13 @@ export interface RecentComment { text: string; at: string }
 export interface AutopilotState {
   schemaVersion: 1; nextAt: string | null; failures: number; recoveryAttempt: number; queryIndex: number; candidates: Candidate[];
   excluded: Record<string, string>; recent: RecentComment[]; lastAttemptAt: string | null; inflight: Inflight | null;
-  notified: Record<string, string>; drafts: { day: string; count: number };
+  notified: Record<string, string>; drafts: { day: string; count: number }; probe?: { pauseId: string; at: string; result: string };
   /** Live lead comments (with the domain) and all published timestamps, both trimmed to 7 days. */
   leads: LeadRecord[]; published: string[];
 }
 export const initialState = (): AutopilotState => ({ schemaVersion: 1, nextAt: null, failures: 0, recoveryAttempt: 0, queryIndex: 0, candidates: [], excluded: {}, recent: [], lastAttemptAt: null, inflight: null, notified: {}, drafts: { day: '', count: 0 }, leads: [], published: [] });
 
-export interface Recovery { status: 'ready' | 'waiting' | 'needs_user'; code: string; message: string; nextCheckAt: string | null }
+export interface Recovery { status: 'ready' | 'waiting' | 'needs_user'; code: string; message: string; nextCheckAt: string | null; verification?: { id: string; detectedAt: string } | null }
 export interface RunSummary { runId: string; status: string; message?: string; resultPath: string }
 export interface Attempt { key: string; state: string; replyUrl?: string }
 export interface Packet {
@@ -64,6 +64,8 @@ export interface Draft { decision: 'reply' | 'skip'; primary: string; alternativ
 export interface DraftResult { draft: Draft; usage?: unknown }
 export interface AutopilotDeps {
   recovery(attempt: number): Promise<Recovery>;
+  /** Read-only recheck of the original captcha page; clears the pause only when the page no longer asks. */
+  probeVerification(id: string): Promise<'cleared' | 'still_required'>;
   startWorkflow(request: Record<string, unknown>, send: boolean): Promise<RunSummary>;
   getWorkflow(runId: string): Promise<RunSummary>;
   attempts(opportunityId: string): Promise<Attempt[]>;
@@ -207,6 +209,17 @@ export async function tick(state: AutopilotState, deps: AutopilotDeps, options: 
   let recovery: Recovery;
   try { recovery = await deps.recovery(state.recoveryAttempt); }
   catch (error) { return technicalFailure(error instanceof Error ? error.message : '恢复状态读取失败'); }
+  // 2026-11-09 user: after a captcha, wait a while and try once more on another post; only a page that
+  // no longer asks clears the pause. One probe per captcha, and none if the last probe was recent.
+  const pause = recovery.code === 'VERIFICATION_REQUIRED' ? recovery.verification : undefined;
+  if (pause && deps.now() - Date.parse(pause.detectedAt) >= COMMENT_POLICY.captchaProbeAfterMs && state.probe?.pauseId !== pause.id
+    && (!state.probe || deps.now() - Date.parse(state.probe.at) >= COMMENT_POLICY.captchaProbeSpacingMs)) {
+    const result = await deps.probeVerification(pause.id).catch(() => 'still_required' as const);
+    state.probe = { pauseId: pause.id, at: iso(deps.now()), result };
+    await deps.notify(result === 'cleared' ? '牛客验证码已自行消失，评论自动恢复，接下来换个帖子发' : '牛客验证码仍在，评论继续暂停，需要你在 Edge 完成验证').catch(() => undefined);
+    if (result === 'cleared') return finish({ outcome: 'captcha_probe_cleared' }, deps.now() + 60_000);
+    return finish({ outcome: 'needs_user', detail: 'captcha_probe_still_required' }, deps.now() + 30 * 60_000);
+  }
   if (recovery.status !== 'ready') {
     const next = recovery.nextCheckAt ? Date.parse(recovery.nextCheckAt) : deps.now() + 30 * 60_000;
     if (recovery.code !== 'PUBLISH_WAIT') state.recoveryAttempt = Math.min(state.recoveryAttempt + 1, 100);

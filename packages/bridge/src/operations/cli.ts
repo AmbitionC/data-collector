@@ -58,6 +58,12 @@ export async function runOperationsCli(args: string[], credentials: OperationsCr
     const summary = (raw: unknown) => raw as RunSummary;
     result = await runAutopilot({ configDir: loadConfig(values.has('--config') ? { configDir: values.get('--config')! } : {}).configDir, live: send, deps: {
       recovery: async attempt => recoveryAdviceSchema.parse(await request(`/recovery?attempt=${attempt}`, 'GET', undefined, 5000)) as Recovery,
+      probeVerification: async id => {
+        try { await request('/publishing/resume', 'POST', nowcoderVerificationResumeSchema.parse({ id, verificationCompleted: true }), 180_000); }
+        catch (error) { if (error instanceof OperationsRequestError) return 'still_required'; throw error; }
+        // Trust only the stored state afterwards, not the response shape.
+        return ((await request('/publishing')) as { verification: unknown }).verification === null ? 'cleared' : 'still_required';
+      },
       startWorkflow: async (raw, live) => summary(await request('/workflow', 'POST', { ...workflowRequestSchema.parse(raw), ...(live ? { send: true } : {}) })),
       getWorkflow: async id => summary(await request(`/workflow/${workflowKey.parse(id)}`, 'GET', undefined, 10_000)),
       attempts: async id => ((await request(`/${operationIdSchema.parse(id)}`, 'GET', undefined, 10_000)) as unknown as { entry: { publicationAttempts?: Attempt[] } }).entry.publicationAttempts ?? [],

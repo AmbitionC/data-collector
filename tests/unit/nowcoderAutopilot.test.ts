@@ -12,6 +12,7 @@ function harness(over: Partial<AutopilotDeps> & { attempt?: string } = {}) {
   const started: Array<{ request: Record<string, unknown>; send: boolean }> = [];
   const deps: AutopilotDeps = {
     recovery: async () => ({ status: 'ready', code: 'READY', message: '', nextCheckAt: null }),
+    probeVerification: async () => 'still_required' as const,
     startWorkflow: async (request, send) => { started.push({ request, send }); return { runId: 'run', status: 'completed', resultPath: String(request.kind) }; },
     getWorkflow: async () => ({ runId: 'run', status: 'completed', resultPath: '' }),
     attempts: async () => { const key = (started.at(-1)?.request.items as Array<{ key: string }> | undefined)?.[0]?.key ?? 'k'; return [{ key, state: over.attempt ?? 'published', replyUrl: 'https://www.nowcoder.com/discuss/comment/1' }]; },
@@ -56,6 +57,22 @@ describe('comment autopilot', () => {
     await run(state, deps); state.nextAt = null; await run(state, deps);
     expect(deps.notify).toHaveBeenCalledTimes(1);
     expect(draft).not.toHaveBeenCalled();
+  });
+  it('probes a captcha once after the cooldown and resumes when it is gone', async () => {
+    const pause = { id: 'p1', detectedAt: new Date(NOW - 2 * 3_600_000).toISOString() }, probe = vi.fn(async () => 'cleared' as const);
+    const { deps } = harness({ probeVerification: probe, recovery: async () => ({ status: 'needs_user', code: 'VERIFICATION_REQUIRED', message: 'm', nextCheckAt: null, verification: pause }) }), state = initialState();
+    expect((await run(state, deps)).outcome).toBe('captcha_probe_cleared');
+    state.nextAt = null; await run(state, deps);
+    expect(probe).toHaveBeenCalledTimes(1);
+  });
+  it('does not probe a fresh captcha or a second one soon after', async () => {
+    const probe = vi.fn(async () => 'cleared' as const), state = initialState();
+    const fresh = harness({ probeVerification: probe, recovery: async () => ({ status: 'needs_user', code: 'VERIFICATION_REQUIRED', message: 'm', nextCheckAt: null, verification: { id: 'p2', detectedAt: new Date(NOW - 10 * 60_000).toISOString() } }) });
+    expect((await run(state, fresh.deps)).outcome).toBe('needs_user');
+    state.probe = { pauseId: 'p1', at: new Date(NOW - 3_600_000).toISOString(), result: 'cleared' }; state.nextAt = null;
+    const second = harness({ probeVerification: probe, recovery: async () => ({ status: 'needs_user', code: 'VERIFICATION_REQUIRED', message: 'm', nextCheckAt: null, verification: { id: 'p3', detectedAt: new Date(NOW - 3 * 3_600_000).toISOString() } }) });
+    expect((await run(state, second.deps)).outcome).toBe('needs_user');
+    expect(probe).not.toHaveBeenCalled();
   });
   it('backs off on technical failure and keeps the candidate', async () => {
     const { deps } = harness({ draft: async () => { throw new Error('boom'); } }), state = initialState();
