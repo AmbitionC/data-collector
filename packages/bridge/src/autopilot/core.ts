@@ -54,6 +54,42 @@ export const macNotify = (message: string) => new Promise<void>(resolve => {
   child.on('close', () => resolve()); child.on('error', () => resolve());
 });
 
+/**
+ * Email settings the user fills in themselves (`<config>/notify-email.json`, mode 0600):
+ * {"smtpUrl":"smtps://smtp.gmail.com:465","user":"...","password":"<app password>","from":"...","to":"..."}.
+ * The password goes to curl through stdin, never through process arguments.
+ */
+export interface EmailSettings { smtpUrl: string; user: string; password: string; from: string; to: string }
+export function curlEmailConfig(settings: EmailSettings, bodyPath: string): string {
+  const quote = (value: string) => `"${value.replace(/[\\"]/gu, ch => `\\${ch}`)}"`;
+  return [`url = ${quote(settings.smtpUrl)}`, `user = ${quote(`${settings.user}:${settings.password}`)}`, `mail-from = ${quote(settings.from)}`,
+    `mail-rcpt = ${quote(settings.to)}`, `upload-file = ${quote(bodyPath)}`, 'ssl-reqd', 'silent', 'show-error', 'max-time = 30'].join('\n');
+}
+export function emailMessage(settings: EmailSettings, subject: string, text: string, now: Date): string {
+  const encoded = `=?UTF-8?B?${Buffer.from(subject).toString('base64')}?=`;
+  return [`From: ${settings.from}`, `To: ${settings.to}`, `Subject: ${encoded}`, `Date: ${now.toUTCString()}`, 'MIME-Version: 1.0',
+    'Content-Type: text/plain; charset=UTF-8', 'Content-Transfer-Encoding: base64', '', Buffer.from(text).toString('base64').replace(/.{76}/gu, '$&\r\n')].join('\r\n');
+}
+export async function sendEmail(configDir: string, subject: string, text: string): Promise<'sent' | 'not_configured' | 'failed'> {
+  const settings = await readFile(join(configDir, 'notify-email.json'), 'utf8').then(raw => JSON.parse(raw) as EmailSettings, () => undefined);
+  if (!settings?.smtpUrl || !settings.to) return 'not_configured';
+  const dir = await mkdtemp(join(tmpdir(), 'notify-')), body = join(dir, 'mail.eml');
+  try {
+    await writeFile(body, emailMessage(settings, subject, text, new Date()), { mode: 0o600 });
+    return await new Promise(resolve => {
+      const child = spawn('/usr/bin/curl', ['-K', '-'], { stdio: ['pipe', 'ignore', 'ignore'] });
+      child.on('close', code => resolve(code === 0 ? 'sent' : 'failed')); child.on('error', () => resolve('failed'));
+      child.stdin.end(curlEmailConfig(settings, body));
+    });
+  } finally { await rm(dir, { recursive: true, force: true }); }
+}
+/** Blockers that need the user: desktop notification plus email when configured. Every caller already dedupes per event. */
+export const notifyUser = (configDir: string) => async (message: string): Promise<void> => {
+  await macNotify(message);
+  const outcome = await sendEmail(configDir, `牛客运营需要你处理：${message.slice(0, 40)}`, `${message}\n\n时间：${new Date().toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' })}\n状态：node packages/bridge/dist/cli.js nowcoder ops autopilot-status`);
+  await appendFile(join(configDir, 'nowcoder-autopilot', 'notify.log.jsonl'), `${JSON.stringify({ at: new Date().toISOString(), message, email: outcome })}\n`, { mode: 0o600 }).catch(() => undefined);
+};
+
 
 export async function runJob<S, R extends JobResult>(input: { configDir: string; name: string; now: () => number; initial(): Promise<S>; tick(state: S, save: (state: S) => Promise<void>): Promise<R>; watch?: (message: string) => Promise<void> }): Promise<R | JobResult> {
   const root = join(input.configDir, 'nowcoder-autopilot'), path = join(root, `${input.name}.json`);

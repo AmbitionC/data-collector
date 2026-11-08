@@ -1,6 +1,6 @@
 import { readFile, readdir } from 'node:fs/promises';
 import { join } from 'node:path';
-import { codexJson, macNotify, runJob } from '../autopilot/core.js';
+import { codexJson, notifyUser, runJob } from '../autopilot/core.js';
 
 /**
  * Deterministic comment runner. One short-lived process per tick; the model is
@@ -323,7 +323,7 @@ export async function readLeadMode(configDir: string): Promise<LeadMode> {
 }
 
 export async function runAutopilot(input: { configDir: string; live: boolean; deps: Omit<AutopilotDeps, 'ownPostUrls' | 'draft' | 'notify' | 'now' | 'sleep' | 'readPacket' | 'leadMode'> & Partial<AutopilotDeps> }): Promise<TickResult> {
-  const deps: AutopilotDeps = { ownPostUrls: () => ownArticleUrls(input.configDir), leadMode: () => readLeadMode(input.configDir), draft: prompt => codexDraft(prompt), notify: macNotify, now: Date.now,
+  const deps: AutopilotDeps = { ownPostUrls: () => ownArticleUrls(input.configDir), leadMode: () => readLeadMode(input.configDir), draft: prompt => codexDraft(prompt), notify: notifyUser(input.configDir), now: Date.now,
     sleep: ms => new Promise(resolve => setTimeout(resolve, ms)), readPacket: async file => JSON.parse(await readFile(file, 'utf8')) as Record<string, unknown>, ...input.deps };
   return runJob<AutopilotState, TickResult>({ configDir: input.configDir, name: input.live ? 'comments' : 'comments.dry-run', now: deps.now, initial: async () => initialState(),
     tick: (state, save) => tick(state, deps, { live: input.live, saveState: save }), ...(input.live ? { watch: deps.notify } : {}) });

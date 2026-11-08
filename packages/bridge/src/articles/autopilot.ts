@@ -1,6 +1,6 @@
 import { readFile, readdir } from 'node:fs/promises';
 import { join } from 'node:path';
-import { codexJson, macNotify, runJob, type JobResult } from '../autopilot/core.js';
+import { codexJson, notifyUser, runJob, type JobResult } from '../autopilot/core.js';
 
 /** Deterministic article runner: one slot, one attempt, its own state. The model only writes the draft. */
 export const ARTICLE_POLICY = { browser: 'chrome', accountId: '544222414', maxSourcesPerTick: 3, maxTriesPerSlot: 3, retryMs: 15 * 60_000,
@@ -112,7 +112,7 @@ function leaves(nodes: any[], company: string, out: Leaf[] = []): Leaf[] {
 const text = async (url: string) => { const response = await fetch(url, { signal: AbortSignal.timeout(20_000) }); if (!response.ok) throw new Error(`读取失败 ${response.status}`); return response.text(); };
 
 export async function runArticleAutopilot(input: { configDir: string; live: boolean; api: ArticleDeps['api'] }): Promise<Record<string, unknown>> {
-  const deps: ArticleDeps = { api: input.api, now: Date.now, sleep: ms => new Promise(resolve => setTimeout(resolve, ms)), notify: macNotify, source: text, generate: prompt => codexJson<GeneratedArticle>(prompt, SCHEMA, { effort: 'high', timeoutMs: 300_000 }),
+  const deps: ArticleDeps = { api: input.api, now: Date.now, sleep: ms => new Promise(resolve => setTimeout(resolve, ms)), notify: notifyUser(input.configDir), source: text, generate: prompt => codexJson<GeneratedArticle>(prompt, SCHEMA, { effort: 'high', timeoutMs: 300_000 }),
     catalog: async () => (JSON.parse(await text(CATALOG)) as { data: { navData: any[] } }).data.navData.flatMap(company => leaves(company.children ?? [], company.key)) };
   return runJob<ArticleState, JobResult>({ configDir: input.configDir, name: input.live ? 'articles' : 'articles.dry-run', now: deps.now, tick: async (state, save) => articleTick(state, deps, { live: input.live, save }) as Promise<JobResult>,
     initial: async () => {

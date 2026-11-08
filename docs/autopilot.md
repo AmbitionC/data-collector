@@ -21,3 +21,7 @@
 ## 投资产品（Invest Journey）
 
 发布层已有 `packages/bridge/src/outreach/service.ts`，保护规则同上，并要求用户逐篇批准，详见 [invest-outreach.md](invest-outreach.md)。接入 `runJob` 时只替换取材和生成，生成结果进入待批准稿件，**不绕过逐篇批准**。雪球和公众号的页面操作尚未核对（`OUTREACH_READY_CHANNELS` 为空），这一步要先做。评论类互动没有对应的发送台账，需要另行实现。
+
+## 阻塞提醒
+
+需要用户处理的阻塞（验证码、风控、授权、登录、连续失败、结果不确定）会发 Mac 通知，并在配置了 `<config>/notify-email.json` 时发邮件，每个事件只发一次，记录在 `nowcoder-autopilot/notify.log.jsonl`。用户自己运行 `scripts/setup-email-alerts.sh` 填写 SMTP（Gmail 需应用专用密码）。面经采集会话把这类阻塞写成交接文件中以「需要用户：」开头的一行，运行器据此提醒。

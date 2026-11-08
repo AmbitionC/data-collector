@@ -2,9 +2,10 @@
 // One interview-collection run in a fresh Codex session. It shares no context with
 // comments or articles: the only memory between runs is a small private handoff file.
 import { spawn } from 'node:child_process';
-import { appendFileSync, closeSync, existsSync, openSync, readFileSync, rmSync, statSync, writeSync } from 'node:fs';
+import { appendFileSync, closeSync, existsSync, openSync, readFileSync, rmSync, statSync, writeFileSync, writeSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
+import { notifyUser } from '../packages/bridge/dist/autopilot/core.js';
 
 const root = process.env.NOWCODER_AUTOPILOT_DIR ?? join(homedir(), '.data-collector/nowcoder-autopilot');
 const binary = process.env.NOWCODER_AUTOPILOT_CODEX ?? join(homedir(), '.local/bin/codex');
@@ -37,6 +38,13 @@ child.stdout.on('data', chunk => {
 child.stdin.end(prompt);
 child.on('exit', code => {
   clearTimeout(timer); killGroup('SIGKILL'); rmSync(lock, { force: true });
-  record({ outcome: stopped ?? (code === 0 ? 'finished' : 'failed'), code, tokens, elapsedMs: Date.now() - started });
-  process.exit(code === 0 && !stopped ? 0 : 1);
+  const outcome = stopped ?? (code === 0 ? 'finished' : 'failed');
+  record({ outcome, code, tokens, elapsedMs: Date.now() - started });
+  // The session marks anything only the user can unblock with a 需要用户： line; alert once per distinct line.
+  const need = (existsSync(handoff) ? readFileSync(handoff, 'utf8') : '').split('\n').find(line => line.startsWith('需要用户：'));
+  const lastPath = join(root, 'collection.alerted.txt'), last = existsSync(lastPath) ? readFileSync(lastPath, 'utf8') : '';
+  const alert = need && need !== last ? need : outcome !== 'finished' ? `面经采集本轮异常结束：${outcome}` : undefined;
+  const done = () => process.exit(code === 0 && !stopped ? 0 : 1);
+  if (!alert) done();
+  else notifyUser(join(homedir(), '.data-collector'))(alert).finally(() => { if (need) appendFileSync(lastPath, '', { mode: 0o600 }), writeFileSync(lastPath, need); done(); });
 });

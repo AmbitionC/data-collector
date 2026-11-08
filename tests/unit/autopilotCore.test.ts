@@ -35,3 +35,21 @@ describe('autopilot core', () => {
     expect(jobIssues([{ job: 'comments', outcomes: {}, tokens: 0, lastSuccessAt: null, lastFailure: null }], NOW)).toEqual([]);
   });
 });
+
+import { curlEmailConfig, emailMessage, sendEmail } from '../../packages/bridge/src/autopilot/core.js';
+describe('email alerts', () => {
+  const settings = { smtpUrl: 'smtps://smtp.example.com:465', user: 'me@example.com', password: 'p"a\\ss', from: 'me@example.com', to: 'me@example.com' };
+  it('keeps the password inside a quoted curl config line', () => {
+    const config = curlEmailConfig(settings, '/tmp/m.eml');
+    expect(config).toContain('user = "me@example.com:p\\"a\\\\ss"');
+    expect(config).toContain('ssl-reqd');
+  });
+  it('encodes a Chinese subject and body', () => {
+    const mail = emailMessage(settings, '需要处理', '验证码', new Date(0));
+    expect(mail).toContain(`Subject: =?UTF-8?B?${Buffer.from('需要处理').toString('base64')}?=`);
+    expect(mail.endsWith(Buffer.from('验证码').toString('base64'))).toBe(true);
+  });
+  it('does nothing without settings', async () => {
+    expect(await sendEmail(await mkdtemp(join(tmpdir(), 'ap-')), 's', 't')).toBe('not_configured');
+  });
+});
