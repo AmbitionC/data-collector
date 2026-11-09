@@ -8,14 +8,21 @@ import { codexJson, notifyUser, runJob } from '../autopilot/core.js';
  * scheduling, retries and bookkeeping live here, never in a model session.
  */
 export const COMMENT_POLICY = {
-  // 2026-11-09 user: post around the clock, at least 15 minutes apart, 60 a day.
-  windowStartHour: 0, lastDispatchMinute: 24 * 60, cadenceMs: 15 * 60_000, captchaProbeAfterMs: 90 * 60_000, captchaProbeSpacingMs: 6 * 3_600_000, noOpportunityDelayMs: 15 * 60_000,
+  // 2026-11-09 user: around the clock; lowered to 30 minutes apart after captchas followed dense runs.
+  windowStartHour: 0, lastDispatchMinute: 24 * 60, cadenceMs: 30 * 60_000, captchaProbeAfterMs: Number.POSITIVE_INFINITY, captchaProbeSpacingMs: 6 * 3_600_000, noOpportunityDelayMs: 15 * 60_000,
   failureBackoffMs: [5 * 60_000, 15 * 60_000, 30 * 60_000], failuresBeforeNotice: 6, maxCandidatesPerTick: 3,
   maxDraftsPerDay: 80, maxCandidateAgeMs: 30 * 86_400_000, tickDeadlineMs: 8 * 60_000, 
   searchWaitMs: 60_000, prepareWaitMs: 120_000, publishWaitMs: 240_000, similarityLimit: 0.6,
 } as const;
 export const COMMENT_QUERIES = ['Agent 面经', 'RAG 面经', '大模型应用 面经', 'LangGraph', 'Agent 开发 一面', 'AI 应用开发 面经',
   'MCP 面试', '前端 面经', 'Agent 项目 怎么做', 'RAG 评测', '后端 面经 Agent', 'Agent 工具调用', 'AI 全栈', '校招 Agent', '大模型 实习 面经', 'Function Calling 面试'];
+/**
+ * Posts whose authors ask for a route, project or material: the only ones a link may answer.
+ * Every search pairs one of these with one interview query, so lead-eligible posts actually turn up
+ * (2026-11-09: 17 drafts, all interview posts, zero links ever sent).
+ */
+export const HELP_QUERIES = ['Agent 学习路线', '转行 大模型 求建议', 'Agent 项目 推荐', '大模型应用 怎么学', 'RAG 项目 求推荐', '秋招 Agent 迷茫',
+  'AI 应用开发 入门', 'Agent 简历 项目', '求推荐 大模型 资料', '后端 转 Agent', '前端 转 AI', '实习 Agent 怎么准备'];
 
 /**
  * Need-gated lead experiment (docs/nowcoder-lead-experiment.md). Ordinary comments stay link-free.
@@ -25,8 +32,8 @@ export const COMMENT_QUERIES = ['Agent 面经', 'RAG 面经', '大模型应用 �
  */
 export type LeadMode = 'off' | 'shadow' | 'live';
 export const LEAD_POLICY = {
-  defaultMode: 'shadow' as LeadMode, domain: 'agent-journey.cn', maxPerDay: 6, minGapMs: 2 * 3_600_000,
-  maxShareOf7Days: 0.2, minPublished7Days: 10, minLength: 150, maxClauseShare: 0.2, tailWindow: 0.25,
+  defaultMode: 'shadow' as LeadMode, domain: 'agent-journey.cn', maxPerDay: 8, minGapMs: 60 * 60_000,
+  maxShareOf7Days: 0.35, minPublished7Days: 10, minLength: 150, maxClauseShare: 0.2, tailWindow: 0.25,
 } as const;
 const LEAD_NEED = /求(助|建议|指点|指导|推荐|路线|资料)|怎么学|学习路线|(转|入门|入行).{0,6}(agent|大模型|ai)|做(什么|啥)项目|项目.{0,8}(推荐|建议|怎么做|做什么|选)|有没有.{0,10}(资料|教程|路线|项目)|迷茫|(选|走).{0,6}方向/iu;
 const INTERVIEW_TITLE = /面经|一面|二面|三面|终面|hr面|凉经|笔试|oc|offer|八股/iu;
@@ -244,8 +251,8 @@ export async function tick(state: AutopilotState, deps: AutopilotDeps, options: 
   const skipped: Array<{ sourceId: string; reason: string }> = [];
   try {
     if (state.candidates.length === 0) {
-      const own = await deps.ownPostUrls(), queries = [0, 1].map(i => COMMENT_QUERIES[(state.queryIndex + i) % COMMENT_QUERIES.length]!);
-      state.queryIndex = (state.queryIndex + 2) % COMMENT_QUERIES.length;
+      const own = await deps.ownPostUrls(), queries = [HELP_QUERIES[state.queryIndex % HELP_QUERIES.length]!, COMMENT_QUERIES[state.queryIndex % COMMENT_QUERIES.length]!];
+      state.queryIndex = (state.queryIndex + 1) % (HELP_QUERIES.length * COMMENT_QUERIES.length);
       const run = await waitRun(await deps.startWorkflow({ schemaVersion: 1, key: `${mode}-search-${stamp}-${deps.now()}`, kind: 'search', queries, limitPerQuery: 8 }, false), COMMENT_POLICY.searchWaitMs);
       if (run.status !== 'completed') throw new TechnicalFailure(run.message ?? '搜索失败');
       const found = ((await deps.readPacket(run.resultPath)).candidates ?? []) as Candidate[];
