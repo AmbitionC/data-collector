@@ -78,5 +78,7 @@ describe('article autopilot', () => {
     expect(articleRejection({ ...article, body: body.replace('备考题单', '题目') }, 'Tencent')).toBe('missing-practice-context');
     expect(articleRejection({ ...article, body: `${body}\n\n面试官问我这题` }, 'Tencent')).toBe('invented-experience');
     expect(articleRejection({ ...article, body: `${body}\n\nhttps://a.cn` }, 'Tencent')).toBe('promotion');
+    for (const head of ['第1题：', '第一题，', '1）', '一、']) expect(articleRejection({ ...article, body: body.replace('1. ', head) }, 'Tencent')).toBeUndefined();
+    expect(articleRejection({ ...article, body: body.replace('1. ', '') }, 'Tencent')).toBe('layout');
   });
 });

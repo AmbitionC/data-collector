@@ -1,5 +1,7 @@
 # 牛客面经与备考整理帖
 
+写法和情绪表达另见 [活人感与情绪](nowcoder-voice.md)（2026-11-09 用户要求评论和文章都带点情绪和活人感）。
+
 Use the plugin CLI for article actions. Browser UI is for explicit role setup, development inspection or a preserved manual handoff. Collection run contracts do not represent article publication.
 
 ## Two browser roles
