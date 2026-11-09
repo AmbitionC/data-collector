@@ -101,6 +101,7 @@ describe('comment autopilot', () => {
     expect(draftRejection(good, packet({ conversation: { comments: [{ text: good.primary, likes: null }], coverage: { total: 1, complete: true } } }), [])).toBe('repeats-comment');
     expect(draftRejection(good, packet(), [{ text: good.primary, at: '' }])).toBe('repeats-own-comment');
     expect(draftRejection({ ...good, anchorIndex: 5 }, packet(), [])).toBe('invalid-anchor');
+    expect(draftRejection({ ...good, primary: '检索'.repeat(41) }, packet(), [])).toBe('invalid-length');
     expect(draftRejection(good, packet(), [])).toBeUndefined();
   });
   it('skips posts that cannot be fully reviewed', () => {
@@ -118,7 +119,7 @@ describe('comment autopilot', () => {
 
 describe('need-gated lead experiment', () => {
   const ask = packet({ currentPost: { title: '【求助】双非 Java 后端想转 Agent，该做什么项目', body: '有一个点评项目，Java 基础还行，不知道 Agent 方向该怎么学、做什么项目能写进简历，求建议', images: [] } });
-  const lead = '已经有 Java 和点评项目的话，先别另起一个 Agent 项目。给点评加一个只读客服：用户问商品就走你现有的查询接口，参数不全时先追问，查不到就直说查不到，不要让模型自己编。分阶段的练习我整理在 agent-journey.cn，可以对着做。先把工具超时和用户换订单号这两条失败路径跑通，再看日志里每一步调用是否符合预期，这样简历上就有能讲清楚的具体改动了';
+  const lead = '有点评项目就别另起了，给它加个只读客服：参数不全先追问，查不到就直说，别让模型编。分阶段练习我整理在 agent-journey.cn 了，先做完第一步就能写进简历，再接下单这类写操作。';
   const seeded = (n: number) => { const s = initialState(); s.published = Array.from({ length: n }, (_, i) => new Date(NOW - (i + 1) * 3_600_000).toISOString()); return s; };
 
   it('only treats posts that ask for help as lead opportunities', () => {
@@ -129,7 +130,8 @@ describe('need-gated lead experiment', () => {
   it('accepts a disclosed, self-contained lead and rejects the warned tail pattern', () => {
     expect(lead.length).toBeGreaterThanOrEqual(LEAD_POLICY.minLength);
     expect(leadRejection(lead, ask, [])).toBeUndefined();
-    expect(leadRejection('250条评测集得留一批没拿来调过的题，不然模型也会背题，评测这块我整理在 agent-journey.cn 了', ask, [])).toBe('lead-length');
+    expect(leadRejection('评测这块我整理在 agent-journey.cn 了', ask, [])).toBe('lead-length');
+    expect(leadRejection(lead.repeat(2).replace('agent-journey.cn', '那边'), ask, [])).toBe('lead-length');
     expect(leadRejection(`${lead.replace('agent-journey.cn', '那边')}，详见 agent-journey.cn`, ask, [])).toBe('lead-domain-at-tail');
     expect(leadRejection(lead.replace('我整理在', '都在'), ask, [])).toBe('lead-no-disclosure');
     expect(leadRejection(`${lead}，注册就能用`, ask, [])).toBe('lead-call-to-action');
