@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { COMMENT_POLICY, LEAD_POLICY, draftRejection, initialState, leadBudgetClosed, leadIneligibility, leadRejection, nextWindowOpen, packetSkipReason, similarity, tick, type AutopilotDeps, type AutopilotState, type Draft, type Packet } from '../../packages/bridge/src/operations/autopilot.js';
+import { COMMENT_POLICY, LEAD_POLICY, isHelpTitle, draftRejection, initialState, leadBudgetClosed, leadIneligibility, leadRejection, nextWindowOpen, packetSkipReason, similarity, tick, type AutopilotDeps, type AutopilotState, type Draft, type Packet } from '../../packages/bridge/src/operations/autopilot.js';
 
 const NOW = Date.parse('2026-11-07T04:00:00.000Z'); // 12:00 Shanghai
 const packet = (over: Partial<Packet> = {}): Packet => ({ id: 'ops-aaaaaaaaaaaa', sourceId: 'aaaaaaaaaaaa', canonicalUrl: 'https://www.nowcoder.com/discuss/1', sourceConflict: false, anchorOptions: ['RAG 怎么评测'],
@@ -142,11 +142,11 @@ describe('need-gated lead experiment', () => {
   it('caps leads per day, by gap and by weekly share', () => {
     expect(leadBudgetClosed(seeded(5), NOW)).toBe('too-few-comments');
     expect(leadBudgetClosed(seeded(30), NOW)).toBeUndefined();
-    const today = seeded(60); today.leads = [1, 2, 3, 4, 5, 6, 7, 8].map(m => ({ at: new Date(NOW - m * 60_000).toISOString(), sourceId: `t${m}` }));
+    const today = seeded(60); today.leads = Array.from({ length: 15 }, (_, i) => i + 1).map(m => ({ at: new Date(NOW - m * 60_000).toISOString(), sourceId: `t${m}` }));
     expect(leadBudgetClosed(today, NOW)).toBe('daily-cap');
-    const late = seeded(30); late.leads = [{ at: new Date(NOW + 10 * 3_600_000).toISOString(), sourceId: 'x' }]; // 22:00, next check 22:30 the same evening
-    expect(leadBudgetClosed(late, NOW + 10.5 * 3_600_000)).toBe('min-gap');
-    const share = seeded(20); share.leads = [1, 2, 3, 4, 5, 6, 7].map(d => ({ at: new Date(NOW - d * 86_400_000).toISOString(), sourceId: `s${d}` }));
+    const late = seeded(30); late.leads = [{ at: new Date(NOW + 10 * 3_600_000).toISOString(), sourceId: 'x' }]; // 22:00, next check 22:15 the same evening
+    expect(leadBudgetClosed(late, NOW + 10.25 * 3_600_000)).toBe('min-gap');
+    const share = seeded(20); share.leads = Array.from({ length: 10 }, (_, i) => i + 1).map(d => ({ at: new Date(NOW - d * 3_600_000).toISOString(), sourceId: `s${d}` }));
     expect(leadBudgetClosed(share, NOW)).toBe('weekly-share');
   });
   it('shadow mode publishes the link-free text and logs the lead', async () => {
@@ -178,6 +178,10 @@ describe('need-gated lead experiment', () => {
       draft: async prompt => { prompts.push(prompt); return { draft: good }; } });
     await run(seeded(30), h.deps);
     expect(prompts[0]).toContain('lead 一律为空串');
+  });
+  it('puts help-seeking posts first', () => {
+    expect(isHelpTitle('Java后端开发如何转AI应用开发，求建议')).toBe(true);
+    expect(isHelpTitle('字节 Agent 一面面经')).toBe(false);
   });
   it('never asks for a lead on ordinary posts or when switched off', async () => {
     const prompts: string[] = [];

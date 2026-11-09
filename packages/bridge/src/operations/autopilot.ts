@@ -33,8 +33,9 @@ export const HELP_QUERIES = ['Agent 学习路线', '转行 大模型 求建议',
  */
 export type LeadMode = 'off' | 'shadow' | 'live';
 export const LEAD_POLICY = {
-  defaultMode: 'shadow' as LeadMode, domain: 'agent-journey.cn', maxPerDay: 8, minGapMs: 60 * 60_000,
-  maxShareOf7Days: 0.35, minPublished7Days: 10, minLength: 50, maxLength: 150, maxClauseShare: 0.6, tailWindow: 0.25,
+  defaultMode: 'shadow' as LeadMode, domain: 'agent-journey.cn', // 2026-11-09 user: half lead comments, half ordinary ones.
+  maxPerDay: 15, minGapMs: 30 * 60_000,
+  maxShareOf7Days: 0.5, minPublished7Days: 10, minLength: 50, maxLength: 150, maxClauseShare: 0.6, tailWindow: 0.25,
 } as const;
 const LEAD_NEED = /求(助|建议|指点|指导|推荐|路线|资料)|怎么学|学习路线|(转|入门|入行).{0,6}(agent|大模型|ai)|做(什么|啥)项目|项目.{0,8}(推荐|建议|怎么做|做什么|选)|有没有.{0,10}(资料|教程|路线|项目)|迷茫|(选|走).{0,6}方向/iu;
 const INTERVIEW_TITLE = /面经|一面|二面|三面|终面|hr面|凉经|笔试|oc|offer|八股/iu;
@@ -47,6 +48,8 @@ export function leadIneligibility(packet: Packet): string | undefined {
 }
 export interface LeadRecord { at: string; sourceId: string; replyUrl?: string }
 
+/** Title-only guess used to order candidates; the full lead gate still reads the whole post. */
+export const isHelpTitle = (title?: string) => !!title && !INTERVIEW_TITLE.test(title) && LEAD_NEED.test(title);
 export interface Candidate { sourceId: string; url: string; title?: string; publishedAt?: string }
 export interface Inflight { key: string; opportunityId: string; sourceId: string; startedAt: string }
 export interface RecentComment { text: string; at: string }
@@ -269,7 +272,8 @@ export async function tick(state: AutopilotState, deps: AutopilotDeps, options: 
       const found = ((await deps.readPacket(run.resultPath)).candidates ?? []) as Candidate[];
       state.candidates = found.filter(c => !state.excluded[c.sourceId] && !own.has(c.url)
         && (!c.publishedAt || deps.now() - Date.parse(c.publishedAt) <= COMMENT_POLICY.maxCandidateAgeMs))
-        .sort((a, b) => (b.publishedAt ?? '').localeCompare(a.publishedAt ?? ''))
+        // Help-seeking posts first, so the lead half of the mix has posts to answer; then newest.
+        .sort((a, b) => Number(isHelpTitle(b.title)) - Number(isHelpTitle(a.title)) || (b.publishedAt ?? '').localeCompare(a.publishedAt ?? ''))
         .map(({ sourceId, url, title, publishedAt }) => ({ sourceId, url, ...(title ? { title } : {}), ...(publishedAt ? { publishedAt } : {}) }));
       await saveState(state);
     }
