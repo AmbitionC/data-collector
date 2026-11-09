@@ -13,7 +13,7 @@ export const COMMENT_POLICY = {
   windowStartHour: 0, lastDispatchMinute: 24 * 60, cadenceMs: 30 * 60_000, captchaProbeAfterMs: Number.POSITIVE_INFINITY, captchaProbeSpacingMs: 6 * 3_600_000, noOpportunityDelayMs: 15 * 60_000,
   failureBackoffMs: [5 * 60_000, 15 * 60_000, 30 * 60_000], failuresBeforeNotice: 6, maxCandidatesPerTick: 3,
   maxDraftsPerDay: 80, maxCandidateAgeMs: 30 * 86_400_000, tickDeadlineMs: 8 * 60_000, 
-  searchWaitMs: 60_000, prepareWaitMs: 120_000, publishWaitMs: 240_000, similarityLimit: 0.6, maxCommentLength: 80,
+  searchWaitMs: 60_000, prepareWaitMs: 120_000, publishWaitMs: 240_000, similarityLimit: 0.6, maxCommentLength: 80, leadMissesBeforeFallback: 6,
 } as const;
 export const COMMENT_QUERIES = ['Agent 面经', 'RAG 面经', '大模型应用 面经', 'LangGraph', 'Agent 开发 一面', 'AI 应用开发 面经',
   'MCP 面试', '前端 面经', 'Agent 项目 怎么做', 'RAG 评测', '后端 面经 Agent', 'Agent 工具调用', 'AI 全栈', '校招 Agent', '大模型 实习 面经', 'Function Calling 面试'];
@@ -57,6 +57,8 @@ export interface AutopilotState {
   schemaVersion: 1; nextAt: string | null; failures: number; recoveryAttempt: number; queryIndex: number; candidates: Candidate[];
   excluded: Record<string, string>; recent: RecentComment[]; lastAttemptAt: string | null; inflight: Inflight | null;
   notified: Record<string, string>; drafts: { day: string; count: number }; probe?: { pauseId: string; at: string; result: string };
+  /** 2026-11-09 user: alternate one ordinary comment and one lead comment. */
+  nextKind?: 'lead' | 'normal'; leadMisses?: number;
   /** Live lead comments (with the domain) and all published timestamps, both trimmed to 7 days. */
   leads: LeadRecord[]; published: string[];
 }
@@ -263,14 +265,19 @@ export async function tick(state: AutopilotState, deps: AutopilotDeps, options: 
   if (state.drafts.day !== day) state.drafts = { day, count: 0 };
   const stamp = day.replaceAll('-', ''), mode = live ? 'ap' : 'dry';
   const skipped: Array<{ sourceId: string; reason: string }> = [];
+  const leadMode = await deps.leadMode().catch((): LeadMode => 'off');
+  // A lead turn only answers help-seeking posts; after too many misses one ordinary comment goes out so the account never stalls.
+  const wantLead = leadMode === 'live' && (state.nextKind ?? 'lead') === 'lead' && (state.leadMisses ?? 0) < COMMENT_POLICY.leadMissesBeforeFallback;
   try {
-    if (state.candidates.length === 0) {
-      const own = await deps.ownPostUrls(), queries = [HELP_QUERIES[state.queryIndex % HELP_QUERIES.length]!, COMMENT_QUERIES[state.queryIndex % COMMENT_QUERIES.length]!];
+    if (state.candidates.length === 0 || (wantLead && !state.candidates.some(c => isHelpTitle(c.title)))) {
+      const own = await deps.ownPostUrls(), queries = wantLead
+        ? [HELP_QUERIES[state.queryIndex % HELP_QUERIES.length]!, HELP_QUERIES[(state.queryIndex + 1) % HELP_QUERIES.length]!]
+        : [HELP_QUERIES[state.queryIndex % HELP_QUERIES.length]!, COMMENT_QUERIES[state.queryIndex % COMMENT_QUERIES.length]!];
       state.queryIndex = (state.queryIndex + 1) % (HELP_QUERIES.length * COMMENT_QUERIES.length);
       const run = await waitRun(await deps.startWorkflow({ schemaVersion: 1, key: `${mode}-search-${stamp}-${deps.now()}`, kind: 'search', queries, limitPerQuery: 8 }, false), COMMENT_POLICY.searchWaitMs);
       if (run.status !== 'completed') throw new TechnicalFailure(run.message ?? '搜索失败');
-      const found = ((await deps.readPacket(run.resultPath)).candidates ?? []) as Candidate[];
-      state.candidates = found.filter(c => !state.excluded[c.sourceId] && !own.has(c.url)
+      const found = ((await deps.readPacket(run.resultPath)).candidates ?? []) as Candidate[], known = new Set(state.candidates.map(c => c.sourceId));
+      state.candidates = [...state.candidates, ...found.filter(c => !known.has(c.sourceId))].filter(c => !state.excluded[c.sourceId] && !own.has(c.url)
         && (!c.publishedAt || deps.now() - Date.parse(c.publishedAt) <= COMMENT_POLICY.maxCandidateAgeMs))
         // Help-seeking posts first, so the lead half of the mix has posts to answer; then newest.
         .sort((a, b) => Number(isHelpTitle(b.title)) - Number(isHelpTitle(a.title)) || (b.publishedAt ?? '').localeCompare(a.publishedAt ?? ''))
@@ -279,7 +286,10 @@ export async function tick(state: AutopilotState, deps: AutopilotDeps, options: 
     }
     for (let examined = 0; examined < COMMENT_POLICY.maxCandidatesPerTick && state.candidates.length > 0; examined++) {
       if (deps.now() >= deadline) throw new TechnicalFailure('本轮超过总时限');
-      const candidate = state.candidates[0]!;
+      const candidate = wantLead ? state.candidates.find(c => isHelpTitle(c.title)) : state.candidates[0];
+      if (!candidate) break;
+      // Every removal below targets this exact candidate, wherever it sat in the queue.
+      if (state.candidates[0] !== candidate) state.candidates = [candidate, ...state.candidates.filter(c => c !== candidate)];
       const exclude = async (reason: string) => { state.excluded[candidate.sourceId] = reason; state.candidates.shift(); skipped.push({ sourceId: candidate.sourceId, reason }); await saveState(state); };
       const prep = await waitRun(await deps.startWorkflow({ schemaVersion: 1, key: `${mode}-prep-${stamp}-${candidate.sourceId}-${deps.now()}`, kind: 'prepare', candidates: [{ sourceId: candidate.sourceId, url: candidate.url }], maxPages: 2 }, false), COMMENT_POLICY.prepareWaitMs);
       if (prep.status !== 'completed') { await exclude(`prepare-failed: ${(prep.message ?? '').slice(0, 80)}`); continue; }
@@ -291,8 +301,7 @@ export async function tick(state: AutopilotState, deps: AutopilotDeps, options: 
       if (state.drafts.count >= COMMENT_POLICY.maxDraftsPerDay) return finish({ outcome: 'draft_budget_reached', skipped }, deps.now() + 3_600_000);
       state.drafts.count++; await saveState(state);
       let drafted: DraftResult;
-      const leadMode = await deps.leadMode().catch((): LeadMode => 'off');
-      const leadGate = leadMode === 'off' ? 'off' : leadIneligibility(packet) ?? (leadMode === 'live' && live ? leadBudgetClosed(state, deps.now()) : undefined);
+      const leadGate = leadMode === 'off' ? 'off' : (state.nextKind === 'normal' && live) ? 'alternation-normal-turn' : leadIneligibility(packet) ?? (leadMode === 'live' && live ? leadBudgetClosed(state, deps.now()) : undefined);
       const site = leadGate === undefined && deps.siteContext ? await deps.siteContext(packet).catch(() => undefined) : undefined;
       try { drafted = await deps.draft(buildPrompt(packet, state.recent, leadGate === undefined && !!site, site)); }
       catch (error) { throw new TechnicalFailure(`起草失败：${error instanceof Error ? error.message : 'unknown'}`); }
@@ -307,6 +316,7 @@ export async function tick(state: AutopilotState, deps: AutopilotDeps, options: 
         : leadRejected ? { status: `rejected:${leadRejected}`, text: leadText }
         : { status: leadMode === 'live' && live ? 'live' : 'shadow', text: leadText };
       const sendLead = lead.status === 'live';
+      if (live && wantLead && !sendLead) { state.leadMisses = (state.leadMisses ?? 0) + 1; await exclude(`lead-turn-${lead.status}`); continue; }
       const texts = sendLead ? { primary: leadText, alternative: draft.primary } : { primary: draft.primary, alternative: draft.alternative };
       const item = { key: `${mode}-c-${stamp}-${candidate.sourceId}`, draft: { ...packet.draftEnvelope, drafts: { ...texts, tone: 'contextual', anchor: packet.anchorOptions[draft.anchorIndex]!, notes: `${sendLead ? '[lead] ' : ''}${draft.notes}`.slice(0, 900) } } };
       if (!live) { state.failures = 0; state.candidates.shift(); return finish({ outcome: 'dry_run_draft', url: packet.canonicalUrl, title: packet.currentPost.title, draft: item.draft.drafts, lead, usage, skipped }, null); }
@@ -321,6 +331,7 @@ export async function tick(state: AutopilotState, deps: AutopilotDeps, options: 
         const at = iso(deps.now()), week = deps.now() - 7 * 86_400_000;
         state.failures = 0; state.recent = [...state.recent, { text: texts.primary, at }].slice(-20);
         state.published = [...state.published.filter(p => Date.parse(p) >= week), at];
+        state.nextKind = sendLead ? 'normal' : 'lead'; if (sendLead) state.leadMisses = 0; else if (!wantLead) state.leadMisses = 0;
         if (sendLead) state.leads = [...state.leads.filter(l => Date.parse(l.at) >= week), { at, sourceId: candidate.sourceId, ...(attempt.replyUrl ? { replyUrl: attempt.replyUrl } : {}) }];
         return finish({ outcome: 'published', url: packet.canonicalUrl, replyUrl: attempt.replyUrl, lead, usage, skipped }, deps.now() + COMMENT_POLICY.cadenceMs);
       }

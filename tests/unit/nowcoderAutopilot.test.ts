@@ -150,7 +150,7 @@ describe('need-gated lead experiment', () => {
     expect(leadBudgetClosed(share, NOW)).toBe('weekly-share');
   });
   it('shadow mode publishes the link-free text and logs the lead', async () => {
-    const h = harness({ readPacket: async path => path === 'search' ? { candidates: [{ sourceId: 'aaaaaaaaaaaa', url: 'https://www.nowcoder.com/discuss/1' }] } : { prepared: [ask], items: [{ result: { contentAccess: 'full' } }] },
+    const h = harness({ readPacket: async path => path === 'search' ? { candidates: [{ sourceId: 'aaaaaaaaaaaa', url: 'https://www.nowcoder.com/discuss/1', title: '双非 Java 后端想转 Agent，求建议' }] } : { prepared: [ask], items: [{ result: { contentAccess: 'full' } }] },
       draft: async () => ({ draft: { ...good, lead } }) });
     const state = seeded(30), result = await run(state, h.deps);
     expect(result.outcome).toBe('published');
@@ -161,7 +161,7 @@ describe('need-gated lead experiment', () => {
   });
   it('live mode sends the lead once and records it against the budget', async () => {
     const prompts: string[] = [];
-    const h = harness({ leadMode: async () => 'live', siteContext: async () => ({ title: '从零到 Agent 工程师的学习路线', excerpt: '第一阶段：把现有接口改成工具', stats: ['站内 243 篇面经里，120 篇问到了 Agent'] }), readPacket: async path => path === 'search' ? { candidates: [{ sourceId: 'aaaaaaaaaaaa', url: 'https://www.nowcoder.com/discuss/1' }] } : { prepared: [ask], items: [{ result: { contentAccess: 'full' } }] },
+    const h = harness({ leadMode: async () => 'live', siteContext: async () => ({ title: '从零到 Agent 工程师的学习路线', excerpt: '第一阶段：把现有接口改成工具', stats: ['站内 243 篇面经里，120 篇问到了 Agent'] }), readPacket: async path => path === 'search' ? { candidates: [{ sourceId: 'aaaaaaaaaaaa', url: 'https://www.nowcoder.com/discuss/1', title: '双非 Java 后端想转 Agent，求建议' }] } : { prepared: [ask], items: [{ result: { contentAccess: 'full' } }] },
       draft: async prompt => { prompts.push(prompt); return { draft: { ...good, lead } }; } });
     const state = seeded(30), result = await run(state, h.deps);
     expect(prompts[0]).toContain('<site_page title="从零到 Agent 工程师的学习路线">');
@@ -171,13 +171,23 @@ describe('need-gated lead experiment', () => {
     expect(sent).toBe(lead);
     expect(state.leads).toHaveLength(1);
     expect(state.published).toHaveLength(31);
+    expect(state.nextKind).toBe('normal');
   });
   it('asks for no lead when no real site page matches', async () => {
     const prompts: string[] = [];
-    const h = harness({ leadMode: async () => 'live', siteContext: async () => undefined, readPacket: async path => path === 'search' ? { candidates: [{ sourceId: 'aaaaaaaaaaaa', url: 'https://www.nowcoder.com/discuss/1' }] } : { prepared: [ask], items: [{ result: { contentAccess: 'full' } }] },
+    const h = harness({ leadMode: async () => 'live', siteContext: async () => undefined, readPacket: async path => path === 'search' ? { candidates: [{ sourceId: 'aaaaaaaaaaaa', url: 'https://www.nowcoder.com/discuss/1', title: '双非 Java 后端想转 Agent，求建议' }] } : { prepared: [ask], items: [{ result: { contentAccess: 'full' } }] },
       draft: async prompt => { prompts.push(prompt); return { draft: good }; } });
-    await run(seeded(30), h.deps);
+    const state = seeded(30), result = await run(state, h.deps);
     expect(prompts[0]).toContain('lead 一律为空串');
+    expect(h.started.some(s => s.send)).toBe(false); // a lead turn never falls back to a plain reply on the same post
+    expect(state.leadMisses).toBe(1);
+    expect(result.outcome).toBe('no_opportunity');
+  });
+  it('falls back to one ordinary comment after repeated lead misses', async () => {
+    const h = harness({ leadMode: async () => 'live' }), state = seeded(30); state.leadMisses = 6;
+    expect((await run(state, h.deps)).outcome).toBe('published');
+    expect(state.leadMisses).toBe(0);
+    expect(state.nextKind).toBe('lead');
   });
   it('puts help-seeking posts first', () => {
     expect(isHelpTitle('Java后端开发如何转AI应用开发，求建议')).toBe(true);
@@ -186,9 +196,11 @@ describe('need-gated lead experiment', () => {
   it('never asks for a lead on ordinary posts or when switched off', async () => {
     const prompts: string[] = [];
     const h = harness({ leadMode: async () => 'live', draft: async prompt => { prompts.push(prompt); return { draft: { ...good, lead } }; } });
-    const result = await run(seeded(30), h.deps);
+    const normalTurn = seeded(30); normalTurn.nextKind = 'normal';
+    const result = await run(normalTurn, h.deps);
     expect(prompts[0]).not.toContain('lead 的要求');
-    expect(result.lead).toEqual({ status: 'ineligible:no-stated-need' });
+    expect(result.lead).toEqual({ status: 'ineligible:alternation-normal-turn' });
+    expect(normalTurn.nextKind).toBe('lead');
     const off = harness({ leadMode: async () => 'off' });
     expect((await run(seeded(30), off.deps)).lead).toEqual({ status: 'off' });
   });
