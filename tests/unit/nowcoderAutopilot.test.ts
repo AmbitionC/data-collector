@@ -134,6 +134,7 @@ describe('need-gated lead experiment', () => {
     expect(leadRejection(lead.repeat(2).replace('agent-journey.cn', '那边'), ask, [])).toBe('lead-length');
     expect(leadRejection(`${lead.replace('agent-journey.cn', '那边')}，详见 agent-journey.cn`, ask, [])).toBe('lead-domain-at-tail');
     expect(leadRejection(lead.replace('我整理在', '都在'), ask, [])).toBe('lead-no-disclosure');
+    expect(leadRejection(lead.replace('我整理在 agent-journey.cn 了', '我在 agent-journey.cn 写过'), ask, [])).toBeUndefined();
     expect(leadRejection(`${lead}，注册就能用`, ask, [])).toBe('lead-call-to-action');
     expect(leadRejection(`${lead}，agent-journey.cn`, ask, [])).toBe('lead-domain-count');
     expect(leadRejection(lead, packet({ ...ask, conversation: { comments: [{ text: '看看 agent-journey.cn', likes: null }], coverage: { total: 1, complete: true } } }), [])).toBe('lead-domain-already-in-thread');
@@ -160,15 +161,23 @@ describe('need-gated lead experiment', () => {
   });
   it('live mode sends the lead once and records it against the budget', async () => {
     const prompts: string[] = [];
-    const h = harness({ leadMode: async () => 'live', readPacket: async path => path === 'search' ? { candidates: [{ sourceId: 'aaaaaaaaaaaa', url: 'https://www.nowcoder.com/discuss/1' }] } : { prepared: [ask], items: [{ result: { contentAccess: 'full' } }] },
+    const h = harness({ leadMode: async () => 'live', siteContext: async () => ({ title: '从零到 Agent 工程师的学习路线', excerpt: '第一阶段：把现有接口改成工具', stats: ['站内 243 篇面经里，120 篇问到了 Agent'] }), readPacket: async path => path === 'search' ? { candidates: [{ sourceId: 'aaaaaaaaaaaa', url: 'https://www.nowcoder.com/discuss/1' }] } : { prepared: [ask], items: [{ result: { contentAccess: 'full' } }] },
       draft: async prompt => { prompts.push(prompt); return { draft: { ...good, lead } }; } });
     const state = seeded(30), result = await run(state, h.deps);
-    expect(prompts[0]).toContain('lead 的要求');
+    expect(prompts[0]).toContain('<site_page title="从零到 Agent 工程师的学习路线">');
+    expect(prompts[0]).toContain('站内 243 篇面经里，120 篇问到了 Agent');
     expect(result.lead).toEqual({ status: 'live', text: lead });
     const sent = (h.started.find(s => s.send)!.request.items as Array<{ draft: { drafts: { primary: string } } }>)[0]!.draft.drafts.primary;
     expect(sent).toBe(lead);
     expect(state.leads).toHaveLength(1);
     expect(state.published).toHaveLength(31);
+  });
+  it('asks for no lead when no real site page matches', async () => {
+    const prompts: string[] = [];
+    const h = harness({ leadMode: async () => 'live', siteContext: async () => undefined, readPacket: async path => path === 'search' ? { candidates: [{ sourceId: 'aaaaaaaaaaaa', url: 'https://www.nowcoder.com/discuss/1' }] } : { prepared: [ask], items: [{ result: { contentAccess: 'full' } }] },
+      draft: async prompt => { prompts.push(prompt); return { draft: good }; } });
+    await run(seeded(30), h.deps);
+    expect(prompts[0]).toContain('lead 一律为空串');
   });
   it('never asks for a lead on ordinary posts or when switched off', async () => {
     const prompts: string[] = [];
