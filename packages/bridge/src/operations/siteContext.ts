@@ -7,7 +7,8 @@ import { join } from 'node:path';
  */
 const API = 'https://fe-journey-main-ktantdfjcs.cn-hangzhou.fcapp.run/article/navList';
 const CONTENT = 'https://font-end-journey-resources.oss-cn-hangzhou.aliyuncs.com';
-const ROADMAP_KEY = 'agent-learning-roadmap';
+const ROADMAP_KEY = 'agent-learning-roadmap', INTERVIEW_KEY = 'agent-resume-interview';
+const INTERVIEW_INTENT = /面试|简历|秋招|春招|实习|复习|八股|面经/iu;
 const ROUTE_INTENT = /路线|怎么学|入门|转行|转方向|转\s*(ai|agent|大模型)|学什么|从零/iu;
 // Terms nearly every interview mentions (Agent, 项目) say nothing and are left out.
 export const STAT_TERMS = ['RAG', 'MCP', 'Function Calling', '工具调用', 'LangGraph', 'Memory', '记忆', '幂等', '超时', '重试', '评测', 'Prompt', '微调',
@@ -35,7 +36,9 @@ export function pickPage(pages: SitePage[], text: string): SitePage | undefined 
     if (score > (best?.score ?? 0)) best = { page, score };
   }
   if (best && best.score >= 3) return best.page;
-  return ROUTE_INTENT.test(text) ? pages.find(page => page.key === ROADMAP_KEY) : undefined;
+  if (ROUTE_INTENT.test(text)) return pages.find(page => page.key === ROADMAP_KEY);
+  // Interview prep and resume questions are answered by the site's interview guide.
+  return INTERVIEW_INTENT.test(text) ? pages.find(page => page.key === INTERVIEW_KEY) : undefined;
 }
 
 /** ASCII terms match whole words only, so "Go" is not counted inside "Google" or "algorithm". */

@@ -22,7 +22,7 @@ export const COMMENT_QUERIES = ['Agent 面经', 'RAG 面经', '大模型应用 �
  * Every search pairs one of these with one interview query, so lead-eligible posts actually turn up
  * (2026-11-09: 17 drafts, all interview posts, zero links ever sent).
  */
-export const HELP_QUERIES = ['Agent 学习路线', '转行 大模型 求建议', 'Agent 项目 推荐', '大模型应用 怎么学', 'RAG 项目 求推荐', '秋招 Agent 迷茫',
+export const HELP_QUERIES = ['面试 怎么准备', '简历 求建议', '秋招 怎么复习', '实习 请教', 'Agent 学习路线', '转行 大模型 求建议', 'Agent 项目 推荐', '大模型应用 怎么学', 'RAG 项目 求推荐', '秋招 Agent 迷茫',
   'AI 应用开发 入门', 'Agent 简历 项目', '求推荐 大模型 资料', '后端 转 Agent', '前端 转 AI', '实习 Agent 怎么准备'];
 
 /**
@@ -37,19 +37,21 @@ export const LEAD_POLICY = {
   maxPerDay: 15, minGapMs: 30 * 60_000,
   maxShareOf7Days: 0.5, minPublished7Days: 10, minLength: 50, maxLength: 150, maxClauseShare: 0.6, tailWindow: 0.25,
 } as const;
-const LEAD_NEED = /求(助|建议|指点|指导|推荐|路线|资料)|怎么学|学习路线|(转|入门|入行).{0,6}(agent|大模型|ai)|做(什么|啥)项目|项目.{0,8}(推荐|建议|怎么做|做什么|选)|有没有.{0,10}(资料|教程|路线|项目)|迷茫|(选|走).{0,6}方向/iu;
+// 2026-11-10 user: widened so interview prep, review, resume and ordinary questions also count ("不然都引流不了").
+const LEAD_NEED = /求(助|建议|指点|指导|推荐|路线|资料|问|解答)|请教|想问|问一下|大家觉得|怎么(学|准备|复习|写|做|选|办|入门|提升)|如何(学|准备|复习|写|选|入门|提升)|学习路线|(转|入门|入行).{0,6}(agent|大模型|ai|开发)|做(什么|啥)项目|项目.{0,8}(推荐|建议|怎么做|做什么|选|写)|简历|有没有.{0,10}(资料|教程|路线|项目|推荐)|迷茫|焦虑|(选|走).{0,6}方向|准备.{0,6}(面试|秋招|春招|实习)|(面试|秋招|春招|实习).{0,6}(准备|攻略|建议)|该不该|值不值|能不能|有必要/iu;
 const INTERVIEW_TITLE = /面经|一面|二面|三面|终面|hr面|凉经|笔试|oc|offer|八股/iu;
 /** Why this post is not a lead opportunity; undefined when the author is asking for help that material could serve. */
 export function leadIneligibility(packet: Packet): string | undefined {
   const { title, body } = packet.currentPost;
-  if (INTERVIEW_TITLE.test(title)) return 'interview-post';
-  if (!LEAD_NEED.test(`${title}\n${body.slice(0, 600)}`)) return 'no-stated-need';
+  // Pure interview recaps stay link-free; a recap whose author asks something counts as help-seeking.
+  if (INTERVIEW_TITLE.test(title) && !LEAD_NEED.test(title) && !LEAD_NEED.test(body.slice(-600))) return 'interview-post';
+  if (!LEAD_NEED.test(`${title}\n${body.slice(0, 600)}`) && !LEAD_NEED.test(body.slice(-600))) return 'no-stated-need';
   return undefined;
 }
 export interface LeadRecord { at: string; sourceId: string; replyUrl?: string }
 
 /** Title-only guess used to order candidates; the full lead gate still reads the whole post. */
-export const isHelpTitle = (title?: string) => !!title && !INTERVIEW_TITLE.test(title) && LEAD_NEED.test(title);
+export const isHelpTitle = (title?: string) => !!title && LEAD_NEED.test(title);
 export interface Candidate { sourceId: string; url: string; title?: string; publishedAt?: string }
 export interface Inflight { key: string; opportunityId: string; sourceId: string; startedAt: string }
 export interface RecentComment { text: string; at: string }

@@ -124,7 +124,7 @@ describe('need-gated lead experiment', () => {
 
   it('only treats posts that ask for help as lead opportunities', () => {
     expect(leadIneligibility(ask)).toBeUndefined();
-    expect(leadIneligibility(packet({ currentPost: { title: '字节后端一面面经', body: '求建议，怎么学 RAG', images: [] } }))).toBe('interview-post');
+    expect(leadIneligibility(packet({ currentPost: { title: '字节后端一面面经', body: '1. RAG 召回 2. 手撕 LRU', images: [] } }))).toBe('interview-post');
     expect(leadIneligibility(packet())).toBe('no-stated-need');
   });
   it('accepts a disclosed, self-contained lead and rejects the warned tail pattern', () => {
@@ -198,6 +198,12 @@ describe('need-gated lead experiment', () => {
     expect((await run(state, h.deps)).outcome).toBe('published');
     expect(state.nextKind).toBe('lead');
     expect(state.leadMisses).toBe(0);
+  });
+  it('counts prep, resume and asking recaps as help-seeking after widening', () => {
+    expect(isHelpTitle('秋招 Agent 面试怎么准备')).toBe(true);
+    expect(isHelpTitle('简历求看看')).toBe(true);
+    expect(leadIneligibility(packet({ currentPost: { title: '字节 Agent 一面', body: '问了 RAG 和幂等，最后想问大家觉得我还能怎么准备二面', images: [] } }))).toBeUndefined();
+    expect(leadIneligibility(packet({ currentPost: { title: '字节 Agent 一面', body: '1. RAG 怎么评测 2. 幂等怎么保证 3. 手撕 LRU', images: [] } }))).toBe('interview-post');
   });
   it('puts help-seeking posts first', () => {
     expect(isHelpTitle('Java后端开发如何转AI应用开发，求建议')).toBe(true);

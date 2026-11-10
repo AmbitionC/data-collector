@@ -4,6 +4,7 @@ import { countTerms, pickPage, statLines, type SitePage } from '../../packages/b
 const pages: SitePage[] = [
   { module: 'knowledge', key: 'agent-learning-roadmap', label: '从零到 Agent 工程师的学习路线', filePath: 'agent' },
   { module: 'knowledge', key: 'rag-evaluation', label: 'RAG 评测：检索与生成分开度量', filePath: 'llm/rag' },
+  { module: 'knowledge', key: 'agent-resume-interview', label: 'AI / Agent 岗位简历与面试', filePath: 'agent' },
   { module: 'knowledge', key: 'llm-token-context', label: 'Token、Context Window 与 KV Cache', filePath: 'llm/basics' },
 ];
 describe('lead grounding', () => {
@@ -13,7 +14,8 @@ describe('lead grounding', () => {
   });
   it('falls back to the roadmap only for route questions', () => {
     expect(pickPage(pages, 'Java 后端想转大模型，求一个学习路线')?.key).toBe('agent-learning-roadmap');
-    expect(pickPage(pages, '今天面试好紧张')).toBeUndefined();
+    expect(pickPage(pages, '秋招面试怎么准备')?.key).toBe('agent-resume-interview');
+    expect(pickPage(pages, '今天好累')).toBeUndefined();
   });
   it('states only counted numbers for terms the post mentions', () => {
     const stats = countTerms(['RAG 和 Redis', 'RAG 幂等', 'Kafka']);
