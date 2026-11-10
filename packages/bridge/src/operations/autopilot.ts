@@ -14,7 +14,7 @@ export const COMMENT_POLICY = {
   windowStartHour: 0, lastDispatchMinute: 24 * 60, cadenceMs: 45 * 60_000, captchaProbeAfterMs: Number.POSITIVE_INFINITY, captchaProbeSpacingMs: 6 * 3_600_000, noOpportunityDelayMs: 15 * 60_000,
   failureBackoffMs: [5 * 60_000, 15 * 60_000, 30 * 60_000], failuresBeforeNotice: 6, maxCandidatesPerTick: 3,
   maxDraftsPerDay: 80, maxCandidateAgeMs: 30 * 86_400_000, minPostAgeMs: 6 * 3_600_000, tickDeadlineMs: 8 * 60_000, 
-  searchWaitMs: 60_000, prepareWaitMs: 120_000, publishWaitMs: 240_000, similarityLimit: 0.6, maxCommentLength: 80, leadMissesBeforeFallback: 6,
+  searchWaitMs: 60_000, prepareWaitMs: 120_000, publishWaitMs: 240_000, similarityLimit: 0.6, maxCommentLength: 80, leadMissesBeforeFallback: 6, afterVerificationMs: 30 * 60_000,
 } as const;
 export const COMMENT_QUERIES = ['Agent 面经', 'RAG 面经', '大模型应用 面经', 'LangGraph', 'Agent 开发 一面', 'AI 应用开发 面经',
   'MCP 面试', '前端 面经', 'Agent 项目 怎么做', 'RAG 评测', '后端 面经 Agent', 'Agent 工具调用', 'AI 全栈', '校招 Agent', '大模型 实习 面经', 'Function Calling 面试'];
@@ -257,7 +257,12 @@ export async function tick(state: AutopilotState, deps: AutopilotDeps, options: 
     if (recovery.status === 'needs_user') await notifyOnce(recovery.code, `牛客评论需要你处理：${recovery.message}`);
     return finish({ outcome: recovery.status, detail: recovery.code }, next);
   }
-  state.recoveryAttempt = 0; delete state.notified.VERIFICATION_REQUIRED;
+  state.recoveryAttempt = 0;
+  // 2026-11-10 user: completing a captcha auto-submits the pending comment, so wait 30 minutes before the next.
+  if (state.notified.VERIFICATION_REQUIRED) {
+    delete state.notified.VERIFICATION_REQUIRED;
+    return finish({ outcome: 'post_verification_cooldown' }, deps.now() + COMMENT_POLICY.afterVerificationMs);
+  }
 
   // A crash can leave a send unresolved. Only the journal decides; nothing is ever sent again for this source.
   if (state.inflight) {

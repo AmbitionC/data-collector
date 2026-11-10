@@ -215,6 +215,12 @@ describe('need-gated lead experiment', () => {
     expect(state.candidates.some(c => c.sourceId === 'dddddddddddd')).toBe(false);
     expect(packetSkipReason(packet({ currentPost: { title: '快手面经', body: '一面问了 Redis 持久化、MySQL 索引和线程池参数，二面问项目。需要内推码的可以私信我，附上快手内推码', images: [] } }))).toBe('ad-like-post');
   });
+  it('waits 30 minutes after a captcha is cleared', async () => {
+    const { deps, started } = harness(), state = initialState(); state.notified.VERIFICATION_REQUIRED = 'x';
+    expect((await run(state, deps)).outcome).toBe('post_verification_cooldown');
+    expect(state.nextAt).toBe(new Date(NOW + 30 * 60_000).toISOString());
+    expect(started).toHaveLength(0);
+  });
   it('puts help-seeking posts first', () => {
     expect(isHelpTitle('Java后端开发如何转AI应用开发，求建议')).toBe(true);
     expect(isHelpTitle('字节 Agent 一面面经')).toBe(false);
