@@ -153,8 +153,8 @@ export function jobIssues(statuses: JobStatus[], now: number): string[] {
     if (status.tokens > limit.tokensPerDay) issues.push(`${status.job} 24 小时用了 ${Math.round(status.tokens / 1e4) / 100}M token，超过预期`);
     const failures = (status.outcomes.technical_failure ?? 0) + (status.outcomes.failed ?? 0) + (status.outcomes.time_limit ?? 0);
     if (failures >= 5) issues.push(`${status.job} 24 小时失败 ${failures} 次，最近：${status.lastFailure ?? '未知'}`);
-    // Quota waits are normal silence, so quiet only counts when something also failed.
-    if (limit.quietMs && shanghaiHour >= 11 && shanghaiHour < 23 && status.lastFailure && (!status.lastSuccessAt || now - Date.parse(status.lastSuccessAt) > limit.quietMs)) issues.push(`${status.job} 超过 ${limit.quietMs / HOUR} 小时没有成功`);
+    // Quota waits are normal silence; quiet counts when something failed or the runner kept finding nothing (2026-11-10 stall).
+    if (limit.quietMs && shanghaiHour >= 11 && shanghaiHour < 23 && (status.lastFailure || (status.outcomes.no_opportunity ?? 0) + (status.outcomes.no_lead_post ?? 0) >= 20) && (!status.lastSuccessAt || now - Date.parse(status.lastSuccessAt) > limit.quietMs)) issues.push(`${status.job} 超过 ${limit.quietMs / HOUR} 小时没有成功`);
   }
   return issues;
 }

@@ -33,6 +33,7 @@ describe('autopilot core', () => {
     expect(jobIssues(statuses, NOW)).toHaveLength(2);
     expect(jobIssues(statuses, NOW + 4 * 3_600_000).some(issue => issue.includes('没有成功'))).toBe(true);
     expect(jobIssues([{ job: 'comments', outcomes: {}, tokens: 0, lastSuccessAt: null, lastFailure: null }], NOW)).toEqual([]);
+    expect(jobIssues([{ job: 'comments', outcomes: { no_opportunity: 40 }, tokens: 0, lastSuccessAt: null, lastFailure: null }], NOW)[0]).toContain('没有成功');
   });
 });
 

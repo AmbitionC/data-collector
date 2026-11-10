@@ -189,6 +189,16 @@ describe('need-gated lead experiment', () => {
     expect(state.leadMisses).toBe(0);
     expect(state.nextKind).toBe('lead');
   });
+  it('hands the turn to an ordinary comment when no help post exists, instead of searching every minute', async () => {
+    const h = harness({ leadMode: async () => 'live' }), state = seeded(30);
+    const first = await run(state, h.deps);
+    expect(first.outcome).toBe('no_lead_post');
+    expect(h.started.filter(s => s.request.kind === 'search')).toHaveLength(1);
+    state.nextAt = null;
+    expect((await run(state, h.deps)).outcome).toBe('published');
+    expect(state.nextKind).toBe('lead');
+    expect(state.leadMisses).toBe(0);
+  });
   it('puts help-seeking posts first', () => {
     expect(isHelpTitle('Java后端开发如何转AI应用开发，求建议')).toBe(true);
     expect(isHelpTitle('字节 Agent 一面面经')).toBe(false);

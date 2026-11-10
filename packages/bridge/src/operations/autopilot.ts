@@ -287,6 +287,12 @@ export async function tick(state: AutopilotState, deps: AutopilotDeps, options: 
     for (let examined = 0; examined < COMMENT_POLICY.maxCandidatesPerTick && state.candidates.length > 0; examined++) {
       if (deps.now() >= deadline) throw new TechnicalFailure('本轮超过总时限');
       const candidate = wantLead ? state.candidates.find(c => isHelpTitle(c.title)) : state.candidates[0];
+      if (!candidate && wantLead) {
+        // 2026-11-10: without this the lead turn re-searched every minute for hours and posted nothing.
+        // No help post right now: give this turn to an ordinary comment shortly, and look again next lead turn.
+        state.leadMisses = COMMENT_POLICY.leadMissesBeforeFallback; await saveState(state);
+        return finish({ outcome: 'no_lead_post', skipped }, deps.now() + 60_000);
+      }
       if (!candidate) break;
       // Every removal below targets this exact candidate, wherever it sat in the queue.
       if (state.candidates[0] !== candidate) state.candidates = [candidate, ...state.candidates.filter(c => c !== candidate)];
