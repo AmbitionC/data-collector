@@ -2,6 +2,7 @@ import { readFile, readdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { codexJson, notifyUser, runJob } from '../autopilot/core.js';
 import { siteContext, type SiteContext } from './siteContext.js';
+import { fetchHotList } from './hotList.js';
 
 /**
  * Deterministic comment runner. One short-lived process per tick; the model is
@@ -12,7 +13,7 @@ export const COMMENT_POLICY = {
   // 2026-11-10 user: around the clock, one comment every 45 minutes (captchas followed runs at 30 minutes).
   windowStartHour: 0, lastDispatchMinute: 24 * 60, cadenceMs: 45 * 60_000, captchaProbeAfterMs: Number.POSITIVE_INFINITY, captchaProbeSpacingMs: 6 * 3_600_000, noOpportunityDelayMs: 15 * 60_000,
   failureBackoffMs: [5 * 60_000, 15 * 60_000, 30 * 60_000], failuresBeforeNotice: 6, maxCandidatesPerTick: 3,
-  maxDraftsPerDay: 80, maxCandidateAgeMs: 30 * 86_400_000, tickDeadlineMs: 8 * 60_000, 
+  maxDraftsPerDay: 80, maxCandidateAgeMs: 30 * 86_400_000, minPostAgeMs: 6 * 3_600_000, tickDeadlineMs: 8 * 60_000, 
   searchWaitMs: 60_000, prepareWaitMs: 120_000, publishWaitMs: 240_000, similarityLimit: 0.6, maxCommentLength: 80, leadMissesBeforeFallback: 6,
 } as const;
 export const COMMENT_QUERIES = ['Agent 面经', 'RAG 面经', '大模型应用 面经', 'LangGraph', 'Agent 开发 一面', 'AI 应用开发 面经',
@@ -52,7 +53,7 @@ export interface LeadRecord { at: string; sourceId: string; replyUrl?: string }
 
 /** Title-only guess used to order candidates; the full lead gate still reads the whole post. */
 export const isHelpTitle = (title?: string) => !!title && LEAD_NEED.test(title);
-export interface Candidate { sourceId: string; url: string; title?: string; publishedAt?: string }
+export interface Candidate { sourceId: string; url: string; title?: string; publishedAt?: string; hot?: number }
 export interface Inflight { key: string; opportunityId: string; sourceId: string; startedAt: string }
 export interface RecentComment { text: string; at: string }
 export interface AutopilotState {
@@ -86,6 +87,8 @@ export interface AutopilotDeps {
   attempts(opportunityId: string): Promise<Attempt[]>;
   readPacket(path: string): Promise<Record<string, unknown>>;
   ownPostUrls(): Promise<Set<string>>;
+  /** Site-wide hot list (2026-11-10 user: comment on hot posts first for exposure). */
+  hotList?(): Promise<Candidate[]>;
   leadMode(): Promise<LeadMode>;
   /** The one real site page and statistics a lead may cite; undefined when nothing matches. */
   siteContext?(packet: Packet): Promise<SiteContext | undefined>;
@@ -114,12 +117,15 @@ export function similarity(a: string, b: string): number {
 }
 
 /** Why a prepared post cannot be answered automatically; undefined when it can. */
+const AD_POST = /内推码|内推链接|可以\s*tt|私信我|加\s*(v|vx|微|wx)|辅导|代运营|测评公司|服务商|招生|课程优惠|扫码/iu;
 export function packetSkipReason(packet: Packet): string | undefined {
   if (packet.sourceConflict) return 'source-conflict';
   if (packet.currentPost.images.length > 0) return 'post-has-images';
   if (packet.conversation.coverage.total === null || !packet.conversation.coverage.complete) return 'comment-coverage-incomplete';
   if (packet.currentPost.body.trim().length < 30) return 'body-too-short';
   if (packet.anchorOptions.length === 0) return 'no-anchor';
+  // Promotion posts (referral codes, coaching, "tt me") are the ones later hidden; a comment there is wasted.
+  if (AD_POST.test(`${packet.currentPost.title}\n${packet.currentPost.body}`)) return 'ad-like-post';
   return undefined;
 }
 
@@ -271,6 +277,15 @@ export async function tick(state: AutopilotState, deps: AutopilotDeps, options: 
   // A lead turn only answers help-seeking posts; after too many misses one ordinary comment goes out so the account never stalls.
   const wantLead = leadMode === 'live' && (state.nextKind ?? 'lead') === 'lead' && (state.leadMisses ?? 0) < COMMENT_POLICY.leadMissesBeforeFallback;
   try {
+    // Hot posts are refreshed every tick and go first on ordinary turns. Other posts younger than minPostAgeMs
+    // wait: the user saw many freshly commented posts later turn author-only, and a post on the hot list has
+    // already survived that stage.
+    const settled = (c: Candidate) => !!c.hot || !c.publishedAt || deps.now() - Date.parse(c.publishedAt) >= COMMENT_POLICY.minPostAgeMs;
+    if (deps.hotList) {
+      const hot = await deps.hotList().catch(() => [] as Candidate[]), known = new Set(state.candidates.map(c => c.sourceId));
+      const fresh = hot.filter(c => !known.has(c.sourceId) && !state.excluded[c.sourceId] && settled(c));
+      if (fresh.length) { state.candidates = [...fresh, ...state.candidates]; await saveState(state); }
+    }
     if (state.candidates.length === 0 || (wantLead && !state.candidates.some(c => isHelpTitle(c.title)))) {
       const own = await deps.ownPostUrls(), queries = wantLead
         ? [HELP_QUERIES[state.queryIndex % HELP_QUERIES.length]!, HELP_QUERIES[(state.queryIndex + 1) % HELP_QUERIES.length]!]
@@ -280,10 +295,10 @@ export async function tick(state: AutopilotState, deps: AutopilotDeps, options: 
       if (run.status !== 'completed') throw new TechnicalFailure(run.message ?? '搜索失败');
       const found = ((await deps.readPacket(run.resultPath)).candidates ?? []) as Candidate[], known = new Set(state.candidates.map(c => c.sourceId));
       state.candidates = [...state.candidates, ...found.filter(c => !known.has(c.sourceId))].filter(c => !state.excluded[c.sourceId] && !own.has(c.url)
-        && (!c.publishedAt || deps.now() - Date.parse(c.publishedAt) <= COMMENT_POLICY.maxCandidateAgeMs))
+        && (!c.publishedAt || deps.now() - Date.parse(c.publishedAt) <= COMMENT_POLICY.maxCandidateAgeMs) && settled(c))
         // Help-seeking posts first, so the lead half of the mix has posts to answer; then newest.
-        .sort((a, b) => Number(isHelpTitle(b.title)) - Number(isHelpTitle(a.title)) || (b.publishedAt ?? '').localeCompare(a.publishedAt ?? ''))
-        .map(({ sourceId, url, title, publishedAt }) => ({ sourceId, url, ...(title ? { title } : {}), ...(publishedAt ? { publishedAt } : {}) }));
+        .sort((a, b) => (b.hot ?? 0) - (a.hot ?? 0) || Number(isHelpTitle(b.title)) - Number(isHelpTitle(a.title)) || (b.publishedAt ?? '').localeCompare(a.publishedAt ?? ''))
+        .map(({ sourceId, url, title, publishedAt, hot }) => ({ sourceId, url, ...(title ? { title } : {}), ...(publishedAt ? { publishedAt } : {}), ...(hot ? { hot } : {}) }));
       await saveState(state);
     }
     for (let examined = 0; examined < COMMENT_POLICY.maxCandidatesPerTick && state.candidates.length > 0; examined++) {
@@ -379,7 +394,7 @@ export async function readLeadMode(configDir: string): Promise<LeadMode> {
 }
 
 export async function runAutopilot(input: { configDir: string; live: boolean; deps: Omit<AutopilotDeps, 'ownPostUrls' | 'draft' | 'notify' | 'now' | 'sleep' | 'readPacket' | 'leadMode'> & Partial<AutopilotDeps> }): Promise<TickResult> {
-  const deps: AutopilotDeps = { ownPostUrls: () => ownArticleUrls(input.configDir), leadMode: () => readLeadMode(input.configDir), siteContext: packet => siteContext(join(input.configDir, 'nowcoder-autopilot'), `${packet.currentPost.title}\n${packet.currentPost.body}`), draft: prompt => codexDraft(prompt), notify: notifyUser(input.configDir), now: Date.now,
+  const deps: AutopilotDeps = { ownPostUrls: () => ownArticleUrls(input.configDir), hotList: fetchHotList, leadMode: () => readLeadMode(input.configDir), siteContext: packet => siteContext(join(input.configDir, 'nowcoder-autopilot'), `${packet.currentPost.title}\n${packet.currentPost.body}`), draft: prompt => codexDraft(prompt), notify: notifyUser(input.configDir), now: Date.now,
     sleep: ms => new Promise(resolve => setTimeout(resolve, ms)), readPacket: async file => JSON.parse(await readFile(file, 'utf8')) as Record<string, unknown>, ...input.deps };
   return runJob<AutopilotState, TickResult>({ configDir: input.configDir, name: input.live ? 'comments' : 'comments.dry-run', now: deps.now, initial: async () => initialState(),
     tick: (state, save) => tick(state, deps, { live: input.live, saveState: save }), ...(input.live ? { watch: deps.notify } : {}) });

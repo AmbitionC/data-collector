@@ -1,6 +1,7 @@
 import { readFile, readdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { codexJson, notifyUser, runJob, type JobResult } from '../autopilot/core.js';
+import { fetchHotList } from '../operations/hotList.js';
 
 /** Deterministic article runner: one slot, one attempt, its own state. The model only writes the draft. */
 export const ARTICLE_POLICY = { browser: 'chrome', accountId: '544222414', maxSourcesPerTick: 3, maxTriesPerSlot: 3, retryMs: 15 * 60_000,
@@ -17,6 +18,8 @@ export interface ArticleDeps {
   api(path: string, method?: string, body?: unknown): Promise<any>;
   catalog(): Promise<Leaf[]>; source(url: string): Promise<string>;
   generate(prompt: string): Promise<{ value: GeneratedArticle; usage?: unknown }>;
+  /** Current site hot-list titles, used only as a hint for the angle of the opening. */
+  hotTitles?(): Promise<string[]>;
   notify(message: string): Promise<void>; now(): number; sleep(ms: number): Promise<void>;
 }
 
@@ -84,7 +87,9 @@ export async function articleTick(state: ArticleState, deps: ArticleDeps, option
   }
   const sources = pickSources(await deps.catalog(), state.used, state.lastCompany).slice(0, ARTICLE_POLICY.maxSourcesPerTick), skipped: Array<{ url: string; reason: string }> = [];
   for (const leaf of sources) {
-    const first = await deps.generate(`${RULES}\n\n<source>${(await deps.source(leaf.url)).slice(0, 12000)}</source>`);
+    const hot = deps.hotTitles ? await deps.hotTitles().catch(() => [] as string[]) : [];
+    const angle = hot.length ? `\n\n<hot_titles>\n${hot.join('\n')}\n</hot_titles>\n今天牛客热榜在聊上面这些。如果其中某个关注点（比如选 offer、薪资、面评、反问、焦虑）和这场面试自然相关，可以用它做开头的切口或结尾的落点，一两句就够；对不上就不用，不要硬蹭，不要提到“热榜”。` : '';
+    const first = await deps.generate(`${RULES}${angle}\n\n<source>${(await deps.source(leaf.url)).slice(0, 12000)}</source>`);
     // Second, fresh pass only rewrites tone; the deterministic checks below still decide.
     const generated = first.value.decision === 'skip' ? first : await deps.generate(`${POLISH}\n\n<draft>${JSON.stringify(first.value)}</draft>`).catch(() => first), article = generated.value;
     const reason = article.decision === 'skip' ? 'model-skip' : articleRejection(article, leaf.company);
@@ -121,7 +126,7 @@ function leaves(nodes: any[], company: string, out: Leaf[] = []): Leaf[] {
 const text = async (url: string) => { const response = await fetch(url, { signal: AbortSignal.timeout(20_000) }); if (!response.ok) throw new Error(`读取失败 ${response.status}`); return response.text(); };
 
 export async function runArticleAutopilot(input: { configDir: string; live: boolean; api: ArticleDeps['api'] }): Promise<Record<string, unknown>> {
-  const deps: ArticleDeps = { api: input.api, now: Date.now, sleep: ms => new Promise(resolve => setTimeout(resolve, ms)), notify: notifyUser(input.configDir), source: text, generate: prompt => codexJson<GeneratedArticle>(prompt, SCHEMA, { effort: 'high', timeoutMs: 300_000 }),
+  const deps: ArticleDeps = { api: input.api, now: Date.now, hotTitles: async () => (await fetchHotList()).map(c => c.title ?? '').filter(Boolean), sleep: ms => new Promise(resolve => setTimeout(resolve, ms)), notify: notifyUser(input.configDir), source: text, generate: prompt => codexJson<GeneratedArticle>(prompt, SCHEMA, { effort: 'high', timeoutMs: 300_000 }),
     catalog: async () => (JSON.parse(await text(CATALOG)) as { data: { navData: any[] } }).data.navData.flatMap(company => leaves(company.children ?? [], company.key)) };
   return runJob<ArticleState, JobResult>({ configDir: input.configDir, name: input.live ? 'articles' : 'articles.dry-run', now: deps.now, tick: async (state, save) => articleTick(state, deps, { live: input.live, save }) as Promise<JobResult>,
     initial: async () => {

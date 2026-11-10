@@ -205,6 +205,16 @@ describe('need-gated lead experiment', () => {
     expect(leadIneligibility(packet({ currentPost: { title: '字节 Agent 一面', body: '问了 RAG 和幂等，最后想问大家觉得我还能怎么准备二面', images: [] } }))).toBeUndefined();
     expect(leadIneligibility(packet({ currentPost: { title: '字节 Agent 一面', body: '1. RAG 怎么评测 2. 幂等怎么保证 3. 手撕 LRU', images: [] } }))).toBe('interview-post');
   });
+  it('comments on hot posts first, waits on fresh ordinary posts, and skips promotion posts', async () => {
+    const fresh = new Date(NOW - 3_600_000).toISOString(), old = new Date(NOW - 10 * 3_600_000).toISOString();
+    const h = harness({ hotList: async () => [{ sourceId: 'cccccccccccc', url: 'https://www.nowcoder.com/discuss/3', title: '月薪8k，很丢人吗？', hot: 1429, publishedAt: fresh }],
+      readPacket: async path => path === 'search' ? { candidates: [{ sourceId: 'dddddddddddd', url: 'https://www.nowcoder.com/discuss/4', title: '刚发的帖', publishedAt: fresh }, { sourceId: 'aaaaaaaaaaaa', url: 'https://www.nowcoder.com/discuss/1', title: '旧帖', publishedAt: old }] } : { prepared: [packet()], items: [{ result: { contentAccess: 'full' } }] } });
+    const state = initialState();
+    await run(state, h.deps);
+    expect(JSON.stringify(h.started.find(s => s.request.kind === 'prepare')!.request)).toContain('cccccccccccc');
+    expect(state.candidates.some(c => c.sourceId === 'dddddddddddd')).toBe(false);
+    expect(packetSkipReason(packet({ currentPost: { title: '快手面经', body: '一面问了 Redis 持久化、MySQL 索引和线程池参数，二面问项目。需要内推码的可以私信我，附上快手内推码', images: [] } }))).toBe('ad-like-post');
+  });
   it('puts help-seeking posts first', () => {
     expect(isHelpTitle('Java后端开发如何转AI应用开发，求建议')).toBe(true);
     expect(isHelpTitle('字节 Agent 一面面经')).toBe(false);
