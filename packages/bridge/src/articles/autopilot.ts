@@ -25,6 +25,8 @@ export interface ArticleDeps {
   dataBundle?(): Promise<DataBundle>;
   /** Rehearsal override: 'data' or 'interview'. */
   kind?: 'data' | 'interview';
+  /** One-off publish outside the regular windows when the user asks for it now. */
+  manualSlot?: { day: string; slot: 'am' | 'pm'; id: string };
   notify(message: string): Promise<void>; now(): number; sleep(ms: number): Promise<void>;
 }
 
@@ -69,7 +71,7 @@ const POLISH = `下面是一篇牛客备考帖草稿，请只做「去 AI 味」
 const SCHEMA = { type: 'object', additionalProperties: false, required: ['decision', 'title', 'body', 'notes'], properties: { decision: { type: 'string', enum: ['write', 'skip'] }, title: { type: 'string' }, body: { type: 'string' }, notes: { type: 'string' } } };
 
 export async function articleTick(state: ArticleState, deps: ArticleDeps, options: { live: boolean; save(state: ArticleState): Promise<void> }): Promise<Record<string, unknown>> {
-  const { live, save } = options, slot = currentSlot(deps.now());
+  const { live, save } = options, slot = deps.manualSlot ?? currentSlot(deps.now());
   if (state.inflight) { // Only the journal decides a crashed attempt; the slot is never sent again.
     const { inflight } = state, attempt = (await deps.api(`/${inflight.id}`)).entry.publicationAttempts?.find((a: { key: string }) => a.key === inflight.key);
     // No journal entry means the server refused before any send, so the slot stays open for a later try.
@@ -177,7 +179,9 @@ const text = async (url: string) => { const response = await fetch(url, { signal
 export async function runArticleAutopilot(input: { configDir: string; live: boolean; api: ArticleDeps['api'] }): Promise<Record<string, unknown>> {
   // Data posts go live only after the user approves samples: <config>/nowcoder-autopilot/articles.data.json = {"enabled":true}.
   const dataEnabled = process.env.NOWCODER_ARTICLE_KIND === 'data' || await readFile(join(input.configDir, 'nowcoder-autopilot', 'articles.data.json'), 'utf8').then(raw => (JSON.parse(raw) as { enabled?: boolean }).enabled === true, () => false);
-  const deps: ArticleDeps = { api: input.api, now: Date.now, ...(dataEnabled ? { dataBundle: () => dataBundle(join(input.configDir, 'nowcoder-autopilot')) } : {}), ...(process.env.NOWCODER_ARTICLE_KIND === 'data' || process.env.NOWCODER_ARTICLE_KIND === 'interview' ? { kind: process.env.NOWCODER_ARTICLE_KIND } : {}), hotTitles: async () => (await fetchHotList()).map(c => c.title ?? '').filter(Boolean), sleep: ms => new Promise(resolve => setTimeout(resolve, ms)), notify: notifyUser(input.configDir), source: text, generate: prompt => codexJson<GeneratedArticle>(prompt, SCHEMA, { effort: 'high', timeoutMs: 300_000 }),
+  // NOWCODER_ARTICLE_MANUAL=1 publishes one article right now (2026-11-11 user: "数据贴现在就发").
+  const manual = process.env.NOWCODER_ARTICLE_MANUAL === '1' ? (() => { const at = new Date(Date.now() + 8 * 3_600_000).toISOString(); return { day: at.slice(0, 10), slot: 'pm' as const, id: `${at.slice(0, 10)}-manual-${at.slice(11, 16).replace(':', '')}` }; })() : undefined;
+  const deps: ArticleDeps = { api: input.api, now: Date.now, ...(manual ? { manualSlot: manual } : {}), ...(dataEnabled ? { dataBundle: () => dataBundle(join(input.configDir, 'nowcoder-autopilot')) } : {}), ...(process.env.NOWCODER_ARTICLE_KIND === 'data' || process.env.NOWCODER_ARTICLE_KIND === 'interview' ? { kind: process.env.NOWCODER_ARTICLE_KIND } : {}), hotTitles: async () => (await fetchHotList()).map(c => c.title ?? '').filter(Boolean), sleep: ms => new Promise(resolve => setTimeout(resolve, ms)), notify: notifyUser(input.configDir), source: text, generate: prompt => codexJson<GeneratedArticle>(prompt, SCHEMA, { effort: 'high', timeoutMs: 300_000 }),
     catalog: async () => (JSON.parse(await text(CATALOG)) as { data: { navData: any[] } }).data.navData.flatMap(company => leaves(company.children ?? [], company.key)) };
   // Waiting only happens inside a slot window, so logging it explains a missed slot (2026-11-11 evening).
   return runJob<ArticleState, JobResult>({ configDir: input.configDir, name: input.live ? 'articles' : 'articles.dry-run', now: deps.now, logWaiting: true, tick: async (state, save) => articleTick(state, deps, { live: input.live, save }) as Promise<JobResult>,

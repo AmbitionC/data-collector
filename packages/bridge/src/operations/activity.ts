@@ -123,17 +123,31 @@ export class NowcoderOperationsActivity {
       const pause = (await control.status()).verification;
       if (!pause || pause.id !== input.id) throw new HttpError(409, 'PUBLISH_VERIFICATION_CHANGED', '待处理验证已变化，请重读发布状态；未恢复');
       this.transport.assertAvailable();
-      const requestId = randomUUID();
-      const result = await this.transport.execute({ kind: 'context', url: pause.sourceUrl, maxPages: 3 }, requestId);
+      // 2026-11-11: a challenged post can be deleted, leaving a pause nobody can clear. Only then may another public
+      // post stand in for the read-only check; the original comment stays unresolved and is never re-sent.
+      if (input.checkUrl && !await originalPostGone(pause.sourceUrl)) throw new HttpError(409, 'ORIGINAL_POST_STILL_EXISTS', '原帖仍在，请在原帖完成验证');
+      const checkUrl = input.checkUrl ?? pause.sourceUrl, requestId = randomUUID();
+      const result = await this.transport.execute({ kind: 'context', url: checkUrl, maxPages: 1 }, requestId);
       if (result.kind === 'attention') {
         await this.observeVerification(result, pause.sourceUrl, requestId, pause.opportunityId, pause.key);
         return { status: await control.status(), attention: result };
       }
-      if (result.kind !== 'context' || result.snapshot.sourceUrl !== pause.sourceUrl) throw new HttpError(409, 'OPERATIONS_RESULT_INVALID', '恢复核验必须返回原帖只读上下文');
-      const publication = pause.opportunityId && pause.key
+      if (result.kind !== 'context' || result.snapshot.sourceUrl !== checkUrl) throw new HttpError(409, 'OPERATIONS_RESULT_INVALID', '恢复核验必须返回只读上下文');
+      const publication = !input.checkUrl && pause.opportunityId && pause.key
         ? await this.store.reconcilePublication(pause.opportunityId, pause.key, result.snapshot) : undefined;
       await control.clearVerification(input.id);
       return { status: await control.status(), ...(publication ? { publication } : {}) };
     } finally { this.active--; }
   }
+}
+
+/** True only when Nowcoder's public detail API answers for the post with no content at all. */
+export async function originalPostGone(url: string, fetcher: typeof fetch = fetch): Promise<boolean> {
+  const discuss = /\/discuss\/(\d+)/u.exec(url)?.[1], moment = /\/feed\/main\/detail\/([0-9a-f]{32})/u.exec(url)?.[1];
+  const api = discuss ? `https://gw-c.nowcoder.com/api/sparta/detail/content-data/detail/${discuss}` : moment ? `https://gw-c.nowcoder.com/api/sparta/detail/moment-data/detail/${moment}` : undefined;
+  if (!api) return false;
+  try {
+    const body = await (await fetcher(api, { signal: AbortSignal.timeout(10_000) })).json() as { success?: boolean; data?: { title?: string | null; content?: string | null; id?: unknown } | null };
+    return body.success === true && !!body.data && !body.data.title && !body.data.content && body.data.id == null;
+  } catch { return false; }
 }

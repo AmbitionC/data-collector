@@ -18,7 +18,7 @@ class OperationsRequestError extends Error {
 export async function runOperationsCli(args: string[], credentials: OperationsCredentials | (() => Promise<OperationsCredentials>), io: OperationsIo): Promise<number> {
   const action = args[2];
   const values = new Map<string, string>();
-  const allowed = new Set(['--source', '--id', '--file', '--port', '--config', '--library', '--query', '--limit', '--pages', '--revision', '--key', '--wait', '--attempt']);
+  const allowed = new Set(['--source', '--id', '--file', '--port', '--config', '--library', '--query', '--limit', '--pages', '--revision', '--key', '--wait', '--attempt', '--check-url']);
   let send = false, verificationCompleted = false;
   for (let index = 3; index < args.length; index += 2) {
     const key = args[index], value = args[index + 1];
@@ -27,7 +27,7 @@ export async function runOperationsCli(args: string[], credentials: OperationsCr
     if (!key || !allowed.has(key) || !value || value.startsWith('--') || values.has(key)) throw new Error('牛客运营命令参数无效');
     values.set(key, value);
   }
-  const actionOptions: Record<string, string[]> = { list: [], add: ['--source'], brief: ['--id'], draft: ['--file'], search: ['--query', '--limit'], context: ['--id', '--pages'], publish: ['--id', '--revision', '--key'], verify: ['--id', '--key', '--pages'], workflow: ['--file', '--id', '--wait'], stats: ['--id'], limits: [], recovery: ['--attempt'], configure: ['--file'], resume: ['--id'], autopilot: [], 'autopilot-status': [] };
+  const actionOptions: Record<string, string[]> = { list: [], add: ['--source'], brief: ['--id'], draft: ['--file'], search: ['--query', '--limit'], context: ['--id', '--pages'], publish: ['--id', '--revision', '--key'], verify: ['--id', '--key', '--pages'], workflow: ['--file', '--id', '--wait'], stats: ['--id'], limits: [], recovery: ['--attempt'], configure: ['--file'], resume: ['--id', '--check-url'], autopilot: [], 'autopilot-status': [] };
   if (!action || !actionOptions[action] || [...values.keys()].some(key => !['--port', '--config', '--library', ...actionOptions[action]!].includes(key)) || (send && action !== 'publish' && action !== 'workflow' && action !== 'autopilot') || (verificationCompleted && action !== 'resume')) throw new Error('牛客运营命令参数无效');
   if (action === 'resume' && !verificationCompleted) throw new Error('恢复需要确认已手动完成验证：--verification-completed');
   let loadedCredentials: OperationsCredentials | undefined;
@@ -89,7 +89,7 @@ export async function runOperationsCli(args: string[], credentials: OperationsCr
     const policy = nowcoderPublishingPolicySchema.parse(JSON.parse(await readFile(path, 'utf8')));
     result = await request('/publishing', 'PUT', policy);
   } else if (action === 'resume') {
-    const input = nowcoderVerificationResumeSchema.parse({ id: values.get('--id'), verificationCompleted });
+    const input = nowcoderVerificationResumeSchema.parse({ id: values.get('--id'), verificationCompleted, ...(values.has('--check-url') ? { checkUrl: values.get('--check-url') } : {}) });
     result = await request('/publishing/resume', 'POST', input);
   } else if (action === 'workflow') {
     if (values.has('--file') === values.has('--id')) throw new Error('workflow需要且仅需要 --file 或 --id');

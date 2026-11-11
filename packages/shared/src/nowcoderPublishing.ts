@@ -35,6 +35,8 @@ export const articlePublishingStatusSchema = z.object({
 export type ArticlePublishingStatus = z.infer<typeof articlePublishingStatusSchema>;
 export const nowcoderVerificationResumeSchema = z.object({
   id: z.string().uuid(), verificationCompleted: z.literal(true),
+  /** Only when the original post was deleted: another public post read to confirm the account is no longer challenged. */
+  checkUrl: z.string().url().regex(/^https:\/\/www\.nowcoder\.com\//u).optional(),
 }).strict();
 
 export type NowcoderPublishingChannel = 'comment' | 'article';
