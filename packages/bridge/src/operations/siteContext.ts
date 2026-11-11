@@ -73,3 +73,25 @@ export async function siteContext(cacheDir: string, postText: string): Promise<S
   const stats = await siteStats(cacheDir).then(s => statLines(s, `${postText}\n${page.label}`)).catch(() => []);
   return { title: page.label, excerpt, stats };
 }
+
+export interface DataBundle { lines: string[]; numbers: Set<string> }
+/** Every number a data post may state, all counted from the published site (2026-11-11 user: hot-style data posts). */
+export async function dataBundle(cacheDir: string): Promise<DataBundle> {
+  const stats = await siteStats(cacheDir), lines: string[] = [], numbers = new Set<string>([String(stats.total)]);
+  lines.push(`站内已发布面经：${stats.total} 篇（AI、Agent、后端、前端等方向，均为牛客公开面经整理）`);
+  for (const [term, count] of Object.entries(stats.counts).filter(([, c]) => c > 0).sort((a, b) => b[1] - a[1])) {
+    const pct = Math.round(count / stats.total * 100);
+    lines.push(`问到 ${term} 的：${count} 篇，占 ${pct}%`); numbers.add(String(count)); numbers.add(`${pct}%`); numbers.add(String(pct));
+  }
+  const nav = (JSON.parse(await get(`${API}?module=interview`)) as { data: { navData: any[] } }).data.navData;
+  const companies = nav.map(c => ({ label: String(c.label), n: leaves(c.children ?? [], 'interview').length })).sort((a, b) => b.n - a.n);
+  lines.push(`覆盖公司：${companies.length} 家；面经最多的：${companies.slice(0, 8).map(c => `${c.label} ${c.n} 篇`).join('、')}`);
+  numbers.add(String(companies.length)); for (const c of companies.slice(0, 8)) numbers.add(String(c.n));
+  return { lines, numbers };
+}
+
+/** Numbers in a draft that the bundle cannot back up (years and list ordinals are allowed). */
+export function unbackedNumbers(text: string, numbers: Set<string>): string[] {
+  // Small numbers are list ordinals or counts of points; years are dates. Anything else must come from the bundle.
+  return [...new Set(text.match(/\d+(?:\.\d+)?%?/gu) ?? [])].filter(n => !numbers.has(n) && !/^20\d\d$/u.test(n) && Number(n.replace('%', '')) > 10);
+}
