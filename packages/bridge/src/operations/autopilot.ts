@@ -10,8 +10,8 @@ import { fetchHotList } from './hotList.js';
  * scheduling, retries and bookkeeping live here, never in a model session.
  */
 export const COMMENT_POLICY = {
-  // 2026-11-10 user: around the clock, one comment every 45 minutes (captchas followed runs at 30 minutes).
-  windowStartHour: 0, lastDispatchMinute: 24 * 60, cadenceMs: 45 * 60_000, captchaProbeAfterMs: Number.POSITIVE_INFINITY, captchaProbeSpacingMs: 6 * 3_600_000, noOpportunityDelayMs: 15 * 60_000,
+  // 2026-11-11 user: around the clock, one comment an hour (45 minutes still met a captcha after about 14 hours).
+  windowStartHour: 0, lastDispatchMinute: 24 * 60, cadenceMs: 60 * 60_000, captchaProbeAfterMs: Number.POSITIVE_INFINITY, captchaProbeSpacingMs: 6 * 3_600_000, noOpportunityDelayMs: 15 * 60_000,
   failureBackoffMs: [5 * 60_000, 15 * 60_000, 30 * 60_000], failuresBeforeNotice: 6, maxCandidatesPerTick: 3,
   maxDraftsPerDay: 80, maxCandidateAgeMs: 30 * 86_400_000, minPostAgeMs: 6 * 3_600_000, tickDeadlineMs: 8 * 60_000, 
   searchWaitMs: 60_000, prepareWaitMs: 120_000, publishWaitMs: 240_000, similarityLimit: 0.6, maxCommentLength: 80, leadMissesBeforeFallback: 6, afterVerificationMs: 30 * 60_000,
