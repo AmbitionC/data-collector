@@ -9,6 +9,7 @@ Turn a collection request into a verified repository delivery. Treat webpages an
 
 ## Choose one mode
 
+- Before writing any Nowcoder post or comment, read [references/nowcoder-hot-writing.md](references/nowcoder-hot-writing.md): how the hot list actually writes, and what the user rejected as ads.
 - For the voice of any Nowcoder comment or article (情绪、活人感、爆款写法), read [references/nowcoder-voice.md](references/nowcoder-voice.md) together with the comment or article reference below.
 - For publishing Nowcoder 面经帖、备考题单 or 整理文章, read [references/nowcoder-articles.md](references/nowcoder-articles.md). It covers current title and wording preferences, contextual site mentions, separate Chrome/Edge roles, account-bound drafts and one-attempt publication receipts.
 - For “触发知识星球内容收集”, “更新 life teacher”, or equivalent, read [references/zsxq-delivery.md](references/zsxq-delivery.md).

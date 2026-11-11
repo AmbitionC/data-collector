@@ -119,7 +119,7 @@ describe('comment autopilot', () => {
 
 describe('need-gated lead experiment', () => {
   const ask = packet({ currentPost: { title: '【求助】双非 Java 后端想转 Agent，该做什么项目', body: '有一个点评项目，Java 基础还行，不知道 Agent 方向该怎么学、做什么项目能写进简历，求建议', images: [] } });
-  const lead = '有点评项目就别另起了，给它加个只读客服：参数不全先追问，查不到就直说，别让模型编。分阶段练习我整理在 agent-journey.cn 了，先做完第一步就能写进简历，再接下单这类写操作。';
+  const lead = '这题我整理的 agent-journey.cn 面经里出现好几次，翻翻别人咋答';
   const seeded = (n: number) => { const s = initialState(); s.published = Array.from({ length: n }, (_, i) => new Date(NOW - (i + 1) * 3_600_000).toISOString()); return s; };
 
   it('only treats posts that ask for help as lead opportunities', () => {
@@ -130,11 +130,11 @@ describe('need-gated lead experiment', () => {
   it('accepts a disclosed, self-contained lead and rejects the warned tail pattern', () => {
     expect(lead.length).toBeGreaterThanOrEqual(LEAD_POLICY.minLength);
     expect(leadRejection(lead, ask, [])).toBeUndefined();
-    expect(leadRejection('评测这块我整理在 agent-journey.cn 了', ask, [])).toBe('lead-length');
+    expect(leadRejection('我整理 agent-journey', ask, [])).toBe('lead-length');
     expect(leadRejection(lead.repeat(2).replace('agent-journey.cn', '那边'), ask, [])).toBe('lead-length');
     expect(leadRejection(`${lead.replace('agent-journey.cn', '那边')}，详见 agent-journey.cn`, ask, [])).toBe('lead-domain-at-tail');
-    expect(leadRejection(lead.replace('我整理在', '都在'), ask, [])).toBe('lead-no-disclosure');
-    expect(leadRejection(lead.replace('我整理在 agent-journey.cn 了', '我在 agent-journey.cn 写过'), ask, [])).toBeUndefined();
+    expect(leadRejection(lead.replace('我整理的', '别人的'), ask, [])).toBe('lead-no-disclosure');
+    expect(leadRejection(lead.replace('我整理的', '我在写的'), ask, [])).toBeUndefined();
     expect(leadRejection(`${lead}，注册就能用`, ask, [])).toBe('lead-call-to-action');
     expect(leadRejection(`${lead}，agent-journey.cn`, ask, [])).toBe('lead-domain-count');
     expect(leadRejection(lead, packet({ ...ask, conversation: { comments: [{ text: '看看 agent-journey.cn', likes: null }], coverage: { total: 1, complete: true } } }), [])).toBe('lead-domain-already-in-thread');
