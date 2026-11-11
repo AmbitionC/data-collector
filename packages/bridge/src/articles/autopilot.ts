@@ -108,17 +108,20 @@ export async function articleTick(state: ArticleState, deps: ArticleDeps, option
   return { outcome: 'no_article', skipped };
 }
 
-export const DATA_RULES = `你为牛客账号写一篇热帖风格的数据帖。作者身份如实：自己整理和维护 agent-journey.cn 这个面经站，最近统计了站内的面经。<stats> 是唯一可用的数据。
-参考今天牛客热帖的写法：
-- 标题像热帖：一个问题、一个反常识结论或一个具体数字，口语，30 字以内，不加“整理版”“干货”“速看”。
-- 开头一两句交代自己是谁、为什么写（比如整理面经时发现了什么），像跟牛友聊天，不要像报告。
-- 正文用 3 到 6 个编号小点，每点一个发现加一句能直接用的建议；口语、短句，可以有一个表情，可以有一点自嘲。
-- 结尾抛一个问题邀请大家在评论区说（比如“你们最近面试被问最多的是哪个”），再加一句祝福。
-- 只能用 <stats> 里出现的数字，原样照抄，不准换算、估算或编新数字；百分比也只能用里面给的。
-- 不编个人经历：不说自己面过、当过面试官、拿过 offer、在哪工作。
-- 网站只在讲为什么写这篇时自然提一次 agent-journey.cn，不带 https，不写访问引导和广告。
-- 不要和 <recent_titles> 里的题目重复角度。
-- 段落之间空一行，不用 Markdown 符号。`;
+// 2026-11-11 user: no "data posts" — the evening slot writes hot-list style posts whose job is traffic.
+export const DATA_RULES = `你为牛客账号写一篇冲热榜的帖子，目的是让尽量多的求职者点进来、留言、记住作者。
+选题：从 <hot_titles> 今天热榜在聊的同类话题里，挑一个和 AI / Agent / 后端求职能接上的切口（比如选 offer、反问环节、面评、薪资、焦虑、转方向、项目被追问、八股背不完），换成自己的角度，不要照抄热榜标题。不要和 <recent_titles> 重复。
+标题（最重要）：
+- 12 到 22 个字，口语，有钩子：反问、反差、戳痛点或一个具体场景。参考句式：“面试官问项目难点，到底想听什么？”“转 Agent 开发的人，最后都卡在哪一步？”“八股背了三个月，为什么一问就懵？”
+- 禁止出现：统计、数据、整理、分析、总结、汇总、干货、速看、建议收藏。
+作者身份如实：维护 agent-journey.cn 面经站、看过很多 AI 面经的人。不编个人经历：不说自己当过面试官、面过哪家、拿过 offer、在哪工作。
+正文：
+- 第一句直接戳痛点或抛观点，不要自我介绍开场。
+- 3 到 5 个短段或编号小点，每点一个能直接用的做法或一个具体例子，可以有态度、轻吐槽、一个表情。
+- 结尾抛一个开放问题请大家评论区聊，再加一句祝福。
+- 400 到 1200 字，段落之间空一行，不用 Markdown 符号。
+- 讲到某一点时自然带一次 agent-journey.cn（比如“我在 agent-journey.cn 收的 AI 面经里，这题几乎场场出现”），不带 https，不写访问引导。
+- 要用数字只能用 <stats> 里出现的，原样照抄；没有合适的就不用数字。`;
 
 async function dataArticle(state: ArticleState, deps: ArticleDeps, ctx: { live: boolean; save(state: ArticleState): Promise<void>; slot: ReturnType<typeof currentSlot> }): Promise<Record<string, unknown>> {
   const bundle = await deps.dataBundle!(), hot = deps.hotTitles ? await deps.hotTitles().catch(() => [] as string[]) : [];
@@ -133,8 +136,8 @@ async function dataArticle(state: ArticleState, deps: ArticleDeps, ctx: { live: 
 
 export function dataRejection(article: GeneratedArticle, bundle: DataBundle): string | undefined {
   const { title, body } = article;
-  if (title.length > 30 || /整理版|干货|速看|备考题单/u.test(title)) return 'title';
-  if (body.length < 300 || body.length > 2000) return 'length';
+  if (title.length > 24 || /统计|数据|整理|分析|总结|汇总|干货|速看|收藏|备考题单/u.test(title)) return 'title';
+  if (body.length < 300 || body.length > 1500) return 'length';
   if (/https?:|www\.|注册|会员|扫码|私信|加群/iu.test(body)) return 'promotion';
   if ((body.match(/agent-journey\.cn/gu) ?? []).length !== 1) return 'domain-count';
   if (/我(之前|当时|去年|也)?(面过|面了|当过面试官|作为面试官|拿到.{0,4}offer|在.{1,8}(工作|实习))/u.test(body)) return 'invented-experience';

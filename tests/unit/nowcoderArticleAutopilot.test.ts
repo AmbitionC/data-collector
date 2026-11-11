@@ -86,13 +86,13 @@ describe('article autopilot', () => {
 describe('data posts', () => {
   const bundle = { lines: ['站内已发布面经：243 篇', '问到 上下文 的：156 篇，占 64%'], numbers: new Set(['243', '156', '64%', '64']) };
   const body = `整理面经时发现一件事，大家最怕的不是算法题。\n\n1. 站内 243 篇面经里，156 篇问到了上下文，占 64%。准备时先把上下文管理讲顺。\n\n这些面经都整理在 agent-journey.cn。${'后面是建议。'.repeat(40)}\n\n你们最近被问最多的是哪个？`;
-  const ok = { decision: 'write' as const, title: '243 篇 AI 面经里，最常被问的是什么？', body, notes: '' };
+  const ok = { decision: 'write' as const, title: 'AI 面试最怕被问哪一题？', body, notes: '' };
   it('accepts a post whose numbers all come from the site', () => expect(dataRejection(ok, bundle)).toBeUndefined());
   it('rejects invented numbers, invented experience and extra links', () => {
     expect(dataRejection({ ...ok, body: body.replace('64%', '70%') }, bundle)).toBe('unbacked-number');
     expect(dataRejection({ ...ok, body: `${body}\n\n我当过面试官` }, bundle)).toBe('invented-experience');
     expect(dataRejection({ ...ok, body: `${body}\n\nagent-journey.cn` }, bundle)).toBe('domain-count');
-    expect(dataRejection({ ...ok, title: '干货：243 篇面经统计' }, bundle)).toBe('title');
+    expect(dataRejection({ ...ok, title: '243 篇面经统计告诉你' }, bundle)).toBe('title');
   });
   it('writes a data post in the evening slot', async () => {
     const PM = Date.parse('2026-11-07T10:40:00.000Z'), prompts: string[] = [];
