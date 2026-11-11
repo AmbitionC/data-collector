@@ -113,14 +113,14 @@ export const notifyUser = (configDir: string) => async (message: string): Promis
 };
 
 
-export async function runJob<S, R extends JobResult>(input: { configDir: string; name: string; now: () => number; initial(): Promise<S>; tick(state: S, save: (state: S) => Promise<void>): Promise<R>; watch?: (message: string) => Promise<void> }): Promise<R | JobResult> {
+export async function runJob<S, R extends JobResult>(input: { configDir: string; name: string; now: () => number; initial(): Promise<S>; tick(state: S, save: (state: S) => Promise<void>): Promise<R>; watch?: (message: string) => Promise<void>; logWaiting?: boolean }): Promise<R | JobResult> {
   const root = join(input.configDir, 'nowcoder-autopilot'), path = join(root, `${input.name}.json`);
   await mkdir(root, { recursive: true, mode: 0o700 });
   const result: R | JobResult = await withLock(join(root, `${input.name}.lock`), input.now(), async () => {
     const state: S = await readFile(path, 'utf8').then(async raw => ({ ...await input.initial(), ...JSON.parse(raw) as S }), async (error: NodeJS.ErrnoException) => { if (error.code === 'ENOENT') return input.initial(); throw error; });
     return input.tick(state, next => atomicWriteText(root, path, `${JSON.stringify(next)}\n`)).catch((error: unknown): JobResult => ({ outcome: 'technical_failure', detail: error instanceof Error ? error.message : 'unknown' }));
   }) ?? { outcome: 'already_running' };
-  if (!IDLE.has(result.outcome)) await appendFile(join(root, `${input.name}.log.jsonl`), `${JSON.stringify({ at: new Date(input.now()).toISOString(), ...result })}\n`, { mode: 0o600 });
+  if (!IDLE.has(result.outcome) || (input.logWaiting && result.outcome === 'waiting')) await appendFile(join(root, `${input.name}.log.jsonl`), `${JSON.stringify({ at: new Date(input.now()).toISOString(), ...result })}\n`, { mode: 0o600 });
   if (input.watch) await watchJobs(root, input.now(), input.watch).catch(() => undefined);
   return result;
 }
