@@ -25,6 +25,6 @@ EOF
   launchctl bootstrap "gui/$(id -u)" "$plist"
 }
 write nowcoder-articles "<string>$REPO/packages/bridge/dist/cli.js</string><string>nowcoder</string><string>articles</string><string>autopilot</string><string>--send</string>" '<key>StartInterval</key><integer>60</integer><key>RunAtLoad</key><true/>'
-hours=''; for h in 0 3 6 9 15 21; do hours="$hours<dict><key>Hour</key><integer>$h</integer><key>Minute</key><integer>0</integer></dict>"; done
+hours=''; for h in 9 15 21; do hours="$hours<dict><key>Hour</key><integer>$h</integer><key>Minute</key><integer>0</integer></dict>"; done
 write nowcoder-collection "<string>$REPO/scripts/nowcoder-collection-run.mjs</string>" "<key>StartCalendarInterval</key><array>$hours</array>"
 launchctl list | grep com.data-collector

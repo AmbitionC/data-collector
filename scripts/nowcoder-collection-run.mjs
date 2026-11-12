@@ -9,8 +9,8 @@ import { notifyUser } from '../packages/bridge/dist/autopilot/core.js';
 
 const root = process.env.NOWCODER_AUTOPILOT_DIR ?? join(homedir(), '.data-collector/nowcoder-autopilot');
 const binary = process.env.NOWCODER_AUTOPILOT_CODEX ?? join(homedir(), '.local/bin/codex');
-const maxMs = Number(process.env.NOWCODER_COLLECTION_MAX_MS ?? 90 * 60_000);
-const maxTokens = Number(process.env.NOWCODER_COLLECTION_MAX_TOKENS ?? 30_000_000);
+const maxMs = Number(process.env.NOWCODER_COLLECTION_MAX_MS ?? 120 * 60_000);
+const maxTokens = Number(process.env.NOWCODER_COLLECTION_MAX_TOKENS ?? 80_000_000);
 const lock = join(root, 'collection.lock'), handoff = join(root, 'collection.handoff.md'), log = join(root, 'collection.log.jsonl');
 const record = entry => appendFileSync(log, `${JSON.stringify({ at: new Date().toISOString(), ...entry })}\n`, { mode: 0o600 });
 
