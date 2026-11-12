@@ -62,6 +62,8 @@ export interface AutopilotState {
   notified: Record<string, string>; drafts: { day: string; count: number }; probe?: { pauseId: string; at: string; result: string };
   /** 2026-11-09 user: alternate one ordinary comment and one lead comment. */
   nextKind?: 'lead' | 'normal'; leadMisses?: number;
+  /** Each captcha with the run of comments before it, to check the observed ~15-a-day pattern (2026-11-12). */
+  captchas?: Array<{ at: string; sinceLast: number; hours: number }>;
   /** Live lead comments (with the domain) and all published timestamps, both trimmed to 7 days. */
   leads: LeadRecord[]; published: string[];
 }
@@ -254,7 +256,13 @@ export async function tick(state: AutopilotState, deps: AutopilotDeps, options: 
   if (recovery.status !== 'ready') {
     const next = recovery.nextCheckAt ? Date.parse(recovery.nextCheckAt) : deps.now() + 30 * 60_000;
     if (recovery.code !== 'PUBLISH_WAIT') state.recoveryAttempt = Math.min(state.recoveryAttempt + 1, 100);
-    if (recovery.status === 'needs_user') await notifyOnce(recovery.code, `牛客评论需要你处理：${recovery.message}`);
+    if (recovery.status === 'needs_user' && recovery.code === 'VERIFICATION_REQUIRED' && !state.notified[recovery.code]) {
+      // Count the comments since the previous captcha so the pattern can be checked against real data.
+      const previous = state.captchas?.at(-1)?.at, start = previous ? Date.parse(previous) : 0;
+      const since = state.published.filter(at => Date.parse(at) > start), first = since.length ? Math.min(...since.map(at => Date.parse(at))) : deps.now();
+      state.captchas = [...(state.captchas ?? []), { at: iso(deps.now()), sinceLast: since.length, hours: Math.round((deps.now() - first) / 360_000) / 10 }].slice(-30);
+      await notifyOnce(recovery.code, `牛客评论碰到验证码，上次以来发了 ${since.length} 条、约 ${state.captchas.at(-1)!.hours} 小时；请在 Edge 完成验证`);
+    } else if (recovery.status === 'needs_user') await notifyOnce(recovery.code, `牛客评论需要你处理：${recovery.message}`);
     return finish({ outcome: recovery.status, detail: recovery.code }, next);
   }
   state.recoveryAttempt = 0;

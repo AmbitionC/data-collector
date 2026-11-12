@@ -226,6 +226,14 @@ describe('need-gated lead experiment', () => {
     expect(state.nextAt).toBe(new Date(NOW + 30 * 60_000).toISOString());
     expect(started).toHaveLength(0);
   });
+  it('records how many comments ran before each captcha', async () => {
+    const { deps } = harness({ recovery: async () => ({ status: 'needs_user', code: 'VERIFICATION_REQUIRED', message: 'm', nextCheckAt: null }) }), state = initialState();
+    state.published = [1, 2, 3].map(h => new Date(NOW - h * 3_600_000).toISOString());
+    await run(state, deps);
+    expect(state.captchas).toEqual([{ at: new Date(NOW).toISOString(), sinceLast: 3, hours: 3 }]);
+    state.nextAt = null; await run(state, deps);
+    expect(state.captchas).toHaveLength(1);
+  });
   it('puts help-seeking posts first', () => {
     expect(isHelpTitle('Java后端开发如何转AI应用开发，求建议')).toBe(true);
     expect(isHelpTitle('字节 Agent 一面面经')).toBe(false);

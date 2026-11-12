@@ -1,7 +1,7 @@
 {
   "name": "data-collector",
   "private": true,
-  "version": "0.4.107",
+  "version": "0.4.108",
   "type": "module",
   "workspaces": [
     "packages/*"
