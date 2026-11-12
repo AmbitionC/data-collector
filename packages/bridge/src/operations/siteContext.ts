@@ -67,7 +67,9 @@ async function siteStats(cacheDir: string): Promise<SiteStats> {
 }
 
 export async function siteContext(cacheDir: string, postText: string): Promise<SiteContext | undefined> {
-  const page = pickPage(await catalog('knowledge'), postText);
+  const pages = await catalog('knowledge');
+  // Lead turns always need a page; the interview guide fits almost any job-hunting post.
+  const page = pickPage(pages, postText) ?? pages.find(p => p.key === INTERVIEW_KEY);
   if (!page) return undefined;
   const excerpt = plain(await get(`${CONTENT}/knowledge/${page.filePath}/${page.key}.md`)).slice(0, 2500);
   const stats = await siteStats(cacheDir).then(s => statLines(s, `${postText}\n${page.label}`)).catch(() => []);

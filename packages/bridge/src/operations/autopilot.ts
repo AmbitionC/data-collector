@@ -36,7 +36,7 @@ export type LeadMode = 'off' | 'shadow' | 'live';
 export const LEAD_POLICY = {
   defaultMode: 'shadow' as LeadMode, domain: 'agent-journey.cn', // 2026-11-09 user: half lead comments, half ordinary ones.
   maxPerDay: 15, minGapMs: 30 * 60_000,
-  maxShareOf7Days: 0.5, minPublished7Days: 10, minLength: 20, maxLength: 60, maxClauseShare: 1, tailWindow: 0.25,
+  maxShareOf7Days: 0.6, minPublished7Days: 10, minLength: 20, maxLength: 60, maxClauseShare: 1, tailWindow: 0.25,
 } as const;
 // 2026-11-10 user: widened so interview prep, review, resume and ordinary questions also count ("不然都引流不了").
 const LEAD_NEED = /求(助|建议|指点|指导|推荐|路线|资料|问|解答)|请教|想问|问一下|大家觉得|怎么(学|准备|复习|写|做|选|办|入门|提升)|如何(学|准备|复习|写|选|入门|提升)|学习路线|(转|入门|入行).{0,6}(agent|大模型|ai|开发)|做(什么|啥)项目|项目.{0,8}(推荐|建议|怎么做|做什么|选|写)|简历|有没有.{0,10}(资料|教程|路线|项目|推荐)|迷茫|焦虑|(选|走).{0,6}方向|准备.{0,6}(面试|秋招|春招|实习)|(面试|秋招|春招|实习).{0,6}(准备|攻略|建议)|该不该|值不值|能不能|有必要/iu;
@@ -173,7 +173,7 @@ export function leadBudgetClosed(state: AutopilotState, now: number): string | u
 }
 
 export const LEAD_RULES = `
-这篇帖子的楼主在求路线、项目建议或资料，可以额外写一个 lead 版本；不合适就把 lead 留空串。lead 的写法（2026-11-11 用户：别写成广告）：
+这一条要带网站（2026-11-12 用户要求一半评论带链接），必须写 lead 版本，不能留空：楼主不一定在求资料，就从帖子里找一个和 <site_page> 能接上的点顺口带一句。lead 的写法（2026-11-11 用户：别写成广告）：
 - 像顺口一提，不像推荐：先用半句接住楼主的话，再顺带一句和 <site_page> 对得上的事，带一次 ${LEAD_POLICY.domain}，写明是自己整理的。例：“这题我整理的 ${LEAD_POLICY.domain} 面经里出现好几次，翻翻别人怎么答的”。
 - 只能说 <site_page> 里真有的内容；<site_stats> 里的数字可以原样用一个，没有就不用。
 - 不写教程、不列步骤、不用“推荐”“可以看看我写的”“建议你”。不带协议参数，不提注册、会员、加群、私信、关注。
@@ -308,7 +308,8 @@ export async function tick(state: AutopilotState, deps: AutopilotDeps, options: 
     }
     for (let examined = 0; examined < COMMENT_POLICY.maxCandidatesPerTick && state.candidates.length > 0; examined++) {
       if (deps.now() >= deadline) throw new TechnicalFailure('本轮超过总时限');
-      const candidate = wantLead ? state.candidates.find(c => isHelpTitle(c.title)) : state.candidates[0];
+      // 2026-11-12 user: half of all comments must carry the link, fitting post or not. Help posts still go first.
+      const candidate = wantLead ? state.candidates.find(c => isHelpTitle(c.title)) ?? state.candidates[0] : state.candidates[0];
       if (!candidate && wantLead) {
         // 2026-11-10: without this the lead turn re-searched every minute for hours and posted nothing.
         // No help post right now: give this turn to an ordinary comment shortly, and look again next lead turn.
@@ -329,7 +330,7 @@ export async function tick(state: AutopilotState, deps: AutopilotDeps, options: 
       if (state.drafts.count >= COMMENT_POLICY.maxDraftsPerDay) return finish({ outcome: 'draft_budget_reached', skipped }, deps.now() + 3_600_000);
       state.drafts.count++; await saveState(state);
       let drafted: DraftResult;
-      const leadGate = leadMode === 'off' ? 'off' : (state.nextKind === 'normal' && live) ? 'alternation-normal-turn' : leadIneligibility(packet) ?? (leadMode === 'live' && live ? leadBudgetClosed(state, deps.now()) : undefined);
+      const leadGate = leadMode === 'off' ? 'off' : (state.nextKind === 'normal' && live) ? 'alternation-normal-turn' : (wantLead && live ? undefined : leadIneligibility(packet)) ?? (leadMode === 'live' && live ? leadBudgetClosed(state, deps.now()) : undefined);
       const site = leadGate === undefined && deps.siteContext ? await deps.siteContext(packet).catch(() => undefined) : undefined;
       try { drafted = await deps.draft(buildPrompt(packet, state.recent, leadGate === undefined && !!site, site)); }
       catch (error) { throw new TechnicalFailure(`起草失败：${error instanceof Error ? error.message : 'unknown'}`); }

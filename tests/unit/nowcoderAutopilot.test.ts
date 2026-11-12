@@ -146,7 +146,7 @@ describe('need-gated lead experiment', () => {
     expect(leadBudgetClosed(today, NOW)).toBe('daily-cap');
     const late = seeded(30); late.leads = [{ at: new Date(NOW + 10 * 3_600_000).toISOString(), sourceId: 'x' }]; // 22:00, next check 22:15 the same evening
     expect(leadBudgetClosed(late, NOW + 10.25 * 3_600_000)).toBe('min-gap');
-    const share = seeded(20); share.leads = Array.from({ length: 10 }, (_, i) => i + 1).map(d => ({ at: new Date(NOW - d * 3_600_000).toISOString(), sourceId: `s${d}` }));
+    const share = seeded(20); share.leads = Array.from({ length: 13 }, (_, i) => i + 1).map(d => ({ at: new Date(NOW - d * 3_600_000).toISOString(), sourceId: `s${d}` }));
     expect(leadBudgetClosed(share, NOW)).toBe('weekly-share');
   });
   it('shadow mode publishes the link-free text and logs the lead', async () => {
@@ -189,15 +189,20 @@ describe('need-gated lead experiment', () => {
     expect(state.leadMisses).toBe(0);
     expect(state.nextKind).toBe('lead');
   });
-  it('hands the turn to an ordinary comment when no help post exists, instead of searching every minute', async () => {
-    const h = harness({ leadMode: async () => 'live' }), state = seeded(30);
-    const first = await run(state, h.deps);
-    expect(first.outcome).toBe('no_lead_post');
+  it('a lead turn links on an ordinary post when no help post exists (half of comments must carry the link)', async () => {
+    const prompts: string[] = [];
+    const h = harness({ leadMode: async () => 'live', siteContext: async () => ({ title: 'AI / Agent 岗位简历与面试', excerpt: '项目描述按问题、方案、指标、优化来写', stats: [] }),
+      draft: async prompt => { prompts.push(prompt); return { draft: { ...good, lead } }; } });
+    const state = seeded(30), result = await run(state, h.deps);
+    expect(prompts[0]).toContain('必须写 lead');
+    expect(result.lead).toEqual({ status: 'live', text: lead });
+    expect(state.nextKind).toBe('normal');
+  });
+  it('hands the turn to an ordinary comment when there is no candidate at all', async () => {
+    const h = harness({ leadMode: async () => 'live', readPacket: async () => ({ candidates: [] }) }), state = seeded(30);
+    expect((await run(state, h.deps)).outcome).toBe('no_opportunity');
+    expect(state.nextAt).toBe(new Date(NOW + COMMENT_POLICY.noOpportunityDelayMs).toISOString());
     expect(h.started.filter(s => s.request.kind === 'search')).toHaveLength(1);
-    state.nextAt = null;
-    expect((await run(state, h.deps)).outcome).toBe('published');
-    expect(state.nextKind).toBe('lead');
-    expect(state.leadMisses).toBe(0);
   });
   it('counts prep, resume and asking recaps as help-seeking after widening', () => {
     expect(isHelpTitle('秋招 Agent 面试怎么准备')).toBe(true);
