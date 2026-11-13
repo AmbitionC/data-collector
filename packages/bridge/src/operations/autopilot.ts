@@ -120,6 +120,12 @@ export function similarity(a: string, b: string): number {
 
 /** Why a prepared post cannot be answered automatically; undefined when it can. */
 const AD_POST = /内推码|内推链接|可以\s*tt|私信我|加\s*(v|vx|微|wx)|辅导|代运营|测评公司|服务商|招生|课程优惠|扫码/iu;
+/** Hot posts are read from text even with images or a long comment thread; only unusable records are skipped. */
+export function hotSkipReason(packet: Packet): string | undefined {
+  if (packet.sourceConflict) return 'source-conflict';
+  if (packet.anchorOptions.length === 0) return 'no-anchor';
+  return undefined;
+}
 export function packetSkipReason(packet: Packet): string | undefined {
   if (packet.sourceConflict) return 'source-conflict';
   if (packet.currentPost.images.length > 0) return 'post-has-images';
@@ -198,12 +204,13 @@ export const DRAFT_RULES = `你为牛客帖子写一条评论。用户消息里�
 - 楼主已有后续时按最新状态说话。
 输出：primary 是主回复，alternative 换一个切入点；anchorIndex 是最贴近回复内容的「原文锚点」序号；notes 用一句话写回复理由。`;
 
-export function buildPrompt(packet: Packet, recent: RecentComment[], withLead = false, site?: SiteContext): string {
+export function buildPrompt(packet: Packet, recent: RecentComment[], withLead = false, site?: SiteContext, hot = false): string {
   const comments = packet.conversation.comments.slice(0, 40).map(c => `- ${c.isAuthor ? '[楼主] ' : ''}${c.likes ? `[${c.likes}赞] ` : ''}${c.text.slice(0, 300)}`).join('\n') || '（暂无评论）';
   const anchors = packet.anchorOptions.map((a, i) => `${i}. ${a}`).join('\n');
   const own = recent.slice(-5).map(r => `- ${r.text.slice(0, 120)}`).join('\n') || '（无）';
   const grounding = withLead && site ? `\n<site_page title="${site.title}">\n${site.excerpt}\n</site_page>\n<site_stats>\n${site.stats.join('\n') || '（无）'}\n</site_stats>` : '';
-  return `${DRAFT_RULES}${withLead && site ? LEAD_RULES : '\n输出里的 lead 一律为空串。'}${grounding}\n\n<title>${packet.currentPost.title}</title>\n<post>${packet.currentPost.body.slice(0, 6000)}</post>\n<comments>\n${comments}\n</comments>\n<anchors>\n${anchors}\n</anchors>\n<recent_own_comments_do_not_repeat_style>\n${own}\n</recent_own_comments_do_not_repeat_style>`;
+  const mustReply = hot ? '\n这是今天全站热榜的帖子，必须回一句，decision 不能是 skip：接楼主的问题、情绪或某个具体细节，一句话就行；帖子有配图看不到时只就文字说。' : '';
+  return `${DRAFT_RULES}${mustReply}${withLead && site ? LEAD_RULES : '\n输出里的 lead 一律为空串。'}${grounding}\n\n<title>${packet.currentPost.title}</title>\n<post>${packet.currentPost.body.slice(0, 6000)}</post>\n<comments>\n${comments}\n</comments>\n<anchors>\n${anchors}\n</anchors>\n<recent_own_comments_do_not_repeat_style>\n${own}\n</recent_own_comments_do_not_repeat_style>`;
 }
 
 class TechnicalFailure extends Error {}
@@ -294,9 +301,12 @@ export async function tick(state: AutopilotState, deps: AutopilotDeps, options: 
     // wait: the user saw many freshly commented posts later turn author-only, and a post on the hot list has
     // already survived that stage.
     const settled = (c: Candidate) => !!c.hot || !c.publishedAt || deps.now() - Date.parse(c.publishedAt) >= COMMENT_POLICY.minPostAgeMs;
+    const retryable = (id: string) => { const why = state.excluded[id]; return !why || !/^(sent-|inflight-|legacy-|hot-)/u.test(why); };
     if (deps.hotList) {
       const hot = await deps.hotList().catch(() => [] as Candidate[]), known = new Set(state.candidates.map(c => c.sourceId));
-      const fresh = hot.filter(c => !known.has(c.sourceId) && !state.excluded[c.sourceId] && settled(c));
+      // 2026-11-13 user: every hot-list post should carry one of our comments. A hot post skipped earlier for
+      // images, promotion wording, coverage or a model skip is tried once more under the hot rules.
+      const fresh = hot.filter(c => !known.has(c.sourceId) && retryable(c.sourceId) && settled(c));
       if (fresh.length) { state.candidates = [...fresh, ...state.candidates]; await saveState(state); }
     }
     if (state.candidates.length === 0 || (wantLead && !state.candidates.some(c => isHelpTitle(c.title)))) {
@@ -307,7 +317,7 @@ export async function tick(state: AutopilotState, deps: AutopilotDeps, options: 
       const run = await waitRun(await deps.startWorkflow({ schemaVersion: 1, key: `${mode}-search-${stamp}-${deps.now()}`, kind: 'search', queries, limitPerQuery: 8 }, false), COMMENT_POLICY.searchWaitMs);
       if (run.status !== 'completed') throw new TechnicalFailure(run.message ?? '搜索失败');
       const found = ((await deps.readPacket(run.resultPath)).candidates ?? []) as Candidate[], known = new Set(state.candidates.map(c => c.sourceId));
-      state.candidates = [...state.candidates, ...found.filter(c => !known.has(c.sourceId))].filter(c => !state.excluded[c.sourceId] && !own.has(c.url)
+      state.candidates = [...state.candidates, ...found.filter(c => !known.has(c.sourceId))].filter(c => (c.hot ? retryable(c.sourceId) : !state.excluded[c.sourceId]) && !own.has(c.url)
         && (!c.publishedAt || deps.now() - Date.parse(c.publishedAt) <= COMMENT_POLICY.maxCandidateAgeMs) && settled(c))
         // Help-seeking posts first, so the lead half of the mix has posts to answer; then newest.
         .sort((a, b) => (b.hot ?? 0) - (a.hot ?? 0) || Number(isHelpTitle(b.title)) - Number(isHelpTitle(a.title)) || (b.publishedAt ?? '').localeCompare(a.publishedAt ?? ''))
@@ -317,7 +327,7 @@ export async function tick(state: AutopilotState, deps: AutopilotDeps, options: 
     for (let examined = 0; examined < COMMENT_POLICY.maxCandidatesPerTick && state.candidates.length > 0; examined++) {
       if (deps.now() >= deadline) throw new TechnicalFailure('本轮超过总时限');
       // 2026-11-12 user: half of all comments must carry the link, fitting post or not. Help posts still go first.
-      const candidate = wantLead ? state.candidates.find(c => isHelpTitle(c.title)) ?? state.candidates[0] : state.candidates[0];
+      const candidate = state.candidates.find(c => c.hot) ?? (wantLead ? state.candidates.find(c => isHelpTitle(c.title)) ?? state.candidates[0] : state.candidates[0]);
       if (!candidate && wantLead) {
         // 2026-11-10: without this the lead turn re-searched every minute for hours and posted nothing.
         // No help post right now: give this turn to an ordinary comment shortly, and look again next lead turn.
@@ -327,20 +337,20 @@ export async function tick(state: AutopilotState, deps: AutopilotDeps, options: 
       if (!candidate) break;
       // Every removal below targets this exact candidate, wherever it sat in the queue.
       if (state.candidates[0] !== candidate) state.candidates = [candidate, ...state.candidates.filter(c => c !== candidate)];
-      const exclude = async (reason: string) => { state.excluded[candidate.sourceId] = reason; state.candidates.shift(); skipped.push({ sourceId: candidate.sourceId, reason }); await saveState(state); };
+      const exclude = async (reason: string) => { state.excluded[candidate.sourceId] = candidate.hot ? `hot-${reason}` : reason; state.candidates.shift(); skipped.push({ sourceId: candidate.sourceId, reason }); await saveState(state); };
       const prep = await waitRun(await deps.startWorkflow({ schemaVersion: 1, key: `${mode}-prep-${stamp}-${candidate.sourceId}-${deps.now()}`, kind: 'prepare', candidates: [{ sourceId: candidate.sourceId, url: candidate.url }], maxPages: 2 }, false), COMMENT_POLICY.prepareWaitMs);
       if (prep.status !== 'completed') { await exclude(`prepare-failed: ${(prep.message ?? '').slice(0, 80)}`); continue; }
       const result = await deps.readPacket(prep.resultPath);
       const packet = (result.prepared as Packet[] | undefined)?.[0], access = (result.items as Array<{ result?: { contentAccess?: string } }> | undefined)?.[0]?.result?.contentAccess;
       if (!packet) { await exclude('prepare-empty'); continue; }
-      const reason = access !== 'full' ? 'content-not-full' : packetSkipReason(packet);
+      const reason = candidate.hot ? hotSkipReason(packet) : access !== 'full' ? 'content-not-full' : packetSkipReason(packet);
       if (reason) { await exclude(reason); continue; }
       if (state.drafts.count >= COMMENT_POLICY.maxDraftsPerDay) return finish({ outcome: 'draft_budget_reached', skipped }, deps.now() + 3_600_000);
       state.drafts.count++; await saveState(state);
       let drafted: DraftResult;
       const leadGate = leadMode === 'off' ? 'off' : (state.nextKind === 'normal' && live) ? 'alternation-normal-turn' : (wantLead && live ? undefined : leadIneligibility(packet)) ?? (leadMode === 'live' && live ? leadBudgetClosed(state, deps.now()) : undefined);
       const site = leadGate === undefined && deps.siteContext ? await deps.siteContext(packet).catch(() => undefined) : undefined;
-      try { drafted = await deps.draft(buildPrompt(packet, state.recent, leadGate === undefined && !!site, site)); }
+      try { drafted = await deps.draft(buildPrompt(packet, state.recent, leadGate === undefined && !!site, site, !!candidate.hot)); }
       catch (error) { throw new TechnicalFailure(`起草失败：${error instanceof Error ? error.message : 'unknown'}`); }
       const { draft, usage } = drafted;
       if (draft.decision === 'skip') { await exclude('model-skip'); continue; }
@@ -353,7 +363,8 @@ export async function tick(state: AutopilotState, deps: AutopilotDeps, options: 
         : leadRejected ? { status: `rejected:${leadRejected}`, text: leadText }
         : { status: leadMode === 'live' && live ? 'live' : 'shadow', text: leadText };
       const sendLead = lead.status === 'live';
-      if (live && wantLead && !sendLead) { state.leadMisses = (state.leadMisses ?? 0) + 1; await exclude(`lead-turn-${lead.status}`); continue; }
+      // Coverage of a hot post wins over the link: if the link version fails there, the plain reply still goes out.
+      if (live && wantLead && !sendLead && !candidate.hot) { state.leadMisses = (state.leadMisses ?? 0) + 1; await exclude(`lead-turn-${lead.status}`); continue; }
       const texts = sendLead ? { primary: leadText, alternative: draft.primary } : { primary: draft.primary, alternative: draft.alternative };
       const item = { key: `${mode}-c-${stamp}-${candidate.sourceId}`, draft: { ...packet.draftEnvelope, drafts: { ...texts, tone: 'contextual', anchor: packet.anchorOptions[draft.anchorIndex]!, notes: `${sendLead ? '[lead] ' : ''}${draft.notes}`.slice(0, 900) } } };
       if (!live) { state.failures = 0; state.candidates.shift(); return finish({ outcome: 'dry_run_draft', url: packet.canonicalUrl, title: packet.currentPost.title, draft: item.draft.drafts, lead, usage, skipped }, null); }

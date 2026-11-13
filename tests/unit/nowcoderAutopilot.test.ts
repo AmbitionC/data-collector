@@ -234,6 +234,19 @@ describe('need-gated lead experiment', () => {
     state.nextAt = null; await run(state, deps);
     expect(state.captchas).toHaveLength(1);
   });
+  it('covers hot posts first, even with images or an earlier skip, and never lets them go unanswered for a link', async () => {
+    const hotPost = packet({ currentPost: { title: '大家offer都是什么时候收到的？', body: '想问问大家都是几月收到的', images: ['i'] } });
+    const prompts: string[] = [];
+    const h = harness({ leadMode: async () => 'live', hotList: async () => [{ sourceId: 'cccccccccccc', url: 'https://www.nowcoder.com/discuss/3', title: '大家offer都是什么时候收到的？', hot: 4570 }],
+      readPacket: async path => path === 'search' ? { candidates: [] } : { prepared: [hotPost], items: [{ result: { contentAccess: 'full' } }] },
+      draft: async prompt => { prompts.push(prompt); return { draft: good }; } });
+    const state = seeded(30); state.excluded.cccccccccccc = 'model-skip';
+    const result = await run(state, h.deps);
+    expect(prompts[0]).toContain('必须回一句');
+    expect(result.outcome).toBe('published');
+    expect(state.excluded.cccccccccccc).toBe('sent-published');
+    expect(state.nextKind).toBe('lead');
+  });
   it('puts help-seeking posts first', () => {
     expect(isHelpTitle('Java后端开发如何转AI应用开发，求建议')).toBe(true);
     expect(isHelpTitle('字节 Agent 一面面经')).toBe(false);
