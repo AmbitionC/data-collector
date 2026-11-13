@@ -89,9 +89,10 @@ describe('comment autopilot', () => {
     expect(result.outcome).toBe('published');
     expect(state.excluded.bbbbbbbbbbbb).toContain('prepare-failed');
   });
-  it('runs around the clock and honours nextAt', async () => {
+  it('stays quiet outside 07:30–23:00 and honours nextAt', async () => {
     const late = Date.parse('2026-11-07T19:30:00.000Z'), { deps } = harness({ now: () => late }), state = initialState(); // 03:30 Shanghai
-    expect((await run(state, deps)).outcome).toBe('published');
+    expect((await run(state, deps)).outcome).toBe('outside_window');
+    expect(state.nextAt).toBe('2026-11-07T23:30:00.000Z');
     expect((await run(state, deps)).outcome).toBe('not_due');
   });
   it('rejects links, promotion, invented experience and repetition', () => {
@@ -112,7 +113,8 @@ describe('comment autopilot', () => {
   });
   it('computes window edges and similarity', () => {
     expect(nextWindowOpen(NOW)).toBeNull();
-    expect(nextWindowOpen(Date.parse('2026-11-06T19:00:00.000Z'))).toBeNull();
+    expect(nextWindowOpen(Date.parse('2026-11-06T19:00:00.000Z'))).toBe(Date.parse('2026-11-06T23:30:00.000Z')); // 03:00 → 07:30 same day
+    expect(nextWindowOpen(Date.parse('2026-11-06T15:30:00.000Z'))).toBe(Date.parse('2026-11-06T23:30:00.000Z')); // 23:30 → next 07:30
     expect(similarity('完全相同的一句话', '完全相同的一句话')).toBe(1);
   });
 });

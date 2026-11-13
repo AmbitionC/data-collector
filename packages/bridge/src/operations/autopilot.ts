@@ -11,7 +11,8 @@ import { fetchHotList } from './hotList.js';
  */
 export const COMMENT_POLICY = {
   // 2026-11-11 user: around the clock, one comment an hour (45 minutes still met a captcha after about 14 hours).
-  windowStartHour: 0, lastDispatchMinute: 24 * 60, cadenceMs: 60 * 60_000, captchaProbeAfterMs: Number.POSITIVE_INFINITY, captchaProbeSpacingMs: 6 * 3_600_000, noOpportunityDelayMs: 15 * 60_000,
+  // 2026-11-13 user: human hours, 07:30 to 23:00, 15 a day (captchas came at the 15th–16th comment).
+  windowStartMinute: 7 * 60 + 30, lastDispatchMinute: 23 * 60, cadenceMs: 60 * 60_000, captchaProbeAfterMs: Number.POSITIVE_INFINITY, captchaProbeSpacingMs: 6 * 3_600_000, noOpportunityDelayMs: 15 * 60_000,
   failureBackoffMs: [5 * 60_000, 15 * 60_000, 30 * 60_000], failuresBeforeNotice: 6, maxCandidatesPerTick: 3,
   maxDraftsPerDay: 80, maxCandidateAgeMs: 30 * 86_400_000, minPostAgeMs: 6 * 3_600_000, tickDeadlineMs: 8 * 60_000, 
   searchWaitMs: 60_000, prepareWaitMs: 120_000, publishWaitMs: 240_000, similarityLimit: 0.6, maxCommentLength: 60, leadMissesBeforeFallback: 6, afterVerificationMs: 30 * 60_000,
@@ -106,9 +107,9 @@ const iso = (ms: number) => new Date(ms).toISOString();
 
 export function nextWindowOpen(now: number): number | null {
   const { day, minute } = shanghaiParts(now);
-  if (minute >= COMMENT_POLICY.windowStartHour * 60 && minute <= COMMENT_POLICY.lastDispatchMinute) return null;
-  const open = Date.parse(`${day}T0${COMMENT_POLICY.windowStartHour}:00:00+08:00`);
-  return minute < COMMENT_POLICY.windowStartHour * 60 ? open : open + 86_400_000;
+  if (minute >= COMMENT_POLICY.windowStartMinute && minute <= COMMENT_POLICY.lastDispatchMinute) return null;
+  const open = Date.parse(`${day}T00:00:00+08:00`) + COMMENT_POLICY.windowStartMinute * 60_000;
+  return minute < COMMENT_POLICY.windowStartMinute ? open : open + 86_400_000;
 }
 
 const bigrams = (text: string) => { const s = text.replace(/[\s\p{P}]/gu, ''), out = new Set<string>(); for (let i = 0; i < s.length - 1; i++) out.add(s.slice(i, i + 2)); return out; };
