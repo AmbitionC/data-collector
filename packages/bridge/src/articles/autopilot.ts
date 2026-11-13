@@ -1,7 +1,7 @@
 import { readFile, readdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { codexJson, notifyUser, runJob, type JobResult } from '../autopilot/core.js';
-import { fetchHotList } from '../operations/hotList.js';
+import { fetchHotList, fetchHotPostSamples } from '../operations/hotList.js';
 import { dataBundle, unbackedNumbers, type DataBundle } from '../operations/siteContext.js';
 
 /** Deterministic article runner: one slot, one attempt, its own state. The model only writes the draft. */
@@ -21,6 +21,9 @@ export interface ArticleDeps {
   generate(prompt: string): Promise<{ value: GeneratedArticle; usage?: unknown }>;
   /** Current site hot-list titles, used only as a hint for the angle of the opening. */
   hotTitles?(): Promise<string[]>;
+  hotSamples?(): Promise<Array<{ title: string; hot: number; views?: number; comments?: number; length: number; excerpt: string }>>;
+  /** Real interview titles on the site, by company, for round-up posts. */
+  siteInterviews?(): Promise<string[]>;
   /** Counted site statistics for hot-style data posts; absent means interview posts only. */
   dataBundle?(): Promise<DataBundle>;
   /** Rehearsal override: 'data' or 'interview'. */
@@ -110,34 +113,38 @@ export async function articleTick(state: ArticleState, deps: ArticleDeps, option
 
 // 2026-11-11 user: no "data posts" — the evening slot writes hot-list style posts whose job is traffic.
 // 2026-11-11 user rejected both the data posts and the polished "viral" samples: write like the hot list itself.
-export const DATA_RULES = `你为牛客账号写一篇像热榜那样的帖子，目的是让人点进来、留言。照 <hot_titles> 的样子写，它们是真人随手发的帖子，不是公众号文章。
-作者身份如实：在维护 agent-journey.cn 这个 AI 面经站、平时看很多面经的人。不编个人经历：不说自己当过面试官、面过哪家、拿过 offer、在哪工作。
-选题：从今天热榜同类话题里挑一个 AI / Agent / 后端求职的人都有话说的点（选 offer、反问、面评、八股背不完、项目被追问、转方向、焦虑），自己的角度。优先写短的提问帖：抛一个问题，列几个选项让大家站队。
-标题：6 到 16 个字，平铺直叙，像自己随手起的，比如一个问题、一句感叹、“我的XX合集”。不用排比和金句，不用“到底”“竟然”“真相”“其实”，不用“统计、数据、整理、分析、总结、汇总、干货、速看、收藏”。
-正文：
-- 100 到 500 字。口语，像发朋友圈，可以吐槽、可以一个表情，不讲课，不写“你可以……试着……”。
-- 开头一句说为什么发这帖（比如“最近翻面经发现……”“看到热榜在聊……”），然后说一件具体的事或抛问题。
-- 最多 3 个短点，可以不编号。
-- 在说“为什么发”的那句里顺带一次 agent-journey.cn（比如“最近在给 agent-journey.cn 补面经，翻到……”），不带 https，不写访问引导。
-- 结尾一句请大家评论区说。
-- 要用数字只能用 <stats> 里的，原样照抄；没有合适的就不用数字。
-- 段落之间空一行，不用 Markdown 符号。`;
+// 2026-11-13 user: not a fixed post type. Study what is hot today and design topic, format and content from it.
+export const DATA_RULES = `你为牛客账号写一篇有爆款体质的帖子，目的是冲热榜、给 agent-journey.cn 带流量。
+先研究 <hot_posts>：这是今天全站热榜的真实帖子，带热度、浏览、评论数、篇幅和开头原文。看清楚今天大家在聊什么话题、哪种形式在火（亲历长文、视角分享、合集清单、信息汇总、吐槽、站队提问……）、标题和开头怎么抓人。
+然后自己设计这一篇：选一个今天正热、又和 AI / Agent / 后端求职能接上的话题，选一种最可能火的形式，形式不固定，跟着今天的热榜走。
+硬约束：
+- 作者身份如实：维护 agent-journey.cn 这个 AI 面经站、看过大量真实面经的人。不编个人经历：不说自己当过面试官、面过哪家、拿过 offer、在哪工作。亲历类的形式只能写“维护面经站、看面经”的真实视角。
+- 写合集或清单时，只能用 <site_interviews> 里真实存在的面经；要用数字只能用 <stats> 里的，原样照抄。
+- 标题照热榜的写法，像真人随手发的，30 字以内，不用营销腔和金句，不用“统计、数据、分析、总结、汇总、干货、速看、建议收藏”。
+- 正文口语，像真人发帖，不讲课；篇幅和结构学同类热帖。
+- 在合适的地方自然带一次 agent-journey.cn，不带 https，不写访问引导，结尾不放广告。
+- 段落之间空一行，不用 Markdown 符号。
+- 不要和 <recent_titles> 重复。`;
 
 async function dataArticle(state: ArticleState, deps: ArticleDeps, ctx: { live: boolean; save(state: ArticleState): Promise<void>; slot: ReturnType<typeof currentSlot> }): Promise<Record<string, unknown>> {
-  const bundle = await deps.dataBundle!(), hot = deps.hotTitles ? await deps.hotTitles().catch(() => [] as string[]) : [];
+  const bundle = await deps.dataBundle!(), samples = deps.hotSamples ? await deps.hotSamples().catch(() => []) : [];
+  const interviews = deps.siteInterviews ? await deps.siteInterviews().catch(() => [] as string[]) : [];
+  const hot = samples.map(p => `【${p.title}】热度 ${p.hot}，浏览 ${p.views ?? '?'}，评论 ${p.comments ?? '?'}，${p.length} 字\n开头：${p.excerpt}`);
   const recent = (state.dataTitles ?? []).slice(-10);
-  const prompt = `${DATA_RULES}\n\n<stats>\n${bundle.lines.join('\n')}\n</stats>\n<hot_titles_for_style_only>\n${hot.join('\n')}\n</hot_titles_for_style_only>\n<recent_titles>\n${recent.join('\n') || '（无）'}\n</recent_titles>`;
+  const prompt = `${DATA_RULES}\n\n<stats>\n${bundle.lines.join('\n')}\n</stats>\n<hot_posts>\n${hot.join('\n\n')}\n</hot_posts>\n<site_interviews>\n${interviews.join('\n')}\n</site_interviews>\n<recent_titles>\n${recent.join('\n') || '（无）'}\n</recent_titles>`;
   const first = await deps.generate(prompt);
   const generated = first.value.decision === 'skip' ? first : await deps.generate(`${POLISH}\n\n<draft>${JSON.stringify(first.value)}</draft>`).catch(() => first), article = generated.value;
-  const reason = article.decision === 'skip' ? 'model-skip' : dataRejection(article, bundle);
+  // Numbers that appear in real site interview titles (dates, rounds) are allowed when quoted from them.
+  const allowed = { ...bundle, numbers: new Set([...bundle.numbers, ...interviews.flatMap(line => line.match(/\d+(?:\.\d+)?%?/gu) ?? [])]) };
+  const reason = article.decision === 'skip' ? 'model-skip' : dataRejection(article, allowed);
   if (reason) return { outcome: 'no_article', skipped: [{ url: 'data-post', reason, ...(ctx.live ? {} : { excerpt: article.body.slice(0, 400) }) }] };
   return publishDraft(state, deps, ctx, article, generated.usage, [], { provenance: 'personal', source: 'https://www.agent-journey.cn/interview', onSent: () => { state.dataTitles = [...(state.dataTitles ?? []), article.title].slice(-20); } });
 }
 
 export function dataRejection(article: GeneratedArticle, bundle: DataBundle): string | undefined {
   const { title, body } = article;
-  if (title.length > 16 || /统计|数据|整理|分析|总结|汇总|干货|速看|收藏|备考题单|到底|竟然|真相/u.test(title)) return 'title';
-  if (body.length < 60 || body.length > 600) return 'length';
+  if (title.length > 30 || /统计|数据|分析|总结|汇总|干货|速看|收藏|备考题单/u.test(title)) return 'title';
+  if (body.length < 60 || body.length > 2500) return 'length';
   if (/https?:|www\.|注册|会员|扫码|私信|加群/iu.test(body)) return 'promotion';
   if ((body.match(/agent-journey\.cn/gu) ?? []).length !== 1) return 'domain-count';
   if (/我(之前|当时|去年|也)?(面过|面了|当过面试官|作为面试官|拿到.{0,4}offer|在.{1,8}(工作|实习))/u.test(body)) return 'invented-experience';
@@ -184,7 +191,8 @@ export async function runArticleAutopilot(input: { configDir: string; live: bool
   const dataEnabled = process.env.NOWCODER_ARTICLE_KIND === 'data' || await readFile(join(input.configDir, 'nowcoder-autopilot', 'articles.data.json'), 'utf8').then(raw => (JSON.parse(raw) as { enabled?: boolean }).enabled === true, () => false);
   // NOWCODER_ARTICLE_MANUAL=1 publishes one article right now (2026-11-11 user: "数据贴现在就发").
   const manual = process.env.NOWCODER_ARTICLE_MANUAL === '1' ? (() => { const at = new Date(Date.now() + 8 * 3_600_000).toISOString(); return { day: at.slice(0, 10), slot: 'pm' as const, id: `${at.slice(0, 10)}-manual-${at.slice(11, 16).replace(':', '')}` }; })() : undefined;
-  const deps: ArticleDeps = { api: input.api, now: Date.now, ...(manual ? { manualSlot: manual } : {}), ...(dataEnabled ? { dataBundle: () => dataBundle(join(input.configDir, 'nowcoder-autopilot')) } : {}), ...(process.env.NOWCODER_ARTICLE_KIND === 'data' || process.env.NOWCODER_ARTICLE_KIND === 'interview' ? { kind: process.env.NOWCODER_ARTICLE_KIND } : {}), hotTitles: async () => (await fetchHotList()).map(c => c.title ?? '').filter(Boolean), sleep: ms => new Promise(resolve => setTimeout(resolve, ms)), notify: notifyUser(input.configDir), source: text, generate: prompt => codexJson<GeneratedArticle>(prompt, SCHEMA, { effort: 'high', timeoutMs: 300_000 }),
+  const deps: ArticleDeps = { api: input.api, now: Date.now, hotSamples: () => fetchHotPostSamples(),
+    siteInterviews: async () => (await deps.catalog()).map(l => `${l.company}｜${l.label}`).slice(0, 120), ...(manual ? { manualSlot: manual } : {}), ...(dataEnabled ? { dataBundle: () => dataBundle(join(input.configDir, 'nowcoder-autopilot')) } : {}), ...(process.env.NOWCODER_ARTICLE_KIND === 'data' || process.env.NOWCODER_ARTICLE_KIND === 'interview' ? { kind: process.env.NOWCODER_ARTICLE_KIND } : {}), hotTitles: async () => (await fetchHotList()).map(c => c.title ?? '').filter(Boolean), sleep: ms => new Promise(resolve => setTimeout(resolve, ms)), notify: notifyUser(input.configDir), source: text, generate: prompt => codexJson<GeneratedArticle>(prompt, SCHEMA, { effort: 'high', timeoutMs: 300_000 }),
     catalog: async () => (JSON.parse(await text(CATALOG)) as { data: { navData: any[] } }).data.navData.flatMap(company => leaves(company.children ?? [], company.key)) };
   // Waiting only happens inside a slot window, so logging it explains a missed slot (2026-11-11 evening).
   return runJob<ArticleState, JobResult>({ configDir: input.configDir, name: input.live ? 'articles' : 'articles.dry-run', now: deps.now, logWaiting: true, tick: async (state, save) => articleTick(state, deps, { live: input.live, save }) as Promise<JobResult>,

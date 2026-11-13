@@ -93,6 +93,7 @@ describe('data posts', () => {
     expect(dataRejection({ ...ok, body: `${body}\n\n我当过面试官` }, bundle)).toBe('invented-experience');
     expect(dataRejection({ ...ok, body: `${body}\n\nagent-journey.cn` }, bundle)).toBe('domain-count');
     expect(dataRejection({ ...ok, title: '243 篇面经统计告诉你' }, bundle)).toBe('title');
+    expect(dataRejection({ ...ok, title: '这个标题写得特别特别长长长长长长长长长长长长长长长长长长长长长' }, bundle)).toBe('title');
   });
   it('writes a data post in the evening slot', async () => {
     const PM = Date.parse('2026-11-07T10:40:00.000Z'), prompts: string[] = [];
