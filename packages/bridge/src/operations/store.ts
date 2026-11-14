@@ -81,7 +81,10 @@ export class NowcoderOperationsStore {
       const canonicalUrl = operationSourceUrlSchema.parse(source.url);
       const id = `ops-${stableContentId(canonicalUrl)}`;
       const existing = await this.get(id);
-      if (existing) return existing;
+      // An entry with any send attempt is history and never changes. One that was only ever drafted may be
+      // refreshed below when the post was edited after we first froze it (2026-11-14: three hot posts were
+      // stuck on "source conflict" forever because the frozen copy predated an edit).
+      if (existing && (existing.publicationAttempts?.length || ['replied', 'skipped'].includes(existing.status))) return existing;
       const root = await realpath(this.libraryRoot);
       const lexical = resolve(root, dirname(source.relativePath), 'source.json');
       if (!inside(root, lexical)) throw new HttpError(409, 'OPERATIONS_SOURCE_INVALID', '来源路径越界，已停止读取');
@@ -101,6 +104,13 @@ export class NowcoderOperationsStore {
       }
       const body = document.text.trim(), title = document.title.trim();
       if (body.length < 2 || body.length > 24_000) throw new HttpError(409, 'OPERATIONS_CONTEXT_LIMIT', '正文为空或过长，请先核对适合回复的完整帖子');
+      if (existing) {
+        if (existing.contextHash === hash(title, body)) return existing;
+        const { conversation: _c, drafts: _d, draftConversationHash: _h, ...kept } = existing as NowcoderOperation & { draftConversationHash?: string };
+        void _c; void _d; void _h;
+        return this.save({ ...kept, title, body, contextHash: hash(title, body), collectedAt: document.collectedAt, updatedAt: new Date().toISOString(),
+          revision: existing.revision + 1, status: 'queued', note: existing.note });
+      }
       const text = `${title}\n${body}`;
       const agent = /agent|langgraph|langchain|rag|大模型|ai.{0,8}(?:前端|应用|开发)|智能体/iu.test(text);
       const interview = /面经|一面|二面|面试记录|面试题/iu.test(title);
