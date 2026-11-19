@@ -49,6 +49,7 @@ const COMPANIES: readonly CompanyDefinition[] = [
   { id: 'other', label: '大疆创新', aliases: [/大疆创新|大疆|DJI/i] },
   { id: 'other', label: 'OPPO', aliases: [/OPPO|欧珀/i] },
   { id: 'other', label: 'vivo', aliases: [/\bvivo\b|维沃/i] },
+  { id: 'other', label: 'Shopee', aliases: [/\bShopee\b|虾皮/i] },
 ];
 
 const BUSINESS_UNITS: readonly [RegExp, string][] = [
