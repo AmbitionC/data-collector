@@ -17,6 +17,53 @@ function interview(title: string, overrides: Partial<CollectedDocument> = {}): C
   };
 }
 
+describe('Shopee interview company recognition', () => {
+  it.each(['Shopee', 'shopee', '虾皮'])('keeps a complete %s Agent interview selectable', employer => {
+    const document = interview(`${employer} Agent 开发一面面经`);
+    const result = selectNowcoderPlanCandidates([document], '2026-11-19T00:00:00.000Z', 1, 'latest-search');
+    expect(result.accepted).toHaveLength(1);
+    expect(result.accepted[0]?.sourceMetadata).toMatchObject({
+      company: 'other', companyLabel: 'Shopee', evidenceGrade: 'A',
+    });
+  });
+
+  it('keeps the explicit Shopee employer ahead of a previous employer in the opening', () => {
+    const document = interview('Shopee后端一面凉经', {
+      text: '我参加了这次一面，之前在腾讯实习。1.Agent 状态怎样保存？2.工具调用失败如何恢复？3.上下文记忆怎样压缩？',
+    });
+    expect(analyzeNowcoderEvidence(document)).toMatchObject({
+      company: 'other', companyLabel: 'Shopee', evidenceGrade: 'B',
+    });
+    expect(selectNowcoderPlanCandidates([document], '2026-11-19T00:00:00.000Z', 1, 'latest-search').accepted).toHaveLength(1);
+  });
+
+  it('does not infer an employer from an English identifier containing Shopee', () => {
+    const evidence = analyzeNowcoderEvidence(interview('Agent 开发一面面经', {
+      text: '我参加了这次一面，项目里使用了 ShopeeSDK。1.Agent 状态怎样保存？2.工具调用怎样恢复？3.上下文怎样压缩？',
+    }));
+    expect(evidence.company).toBeUndefined();
+    expect(evidence.evidenceGrade).toBe('C');
+  });
+
+  it.each(['truncated', 'promotion', 'few-questions', 'unrelated-role'] as const)(
+    'preserves the %s rejection for a recognized Shopee employer', reason => {
+      const document = interview('Shopee Agent 开发一面面经');
+      if (reason === 'truncated') {
+        document.truncated = true;
+        document.sourceMetadata = { contentAccess: 'truncated' };
+      } else if (reason === 'promotion') document.text += ' 加微信领取资料。';
+      else if (reason === 'few-questions') document.text = '我参加了这次一面，只问了 Agent 工具调用。';
+      else {
+        document.title = 'Shopee 后端开发一面面经';
+        document.text = '我参加了后端开发一面。1.事务隔离级别有哪些？2.索引怎么设计？3.线程池怎样配置？';
+      }
+      const result = selectNowcoderPlanCandidates([document], '2026-11-19T00:00:00.000Z', 1, 'latest-search');
+      expect(result.accepted).toEqual([]);
+      if (reason !== 'unrelated-role') expect(analyzeNowcoderEvidence(document).evidenceGrade).toBe('C');
+    },
+  );
+});
+
 describe('Nowcoder additional company recognition', () => {
   // Missing a company alias must not discard an otherwise complete engineering interview.
   it.each([
