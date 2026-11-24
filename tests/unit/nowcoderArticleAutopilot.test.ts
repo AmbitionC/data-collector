@@ -29,6 +29,14 @@ describe('article autopilot', () => {
     expect((await run(initialArticleState(), deps, false)).outcome).toBe('dry_run_draft');
     expect(calls.some(([p]) => p.endsWith('/publish'))).toBe(false);
   });
+  it('waits out a network outage without using a try, then publishes', async () => {
+    let up = false, now = AM; const { deps } = harness(); deps.now = () => now; deps.online = async () => { if (!up) throw new Error('fetch failed'); return true; };
+    const state = initialArticleState();
+    for (let i = 0; i < 40; i++) { await run(state, deps); now += 60_000; }
+    expect(state.tries).toEqual({}); expect(state.slots).toEqual({}); expect(deps.notify).toHaveBeenCalledOnce();
+    up = true; now += 5 * 60_000;
+    expect((await run(state, deps)).outcome).toBe('published');
+  });
   it('marks an uncertain slot done without retrying', async () => {
     const { deps } = harness({ state: 'uncertain' }), state = initialArticleState();
     expect((await run(state, deps)).outcome).toBe('isolated_uncertain');

@@ -5,7 +5,7 @@ import { fetchHotList, fetchHotPostSamples } from '../operations/hotList.js';
 import { dataBundle, unbackedNumbers, type DataBundle } from '../operations/siteContext.js';
 
 /** Deterministic article runner: one slot, one attempt, its own state. The model only writes the draft. */
-export const ARTICLE_POLICY = { browser: 'chrome', accountId: '544222414', maxSourcesPerTick: 3, maxTriesPerSlot: 3, retryMs: 15 * 60_000,
+export const ARTICLE_POLICY = { browser: 'chrome', accountId: '544222414', maxSourcesPerTick: 3, maxTriesPerSlot: 3, retryMs: 15 * 60_000, networkRetryMs: 5 * 60_000, networkNoticeAfter: 6,
   slots: { am: { start: 10 * 60 + 30, end: 12 * 60 }, pm: { start: 18 * 60 + 30, end: 20 * 60 } } } as const;
 const CATALOG = 'https://fe-journey-main-ktantdfjcs.cn-hangzhou.fcapp.run/article/navList?module=interview';
 const SOURCE_ROOT = 'https://font-end-journey-resources.oss-cn-hangzhou.aliyuncs.com/interview';
@@ -13,11 +13,13 @@ export const COMPANIES = [['Bytedance', '字节'], ['Meituan', '美团'], ['Kuai
 
 export interface Leaf { key: string; company: string; label: string; url: string; updatedAt: string }
 export interface GeneratedArticle { decision: 'write' | 'skip'; title: string; body: string; notes: string }
-export interface ArticleState { schemaVersion: 1; slots: Record<string, { state: string; articleId?: string; url?: string }>; used: string[]; lastCompany: string | null; inflight: { key: string; id: string; slot: string; source?: string } | null; dataTitles?: string[]; notified: Record<string, string>; tries: Record<string, number>; retryAt: string | null }
+export interface ArticleState { schemaVersion: 1; slots: Record<string, { state: string; articleId?: string; url?: string }>; used: string[]; lastCompany: string | null; inflight: { key: string; id: string; slot: string; source?: string } | null; dataTitles?: string[]; notified: Record<string, string>; tries: Record<string, number>; retryAt: string | null; networkFailures?: number }
 export const initialArticleState = (): ArticleState => ({ schemaVersion: 1, slots: {}, used: [], lastCompany: null, inflight: null, notified: {}, tries: {}, retryAt: null });
 export interface ArticleDeps {
   api(path: string, method?: string, body?: unknown): Promise<any>;
   catalog(): Promise<Leaf[]>; source(url: string): Promise<string>;
+  /** True when the site catalog answers; any HTTP status counts as reachable. */
+  online?(): Promise<boolean>;
   generate(prompt: string): Promise<{ value: GeneratedArticle; usage?: unknown }>;
   /** Current site hot-list titles, used only as a hint for the angle of the opening. */
   hotTitles?(): Promise<string[]>;
@@ -90,6 +92,13 @@ export async function articleTick(state: ArticleState, deps: ArticleDeps, option
   delete state.notified.verification;
   if (!runtime.connected || runtime.active) return { outcome: 'waiting', detail: 'runtime' };
   if (live && limits.nextAllowedAt && Date.parse(limits.nextAllowedAt) > deps.now()) return { outcome: 'waiting', detail: 'interval' };
+  // 2026-11-24 user: being offline must not use up the slot. Probe first; only a reachable site counts as a try.
+  if (live && deps.online && !await deps.online().catch(() => false)) {
+    state.networkFailures = (state.networkFailures ?? 0) + 1; state.retryAt = new Date(deps.now() + ARTICLE_POLICY.networkRetryMs).toISOString(); await save(state);
+    if (state.networkFailures === ARTICLE_POLICY.networkNoticeAfter) await deps.notify('牛客发文连不上外网已约半小时，网络恢复后会自动继续').catch(() => undefined);
+    return { outcome: 'waiting', detail: 'network' };
+  }
+  if (live) state.networkFailures = 0;
   if (live) { // Counted before any model call, so a failing slot can never spend tokens every minute.
     const tries = state.tries[slot!.id] ?? 0;
     if (tries >= ARTICLE_POLICY.maxTriesPerSlot) { state.slots[slot!.id] = { state: 'gave_up' }; await save(state); await deps.notify('牛客发文本时段三次都没写成，已跳过').catch(() => undefined); return { outcome: 'gave_up' }; }
@@ -186,12 +195,16 @@ function leaves(nodes: any[], company: string, out: Leaf[] = []): Leaf[] {
 }
 const text = async (url: string) => { const response = await fetch(url, { signal: AbortSignal.timeout(20_000) }); if (!response.ok) throw new Error(`读取失败 ${response.status}`); return response.text(); };
 
+const online = async (): Promise<boolean> => {
+  await fetch(CATALOG, { method: 'HEAD', signal: AbortSignal.timeout(10_000) });
+  return true;
+};
 export async function runArticleAutopilot(input: { configDir: string; live: boolean; api: ArticleDeps['api'] }): Promise<Record<string, unknown>> {
   // Data posts go live only after the user approves samples: <config>/nowcoder-autopilot/articles.data.json = {"enabled":true}.
   const dataEnabled = process.env.NOWCODER_ARTICLE_KIND === 'data' || await readFile(join(input.configDir, 'nowcoder-autopilot', 'articles.data.json'), 'utf8').then(raw => (JSON.parse(raw) as { enabled?: boolean }).enabled === true, () => false);
   // NOWCODER_ARTICLE_MANUAL=1 publishes one article right now (2026-11-11 user: "数据贴现在就发").
   const manual = process.env.NOWCODER_ARTICLE_MANUAL === '1' ? (() => { const at = new Date(Date.now() + 8 * 3_600_000).toISOString(); return { day: at.slice(0, 10), slot: 'pm' as const, id: `${at.slice(0, 10)}-manual-${at.slice(11, 16).replace(':', '')}` }; })() : undefined;
-  const deps: ArticleDeps = { api: input.api, now: Date.now, hotSamples: () => fetchHotPostSamples(),
+  const deps: ArticleDeps = { api: input.api, now: Date.now, online, hotSamples: () => fetchHotPostSamples(),
     siteInterviews: async () => (await deps.catalog()).map(l => `${l.company}｜${l.label}`).slice(0, 120), ...(manual ? { manualSlot: manual } : {}), ...(dataEnabled ? { dataBundle: () => dataBundle(join(input.configDir, 'nowcoder-autopilot')) } : {}), ...(process.env.NOWCODER_ARTICLE_KIND === 'data' || process.env.NOWCODER_ARTICLE_KIND === 'interview' ? { kind: process.env.NOWCODER_ARTICLE_KIND } : {}), hotTitles: async () => (await fetchHotList()).map(c => c.title ?? '').filter(Boolean), sleep: ms => new Promise(resolve => setTimeout(resolve, ms)), notify: notifyUser(input.configDir), source: text, generate: prompt => codexJson<GeneratedArticle>(prompt, SCHEMA, { effort: 'high', timeoutMs: 300_000 }),
     catalog: async () => (JSON.parse(await text(CATALOG)) as { data: { navData: any[] } }).data.navData.flatMap(company => leaves(company.children ?? [], company.key)) };
   // Waiting only happens inside a slot window, so logging it explains a missed slot (2026-11-11 evening).
