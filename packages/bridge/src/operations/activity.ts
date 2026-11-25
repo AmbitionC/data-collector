@@ -14,7 +14,9 @@ export class NowcoderOperationsActivity {
   private active = 0;
   private readonly publishing = new Set<string>();
   constructor(private readonly store: NowcoderOperationsStore, private readonly transport: Transport, private readonly fetcher: typeof fetch,
-    readonly publishingControl?: NowcoderPublishingControl) {}
+    readonly publishingControl?: NowcoderPublishingControl,
+    /** Confirms the logged-in account before a routed comment is journaled; throws when it is not the assigned one. */
+    private readonly confirmAccount?: () => Promise<void>) {}
   get busy(): boolean { return this.active > 0; }
   isPublishing(id: string): boolean { return this.publishing.has(id); }
 
@@ -69,7 +71,7 @@ export class NowcoderOperationsActivity {
     try {
       // An existing durable attempt can be inspected even while the extension is offline.
       const existing = await this.store.get(id);
-      if (!existing?.publicationAttempts?.some(a => a.key === input.key)) this.transport.assertAvailable();
+      if (!existing?.publicationAttempts?.some(a => a.key === input.key)) { this.transport.assertAvailable(); await this.confirmAccount?.(); }
       const started = await this.store.beginPublication(id, input, randomUUID());
       if (!started.dispatch) return { id, revision: started.entry.revision, publication: started.publication };
       let result: NowcoderOperationResult;

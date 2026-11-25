@@ -79,14 +79,19 @@ describe('extension article connection role', () => {
     let reads = 0;
     runtime.connection.onCollect(() => { reads++; });
     runtime.connection.onPlanCollect(() => { reads++; });
-    runtime.connection.onOperations(async () => { reads++; return attention; });
     const socket = runtime.sockets[0]!;
     socket.receive('job.collect', 'job', { url: 'https://www.nowcoder.com/discuss/123' });
     socket.receive('plan.collect', 'plan', {});
-    socket.receive('operations.execute', 'comment', { kind: 'context', url: 'https://www.nowcoder.com/discuss/123', maxPages: 1 });
     await new Promise(resolve => setTimeout(resolve, 0));
     expect(reads).toBe(0);
     expect(runtime.storage.values).not.toHaveProperty('lastJobId');
+  });
+
+  it('runs a comment operation on the article role and returns its receipt', async () => {
+    const runtime = await setup('articles');
+    runtime.connection.onOperations(async () => ({ kind: 'attention', code: 'VERIFY', message: '请核验', submission: 'not_attempted' }));
+    runtime.sockets[0]!.receive('operations.execute', 'comment', { kind: 'context', url: 'https://www.nowcoder.com/discuss/123', maxPages: 1 });
+    await vi.waitFor(() => expect(runtime.sockets[0]!.sent.at(-1)).toMatchObject({ type: 'operations.result', requestId: 'comment' }));
   });
 
   it('does not run an article command on a collector role connection', async () => {

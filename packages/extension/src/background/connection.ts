@@ -464,7 +464,7 @@ export class BridgeConnection {
         runtimeId: this.runtimeId,
         ...(articleCompatible && this.dependencies.browserFamily ? { browserFamily: this.dependencies.browserFamily } : {}),
         capabilities: (settings.role === 'articles'
-          ? [NOWCODER_ARTICLE_CAPABILITY, ...(this.bridgeCapabilities.has(INVEST_OUTREACH_CAPABILITY) && this.outreachHandler ? [INVEST_OUTREACH_CAPABILITY] : [])]
+          ? [NOWCODER_ARTICLE_CAPABILITY, ...(this.operationsHandler ? [NOWCODER_BROWSER_OPERATIONS_CAPABILITY] : []), ...(this.bridgeCapabilities.has(INVEST_OUTREACH_CAPABILITY) && this.outreachHandler ? [INVEST_OUTREACH_CAPABILITY] : [])]
           : [NOWCODER_DETAIL_CAPABILITY, ZSXQ_COMPLETE_CONTENT_CAPABILITY, NOWCODER_BROWSER_OPERATIONS_CAPABILITY])
           .sort((left, right) => left.localeCompare(right)),
       });
@@ -537,7 +537,7 @@ export class BridgeConnection {
   }
 
   send(type: string, requestId: string, payload: unknown): void {
-    if (this.connectionRole === 'articles' && !['extension.hello', 'bridge.ping', 'article.result'].includes(type)) {
+    if (this.connectionRole === 'articles' && !['extension.hello', 'bridge.ping', 'article.result', 'operations.result'].includes(type)) {
       throw new Error('发文连接不能发送采集或评论消息');
     }
     const socket = this.socket;
@@ -1040,7 +1040,7 @@ export class BridgeConnection {
     }
     if (!isCurrent()) return;
 
-    if (this.connectionRole === 'articles' && message.type !== 'bridge.authorized' && message.type !== 'article.execute' && message.type !== 'outreach.execute') return;
+    if (this.connectionRole === 'articles' && message.type !== 'bridge.authorized' && message.type !== 'article.execute' && message.type !== 'outreach.execute' && message.type !== 'operations.execute') return;
     if (message.type === 'outreach.execute') {
       if (this.connectionRole !== 'articles' || !this.outreachHandler) return;
       const parsed = outreachActionSchema.safeParse(message.payload);

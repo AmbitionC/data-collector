@@ -56,6 +56,7 @@ import { loadConfig, type ConfigOverrides } from '../config.js';
 import { NowcoderScheduleStore } from '../plans/nowcoderSchedule.js';
 import { NowcoderOperationsStore } from '../operations/store.js';
 import { NowcoderPublishingControl } from '../operations/publishingControl.js';
+import { readCommentRoute } from '../operations/commentRoute.js';
 import { getNowcoderRecoveryAdvice, getRecoveryFailureAdvice, recoveryAttemptSchema } from '../operations/recovery.js';
 import { NowcoderOperationsTransport } from '../operations/transport.js';
 import { NowcoderOperationsWorkflow, workflowRequestSchema } from '../operations/workflow.js';
@@ -442,7 +443,7 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
     ...(await operations.list()).flatMap(entry => (entry.publicationAttempts ?? []).map(publication => ({ opportunityId: entry.id, sourceUrl: entry.canonicalUrl, publication }))),
     ...(await articles.list()).flatMap(entry => entry.publicationAttempts.map(publication => ({ opportunityId: entry.id,
       sourceUrl: NOWCODER_ARTICLE_EDITOR_URL, publication, channel: 'article' as const, browser: entry.browser, accountId: entry.accountId }))),
-  ]);
+  ], { sharedAccount: () => { try { return readCommentRoute(config.configDir) !== undefined; } catch { return true; } } });
   const operations = new NowcoderOperationsStore(join(config.configDir, 'nowcoder-operations'), config.libraryRoot,
     { admission: publicationAdmission, beforePublication: () => publishingControl.assertCapacity(), afterPublication: async () => { await publishingControl.status(); } });
   const articles = new NowcoderArticlesStore(join(config.configDir, 'nowcoder-articles'), {
@@ -720,13 +721,27 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
   let restartIntent: ArtifactUpdateIntent | undefined;
   let updateCheckInFlight = false;
   let externalOperations = 0;
-  const operationsTransport = new NowcoderOperationsTransport(() => ({
-    socket: extensionSocket,
-    ready: !closing && !updateCheckInFlight && !restartPending && extensionReady && !(directedService?.hasActiveRun() ?? false)
-      && extensionMatchesArtifact(),
-    capabilities: extensionSocket ? extensionRuntime.get(extensionSocket)?.capabilities ?? [] : [],
-  }));
-  const operationsActivity = new NowcoderOperationsActivity(operations, operationsTransport, options.fetch ?? fetch, publishingControl);
+  const commentRuntime = () => {
+    const route = readCommentRoute(config.configDir), socket = route ? articleSocket : extensionSocket;
+    const runtime = socket ? extensionRuntime.get(socket) : undefined;
+    return { socket, capabilities: runtime?.capabilities ?? [], matches: extensionMatchesArtifact(socket),
+      connected: route ? articleReady && runtime?.browserFamily === route.browser : extensionReady };
+  };
+  const operationsTransport = new NowcoderOperationsTransport(() => {
+    const current = commentRuntime();
+    return { socket: current.socket, capabilities: current.capabilities,
+      ready: !closing && !updateCheckInFlight && !restartPending && current.connected && current.matches
+        && !(directedService?.hasActiveRun() ?? false)
+        && !(current.socket === articleSocket && (articlesActivity.busy || articleTransport.busy || outreachBusy())) };
+  });
+  const operationsActivity = new NowcoderOperationsActivity(operations, operationsTransport, options.fetch ?? fetch, publishingControl, async () => {
+    const route = readCommentRoute(config.configDir);
+    if (!route) return;
+    const result = await articlesActivity.account(route.browser, route.accountId);
+    if (result.kind !== 'account' || result.identity.userId !== route.accountId) {
+      throw new HttpError(409, 'COMMENT_ACCOUNT_MISMATCH', result.kind === 'attention' ? result.message : '当前登录账号不是指定的评论账号，未发送');
+    }
+  });
   const articleTransport = new ArticleTransport(() => ({
     socket: articleSocket,
     ready: !closing && !updateCheckInFlight && !restartPending && articleReady && extensionMatchesArtifact(articleSocket),
@@ -1568,6 +1583,11 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
         setImmediate(maybeRestart);
         return;
       }
+      if (message.type === 'operations.result' && articleReady) {
+        operationsTransport.receive(socket, message.requestId, message.payload);
+        setImmediate(maybeRestart);
+        return;
+      }
       if (message.type === 'outreach.result' && articleReady) {
         outreachTransport.receive(socket, message.requestId, message.payload);
         setImmediate(maybeRestart);
@@ -2135,11 +2155,11 @@ export async function startBridge(options: StartBridgeOptions = {}): Promise<Bri
       const input = z.object({ attempt: recoveryAttemptSchema }).strict().parse(Object.fromEntries(requestUrl.searchParams));
       try {
         await refreshArtifactBuildId();
-        const snapshot = await publishingControl.recoverySnapshot();
+        const snapshot = await publishingControl.recoverySnapshot(), comments = commentRuntime();
         return sendJson(response, 200, getNowcoderRecoveryAdvice({ ...snapshot, attempt: input.attempt, runtime: {
-          connected: extensionReady && extensionSocket?.readyState === WebSocket.OPEN,
-          supported: !!extensionSocket && (extensionRuntime.get(extensionSocket)?.capabilities.includes(NOWCODER_BROWSER_OPERATIONS_CAPABILITY) ?? false),
-          buildMatches: extensionMatchesArtifact(), updating: updateCheckInFlight || restartPending || closing,
+          connected: extensionReady && extensionSocket?.readyState === WebSocket.OPEN && comments.connected && comments.socket?.readyState === WebSocket.OPEN,
+          supported: comments.capabilities.includes(NOWCODER_BROWSER_OPERATIONS_CAPABILITY),
+          buildMatches: extensionMatchesArtifact() && comments.matches, updating: updateCheckInFlight || restartPending || closing,
           busy: externalOperations > 0 || operationsWorkflow.busy || operationsActivity.busy || operationsTransport.busy
             || articlesActivity.busy || articleTransport.busy || (directedService?.hasActiveRun() ?? false)
             || (planStore?.active().length ?? 0) > 0 || jobs.list().some(job => ['queued', 'dispatched', 'collecting'].includes(job.status)),

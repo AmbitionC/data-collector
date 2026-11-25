@@ -35,9 +35,12 @@ export class NowcoderPublishingControl {
     return verificationBlocks(this.memoryPause, channel) || this.observedPauseEpoch[channel] > this.clearedPauseEpoch[channel];
   }
   readonly now: () => number;
+  /** True while one account serves both channels: its captcha must stop comments and posts alike. */
+  private readonly sharedAccount: () => boolean;
   private readonly sleep: (ms: number) => Promise<void>;
   constructor(private readonly path: string, private readonly history: () => Promise<PublishingHistoryEntry[]>,
-    options: { now?: () => number; sleep?: (ms: number) => Promise<void> } = {}) {
+    options: { now?: () => number; sleep?: (ms: number) => Promise<void>; sharedAccount?: () => boolean } = {}) {
+    this.sharedAccount = options.sharedAccount ?? (() => false);
     this.now = options.now ?? Date.now;
     this.sleep = options.sleep ?? (ms => new Promise(resolve => setTimeout(resolve, ms)));
   }
@@ -151,11 +154,13 @@ export class NowcoderPublishingControl {
     return this.serialize(async () => { const { state, events } = await this.read(); state.policy = policy; await this.write(state); return this.summarize(state, events); });
   }
   async pause(input: Omit<NowcoderVerificationPause, 'id' | 'detectedAt'>): Promise<NowcoderVerificationPause> {
-    const verification = nowcoderVerificationPauseSchema.parse({ ...input, id: randomUUID(), detectedAt: new Date(this.now()).toISOString() });
+    const shared = this.sharedAccount();
+    const verification = nowcoderVerificationPauseSchema.parse({ ...input, ...(shared ? { allChannels: true } : {}), id: randomUUID(), detectedAt: new Date(this.now()).toISOString() });
     // Observation fences both channels synchronously, before queued history or
     // filesystem reads. A failed persistence keeps this latch closed.
     const channel = input.channel ?? 'comment';
     this.observedPauseEpoch[channel]++;
+    if (shared) this.observedPauseEpoch[channel === 'comment' ? 'article' : 'comment']++;
     return this.serialize(async () => {
       const { state } = await this.read();
       if (state.verification?.requestId === input.requestId) return state.verification;

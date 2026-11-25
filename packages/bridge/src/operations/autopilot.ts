@@ -2,6 +2,7 @@ import { readFile, readdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { codexJson, notifyUser, runJob } from '../autopilot/core.js';
 import { siteContext, type SiteContext } from './siteContext.js';
+import { readCommentRoute } from './commentRoute.js';
 import { fetchHotList } from './hotList.js';
 
 /**
@@ -93,6 +94,8 @@ export interface AutopilotDeps {
   /** Site-wide hot list (2026-11-10 user: comment on hot posts first for exposure). */
   hotList?(): Promise<Candidate[]>;
   leadMode(): Promise<LeadMode>;
+  /** When comments moved to the current account; undefined for the original one. */
+  leadSince?(): string | undefined;
   /** The one real site page and statistics a lead may cite; undefined when nothing matches. */
   siteContext?(packet: Packet): Promise<SiteContext | undefined>;
   draft(prompt: string): Promise<DraftResult>;
@@ -174,8 +177,9 @@ export function leadRejection(lead: string, packet: Packet, recent: RecentCommen
 }
 
 /** Why the lead budget is closed right now; undefined when one lead comment may go out. */
-export function leadBudgetClosed(state: AutopilotState, now: number): string | undefined {
-  const week = now - 7 * 86_400_000, day = shanghaiParts(now).day;
+export function leadBudgetClosed(state: AutopilotState, now: number, since?: string): string | undefined {
+  // A newly assigned account has its own record: it earns its first link with ordinary comments of its own.
+  const week = Math.max(now - 7 * 86_400_000, since ? Date.parse(since) : 0), day = shanghaiParts(now).day;
   const leads = state.leads.filter(l => Date.parse(l.at) >= week), published = state.published.filter(at => Date.parse(at) >= week);
   if (leads.filter(l => shanghaiParts(Date.parse(l.at)).day === day).length >= LEAD_POLICY.maxPerDay) return 'daily-cap';
   const last = leads.at(-1); if (last && now - Date.parse(last.at) < LEAD_POLICY.minGapMs) return 'min-gap';
@@ -298,7 +302,8 @@ export async function tick(state: AutopilotState, deps: AutopilotDeps, options: 
   const stamp = day.replaceAll('-', ''), mode = live ? 'ap' : 'dry';
   const skipped: Array<{ sourceId: string; reason: string }> = [];
   const leadMode = await deps.leadMode().catch((): LeadMode => 'off');
-  const wantLead = leadMode === 'live' && (state.nextKind ?? 'lead') === 'lead' && leadBudgetClosed(state, deps.now()) === undefined;
+  const leadSince = deps.leadSince?.();
+  const wantLead = leadMode === 'live' && (state.nextKind ?? 'lead') === 'lead' && leadBudgetClosed(state, deps.now(), leadSince) === undefined;
   try {
     // Hot posts are refreshed every tick and go first on ordinary turns. Other posts younger than minPostAgeMs
     // wait: the user saw many freshly commented posts later turn author-only, and a post on the hot list has
@@ -309,7 +314,8 @@ export async function tick(state: AutopilotState, deps: AutopilotDeps, options: 
       const hot = await deps.hotList().catch(() => [] as Candidate[]), known = new Set(state.candidates.map(c => c.sourceId));
       // 2026-11-13 user: every hot-list post should carry one of our comments. A hot post skipped earlier for
       // images, promotion wording, coverage or a model skip is tried once more under the hot rules.
-      const fresh = hot.filter(c => !known.has(c.sourceId) && retryable(c.sourceId) && settled(c));
+      const ownUrls = hot.length ? await deps.ownPostUrls() : new Set<string>();
+      const fresh = hot.filter(c => !known.has(c.sourceId) && !ownUrls.has(c.url) && retryable(c.sourceId) && settled(c));
       if (fresh.length) { state.candidates = [...fresh, ...state.candidates]; await saveState(state); }
     }
     if (state.candidates.length === 0 || (wantLead && !state.candidates.some(c => isHelpTitle(c.title)))) {
@@ -345,7 +351,7 @@ export async function tick(state: AutopilotState, deps: AutopilotDeps, options: 
       if (state.drafts.count >= COMMENT_POLICY.maxDraftsPerDay) return finish({ outcome: 'draft_budget_reached', skipped }, deps.now() + 3_600_000);
       state.drafts.count++; await saveState(state);
       let drafted: DraftResult;
-      const leadGate = leadMode === 'off' ? 'off' : (state.nextKind === 'normal' && live) ? 'ordinary-turn' : leadIneligibility(packet) ?? (leadMode === 'live' && live ? leadBudgetClosed(state, deps.now()) : undefined);
+      const leadGate = leadMode === 'off' ? 'off' : (state.nextKind === 'normal' && live) ? 'ordinary-turn' : leadIneligibility(packet) ?? (leadMode === 'live' && live ? leadBudgetClosed(state, deps.now(), leadSince) : undefined);
       const site = leadGate === undefined && deps.siteContext ? await deps.siteContext(packet).catch(() => undefined) : undefined;
       try { drafted = await deps.draft(buildPrompt(packet, state.recent, leadGate === undefined && !!site, site, !!candidate.hot)); }
       catch (error) { throw new TechnicalFailure(`起草失败：${error instanceof Error ? error.message : 'unknown'}`); }
@@ -415,7 +421,7 @@ export async function readLeadMode(configDir: string): Promise<LeadMode> {
 }
 
 export async function runAutopilot(input: { configDir: string; live: boolean; deps: Omit<AutopilotDeps, 'ownPostUrls' | 'draft' | 'notify' | 'now' | 'sleep' | 'readPacket' | 'leadMode'> & Partial<AutopilotDeps> }): Promise<TickResult> {
-  const deps: AutopilotDeps = { ownPostUrls: () => ownArticleUrls(input.configDir), hotList: fetchHotList, leadMode: () => readLeadMode(input.configDir), siteContext: packet => siteContext(join(input.configDir, 'nowcoder-autopilot'), `${packet.currentPost.title}\n${packet.currentPost.body}`), draft: prompt => codexDraft(prompt), notify: notifyUser(input.configDir), now: Date.now,
+  const deps: AutopilotDeps = { ownPostUrls: () => ownArticleUrls(input.configDir), hotList: fetchHotList, leadMode: () => readLeadMode(input.configDir), leadSince: () => readCommentRoute(input.configDir)?.since, siteContext: packet => siteContext(join(input.configDir, 'nowcoder-autopilot'), `${packet.currentPost.title}\n${packet.currentPost.body}`), draft: prompt => codexDraft(prompt), notify: notifyUser(input.configDir), now: Date.now,
     sleep: ms => new Promise(resolve => setTimeout(resolve, ms)), readPacket: async file => JSON.parse(await readFile(file, 'utf8')) as Record<string, unknown>, ...input.deps };
   return runJob<AutopilotState, TickResult>({ configDir: input.configDir, name: input.live ? 'comments' : 'comments.dry-run', now: deps.now, initial: async () => initialState(),
     tick: (state, save) => tick(state, deps, { live: input.live, saveState: save }), ...(input.live ? { watch: deps.notify } : {}) });
