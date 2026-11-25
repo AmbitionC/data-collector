@@ -146,9 +146,9 @@ describe('need-gated lead experiment', () => {
     expect(leadBudgetClosed(seeded(30), NOW)).toBeUndefined();
     const today = seeded(60); today.leads = Array.from({ length: 15 }, (_, i) => i + 1).map(m => ({ at: new Date(NOW - m * 60_000).toISOString(), sourceId: `t${m}` }));
     expect(leadBudgetClosed(today, NOW)).toBe('daily-cap');
-    const late = seeded(30); late.leads = [{ at: new Date(NOW + 10 * 3_600_000).toISOString(), sourceId: 'x' }]; // 22:00, next check 22:15 the same evening
+    const late = seeded(30); late.leads = [{ at: new Date(NOW + 10 * 3_600_000).toISOString(), sourceId: 'x' }];
     expect(leadBudgetClosed(late, NOW + 10.25 * 3_600_000)).toBe('min-gap');
-    const share = seeded(20); share.leads = Array.from({ length: 13 }, (_, i) => i + 1).map(d => ({ at: new Date(NOW - d * 3_600_000).toISOString(), sourceId: `s${d}` }));
+    const share = seeded(20); share.leads = Array.from({ length: 5 }, (_, i) => i + 1).map(d => ({ at: new Date(NOW - d * 26 * 3_600_000).toISOString(), sourceId: `s${d}` }));
     expect(leadBudgetClosed(share, NOW)).toBe('weekly-share');
   });
   it('shadow mode publishes the link-free text and logs the lead', async () => {
@@ -181,24 +181,25 @@ describe('need-gated lead experiment', () => {
       draft: async prompt => { prompts.push(prompt); return { draft: good }; } });
     const state = seeded(30), result = await run(state, h.deps);
     expect(prompts[0]).toContain('lead 一律为空串');
-    expect(h.started.some(s => s.send)).toBe(false); // a lead turn never falls back to a plain reply on the same post
-    expect(state.leadMisses).toBe(1);
-    expect(result.outcome).toBe('no_opportunity');
+    expect(result.outcome).toBe('published'); // no matching page: the turn becomes an ordinary comment
+    expect(state.leads).toHaveLength(0);
   });
-  it('falls back to one ordinary comment after repeated lead misses', async () => {
-    const h = harness({ leadMode: async () => 'live' }), state = seeded(30); state.leadMisses = 6;
-    expect((await run(state, h.deps)).outcome).toBe('published');
-    expect(state.leadMisses).toBe(0);
-    expect(state.nextKind).toBe('lead');
-  });
-  it('a lead turn links on an ordinary post when no help post exists (half of comments must carry the link)', async () => {
-    const prompts: string[] = [];
-    const h = harness({ leadMode: async () => 'live', siteContext: async () => ({ title: 'AI / Agent 岗位简历与面试', excerpt: '项目描述按问题、方案、指标、优化来写', stats: [] }),
-      draft: async prompt => { prompts.push(prompt); return { draft: { ...good, lead } }; } });
+  it('never links on a post that is not asking for help', async () => {
+    const h = harness({ leadMode: async () => 'live', siteContext: async () => ({ title: 't', excerpt: 'e', stats: [] }), draft: async () => ({ draft: { ...good, lead } }) });
     const state = seeded(30), result = await run(state, h.deps);
-    expect(prompts[0]).toContain('必须写 lead');
-    expect(result.lead).toEqual({ status: 'live', text: lead });
-    expect(state.nextKind).toBe('normal');
+    expect(result.outcome).toBe('published');
+    expect(result.lead).toEqual({ status: 'ineligible:no-stated-need' });
+    expect(state.leads).toHaveLength(0);
+  });
+  it('needs four ordinary comments between leads', async () => {
+    const at = (hours: number) => new Date(NOW - hours * 3_600_000).toISOString();
+    const one = async (since: number) => { const s = initialState(); s.nextKind = 'normal'; s.leads = [{ at: at(10), sourceId: 'l' }]; s.published = [at(10), ...Array.from({ length: since }, (_, i) => at(i + 1))]; await run(s, harness({ leadMode: async () => 'live' }).deps); return s.nextKind; };
+    expect(await one(2)).toBe('normal');
+    expect(await one(3)).toBe('lead');
+  });
+  it('rejects a lead that reuses the stock phrase before the domain', () => {
+    expect(leadRejection(lead, ask, [{ text: '线程池参数得结合业务流量压测，背景知识在我自己做的站 agent-journey.cn 单独写过，可以对照着想', at: new Date(NOW).toISOString() }])).toBeUndefined();
+    expect(leadRejection(lead, ask, [{ text: '线程池参数得结合业务流量压测，背景知识在我整理的 agent-journey.cn 单独写过，可以对照着想', at: new Date(NOW).toISOString() }])).toBe('lead-repeats-own-phrasing');
   });
   it('hands the turn to an ordinary comment when there is no candidate at all', async () => {
     const h = harness({ leadMode: async () => 'live', readPacket: async () => ({ candidates: [] }) }), state = seeded(30);
@@ -259,8 +260,8 @@ describe('need-gated lead experiment', () => {
     const normalTurn = seeded(30); normalTurn.nextKind = 'normal';
     const result = await run(normalTurn, h.deps);
     expect(prompts[0]).not.toContain('lead 的要求');
-    expect(result.lead).toEqual({ status: 'ineligible:alternation-normal-turn' });
-    expect(normalTurn.nextKind).toBe('lead');
+    expect(result.lead).toEqual({ status: 'ineligible:ordinary-turn' });
+    expect(normalTurn.nextKind).toBe('lead'); // 31 ordinary comments and no lead yet
     const off = harness({ leadMode: async () => 'off' });
     expect((await run(seeded(30), off.deps)).lead).toEqual({ status: 'off' });
   });

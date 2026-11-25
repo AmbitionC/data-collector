@@ -15,7 +15,7 @@ export const COMMENT_POLICY = {
   windowStartMinute: 7 * 60 + 30, lastDispatchMinute: 23 * 60, cadenceMs: 60 * 60_000, captchaProbeAfterMs: Number.POSITIVE_INFINITY, captchaProbeSpacingMs: 6 * 3_600_000, noOpportunityDelayMs: 15 * 60_000,
   failureBackoffMs: [5 * 60_000, 15 * 60_000, 30 * 60_000], failuresBeforeNotice: 3, maxCandidatesPerTick: 3,
   maxDraftsPerDay: 80, maxCandidateAgeMs: 30 * 86_400_000, minPostAgeMs: 6 * 3_600_000, tickDeadlineMs: 8 * 60_000, 
-  searchWaitMs: 60_000, prepareWaitMs: 120_000, publishWaitMs: 240_000, similarityLimit: 0.6, maxCommentLength: 60, leadMissesBeforeFallback: 6, afterVerificationMs: 30 * 60_000,
+  searchWaitMs: 60_000, prepareWaitMs: 120_000, publishWaitMs: 240_000, similarityLimit: 0.6, maxCommentLength: 60, afterVerificationMs: 30 * 60_000,
 } as const;
 export const COMMENT_QUERIES = ['Agent 面经', 'RAG 面经', '大模型应用 面经', 'LangGraph', 'Agent 开发 一面', 'AI 应用开发 面经',
   'MCP 面试', '前端 面经', 'Agent 项目 怎么做', 'RAG 评测', '后端 面经 Agent', 'Agent 工具调用', 'AI 全栈', '校招 Agent', '大模型 实习 面经', 'Function Calling 面试'];
@@ -35,9 +35,9 @@ export const HELP_QUERIES = ['面试 怎么准备', '简历 求建议', '秋招 
  */
 export type LeadMode = 'off' | 'shadow' | 'live';
 export const LEAD_POLICY = {
-  defaultMode: 'shadow' as LeadMode, domain: 'agent-journey.cn', // 2026-11-09 user: half lead comments, half ordinary ones.
-  maxPerDay: 15, minGapMs: 30 * 60_000,
-  maxShareOf7Days: 0.6, minPublished7Days: 10, minLength: 20, maxLength: 60, maxClauseShare: 1, tailWindow: 0.25,
+  defaultMode: 'shadow' as LeadMode, domain: 'agent-journey.cn', // 2026-11-25 user: one lead in five. The account was muted for 30 days after a month at one in two.
+  maxPerDay: 3, minGapMs: 4 * 3_600_000, normalsBetweenLeads: 4,
+  maxShareOf7Days: 0.2, minPublished7Days: 10, minLength: 20, maxLength: 60, maxClauseShare: 1, tailWindow: 0.25,
 } as const;
 // 2026-11-10 user: widened so interview prep, review, resume and ordinary questions also count ("不然都引流不了").
 const LEAD_NEED = /求(助|建议|指点|指导|推荐|路线|资料|问|解答)|请教|想问|问一下|大家觉得|怎么(学|准备|复习|写|做|选|办|入门|提升)|如何(学|准备|复习|写|选|入门|提升)|学习路线|(转|入门|入行).{0,6}(agent|大模型|ai|开发)|做(什么|啥)项目|项目.{0,8}(推荐|建议|怎么做|做什么|选|写)|简历|有没有.{0,10}(资料|教程|路线|项目|推荐)|迷茫|焦虑|(选|走).{0,6}方向|准备.{0,6}(面试|秋招|春招|实习)|(面试|秋招|春招|实习).{0,6}(准备|攻略|建议)|该不该|值不值|能不能|有必要/iu;
@@ -61,8 +61,8 @@ export interface AutopilotState {
   schemaVersion: 1; nextAt: string | null; failures: number; recoveryAttempt: number; queryIndex: number; candidates: Candidate[];
   excluded: Record<string, string>; recent: RecentComment[]; lastAttemptAt: string | null; inflight: Inflight | null;
   notified: Record<string, string>; drafts: { day: string; count: number }; probe?: { pauseId: string; at: string; result: string };
-  /** 2026-11-09 user: alternate one ordinary comment and one lead comment. */
-  nextKind?: 'lead' | 'normal'; leadMisses?: number;
+  /** 2026-11-25 user: at least four ordinary comments between two lead comments. */
+  nextKind?: 'lead' | 'normal';
   /** Each captcha with the run of comments before it, to check the observed ~15-a-day pattern (2026-11-12). */
   captchas?: Array<{ at: string; sinceLast: number; hours: number }>;
   /** Live lead comments (with the domain) and all published timestamps, both trimmed to 7 days. */
@@ -152,6 +152,8 @@ export function draftRejection(draft: Draft, packet: Packet, recent: RecentComme
   return undefined;
 }
 
+/** The words right before the domain: the stock phrase (「我自己整理的」) that must not recur between leads. */
+const leadFrame = (text: string) => text.slice(0, text.indexOf(LEAD_POLICY.domain)).replace(/\s/gu, '').slice(-4);
 /** Deterministic gate on the lead version. Anything it cannot verify is not sent with a link. */
 export function leadRejection(lead: string, packet: Packet, recent: RecentComment[]): string | undefined {
   const text = lead.trim(), domain = LEAD_POLICY.domain;
@@ -167,6 +169,7 @@ export function leadRejection(lead: string, packet: Packet, recent: RecentCommen
   if (/我(之前|当时|去年|上次|也)?(面过|面试时|面试的时候|实习时|在.{1,8}(实习|工作)|拿到.{0,4}offer)/iu.test(text)) return 'lead-invented-experience';
   if (packet.conversation.comments.some(c => c.text.includes(domain))) return 'lead-domain-already-in-thread';
   if (recent.some(r => similarity(text, r.text) >= COMMENT_POLICY.similarityLimit)) return 'lead-repeats-own-comment';
+  if (recent.some(r => r.text.includes(domain) && leadFrame(r.text) === leadFrame(text))) return 'lead-repeats-own-phrasing';
   return undefined;
 }
 
@@ -182,7 +185,7 @@ export function leadBudgetClosed(state: AutopilotState, now: number): string | u
 }
 
 export const LEAD_RULES = `
-这一条要带网站（2026-11-12 用户要求一半评论带链接），必须写 lead 版本，不能留空：楼主不一定在求资料，就从帖子里找一个和 <site_page> 能接上的点顺口带一句。lead 的写法（2026-11-11 用户：别写成广告）：
+这一条可以带网站（2026-11-25 用户：五条里最多一条，不相关的帖子不带）。只有楼主确实在求资料、问怎么准备，并且 <site_page> 的内容正好能回答时才写 lead；帖子在晒、吐槽、聊感情或薪资，或者对不上 <site_page>，lead 就填空串。先正经回答楼主的问题，网站只是补充。不要用“我自己整理的 X 里有/讲了/写了”这种固定句式，每次换说法，但要写明网站是自己做的。lead 的写法（2026-11-11 用户：别写成广告）：
 - 像顺口一提，不像推荐：先用半句接住楼主的话，再顺带一句和 <site_page> 对得上的事，带一次 ${LEAD_POLICY.domain}，写明是自己整理的。例：“这题我整理的 ${LEAD_POLICY.domain} 面经里出现好几次，翻翻别人怎么答的”。
 - 只能说 <site_page> 里真有的内容；<site_stats> 里的数字可以原样用一个，没有就不用。
 - 不写教程、不列步骤、不用“推荐”“可以看看我写的”“建议你”。不带协议参数，不提注册、会员、加群、私信、关注。
@@ -295,8 +298,7 @@ export async function tick(state: AutopilotState, deps: AutopilotDeps, options: 
   const stamp = day.replaceAll('-', ''), mode = live ? 'ap' : 'dry';
   const skipped: Array<{ sourceId: string; reason: string }> = [];
   const leadMode = await deps.leadMode().catch((): LeadMode => 'off');
-  // A lead turn only answers help-seeking posts; after too many misses one ordinary comment goes out so the account never stalls.
-  const wantLead = leadMode === 'live' && (state.nextKind ?? 'lead') === 'lead' && (state.leadMisses ?? 0) < COMMENT_POLICY.leadMissesBeforeFallback;
+  const wantLead = leadMode === 'live' && (state.nextKind ?? 'lead') === 'lead' && leadBudgetClosed(state, deps.now()) === undefined;
   try {
     // Hot posts are refreshed every tick and go first on ordinary turns. Other posts younger than minPostAgeMs
     // wait: the user saw many freshly commented posts later turn author-only, and a post on the hot list has
@@ -327,14 +329,8 @@ export async function tick(state: AutopilotState, deps: AutopilotDeps, options: 
     }
     for (let examined = 0; examined < COMMENT_POLICY.maxCandidatesPerTick && state.candidates.length > 0; examined++) {
       if (deps.now() >= deadline) throw new TechnicalFailure('本轮超过总时限');
-      // 2026-11-12 user: half of all comments must carry the link, fitting post or not. Help posts still go first.
-      const candidate = state.candidates.find(c => c.hot) ?? (wantLead ? state.candidates.find(c => isHelpTitle(c.title)) ?? state.candidates[0] : state.candidates[0]);
-      if (!candidate && wantLead) {
-        // 2026-11-10: without this the lead turn re-searched every minute for hours and posted nothing.
-        // No help post right now: give this turn to an ordinary comment shortly, and look again next lead turn.
-        state.leadMisses = COMMENT_POLICY.leadMissesBeforeFallback; await saveState(state);
-        return finish({ outcome: 'no_lead_post', skipped }, deps.now() + 60_000);
-      }
+      // A lead turn looks at a help-seeking post first; if none fits, that turn is simply an ordinary comment.
+      const candidate = state.candidates.find(c => c.hot) ?? (wantLead ? state.candidates.find(c => isHelpTitle(c.title)) : undefined) ?? state.candidates[0];
       if (!candidate) break;
       // Every removal below targets this exact candidate, wherever it sat in the queue.
       if (state.candidates[0] !== candidate) state.candidates = [candidate, ...state.candidates.filter(c => c !== candidate)];
@@ -349,7 +345,7 @@ export async function tick(state: AutopilotState, deps: AutopilotDeps, options: 
       if (state.drafts.count >= COMMENT_POLICY.maxDraftsPerDay) return finish({ outcome: 'draft_budget_reached', skipped }, deps.now() + 3_600_000);
       state.drafts.count++; await saveState(state);
       let drafted: DraftResult;
-      const leadGate = leadMode === 'off' ? 'off' : (state.nextKind === 'normal' && live) ? 'alternation-normal-turn' : (wantLead && live ? undefined : leadIneligibility(packet)) ?? (leadMode === 'live' && live ? leadBudgetClosed(state, deps.now()) : undefined);
+      const leadGate = leadMode === 'off' ? 'off' : (state.nextKind === 'normal' && live) ? 'ordinary-turn' : leadIneligibility(packet) ?? (leadMode === 'live' && live ? leadBudgetClosed(state, deps.now()) : undefined);
       const site = leadGate === undefined && deps.siteContext ? await deps.siteContext(packet).catch(() => undefined) : undefined;
       try { drafted = await deps.draft(buildPrompt(packet, state.recent, leadGate === undefined && !!site, site, !!candidate.hot)); }
       catch (error) { throw new TechnicalFailure(`起草失败：${error instanceof Error ? error.message : 'unknown'}`); }
@@ -364,8 +360,6 @@ export async function tick(state: AutopilotState, deps: AutopilotDeps, options: 
         : leadRejected ? { status: `rejected:${leadRejected}`, text: leadText }
         : { status: leadMode === 'live' && live ? 'live' : 'shadow', text: leadText };
       const sendLead = lead.status === 'live';
-      // Coverage of a hot post wins over the link: if the link version fails there, the plain reply still goes out.
-      if (live && wantLead && !sendLead && !candidate.hot) { state.leadMisses = (state.leadMisses ?? 0) + 1; await exclude(`lead-turn-${lead.status}`); continue; }
       const texts = sendLead ? { primary: leadText, alternative: draft.primary } : { primary: draft.primary, alternative: draft.alternative };
       const item = { key: `${mode}-c-${stamp}-${candidate.sourceId}`, draft: { ...packet.draftEnvelope, drafts: { ...texts, tone: 'contextual', anchor: packet.anchorOptions[draft.anchorIndex]!, notes: `${sendLead ? '[lead] ' : ''}${draft.notes}`.slice(0, 900) } } };
       if (!live) { state.failures = 0; state.candidates.shift(); return finish({ outcome: 'dry_run_draft', url: packet.canonicalUrl, title: packet.currentPost.title, draft: item.draft.drafts, lead, usage, skipped }, null); }
@@ -380,8 +374,9 @@ export async function tick(state: AutopilotState, deps: AutopilotDeps, options: 
         const at = iso(deps.now()), week = deps.now() - 7 * 86_400_000;
         state.failures = 0; state.recent = [...state.recent, { text: texts.primary, at }].slice(-20);
         state.published = [...state.published.filter(p => Date.parse(p) >= week), at];
-        state.nextKind = sendLead ? 'normal' : 'lead'; if (sendLead) state.leadMisses = 0; else if (!wantLead) state.leadMisses = 0;
         if (sendLead) state.leads = [...state.leads.filter(l => Date.parse(l.at) >= week), { at, sourceId: candidate.sourceId, ...(attempt.replyUrl ? { replyUrl: attempt.replyUrl } : {}) }];
+        const lastLead = state.leads.at(-1)?.at ?? '';
+        state.nextKind = state.published.filter(p => p > lastLead).length >= LEAD_POLICY.normalsBetweenLeads ? 'lead' : 'normal';
         return finish({ outcome: 'published', url: packet.canonicalUrl, replyUrl: attempt.replyUrl, lead, usage, skipped }, deps.now() + COMMENT_POLICY.cadenceMs);
       }
       // One unresolved comment stays with its own source; independent posts carry on at the normal cadence.
