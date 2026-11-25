@@ -6,6 +6,7 @@ import { commentRoutePath, readCommentRoute } from '../../packages/bridge/src/op
 import { NowcoderPublishingControl } from '../../packages/bridge/src/operations/publishingControl.js';
 import { NowcoderOperationsActivity } from '../../packages/bridge/src/operations/activity.js';
 import { initialState, leadBudgetClosed } from '../../packages/bridge/src/operations/autopilot.js';
+import { postHoldUntil } from '../../packages/bridge/src/operations/postSpacing.js';
 import { createTemporaryDirectoryTracker } from '../helpers/temp.js';
 
 const dirs = createTemporaryDirectoryTracker();
@@ -45,4 +46,16 @@ it('counts only the assigned account when deciding on a link', () => {
   expect(leadBudgetClosed(state, now)).toBe('weekly-share');
   expect(leadBudgetClosed(state, now, since)).toBeUndefined();
   expect(leadBudgetClosed({ ...state, published: state.published.slice(0, 29) }, now, since)).toBe('too-few-comments');
+});
+
+it('gives the hour around a post to the post', () => {
+  const at = (hm: string) => Date.parse(`2026-11-26T${hm}:00+08:00`), open = { settled: () => false }, done = { settled: () => true, lastAttemptAt: new Date(at('10:32')).toISOString() };
+  expect(postHoldUntil(at('09:44'), open)).toBeNull();
+  expect(postHoldUntil(at('09:46'), open)).toBe(at('10:35'));
+  expect(postHoldUntil(at('11:00'), open)).toBe(at('11:05'));
+  expect(postHoldUntil(at('10:40'), done)).toBe(at('11:32'));
+  expect(postHoldUntil(at('11:32'), done)).toBeNull();
+  expect(postHoldUntil(at('11:00'), { settled: () => true })).toBeNull(); // gave up: comments carry on
+  expect(postHoldUntil(at('12:00'), open)).toBeNull();
+  expect(postHoldUntil(at('18:00'), open)).toBe(at('18:35'));
 });

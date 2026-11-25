@@ -3,6 +3,7 @@ import { join } from 'node:path';
 import { codexJson, notifyUser, runJob } from '../autopilot/core.js';
 import { siteContext, type SiteContext } from './siteContext.js';
 import { readCommentRoute } from './commentRoute.js';
+import { readPostHold } from './postSpacing.js';
 import { fetchHotList } from './hotList.js';
 
 /**
@@ -94,6 +95,8 @@ export interface AutopilotDeps {
   /** Site-wide hot list (2026-11-10 user: comment on hot posts first for exposure). */
   hotList?(): Promise<Candidate[]>;
   leadMode(): Promise<LeadMode>;
+  /** When a post by the same account makes this hour's comment wait; null when none is near. */
+  postHold?(now: number): Promise<number | null>;
   /** When comments moved to the current account; undefined for the original one. */
   leadSince?(): string | undefined;
   /** The one real site page and statistics a lead may cite; undefined when nothing matches. */
@@ -253,6 +256,10 @@ export async function tick(state: AutopilotState, deps: AutopilotDeps, options: 
     if (state.nextAt && deps.now() < Date.parse(state.nextAt)) return { outcome: 'not_due', nextAt: state.nextAt };
     const open = nextWindowOpen(deps.now());
     if (open !== null) return finish({ outcome: 'outside_window' }, open);
+    try {
+      const hold = await deps.postHold?.(deps.now());
+      if (hold) return finish({ outcome: 'post_turn' }, hold);
+    } catch (error) { return technicalFailure(error instanceof Error ? error.message : '发帖记录读取失败'); }
   }
   let recovery: Recovery;
   try { recovery = await deps.recovery(state.recoveryAttempt); }
@@ -421,7 +428,7 @@ export async function readLeadMode(configDir: string): Promise<LeadMode> {
 }
 
 export async function runAutopilot(input: { configDir: string; live: boolean; deps: Omit<AutopilotDeps, 'ownPostUrls' | 'draft' | 'notify' | 'now' | 'sleep' | 'readPacket' | 'leadMode'> & Partial<AutopilotDeps> }): Promise<TickResult> {
-  const deps: AutopilotDeps = { ownPostUrls: () => ownArticleUrls(input.configDir), hotList: fetchHotList, leadMode: () => readLeadMode(input.configDir), leadSince: () => readCommentRoute(input.configDir)?.since, siteContext: packet => siteContext(join(input.configDir, 'nowcoder-autopilot'), `${packet.currentPost.title}\n${packet.currentPost.body}`), draft: prompt => codexDraft(prompt), notify: notifyUser(input.configDir), now: Date.now,
+  const deps: AutopilotDeps = { ownPostUrls: () => ownArticleUrls(input.configDir), hotList: fetchHotList, leadMode: () => readLeadMode(input.configDir), postHold: now => readPostHold(input.configDir, now), leadSince: () => readCommentRoute(input.configDir)?.since, siteContext: packet => siteContext(join(input.configDir, 'nowcoder-autopilot'), `${packet.currentPost.title}\n${packet.currentPost.body}`), draft: prompt => codexDraft(prompt), notify: notifyUser(input.configDir), now: Date.now,
     sleep: ms => new Promise(resolve => setTimeout(resolve, ms)), readPacket: async file => JSON.parse(await readFile(file, 'utf8')) as Record<string, unknown>, ...input.deps };
   return runJob<AutopilotState, TickResult>({ configDir: input.configDir, name: input.live ? 'comments' : 'comments.dry-run', now: deps.now, initial: async () => initialState(),
     tick: (state, save) => tick(state, deps, { live: input.live, saveState: save }), ...(input.live ? { watch: deps.notify } : {}) });
