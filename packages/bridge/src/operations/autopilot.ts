@@ -343,7 +343,8 @@ export async function tick(state: AutopilotState, deps: AutopilotDeps, options: 
     for (let examined = 0; examined < COMMENT_POLICY.maxCandidatesPerTick && state.candidates.length > 0; examined++) {
       if (deps.now() >= deadline) throw new TechnicalFailure('本轮超过总时限');
       // A lead turn looks at a help-seeking post first; if none fits, that turn is simply an ordinary comment.
-      const candidate = state.candidates.find(c => c.hot) ?? (wantLead ? state.candidates.find(c => isHelpTitle(c.title)) : undefined) ?? state.candidates[0];
+      // 2026-11-27: hot posts first left 8 lead turns in a row on posts with nothing to ask, so a lead turn tries a help-seeking post first.
+      const candidate = (wantLead ? state.candidates.find(c => isHelpTitle(c.title)) : undefined) ?? state.candidates.find(c => c.hot) ?? state.candidates[0];
       if (!candidate) break;
       // Every removal below targets this exact candidate, wherever it sat in the queue.
       if (state.candidates[0] !== candidate) state.candidates = [candidate, ...state.candidates.filter(c => c !== candidate)];

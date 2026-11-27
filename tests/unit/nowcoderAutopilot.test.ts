@@ -250,6 +250,14 @@ describe('need-gated lead experiment', () => {
     expect(state.excluded.cccccccccccc).toBe('sent-published');
     expect(state.nextKind).toBe('lead');
   });
+  it('on a lead turn tries a help-seeking post before the hot list', async () => {
+    const old = new Date(NOW - 10 * 3_600_000).toISOString();
+    const h = harness({ leadMode: async () => 'live', hotList: async () => [{ sourceId: 'cccccccccccc', url: 'https://www.nowcoder.com/discuss/3', title: '月薪8k，很丢人吗？', hot: 1429 }],
+      readPacket: async path => path === 'search' ? { candidates: [{ sourceId: 'dddddddddddd', url: 'https://www.nowcoder.com/discuss/4', title: 'Java后端如何转AI应用开发，求建议', publishedAt: old }] } : { prepared: [packet()], items: [{ result: { contentAccess: 'full' } }] } });
+    const state = seeded(30); state.nextKind = 'lead';
+    await run(state, h.deps);
+    expect(JSON.stringify(h.started.find(s => s.request.kind === 'prepare')!.request)).toContain('dddddddddddd');
+  });
   it('puts help-seeking posts first', () => {
     expect(isHelpTitle('Java后端开发如何转AI应用开发，求建议')).toBe(true);
     expect(isHelpTitle('字节 Agent 一面面经')).toBe(false);
